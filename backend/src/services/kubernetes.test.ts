@@ -145,6 +145,10 @@ describe('KubernetesService - deployment pod lookup', () => {
           return { body: { items: [pod('demo-ray-template')] } };
         }
 
+        if (labelSelector === 'nvidia.com/dynamo-graph-deployment-name=demo') {
+          return { body: { items: [pod('demo-epp'), pod('demo-vllmworker')] } };
+        }
+
         if (labelSelector === 'app=demo') {
           return { body: { items: [pod('unrelated-app-pod')] } };
         }
@@ -174,6 +178,8 @@ describe('KubernetesService - deployment pod lookup', () => {
         'demo-shared',
         'demo-worker',
         'demo-ray-template',
+        'demo-epp',
+        'demo-vllmworker',
         'demo-ray-head',
       ]);
       expect(new Set(pods.map((item) => item.name)).size).toBe(pods.length);
@@ -181,6 +187,7 @@ describe('KubernetesService - deployment pod lookup', () => {
         'app.kubernetes.io/instance=demo',
         'airunway.ai/deployment=demo',
         'airunway.ai/model-deployment=demo',
+        'nvidia.com/dynamo-graph-deployment-name=demo',
         'kaito.sh/workspace=demo',
         'ray.io/cluster',
       ]);
@@ -225,6 +232,7 @@ describe('KubernetesService - deployment pod lookup', () => {
         'app.kubernetes.io/instance=legacy-demo',
         'airunway.ai/deployment=legacy-demo',
         'airunway.ai/model-deployment=legacy-demo',
+        'nvidia.com/dynamo-graph-deployment-name=legacy-demo',
         'kaito.sh/workspace=legacy-demo',
         'ray.io/cluster',
         'app=legacy-demo',

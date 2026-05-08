@@ -542,6 +542,7 @@ class KubernetesService {
       `app.kubernetes.io/instance=${name}`,      // Standard K8s label (Dynamo)
       `airunway.ai/deployment=${name}`,          // AIRunway label
       `airunway.ai/model-deployment=${name}`,    // Pod-template label used by KubeRay
+      `nvidia.com/dynamo-graph-deployment-name=${name}`, // Runtime label used by Dynamo/Grove pods
       `kaito.sh/workspace=${name}`,              // KAITO workspace label
     ];
 
