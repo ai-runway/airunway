@@ -100,4 +100,5 @@ spec:
       - disaggregated
     cpuSupport: false
     gpuSupport: true
+    requiresCRD: false
   selectionRules: []

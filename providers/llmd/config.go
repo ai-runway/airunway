@@ -59,6 +59,8 @@ func NewProviderConfigManager(c client.Client) *ProviderConfigManager {
 
 // GetProviderConfigSpec returns the InferenceProviderConfigSpec for llm-d
 func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
+	requiresCRD := false
+
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
 			Engines: []airunwayv1alpha1.EngineType{
@@ -68,8 +70,9 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 				airunwayv1alpha1.ServingModeAggregated,
 				airunwayv1alpha1.ServingModeDisaggregated,
 			},
-			CPUSupport: false,
-			GPUSupport: true,
+			CPUSupport:  false,
+			GPUSupport:  true,
+			RequiresCRD: &requiresCRD,
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{},
 	}

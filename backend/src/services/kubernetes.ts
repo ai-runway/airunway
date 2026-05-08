@@ -5,6 +5,7 @@ import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL 
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig } from '../lib/kubeconfig';
 import logger from '../lib/logger';
+import { getProviderDisplayName } from '../lib/providers';
 
 // ModelDeployment CRD configuration
 const MODEL_DEPLOYMENT_CRD = {
@@ -109,6 +110,7 @@ export interface InstallationStatus {
   installed: boolean;
   crdFound?: boolean;
   operatorRunning?: boolean;
+  requiresCRD?: boolean;
   version?: string;
   message?: string;
 }
@@ -695,8 +697,9 @@ class KubernetesService {
           items.map(async (item: any): Promise<RuntimeStatus> => {
             const name = item.metadata?.name || 'unknown';
             const status = item.status || {};
-            const displayName = name.charAt(0).toUpperCase() + name.slice(1);
-            const runtimeStatus = await this.checkProviderInstallationStatus(name, status, displayName);
+            const requiresCRD = item.spec?.capabilities?.requiresCRD !== false;
+            const displayName = getProviderDisplayName(name, item.metadata?.annotations);
+            const runtimeStatus = await this.checkProviderInstallationStatus(name, status, displayName, requiresCRD);
 
             return {
               id: name,
@@ -705,6 +708,7 @@ class KubernetesService {
               healthy: runtimeStatus.operatorRunning ?? false,
               crdFound: runtimeStatus.crdFound ?? runtimeStatus.installed,
               operatorRunning: runtimeStatus.operatorRunning ?? false,
+              requiresCRD: runtimeStatus.requiresCRD ?? requiresCRD,
               version: status.version,
               message: runtimeStatus.message,
             };
@@ -887,7 +891,19 @@ class KubernetesService {
     providerId: string,
     status?: { ready?: boolean },
     providerName?: string,
+    requiresCRD = true,
   ): Promise<InstallationStatus> {
+    if (!requiresCRD) {
+      const displayName = providerName || getProviderDisplayName(providerId);
+      return {
+        installed: true,
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: false,
+        message: `${displayName} is available without an upstream runtime operator installation`,
+      };
+    }
+
     switch (providerId) {
       case 'kaito':
         return this.checkKaitoInstallationStatus();
@@ -897,11 +913,12 @@ class KubernetesService {
         return this.checkKubeRayInstallationStatus();
       default: {
         const installed = status?.ready === true;
-        const displayName = providerName || providerId.charAt(0).toUpperCase() + providerId.slice(1);
+        const displayName = providerName || getProviderDisplayName(providerId);
         return {
           installed,
           crdFound: installed,
           operatorRunning: installed,
+          requiresCRD: true,
           message: installed
             ? `${displayName} is installed and running`
             : `${displayName} is registered but not ready`,
@@ -944,6 +961,7 @@ class KubernetesService {
       installed,
       crdFound,
       operatorRunning,
+      requiresCRD: true,
       message,
     };
   }

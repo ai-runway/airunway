@@ -621,6 +621,11 @@ func (in *ProviderCapabilities) DeepCopyInto(out *ProviderCapabilities) {
 		*out = make([]ServingMode, len(*in))
 		copy(*out, *in)
 	}
+	if in.RequiresCRD != nil {
+		in, out := &in.RequiresCRD, &out.RequiresCRD
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Gateway != nil {
 		in, out := &in.Gateway, &out.Gateway
 		*out = new(GatewayCapabilities)

@@ -47,6 +47,11 @@ type ProviderCapabilities struct {
 	// +optional
 	GPUSupport bool `json:"gpuSupport,omitempty"`
 
+	// requiresCRD indicates if this provider needs an upstream CRD/operator installation.
+	// When omitted, clients should treat this as true for backward compatibility.
+	// +optional
+	RequiresCRD *bool `json:"requiresCRD,omitempty"`
+
 	// gateway defines the provider's gateway-related capabilities.
 	// +optional
 	Gateway *GatewayCapabilities `json:"gateway,omitempty"`

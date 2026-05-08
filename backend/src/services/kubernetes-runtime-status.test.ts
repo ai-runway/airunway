@@ -126,6 +126,41 @@ describe('KubernetesService - Runtime Status', () => {
     expect(dynamo?.message).toBe('Dynamo CRD not found');
   });
 
+  test('reports providers that do not require runtime CRDs as installed without using readiness status', async () => {
+    const llmdConfig = {
+      ...mockInferenceProviderConfig,
+      metadata: { ...mockInferenceProviderConfig.metadata, name: 'llmd' },
+      spec: {
+        ...mockInferenceProviderConfig.spec,
+        capabilities: {
+          ...mockInferenceProviderConfig.spec.capabilities,
+          requiresCRD: false,
+        },
+      },
+      status: {
+        ready: false,
+        version: '0.1.0',
+      },
+    };
+
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
+    );
+    mockProviderConfigs([llmdConfig]);
+
+    const runtimes = await kubernetesService.getRuntimesStatus();
+    const llmd = runtimes.find((runtime) => runtime.id === 'llmd');
+
+    expect(llmd).toBeDefined();
+    expect(llmd?.installed).toBe(true);
+    expect(llmd?.healthy).toBe(true);
+    expect(llmd?.crdFound).toBe(true);
+    expect(llmd?.operatorRunning).toBe(true);
+    expect(llmd?.requiresCRD).toBe(false);
+    expect(llmd?.version).toBe('0.1.0');
+    expect(llmd?.message).toBe('LLM-D is available without an upstream runtime operator installation');
+  });
+
   test('reports KAITO as not fully installed when the CRD exists but no ready operator pod is found', async () => {
     restores.push(
       mockServiceMethod(kubernetesService, 'checkCRDExists', async () => true),

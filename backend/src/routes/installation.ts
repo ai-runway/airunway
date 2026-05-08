@@ -3,6 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
 import logger from '../lib/logger';
+import { getProviderDisplayName } from '../lib/providers';
 
 interface ProviderHelmChartDetails {
   name: string;
@@ -44,9 +45,10 @@ function extractProviderDetails(config: any) {
 
   return {
     id: name,
-    name: name.charAt(0).toUpperCase() + name.slice(1),
+    name: getProviderDisplayName(name, config.metadata?.annotations),
     description: installation.description || '',
     defaultNamespace: installation.defaultNamespace || 'default',
+    requiresCRD: capabilities.requiresCRD !== false,
     crdConfig: {
       apiGroup: capabilities.engines?.length ? '' : '',
     },
@@ -203,6 +205,7 @@ const installation = new Hono()
       providerId,
       status,
       provider.name,
+      provider.requiresCRD,
     );
 
     return c.json({
@@ -211,8 +214,9 @@ const installation = new Hono()
       installed: installationStatus.installed,
       crdFound: installationStatus.crdFound,
       operatorRunning: installationStatus.operatorRunning,
+      requiresCRD: installationStatus.requiresCRD ?? provider.requiresCRD,
       version: status.version,
-      message: hasInstallMetadata
+      message: hasInstallMetadata || provider.requiresCRD === false
         ? installationStatus.message
         : `No installation metadata found for provider ${providerId}`,
       installable: hasInstallMetadata,

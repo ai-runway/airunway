@@ -67,6 +67,15 @@ vi.mock('@/hooks/useRuntimes', () => ({
           crdFound: true,
           operatorRunning: false,
         },
+        {
+          id: 'llmd',
+          name: 'LLM-D',
+          installed: true,
+          healthy: true,
+          crdFound: true,
+          operatorRunning: true,
+          requiresCRD: false,
+        },
       ],
     },
     isLoading: false,
@@ -111,7 +120,17 @@ vi.mock('@/hooks/useInstallation', () => ({
             operatorRunning: false,
             installationSteps: [],
           }
-        : {
+        : providerId === 'llmd'
+          ? {
+              installed: true,
+              providerName: 'LLM-D',
+              message: 'LLM-D is available without an upstream runtime operator installation',
+              crdFound: true,
+              operatorRunning: true,
+              requiresCRD: false,
+              installationSteps: [],
+            }
+          : {
             installed: true,
             providerName: 'Installed Runtime',
             message: 'Installed Runtime is ready.',
@@ -258,6 +277,30 @@ describe('SettingsPage', () => {
     expect(within(installationPanel as HTMLElement).getByText('Operator Running')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /install kuberay/i })).toBeInTheDocument()
+  })
+
+  it('shows providers that do not require runtime operators without CRD controls', () => {
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByText('LLM-D'))
+
+    const llmdCard = screen.getByText('LLM-D').closest('.rounded-2xl')
+    expect(within(llmdCard as HTMLElement).getByText('No runtime operator installation required.')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('CRD')).not.toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Operator')).not.toBeInTheDocument()
+
+    const installationPanel = screen.getByText('LLM-D Installation').closest('.rounded-2xl')
+    expect(within(installationPanel as HTMLElement).getByText('Installed')).toBeInTheDocument()
+    expect(within(installationPanel as HTMLElement).getByText('LLM-D is available without an upstream runtime operator installation')).toBeInTheDocument()
+    expect(within(installationPanel as HTMLElement).getByText('No runtime operator installation required.')).toBeInTheDocument()
+    expect(within(installationPanel as HTMLElement).queryByText('CRD Installed')).not.toBeInTheDocument()
+    expect(within(installationPanel as HTMLElement).queryByText('Operator Running')).not.toBeInTheDocument()
+    expect(within(installationPanel as HTMLElement).queryByRole('button', { name: /install llm-d/i })).not.toBeInTheDocument()
+    expect(within(installationPanel as HTMLElement).queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
   })
 
   it('keeps a runtime in a starting state after install command succeeds but operator is not ready yet', async () => {

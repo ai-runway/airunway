@@ -81,6 +81,7 @@ export interface RuntimeStatus {
   healthy: boolean;     // Runtime service is running
   crdFound?: boolean;   // Provider API is available
   operatorRunning?: boolean; // Runtime service pods are ready
+  requiresCRD?: boolean; // Whether the provider depends on an upstream runtime operator/CRD
   version?: string;     // Detected version
   message?: string;     // Status message
 }

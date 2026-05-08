@@ -19,6 +19,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if spec.Capabilities.CPUSupport {
 		t.Error("expected no CPU support")
 	}
+	if spec.Capabilities.RequiresCRD == nil || *spec.Capabilities.RequiresCRD {
+		t.Error("expected LLMD to not require CRDs")
+	}
 
 	// Engines
 	engines := spec.Capabilities.Engines

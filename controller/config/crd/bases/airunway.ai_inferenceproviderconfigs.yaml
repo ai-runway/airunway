@@ -91,6 +91,11 @@ spec:
                     description: gpuSupport indicates if the provider supports GPU
                       inference
                     type: boolean
+                  requiresCRD:
+                    description: |-
+                      requiresCRD indicates if this provider needs an upstream CRD/operator installation.
+                      When omitted, clients should treat this as true for backward compatibility.
+                    type: boolean
                   servingModes:
                     description: servingModes is the list of supported serving modes
                     items:

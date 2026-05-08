@@ -116,6 +116,9 @@ export function SettingsPage() {
     refetch: refetchInstallation,
   } = useProviderInstallationStatus(effectiveRuntime)
 
+  const currentRuntime = runtimes.find(r => r.id === effectiveRuntime)
+  const selectedRuntimeRequiresCRD = (installationStatus?.requiresCRD ?? currentRuntime?.requiresCRD) !== false
+
   const installProvider = useInstallProvider()
   const uninstallProvider = useUninstallProvider()
 
@@ -481,28 +484,37 @@ export function SettingsPage() {
                         : runtime.id === 'dynamo'
                           ? 'NVIDIA Dynamo for high-performance GPU inference'
                           : runtime.id === 'llmd'
-                        ? 'LLM-D for distributed inference'
-                          : 'Ray Serve via KubeRay for distributed Ray-based model serving with vLLM'}
+                            ? 'LLM-D for distributed inference'
+                            : 'Ray Serve via KubeRay for distributed Ray-based model serving with vLLM'}
                     </p>
                   </div>
                   <div>
                     <div className="space-y-2 text-sm">
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">CRD</span>
-                        {runtime.crdFound ?? runtime.installed ? (
+                      {runtime.requiresCRD === false ? (
+                        <div className="flex items-center gap-2 rounded-lg bg-muted/60 p-3 text-muted-foreground">
                           <CheckCircle className="h-4 w-4 text-green-400" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-red-500" />
-                        )}
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">Operator</span>
-                        {runtime.operatorRunning ?? runtime.healthy ? (
-                          <CheckCircle className="h-4 w-4 text-green-400" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-red-500" />
-                        )}
-                      </div>
+                          <span>No runtime operator installation required.</span>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">CRD</span>
+                            {runtime.crdFound ?? runtime.installed ? (
+                              <CheckCircle className="h-4 w-4 text-green-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-500" />
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">Operator</span>
+                            {runtime.operatorRunning ?? runtime.healthy ? (
+                              <CheckCircle className="h-4 w-4 text-green-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-500" />
+                            )}
+                          </div>
+                        </>
+                      )}
                       {runtime.version && (
                         <div className="flex items-center justify-between">
                           <span className="text-muted-foreground">Version</span>
@@ -523,7 +535,7 @@ export function SettingsPage() {
               <h3 className="font-heading text-lg font-semibold flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Download className="h-5 w-5" />
-                  {installationStatus?.providerName || runtimes.find(r => r.id === effectiveRuntime)?.name || 'Runtime'} Installation
+                  {installationStatus?.providerName || currentRuntime?.name || 'Runtime'} Installation
                 </div>
                 {isInstalled ? (
                   <Badge variant="success" className="shrink-0">
@@ -555,27 +567,34 @@ export function SettingsPage() {
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="flex items-center justify-between rounded-lg bg-muted p-3">
-                      <span>CRD Installed</span>
-                      {installationStatus?.crdFound ? (
-                        <CheckCircle className="h-4 w-4 text-green-500" />
-                      ) : (
-                        <XCircle className="h-4 w-4 text-red-500" />
-                      )}
+                  {selectedRuntimeRequiresCRD ? (
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div className="flex items-center justify-between rounded-lg bg-muted p-3">
+                        <span>CRD Installed</span>
+                        {installationStatus?.crdFound ? (
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between rounded-lg bg-muted p-3">
+                        <span>Operator Running</span>
+                        {installationStatus?.operatorRunning ? (
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center justify-between rounded-lg bg-muted p-3">
-                      <span>Operator Running</span>
-                      {installationStatus?.operatorRunning ? (
-                        <CheckCircle className="h-4 w-4 text-green-500" />
-                      ) : (
-                        <XCircle className="h-4 w-4 text-red-500" />
-                      )}
+                  ) : (
+                    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                      <CheckCircle className="h-4 w-4 text-green-500" />
+                      <span>No runtime operator installation required.</span>
                     </div>
-                  </div>
+                  )}
 
                   <div className="flex gap-3">
-                    {!isInstalled && (
+                    {selectedRuntimeRequiresCRD && !isInstalled && (
                       <Button
                         onClick={() => handleInstall(effectiveRuntime)}
                         disabled={isInstalling || isWaitingForInstall || !helmAvailable || !clusterStatus?.connected}
@@ -594,13 +613,13 @@ export function SettingsPage() {
                         ) : (
                           <>
                             <Download className="h-4 w-4" />
-                            Install {runtimes.find(r => r.id === effectiveRuntime)?.name || 'Runtime'}
+                            Install {currentRuntime?.name || 'Runtime'}
                           </>
                         )}
                       </Button>
                     )}
 
-                    {isInstalled && (
+                    {selectedRuntimeRequiresCRD && isInstalled && (
                       <Button
                         variant="destructive"
                         onClick={() => setShowUninstallDialog(true)}
@@ -633,7 +652,7 @@ export function SettingsPage() {
                     </Button>
                   </div>
 
-                  {!helmAvailable && (
+                  {selectedRuntimeRequiresCRD && !helmAvailable && (
                     <div className="flex items-start gap-2 rounded-lg bg-yellow-50 p-4 text-sm text-yellow-800 dark:bg-yellow-950 dark:text-yellow-200">
                       <AlertTriangle className="h-5 w-5 flex-shrink-0 mt-0.5" />
                       <div>
