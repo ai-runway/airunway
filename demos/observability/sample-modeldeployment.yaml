@@ -1,0 +1,19 @@
+# Sample ModelDeployment for testing observability.
+# Without a provider installed, this will stay in Pending phase —
+# but that's enough to generate controller metrics.
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: test-observability
+  namespace: default
+spec:
+  model:
+    id: microsoft/Phi-4-mini-instruct
+    source: huggingface
+  engine:
+    type: vllm
+  provider:
+    name: kaito
+  resources:
+    gpu:
+      count: 1

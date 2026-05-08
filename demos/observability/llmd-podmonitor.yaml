@@ -1,0 +1,41 @@
+# PodMonitor for llm-d inference pods
+#
+# llm-d deploys standard Kubernetes Deployments running vLLM on port 8000.
+# In disaggregated mode, separate prefill and decode Deployments are created,
+# each exposing vLLM metrics on the same port.
+#
+# Pod labels set by the llm-d transformer:
+#   - airunway.ai/deployment=<name>
+#   - app=<name>
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: llmd-inference-metrics
+  namespace: default
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: airunway
+spec:
+  selector:
+    matchLabels:
+      airunway.ai/managed-by: airunway
+    matchExpressions:
+      - key: airunway.ai/deployment
+        operator: Exists
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_label_airunway_ai_deployment]
+          targetLabel: model_deployment
+        - action: replace
+          targetLabel: provider
+          replacement: llm-d
+  namespaceSelector:
+    any: true

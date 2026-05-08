@@ -1,0 +1,18 @@
+# ClusterRoleBinding that grants Prometheus access to the controller metrics endpoint.
+# The controller uses authn/authz to protect /metrics — this binding allows the
+# Prometheus ServiceAccount to pass those checks.
+#
+# Adjust the ServiceAccount name/namespace if your Prometheus installation differs.
+# Run `kubectl get sa -n monitoring` to find the correct name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: airunway-metrics-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: airunway-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-kube-prometheus-prometheus
+    namespace: monitoring

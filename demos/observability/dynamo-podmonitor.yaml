@@ -1,0 +1,66 @@
+# PodMonitor for NVIDIA Dynamo inference pods
+#
+# Dynamo deploys three component types, each with its own metrics port:
+#   - Frontend (router):       port http/8000  — dynamo_frontend_*, dynamo_router_*
+#   - VllmDecodeWorker:        port system/9090 — dynamo_component_*, vllm:*
+#   - VllmPrefillWorker:       port system/9090 — dynamo_component_*, vllm:*
+#
+# All Dynamo inference pods carry the label nvidia.com/metrics-enabled=true.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-inference-metrics
+  namespace: dynamo-system
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: airunway
+spec:
+  selector:
+    matchLabels:
+      nvidia.com/metrics-enabled: "true"
+  podMetricsEndpoints:
+    # Frontend / router pods (port 8000)
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels:
+            [__meta_kubernetes_pod_label_nvidia_com_dynamo_component]
+          targetLabel: dynamo_component
+        - sourceLabels:
+            [
+              __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name,
+            ]
+          targetLabel: model_deployment
+        - action: replace
+          targetLabel: provider
+          replacement: dynamo
+    # Worker pods — decode and prefill (port 9090)
+    - port: system
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels:
+            [__meta_kubernetes_pod_label_nvidia_com_dynamo_component]
+          targetLabel: dynamo_component
+        - sourceLabels:
+            [__meta_kubernetes_pod_label_nvidia_com_dynamo_sub_component_type]
+          targetLabel: dynamo_role
+        - sourceLabels:
+            [
+              __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name,
+            ]
+          targetLabel: model_deployment
+        - action: replace
+          targetLabel: provider
+          replacement: dynamo

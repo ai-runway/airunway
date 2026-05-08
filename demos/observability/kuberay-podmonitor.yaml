@@ -1,0 +1,45 @@
+# PodMonitor for KubeRay inference pods
+#
+# KubeRay deploys a RayService with head and worker pods. vLLM runs inside
+# Ray Serve on the head node and serves on port 8000, which also exposes
+# Prometheus metrics at /metrics.
+#
+# Worker pods run Ray worker processes and do not expose vLLM metrics directly.
+# This monitor targets head pods (which run the serve application).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kuberay-inference-metrics
+  namespace: default
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: airunway
+spec:
+  # KubeRay RayService pods carry the airunway model-deployment label
+  # set by the KubeRay transformer. The ray.io/node-type label distinguishes
+  # head from worker pods.
+  selector:
+    matchExpressions:
+      - key: airunway.ai/model-deployment
+        operator: Exists
+      - key: ray.io/node-type
+        operator: In
+        values: ["head"]
+  podMetricsEndpoints:
+    - port: serve
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels:
+            [__meta_kubernetes_pod_label_airunway_ai_model_deployment]
+          targetLabel: model_deployment
+        - action: replace
+          targetLabel: provider
+          replacement: kuberay
+  namespaceSelector:
+    any: true
