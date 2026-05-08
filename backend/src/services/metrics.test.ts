@@ -149,6 +149,119 @@ describe('MetricsService - Caching', () => {
   });
 });
 
+describe('MetricsService - Endpoint Resolution', () => {
+  test('uses frontend service override for in-cluster scraping', async () => {
+    const urls: string[] = [];
+    const fetchRawMetrics = mock(async (url: string) => {
+      urls.push(url);
+      return 'vllm:num_requests_running 5\n';
+    });
+
+    const service = new MetricsService({
+      fetchRawMetrics,
+      checkInCluster: () => true,
+      now: () => 1700000000000,
+      successCacheTtlMs: 0,
+      errorCacheTtlMs: 0,
+    });
+
+    const response = await service.getDeploymentMetrics('demo', 'default', {
+      providerId: 'dynamo',
+      serviceName: 'demo-frontend',
+      port: 8000,
+    });
+
+    expect(response.available).toBe(true);
+    expect(urls).toEqual(['http://demo-frontend.default.svc.cluster.local:8000/metrics']);
+  });
+
+  test('uses resolved service and port for off-cluster proxy scraping', async () => {
+    const calls: Array<[string, string, number, string]> = [];
+    const proxyServiceGet = mock(async (serviceName: string, namespace: string, port: number, path: string) => {
+      calls.push([serviceName, namespace, port, path]);
+      return 'vllm:num_requests_running 5\n';
+    });
+
+    const service = new MetricsService({
+      proxyServiceGet,
+      checkInCluster: () => false,
+      now: () => 1700000000000,
+      successCacheTtlMs: 0,
+      errorCacheTtlMs: 0,
+    });
+
+    const response = await service.getDeploymentMetrics('demo', 'models', {
+      serviceName: 'custom-svc',
+      port: 9000,
+    });
+
+    expect(response.available).toBe(true);
+    expect(calls).toEqual([['custom-svc', 'models', 9000, 'metrics']]);
+  });
+
+  test('keeps default deployment-name service behavior when no endpoint override is supplied', async () => {
+    const urls: string[] = [];
+    const fetchRawMetrics = mock(async (url: string) => {
+      urls.push(url);
+      return 'vllm:num_requests_running 5\n';
+    });
+
+    const service = new MetricsService({
+      fetchRawMetrics,
+      checkInCluster: () => true,
+      now: () => 1700000000000,
+      successCacheTtlMs: 0,
+      errorCacheTtlMs: 0,
+    });
+
+    const response = await service.getDeploymentMetrics('demo', 'default');
+
+    expect(response.available).toBe(true);
+    expect(urls).toEqual(['http://demo.default.svc.cluster.local:8000/metrics']);
+  });
+
+  test('cache keys differ when service or port differs for the same deployment', async () => {
+    let now = 1700000000000;
+    const fetchRawMetrics = mock(async () => 'vllm:num_requests_running 5\n');
+    const service = new MetricsService({
+      fetchRawMetrics,
+      checkInCluster: () => true,
+      now: () => now,
+      successCacheTtlMs: 15000,
+      errorCacheTtlMs: 5000,
+    });
+
+    await service.getDeploymentMetrics('demo', 'default', { serviceName: 'demo-a', port: 8000 });
+    now += 1000;
+    await service.getDeploymentMetrics('demo', 'default', { serviceName: 'demo-b', port: 8000 });
+    now += 1000;
+    await service.getDeploymentMetrics('demo', 'default', { serviceName: 'demo-a', port: 8000 });
+
+    expect(fetchRawMetrics).toHaveBeenCalledTimes(2);
+  });
+
+  test('uses Dynamo frontend service fallback when provider is dynamo and no endpoint override is supplied', async () => {
+    const urls: string[] = [];
+    const fetchRawMetrics = mock(async (url: string) => {
+      urls.push(url);
+      return 'vllm:num_requests_running 5\n';
+    });
+
+    const service = new MetricsService({
+      fetchRawMetrics,
+      checkInCluster: () => true,
+      now: () => 1700000000000,
+      successCacheTtlMs: 0,
+      errorCacheTtlMs: 0,
+    });
+
+    const response = await service.getDeploymentMetrics('demo', 'default', 'dynamo');
+
+    expect(response.available).toBe(true);
+    expect(urls).toEqual(['http://demo-frontend.default.svc.cluster.local:8000/metrics']);
+  });
+});
+
 describe('MetricsService - MetricsResponse structure', () => {
   test('creates unavailable response for off-cluster', () => {
     const response: MetricsResponse = {
