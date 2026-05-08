@@ -1003,7 +1003,7 @@ Get installation and health status of all runtimes.
 **Notes:**
 
 - Used by the frontend to show available runtimes in the deployment wizard
-- Checks provider configuration and available health signals for each provider/runtime; provider-supplied direct runtimes may not have a repo-local operator shim
+- Checks provider configuration and available health signals for each provider/runtime; Direct vLLM is registered by the repo-local `providers/vllm` shim
 
 ### DELETE /deployments/:name
 
