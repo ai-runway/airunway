@@ -2,6 +2,7 @@ package llmd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
@@ -664,6 +665,9 @@ func TestTransformOverrideBlocksPodSpec(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when overriding spec.template.spec")
 	}
+	if !strings.Contains(err.Error(), "spec.template.spec") {
+		t.Fatalf("expected error to mention spec.template.spec, got %v", err)
+	}
 }
 
 func TestHasNestedMapPath(t *testing.T) {
@@ -833,9 +837,9 @@ func TestTransformUserLabelsCannotClobberSelectors(t *testing.T) {
 	md.Spec.PodTemplate = &airunwayv1alpha1.PodTemplateSpec{
 		Metadata: &airunwayv1alpha1.PodTemplateMetadata{
 			Labels: map[string]string{
-				"app":                        "my-custom-app",
+				"app":                    "my-custom-app",
 				"airunway.ai/deployment": "my-custom-deployment",
-				"my-label":                   "my-value",
+				"my-label":               "my-value",
 			},
 		},
 	}
