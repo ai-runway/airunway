@@ -14,6 +14,22 @@ if (typeof window !== 'undefined' && !window.ResizeObserver) {
   globalThis.ResizeObserver = ResizeObserverMock
 }
 
+// Radix UI Select uses browser element APIs that jsdom does not implement.
+if (typeof Element !== 'undefined') {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {}
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {}
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {}
+  }
+}
+
 // Start MSW server before all tests
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 

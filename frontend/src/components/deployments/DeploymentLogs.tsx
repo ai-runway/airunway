@@ -34,10 +34,17 @@ export function DeploymentLogs({ deploymentName, namespace }: DeploymentLogsProp
 
   // Fetch pods for this deployment
   const { data: pods } = useDeploymentPods(deploymentName, namespace);
+  const selectedPodIsAvailable = pods?.some((pod) => pod.name === selectedPod) ?? false;
+  const effectiveSelectedPod = selectedPodIsAvailable ? selectedPod : pods?.[0]?.name;
 
-  // Set default pod when pods load
+  // Keep a valid selected instance as pods change (for example during rollouts).
   useEffect(() => {
-    if (pods && pods.length > 0 && !selectedPod) {
+    if (!pods || pods.length === 0) {
+      setSelectedPod(undefined);
+      return;
+    }
+
+    if (!selectedPod || !pods.some((pod) => pod.name === selectedPod)) {
       setSelectedPod(pods[0].name);
     }
   }, [pods, selectedPod]);
@@ -46,7 +53,7 @@ export function DeploymentLogs({ deploymentName, namespace }: DeploymentLogsProp
   const { data: logsData, isLoading, refetch, isFetching, error } = useDeploymentLogs(
     deploymentName,
     namespace,
-    { podName: selectedPod, tailLines, timestamps }
+    { podName: effectiveSelectedPod, tailLines, timestamps }
   );
 
   // Auto-scroll to bottom when new logs arrive
@@ -110,8 +117,8 @@ export function DeploymentLogs({ deploymentName, namespace }: DeploymentLogsProp
           <div className="flex items-center gap-2">
             {/* Instance Selector */}
             {pods.length > 1 && (
-              <Select value={selectedPod} onValueChange={setSelectedPod}>
-                <SelectTrigger className="w-[200px]">
+              <Select value={effectiveSelectedPod} onValueChange={setSelectedPod}>
+                <SelectTrigger className="w-[200px]" aria-label="Instance">
                   <SelectValue placeholder="Select instance" />
                 </SelectTrigger>
                 <SelectContent>
@@ -174,7 +181,7 @@ export function DeploymentLogs({ deploymentName, namespace }: DeploymentLogsProp
       </div>
       <div>
         <div className="relative">
-          {isLoading || !selectedPod ? (
+          {isLoading || !effectiveSelectedPod ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>

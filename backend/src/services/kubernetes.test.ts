@@ -112,6 +112,231 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 });
 
 
+describe('KubernetesService - deployment pod lookup', () => {
+  test('aggregates and de-duplicates pods across exact supported selectors', async () => {
+    const service = kubernetesService as any;
+    const originalCoreV1Api = service.coreV1Api;
+    const selectors: string[] = [];
+
+    const pod = (name: string, labels: Record<string, string> = {}) => ({
+      metadata: { name, labels },
+      status: {
+        phase: 'Running',
+        containerStatuses: [
+          { ready: true, restartCount: 0, state: { running: {} } },
+        ],
+      },
+    });
+
+    service.coreV1Api = {
+      listNamespacedPod: async (...args: unknown[]) => {
+        const labelSelector = args[5] as string;
+        selectors.push(labelSelector);
+
+        if (labelSelector === 'app.kubernetes.io/instance=demo') {
+          return { body: { items: [pod('demo-router'), pod('demo-shared')] } };
+        }
+
+        if (labelSelector === 'airunway.ai/deployment=demo') {
+          return { body: { items: [pod('demo-shared'), pod('demo-worker')] } };
+        }
+
+        if (labelSelector === 'airunway.ai/model-deployment=demo') {
+          return { body: { items: [pod('demo-ray-template')] } };
+        }
+
+        if (labelSelector === 'nvidia.com/dynamo-graph-deployment-name=demo') {
+          return { body: { items: [pod('demo-epp'), pod('demo-vllmworker')] } };
+        }
+
+        if (labelSelector === 'app=demo') {
+          return { body: { items: [pod('unrelated-app-pod')] } };
+        }
+
+        if (labelSelector === 'ray.io/cluster') {
+          return {
+            body: {
+              items: [
+                pod('demo-ray-head', { 'ray.io/cluster': 'demo-raycluster' }),
+                pod('demo2-ray-head', { 'ray.io/cluster': 'demo2-raycluster' }),
+                pod('demo-extra-ray-head', { 'ray.io/cluster': 'demo-extra-raycluster' }),
+                pod('other-ray-head', { 'ray.io/cluster': 'other-raycluster' }),
+              ],
+            },
+          };
+        }
+
+        return { body: { items: [] } };
+      },
+    };
+
+    try {
+      const pods = await kubernetesService.getDeploymentPods('demo', 'default');
+
+      expect(pods.map((item) => item.name)).toEqual([
+        'demo-epp',
+        'demo-ray-head',
+        'demo-ray-template',
+        'demo-router',
+        'demo-shared',
+        'demo-vllmworker',
+        'demo-worker',
+      ]);
+      expect(new Set(pods.map((item) => item.name)).size).toBe(pods.length);
+      expect(selectors).toEqual([
+        'app.kubernetes.io/instance=demo',
+        'airunway.ai/deployment=demo',
+        'airunway.ai/model-deployment=demo',
+        'nvidia.com/dynamo-graph-deployment-name=demo',
+        'kaito.sh/workspace=demo',
+        'ray.io/cluster',
+      ]);
+    } finally {
+      service.coreV1Api = originalCoreV1Api;
+    }
+  });
+
+  test('uses broad app selector only as a last-resort fallback', async () => {
+    const service = kubernetesService as any;
+    const originalCoreV1Api = service.coreV1Api;
+    const selectors: string[] = [];
+
+    const pod = (name: string) => ({
+      metadata: { name },
+      status: {
+        phase: 'Running',
+        containerStatuses: [
+          { ready: true, restartCount: 0, state: { running: {} } },
+        ],
+      },
+    });
+
+    service.coreV1Api = {
+      listNamespacedPod: async (...args: unknown[]) => {
+        const labelSelector = args[5] as string;
+        selectors.push(labelSelector);
+
+        if (labelSelector === 'app=legacy-demo') {
+          return { body: { items: [pod('legacy-demo-pod')] } };
+        }
+
+        return { body: { items: [] } };
+      },
+    };
+
+    try {
+      const pods = await kubernetesService.getDeploymentPods('legacy-demo', 'default');
+
+      expect(pods.map((item) => item.name)).toEqual(['legacy-demo-pod']);
+      expect(selectors).toEqual([
+        'app.kubernetes.io/instance=legacy-demo',
+        'airunway.ai/deployment=legacy-demo',
+        'airunway.ai/model-deployment=legacy-demo',
+        'nvidia.com/dynamo-graph-deployment-name=legacy-demo',
+        'kaito.sh/workspace=legacy-demo',
+        'ray.io/cluster',
+        'app=legacy-demo',
+      ]);
+    } finally {
+      service.coreV1Api = originalCoreV1Api;
+    }
+  });
+});
+
+
+describe('KubernetesService - pod logs', () => {
+  test('defaults multi-container pod logs to the primary main container using pod list permission', async () => {
+    const service = kubernetesService as any;
+    const originalCoreV1Api = service.coreV1Api;
+    let requestedContainer: string | undefined;
+
+    service.coreV1Api = {
+      listNamespacedPod: async (namespace: string, _pretty?: string, _allowWatchBookmarks?: boolean, _continue?: string, fieldSelector?: string) => {
+        expect(namespace).toBe('default');
+        expect(fieldSelector).toBe('metadata.name=demo-worker');
+        return {
+          body: {
+            items: [
+              {
+                spec: {
+                  containers: [
+                    { name: 'frontend' },
+                    { name: 'main' },
+                  ],
+                },
+                status: {
+                  containerStatuses: [
+                    { name: 'frontend', ready: true, restartCount: 0, state: { running: {} } },
+                    { name: 'main', ready: true, restartCount: 0, state: { running: {} } },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      },
+      readNamespacedPodLog: async (...args: unknown[]) => {
+        requestedContainer = args[2] as string | undefined;
+        return { body: 'worker logs' };
+      },
+    };
+
+    try {
+      const logs = await kubernetesService.getPodLogs('demo-worker', 'default', { tailLines: 10 });
+
+      expect(logs).toBe('worker logs');
+      expect(requestedContainer).toBe('main');
+    } finally {
+      service.coreV1Api = originalCoreV1Api;
+    }
+  });
+
+  test('prefers generated model containers before ready sidecars', async () => {
+    const service = kubernetesService as any;
+    const originalCoreV1Api = service.coreV1Api;
+    let requestedContainer: string | undefined;
+
+    service.coreV1Api = {
+      listNamespacedPod: async (_namespace: string, _pretty?: string, _allowWatchBookmarks?: boolean, _continue?: string, fieldSelector?: string) => {
+        expect(fieldSelector).toBe('metadata.name=demo-model');
+        return {
+          body: {
+            items: [
+              {
+                spec: {
+                  containers: [
+                    { name: 'istio-proxy' },
+                    { name: 'vllm' },
+                  ],
+                },
+                status: {
+                  containerStatuses: [
+                    { name: 'istio-proxy', ready: true, restartCount: 0, state: { running: {} } },
+                    { name: 'vllm', ready: false, restartCount: 3, state: { waiting: { reason: 'CrashLoopBackOff' } } },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      },
+      readNamespacedPodLog: async (...args: unknown[]) => {
+        requestedContainer = args[2] as string | undefined;
+        return { body: 'model logs' };
+      },
+    };
+
+    try {
+      const logs = await kubernetesService.getPodLogs('demo-model', 'default', { tailLines: 10 });
+
+      expect(logs).toBe('model logs');
+      expect(requestedContainer).toBe('vllm');
+    } finally {
+      service.coreV1Api = originalCoreV1Api;
+    }
+  });
+});
+
 describe('KubernetesService - Type Definitions', () => {
   describe('ClusterGpuCapacity', () => {
     test('creates valid capacity with GPU nodes', () => {
