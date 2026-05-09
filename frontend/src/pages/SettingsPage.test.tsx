@@ -38,6 +38,121 @@ let mockGatewayStatus = {
   inferenceExtVersion: undefined as string | undefined,
 }
 
+type MockRuntimeStatus = {
+  id: string
+  name: string
+  installed: boolean
+  healthy: boolean
+  crdFound?: boolean
+  operatorRunning?: boolean
+  requiresCRD?: boolean
+  version?: string
+}
+
+const defaultMockRuntimes = (): MockRuntimeStatus[] => [
+  {
+    id: 'installed-runtime',
+    name: 'Installed Runtime',
+    installed: true,
+    healthy: true,
+    version: '1.0.0',
+  },
+  {
+    id: 'available-runtime',
+    name: 'Available Runtime',
+    installed: false,
+    healthy: false,
+  },
+  {
+    id: 'kuberay',
+    name: 'Kuberay',
+    installed: false,
+    healthy: false,
+    crdFound: true,
+    operatorRunning: false,
+  },
+  {
+    id: 'llmd',
+    name: 'LLM-D',
+    installed: true,
+    healthy: true,
+    crdFound: true,
+    operatorRunning: true,
+    requiresCRD: true,
+  },
+  {
+    id: 'vLLM',
+    name: 'vLLM',
+    installed: true,
+    healthy: true,
+    crdFound: true,
+    operatorRunning: true,
+    requiresCRD: true,
+  },
+]
+
+let mockRuntimes = defaultMockRuntimes()
+
+const getMockInstallationStatus = (providerId: string) => {
+  switch (providerId) {
+    case 'available-runtime':
+      return {
+        installed: false,
+        providerName: 'Available Runtime',
+        message: 'Available Runtime is not installed yet.',
+        crdFound: false,
+        operatorRunning: false,
+        installationSteps: [],
+      }
+    case 'kuberay':
+      return {
+        installed: false,
+        providerName: 'Kuberay',
+        message: 'KubeRay CRD found but no ready KubeRay operator pods were detected in ray-system',
+        crdFound: true,
+        operatorRunning: false,
+        installationSteps: [],
+      }
+    case 'llmd':
+    case 'custom-llmd-registration':
+      return {
+        installed: true,
+        providerName: 'LLM-D',
+        message: 'Runtime is ready to use.',
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: true,
+        installationSteps: [
+          { title: 'Install LLM-D CRD', commands: ['kubectl apply -f llmd-crd.yaml'] },
+          { title: 'Start LLM-D operator', commands: ['helm install llmd-operator llmd/operator'] },
+        ],
+      }
+    case 'vllm':
+    case 'custom-vllm-registration':
+      return {
+        installed: true,
+        providerName: 'vLLM',
+        message: 'Runtime is ready to use.',
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: true,
+        installationSteps: [
+          { title: 'Install vLLM CRD', commands: ['kubectl apply -f vllm-crd.yaml'] },
+          { title: 'Start vLLM operator', commands: ['helm install vllm-operator vllm/operator'] },
+        ],
+      }
+    default:
+      return {
+        installed: true,
+        providerName: 'Installed Runtime',
+        message: 'Installed Runtime is ready.',
+        crdFound: true,
+        operatorRunning: true,
+        installationSteps: [],
+      }
+  }
+}
+
 vi.mock('@/hooks/useSettings', () => ({
   useSettings: () => ({ isLoading: false }),
 }))
@@ -45,38 +160,7 @@ vi.mock('@/hooks/useSettings', () => ({
 vi.mock('@/hooks/useRuntimes', () => ({
   useRuntimesStatus: () => ({
     data: {
-      runtimes: [
-        {
-          id: 'installed-runtime',
-          name: 'Installed Runtime',
-          installed: true,
-          healthy: true,
-          version: '1.0.0',
-        },
-        {
-          id: 'available-runtime',
-          name: 'Available Runtime',
-          installed: false,
-          healthy: false,
-        },
-        {
-          id: 'kuberay',
-          name: 'Kuberay',
-          installed: false,
-          healthy: false,
-          crdFound: true,
-          operatorRunning: false,
-        },
-        {
-          id: 'llmd',
-          name: 'LLM-D',
-          installed: true,
-          healthy: true,
-          crdFound: true,
-          operatorRunning: true,
-          requiresCRD: false,
-        },
-      ],
+      runtimes: mockRuntimes,
     },
     isLoading: false,
     refetch,
@@ -102,42 +186,7 @@ vi.mock('@/hooks/useInstallation', () => ({
     isLoading: false,
   }),
   useProviderInstallationStatus: (providerId: string) => ({
-    data: providerId === 'available-runtime'
-      ? {
-          installed: false,
-          providerName: 'Available Runtime',
-          message: 'Available Runtime is not installed yet.',
-          crdFound: false,
-          operatorRunning: false,
-          installationSteps: [],
-        }
-      : providerId === 'kuberay'
-        ? {
-            installed: false,
-            providerName: 'Kuberay',
-            message: 'KubeRay CRD found but no ready KubeRay operator pods were detected in ray-system',
-            crdFound: true,
-            operatorRunning: false,
-            installationSteps: [],
-          }
-        : providerId === 'llmd'
-          ? {
-              installed: true,
-              providerName: 'LLM-D',
-              message: 'LLM-D is available without an upstream runtime operator installation',
-              crdFound: true,
-              operatorRunning: true,
-              requiresCRD: false,
-              installationSteps: [],
-            }
-          : {
-            installed: true,
-            providerName: 'Installed Runtime',
-            message: 'Installed Runtime is ready.',
-            crdFound: true,
-            operatorRunning: true,
-            installationSteps: [],
-          },
+    data: getMockInstallationStatus(providerId),
     isLoading: false,
     refetch,
   }),
@@ -209,6 +258,7 @@ describe('SettingsPage', () => {
     refetch.mockReset()
     startOAuth.mockReset()
     toast.mockReset()
+    mockRuntimes = defaultMockRuntimes()
     mockGpuStatus = {
       installed: false,
       gpusAvailable: false,
@@ -261,7 +311,6 @@ describe('SettingsPage', () => {
     expect(installationStatus?.querySelector('svg')).toHaveClass('text-red-500')
   })
 
-
   it('does not show uninstall for a runtime that has only its CRD installed', () => {
     render(
       <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
@@ -289,18 +338,135 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('LLM-D'))
 
     const llmdCard = screen.getByText('LLM-D').closest('.rounded-2xl')
-    expect(within(llmdCard as HTMLElement).getByText('No runtime operator installation required.')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('LLM-D for distributed inference')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('Runtime is ready to use.')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
     expect(within(llmdCard as HTMLElement).queryByText('CRD')).not.toBeInTheDocument()
     expect(within(llmdCard as HTMLElement).queryByText('Operator')).not.toBeInTheDocument()
+    expect(llmdCard).not.toHaveTextContent(/CRD|operator/i)
 
-    const installationPanel = screen.getByText('LLM-D Installation').closest('.rounded-2xl')
-    expect(within(installationPanel as HTMLElement).getByText('Installed')).toBeInTheDocument()
-    expect(within(installationPanel as HTMLElement).getByText('LLM-D is available without an upstream runtime operator installation')).toBeInTheDocument()
-    expect(within(installationPanel as HTMLElement).getByText('No runtime operator installation required.')).toBeInTheDocument()
-    expect(within(installationPanel as HTMLElement).queryByText('CRD Installed')).not.toBeInTheDocument()
-    expect(within(installationPanel as HTMLElement).queryByText('Operator Running')).not.toBeInTheDocument()
-    expect(within(installationPanel as HTMLElement).queryByRole('button', { name: /install llm-d/i })).not.toBeInTheDocument()
-    expect(within(installationPanel as HTMLElement).queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
+    const llmdInstallationPanel = screen.getByText('LLM-D Status').closest('.rounded-2xl')
+    expect(within(llmdInstallationPanel as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).getAllByText('Runtime is ready to use.').length).toBeGreaterThan(0)
+    expect(llmdInstallationPanel).not.toHaveTextContent(/CRD|operator/i)
+    expect(llmdInstallationPanel).not.toHaveTextContent('Manual Installation Steps')
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('CRD Installed')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('Operator Running')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByRole('button', { name: /install llm-d/i })).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByRole('button')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('vLLM'))
+
+    const vllmCard = screen.getByText('vLLM').closest('.rounded-2xl')
+    expect(within(vllmCard as HTMLElement).getByText('vLLM for high-throughput inference')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).getByText('Runtime is ready to use.')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('CRD')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Operator')).not.toBeInTheDocument()
+    expect(vllmCard).not.toHaveTextContent(/CRD|operator/i)
+
+    const vllmInstallationPanel = screen.getByText('vLLM Status').closest('.rounded-2xl')
+    expect(within(vllmInstallationPanel as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).getAllByText('Runtime is ready to use.').length).toBeGreaterThan(0)
+    expect(vllmInstallationPanel).not.toHaveTextContent(/CRD|operator/i)
+    expect(vllmInstallationPanel).not.toHaveTextContent('Manual Installation Steps')
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('CRD Installed')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('Operator Running')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByRole('button', { name: /install vllm/i })).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('uses display names to hide CRD controls for CRD-less providers with custom ids', async () => {
+    mockRuntimes = [
+      {
+        id: 'custom-llmd-registration',
+        name: 'LLM-D',
+        installed: true,
+        healthy: true,
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: true,
+      },
+      {
+        id: 'custom-vllm-registration',
+        name: 'vLLM',
+        installed: true,
+        healthy: true,
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('LLM-D Status')
+
+    const llmdCard = screen.getByText('LLM-D').closest('.rounded-2xl')
+    expect(within(llmdCard as HTMLElement).getByText('LLM-D for distributed inference')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Ray Serve via KubeRay for distributed Ray-based model serving with vLLM')).not.toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('Runtime is ready to use.')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('CRD')).not.toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Operator')).not.toBeInTheDocument()
+    expect(llmdCard).not.toHaveTextContent(/CRD|operator/i)
+
+    const llmdInstallationPanel = screen.getByText('LLM-D Status').closest('.rounded-2xl')
+    expect(within(llmdInstallationPanel as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).getAllByText('Runtime is ready to use.').length).toBeGreaterThan(0)
+    expect(llmdInstallationPanel).not.toHaveTextContent(/CRD|operator/i)
+    expect(llmdInstallationPanel).not.toHaveTextContent('Manual Installation Steps')
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('CRD Installed')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByText('Operator Running')).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByRole('button', { name: /install llm-d/i })).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).queryByRole('button')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('vLLM'))
+
+    await screen.findByText('vLLM Status')
+
+    const vllmCard = screen.getByText('vLLM').closest('.rounded-2xl')
+    expect(within(vllmCard as HTMLElement).getByText('vLLM for high-throughput inference')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Ray Serve via KubeRay for distributed Ray-based model serving with vLLM')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).getByText('Runtime is ready to use.')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('CRD')).not.toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Operator')).not.toBeInTheDocument()
+    expect(vllmCard).not.toHaveTextContent(/CRD|operator/i)
+
+    const vllmInstallationPanel = screen.getByText('vLLM Status').closest('.rounded-2xl')
+    expect(within(vllmInstallationPanel as HTMLElement).getByText('Ready')).toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).getAllByText('Runtime is ready to use.').length).toBeGreaterThan(0)
+    expect(vllmInstallationPanel).not.toHaveTextContent(/CRD|operator/i)
+    expect(vllmInstallationPanel).not.toHaveTextContent('Manual Installation Steps')
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('CRD Installed')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByText('Operator Running')).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByRole('button', { name: /install vllm/i })).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('keeps a runtime in a starting state after install command succeeds but operator is not ready yet', async () => {

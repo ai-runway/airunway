@@ -3,7 +3,47 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   dynamo: 'Dynamo',
   kuberay: 'KubeRay',
   llmd: 'LLM-D',
+  vllm: 'vLLM',
 };
+
+const CRD_LESS_PROVIDER_IDS = new Set([
+  'llmd',
+  'vllm',
+]);
+
+const CRD_LESS_PROVIDER_DISPLAY_NAMES = new Set([
+  'LLM-D',
+  'vLLM',
+]);
+
+function normalizeCanonicalProviderId(providerId: string | null | undefined): string {
+  return String(providerId ?? '').toLowerCase();
+}
+
+function isCanonicalCrdLessProviderId(providerId: string | null | undefined): boolean {
+  const normalizedProviderId = normalizeCanonicalProviderId(providerId);
+  return CRD_LESS_PROVIDER_IDS.has(normalizedProviderId);
+}
+
+function isCrdLessProviderDisplayName(providerName: string | null | undefined): boolean {
+  return CRD_LESS_PROVIDER_DISPLAY_NAMES.has(String(providerName ?? '').trim());
+}
+
+export function providerRequiresRuntimeCRD(
+  providerId: string,
+  explicitRequiresCRD?: unknown,
+  providerName?: string | null,
+): boolean {
+  if (isCanonicalCrdLessProviderId(providerId) || isCrdLessProviderDisplayName(providerName)) {
+    return false;
+  }
+
+  if (typeof explicitRequiresCRD === 'boolean') {
+    return explicitRequiresCRD;
+  }
+
+  return true;
+}
 
 const DISPLAY_NAME_ANNOTATION_KEYS = [
   'airunway.ai/provider-name',
@@ -12,15 +52,26 @@ const DISPLAY_NAME_ANNOTATION_KEYS = [
   'airunway.io/display-name',
 ];
 
-export function getProviderDisplayName(
-  providerId: string,
+export function getAnnotatedProviderDisplayName(
   annotations?: Record<string, unknown>,
-): string {
+): string | undefined {
   for (const key of DISPLAY_NAME_ANNOTATION_KEYS) {
     const value = annotations?.[key];
     if (typeof value === 'string' && value.trim().length > 0) {
       return value.trim();
     }
+  }
+
+  return undefined;
+}
+
+export function getProviderDisplayName(
+  providerId: string,
+  annotations?: Record<string, unknown>,
+): string {
+  const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
+  if (annotatedDisplayName) {
+    return annotatedDisplayName;
   }
 
   const normalizedProviderId = providerId.toLowerCase();

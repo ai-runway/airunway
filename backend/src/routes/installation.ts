@@ -3,7 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
 import logger from '../lib/logger';
-import { getProviderDisplayName } from '../lib/providers';
+import { getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
 
 interface ProviderHelmChartDetails {
   name: string;
@@ -40,15 +40,18 @@ function parseInstallationAnnotation(config: any): any {
  */
 function extractProviderDetails(config: any) {
   const name = config.metadata?.name || 'unknown';
+  const annotations = config.metadata?.annotations;
+  const displayName = getProviderDisplayName(name, annotations);
+  const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
   const installation = parseInstallationAnnotation(config);
   const capabilities = config.spec?.capabilities || {};
 
   return {
     id: name,
-    name: getProviderDisplayName(name, config.metadata?.annotations),
+    name: displayName,
     description: installation.description || '',
     defaultNamespace: installation.defaultNamespace || 'default',
-    requiresCRD: capabilities.requiresCRD !== false,
+    requiresCRD: providerRequiresRuntimeCRD(name, capabilities.requiresCRD, annotatedDisplayName),
     crdConfig: {
       apiGroup: capabilities.engines?.length ? '' : '',
     },
@@ -258,7 +261,7 @@ const installation = new Hono()
 
     if (provider.requiresCRD === false) {
       throw new HTTPException(400, {
-        message: `${provider.name} does not require an upstream runtime operator installation.`,
+        message: `${provider.name} is managed by provider registration and cannot be installed from this page.`,
       });
     }
 
@@ -313,7 +316,7 @@ const installation = new Hono()
 
     if (provider.requiresCRD === false) {
       throw new HTTPException(400, {
-        message: `${provider.name} does not require an upstream runtime operator installation.`,
+        message: `${provider.name} is managed by provider registration and cannot be uninstalled from this page.`,
       });
     }
 

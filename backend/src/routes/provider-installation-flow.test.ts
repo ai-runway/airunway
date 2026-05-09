@@ -237,7 +237,7 @@ describe('Provider Installation Flow', () => {
     expect(body.installable).toBe(false);
     expect(body.installationSteps).toEqual([]);
     expect(body.helmCommands).toEqual([]);
-    expect(body.message).toBe('LLM-D is available without an upstream runtime operator installation');
+    expect(body.message).toBe('Runtime is ready to use.');
   });
 
   test('GET /providers/llmd/status honors provider readiness even without runtime CRD requirement', async () => {
@@ -283,7 +283,7 @@ describe('Provider Installation Flow', () => {
     expect(body.requiresCRD).toBe(false);
     expect(body.installable).toBe(false);
     expect(body.helmCommands).toEqual([]);
-    expect(body.message).toBe('LLM-D does not require an upstream runtime operator, but the provider is not ready');
+    expect(body.message).toBe('Provider is registered but not ready yet.');
   });
 
   // ==========================================================================
