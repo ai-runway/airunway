@@ -81,16 +81,16 @@ const runtimeIdsMatch = (left: string | null | undefined, right: string | null |
   normalizeRuntimeId(left) === normalizeRuntimeId(right)
 
 const runtimeRequiresCRD = (runtime: RuntimeCrdMetadata | null | undefined, fallbackId?: string | null) => {
+  if (typeof runtime?.requiresCRD === 'boolean') {
+    return runtime.requiresCRD
+  }
+
   if (
     isCrdLessRuntimeId(runtime?.id) ||
     isCrdLessRuntimeDisplayName(runtime?.name) ||
     isCrdLessRuntimeId(fallbackId)
   ) {
     return false
-  }
-
-  if (typeof runtime?.requiresCRD === 'boolean') {
-    return runtime.requiresCRD
   }
 
   return true

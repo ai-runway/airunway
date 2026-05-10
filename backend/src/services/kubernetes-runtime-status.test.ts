@@ -170,7 +170,7 @@ describe('KubernetesService - Runtime Status', () => {
     expect(vllm?.message).toBe('Runtime is ready to use.');
   });
 
-  test('ignores stale requiresCRD metadata for custom-named CRD-less runtime entries', async () => {
+  test('honors explicit requiresCRD metadata for custom-named CRD-less runtime entries', async () => {
     const customVllmConfig = {
       ...mockInferenceProviderConfig,
       metadata: {
@@ -208,9 +208,9 @@ describe('KubernetesService - Runtime Status', () => {
     expect(vllm?.healthy).toBe(true);
     expect(vllm?.crdFound).toBe(true);
     expect(vllm?.operatorRunning).toBe(true);
-    expect(vllm?.requiresCRD).toBe(false);
+    expect(vllm?.requiresCRD).toBe(true);
     expect(vllm?.version).toBe('0.8.0');
-    expect(vllm?.message).toBe('Runtime is ready to use.');
+    expect(vllm?.message).toBe('vLLM is installed and running');
   });
 
   test('reports ready providers that do not require runtime CRDs as installed without probing an operator', async () => {

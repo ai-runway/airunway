@@ -34,12 +34,12 @@ export function providerRequiresRuntimeCRD(
   explicitRequiresCRD?: unknown,
   providerName?: string | null,
 ): boolean {
-  if (isCanonicalCrdLessProviderId(providerId) || isCrdLessProviderDisplayName(providerName)) {
-    return false;
-  }
-
   if (typeof explicitRequiresCRD === 'boolean') {
     return explicitRequiresCRD;
+  }
+
+  if (isCanonicalCrdLessProviderId(providerId) || isCrdLessProviderDisplayName(providerName)) {
+    return false;
   }
 
   return true;

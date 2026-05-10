@@ -79,7 +79,7 @@ const defaultMockRuntimes = (): MockRuntimeStatus[] => [
     healthy: true,
     crdFound: true,
     operatorRunning: true,
-    requiresCRD: true,
+    requiresCRD: false,
   },
   {
     id: 'vLLM',
@@ -88,7 +88,7 @@ const defaultMockRuntimes = (): MockRuntimeStatus[] => [
     healthy: true,
     crdFound: true,
     operatorRunning: true,
-    requiresCRD: true,
+    requiresCRD: false,
   },
 ]
 
@@ -147,7 +147,7 @@ const getMockInstallationStatus = (providerId: string) => {
         message: 'Runtime is ready to use.',
         crdFound: false,
         operatorRunning: false,
-        requiresCRD: false,
+        requiresCRD: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.requiresCRD ?? false,
         installationSteps: llmdSetupSteps,
       }
     case 'custom-llmd-registration':
@@ -157,7 +157,6 @@ const getMockInstallationStatus = (providerId: string) => {
         message: 'Runtime is ready to use.',
         crdFound: true,
         operatorRunning: true,
-        requiresCRD: true,
         installationSteps: llmdSetupSteps,
       }
     case 'vllm':
@@ -167,7 +166,7 @@ const getMockInstallationStatus = (providerId: string) => {
         message: 'Runtime is ready to use.',
         crdFound: false,
         operatorRunning: false,
-        requiresCRD: false,
+        requiresCRD: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.requiresCRD ?? false,
         installationSteps: vllmSetupSteps,
       }
     case 'custom-vllm-registration':
@@ -177,7 +176,6 @@ const getMockInstallationStatus = (providerId: string) => {
         message: 'Runtime is ready to use.',
         crdFound: true,
         operatorRunning: true,
-        requiresCRD: true,
         installationSteps: vllmSetupSteps,
       }
     case 'registered-vllm-provider':
@@ -458,7 +456,6 @@ describe('SettingsPage', () => {
         healthy: true,
         crdFound: true,
         operatorRunning: true,
-        requiresCRD: true,
       },
       {
         id: 'custom-vllm-registration',
@@ -467,7 +464,6 @@ describe('SettingsPage', () => {
         healthy: true,
         crdFound: true,
         operatorRunning: true,
-        requiresCRD: true,
       },
     ]
 
@@ -538,6 +534,66 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Confirm GPU Nodes Are Ready')).toBeInTheDocument()
     expect(screen.queryByText('Install vLLM CRD')).not.toBeInTheDocument()
     expect(screen.queryByText('Start vLLM operator')).not.toBeInTheDocument()
+  })
+
+
+  it('honors explicit requiresCRD true before CRD-less id or display-name fallbacks', async () => {
+    mockRuntimes = [
+      {
+        id: 'llmd',
+        name: 'LLM-D',
+        installed: true,
+        healthy: true,
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: true,
+      },
+      {
+        id: 'custom-vllm-registration',
+        name: 'vLLM',
+        installed: true,
+        healthy: true,
+        crdFound: true,
+        operatorRunning: true,
+        requiresCRD: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('LLM-D Installation')
+
+    const llmdCard = screen.getByText('LLM-D').closest('.rounded-2xl')
+    expect(within(llmdCard as HTMLElement).getByText('Installed')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('CRD')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).getByText('Operator')).toBeInTheDocument()
+    expect(within(llmdCard as HTMLElement).queryByText('Ready')).not.toBeInTheDocument()
+
+    const llmdInstallationPanel = screen.getByText('LLM-D Installation').closest('.rounded-2xl')
+    expect(within(llmdInstallationPanel as HTMLElement).getByText('Installed')).toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).getByText('CRD Installed')).toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).getByText('Operator Running')).toBeInTheDocument()
+    expect(within(llmdInstallationPanel as HTMLElement).getByRole('button', { name: /^uninstall$/i })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('vLLM'))
+
+    await screen.findByText('vLLM Installation')
+
+    const vllmCard = screen.getByText('vLLM').closest('.rounded-2xl')
+    expect(within(vllmCard as HTMLElement).getByText('Installed')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).getByText('CRD')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).getByText('Operator')).toBeInTheDocument()
+    expect(within(vllmCard as HTMLElement).queryByText('Ready')).not.toBeInTheDocument()
+
+    const vllmInstallationPanel = screen.getByText('vLLM Installation').closest('.rounded-2xl')
+    expect(within(vllmInstallationPanel as HTMLElement).getByText('Installed')).toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).getByText('CRD Installed')).toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).getByText('Operator Running')).toBeInTheDocument()
+    expect(within(vllmInstallationPanel as HTMLElement).getByRole('button', { name: /^uninstall$/i })).toBeInTheDocument()
   })
 
   it('treats native lower-case vllm runtime id as a CRD-less provider', async () => {

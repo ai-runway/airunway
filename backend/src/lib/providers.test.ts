@@ -19,11 +19,20 @@ describe('provider metadata helpers', () => {
     expect(providerRequiresRuntimeCRD('vLLM-provider')).toBe(true);
   });
 
-  test('does not let stale requiresCRD flags override canonical or display-name CRD-less providers', () => {
-    expect(providerRequiresRuntimeCRD('llmd', true)).toBe(false);
-    expect(providerRequiresRuntimeCRD('vllm', true)).toBe(false);
-    expect(providerRequiresRuntimeCRD('custom-llmd-registration', true, 'LLM-D')).toBe(false);
-    expect(providerRequiresRuntimeCRD('custom-vllm-registration', true, 'vLLM')).toBe(false);
+  test('honors explicit requiresCRD flags for canonical or display-name CRD-less providers', () => {
+    expect(providerRequiresRuntimeCRD('llmd', true)).toBe(true);
+    expect(providerRequiresRuntimeCRD('vllm', true)).toBe(true);
+    expect(providerRequiresRuntimeCRD('custom-llmd-registration', true, 'LLM-D')).toBe(true);
+    expect(providerRequiresRuntimeCRD('custom-vllm-registration', true, 'vLLM')).toBe(true);
+    expect(providerRequiresRuntimeCRD('llmd', false)).toBe(false);
+    expect(providerRequiresRuntimeCRD('custom-llmd-registration', false, 'LLM-D')).toBe(false);
+  });
+
+  test('uses CRD-less id and display-name fallbacks only when requiresCRD is omitted', () => {
+    expect(providerRequiresRuntimeCRD('llmd', undefined)).toBe(false);
+    expect(providerRequiresRuntimeCRD('vllm', undefined)).toBe(false);
+    expect(providerRequiresRuntimeCRD('custom-llmd-registration', undefined, 'LLM-D')).toBe(false);
+    expect(providerRequiresRuntimeCRD('custom-vllm-registration', undefined, 'vLLM')).toBe(false);
   });
 
   test('preserves explicit requiresCRD flags for operator-backed providers', () => {

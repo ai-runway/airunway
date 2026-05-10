@@ -162,7 +162,7 @@ describe('Installation Provider Routes', () => {
     };
   }
 
-  function createCustomNamedNoCrdProviderConfigWithStaleRequiresCrd() {
+  function createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd() {
     const config = createNoCrdProviderConfigWithHelmMetadata();
 
     return {
@@ -342,12 +342,12 @@ describe('Installation Provider Routes', () => {
       expect(data.message).toBe('Runtime is ready to use.');
     });
 
-    test('ignores stale requiresCRD metadata for custom-named CRD-less providers', async () => {
+    test('honors explicit requiresCRD metadata for custom-named CRD-less providers', async () => {
       restores.push(
         mockServiceMethod(
           kubernetesService,
           'getInferenceProviderConfig',
-          async () => createCustomNamedNoCrdProviderConfigWithStaleRequiresCrd(),
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
         ),
       );
 
@@ -358,10 +358,10 @@ describe('Installation Provider Routes', () => {
       expect(data.providerId).toBe('custom-llmd-registration');
       expect(data.providerName).toBe('LLM-D');
       expect(data.installed).toBe(true);
-      expect(data.requiresCRD).toBe(false);
-      expect(data.installable).toBe(false);
-      expect(data.helmCommands).toHaveLength(0);
-      expect(data.message).toBe('Runtime is ready to use.');
+      expect(data.requiresCRD).toBe(true);
+      expect(data.installable).toBe(true);
+      expect(data.helmCommands.length).toBeGreaterThan(0);
+      expect(data.message).toBe('LLM-D is installed and running');
     });
 
     test('returns 404 for unknown provider', async () => {
