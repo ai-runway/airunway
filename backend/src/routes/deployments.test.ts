@@ -614,7 +614,7 @@ describe('Deployment Routes', () => {
     });
   });
 
-  describe('GET /api/deployments/pvcs', () => {
+  describe('GET /api/deployments/-/pvcs', () => {
     test('returns PVCs for the requested namespace', async () => {
       let capturedNamespace: string | undefined;
       let capturedToken: string | undefined;
@@ -634,7 +634,7 @@ describe('Deployment Routes', () => {
         }),
       );
 
-      const res = await app.request('/api/deployments/pvcs?namespace=dynamo-system');
+      const res = await app.request('/api/deployments/-/pvcs?namespace=dynamo-system');
       expect(res.status).toBe(200);
 
       const data = await res.json();
@@ -668,7 +668,7 @@ describe('Deployment Routes', () => {
         }),
       );
 
-      const res = await app.request('/api/deployments/pvcs?namespace=dynamo-system', {
+      const res = await app.request('/api/deployments/-/pvcs?namespace=dynamo-system', {
         headers: { Authorization: 'Bearer user-token' },
       });
       expect(res.status).toBe(200);
@@ -678,18 +678,34 @@ describe('Deployment Routes', () => {
       expect(await res.json()).toEqual({ pvcs: [] });
     });
 
-    test('returns an empty PVC list when Kubernetes listing fails', async () => {
+    test('returns Kubernetes errors when PVC listing fails', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'listPVCs', async () => {
-          throw new Error('forbidden');
+          const error = new Error('HTTP request failed') as Error & {
+            response: {
+              statusCode: number;
+              body: { reason: string; message: string; code: number };
+            };
+          };
+
+          error.response = {
+            statusCode: 403,
+            body: {
+              reason: 'Forbidden',
+              message: 'forbidden',
+              code: 403,
+            },
+          };
+
+          throw error;
         }),
       );
 
-      const res = await app.request('/api/deployments/pvcs?namespace=dynamo-system');
-      expect(res.status).toBe(200);
+      const res = await app.request('/api/deployments/-/pvcs?namespace=dynamo-system');
+      expect(res.status).toBe(403);
 
       const data = await res.json();
-      expect(data).toEqual({ pvcs: [] });
+      expect(data.error.message).toContain('Failed to list storage disks: forbidden');
     });
   });
 

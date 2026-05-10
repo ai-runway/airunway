@@ -349,7 +349,7 @@ export const deploymentsApi = {
 
   listPVCs: (namespace: string) =>
     request<{ pvcs: Array<{ name: string; status: string; storageClass: string; capacity: string }> }>(
-      `/deployments/pvcs?namespace=${encodeURIComponent(namespace)}`
+      `/deployments/-/pvcs?namespace=${encodeURIComponent(namespace)}`
     ),
 };
 

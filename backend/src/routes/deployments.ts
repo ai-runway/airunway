@@ -469,16 +469,22 @@ const deployments = new Hono<AppEnv>()
     });
   })
   // List PVCs in a namespace (for storage volume selection)
-  // Must be defined before /:name to avoid being caught by the wildcard
-  .get('/pvcs', zValidator('query', z.object({ namespace: namespaceSchema })), async (c) => {
+  // Use a reserved segment to avoid conflicting with deployment names like "pvcs".
+  .get('/-/pvcs', zValidator('query', z.object({ namespace: namespaceSchema })), async (c) => {
     const { namespace } = c.req.valid('query');
     const userToken = c.get('token') as string | undefined;
     try {
       const pvcs = await kubernetesService.listPVCs(namespace, userToken);
       return c.json({ pvcs });
     } catch (error) {
-      logger.error({ error, namespace }, 'Failed to list PVCs');
-      return c.json({ pvcs: [] });
+      const { message, statusCode } = handleK8sError(error, {
+        operation: 'listPVCs',
+        namespace,
+      });
+
+      throw new HTTPException(statusCode as 400 | 401 | 403 | 404 | 409 | 422 | 500 | 502 | 503 | 504, {
+        message: `Failed to list storage disks: ${message}`,
+      });
     }
   })
   .get(

@@ -338,7 +338,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes }
   })
 
   // Fetch PVCs for the selected namespace (for existing disk selection)
-  const { data: availablePVCs } = usePVCs(config.namespace)
+  const { data: availablePVCs } = usePVCs(
+    selectedRuntime === 'dynamo' ? config.namespace : undefined
+  )
 
   // Calculate GPU recommendation based on model characteristics
   const gpuRecommendation = calculateGpuRecommendation(model, detailedCapacity)
