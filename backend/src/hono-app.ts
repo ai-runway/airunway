@@ -45,21 +45,24 @@ logger.info(
 // Main App
 // ============================================================================
 
-const DEFAULT_CORS_ORIGIN = 'http://localhost:5173';
+const DEFAULT_CORS_ORIGINS = ['http://localhost:5173'];
+const DEFAULT_CORS_ORIGIN = DEFAULT_CORS_ORIGINS.join(',');
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-// Default cross-origin allowlist for browser-based UIs that talk to this
-// backend. Same-origin clients (the embedded production frontend) don't go
-// through CORS, so this list is only relevant for separately-hosted UIs.
-// Headlamp Desktop / in-cluster Headlamp users must set CORS_ORIGIN to their
-// Headlamp origin explicitly — there's no portable default we can ship.
-const CORS_ORIGIN = process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGIN;
+// Default cross-origin policy for browser-based UIs that talk to this backend.
+// Same-origin clients (the embedded production frontend) don't go through CORS.
+// When CORS_ORIGIN is unset, allow local loopback origins so Vite and Headlamp
+// Desktop/browser plugin development work out of the box without reopening CORS
+// to arbitrary internet origins.
+const CORS_ORIGIN = process.env.CORS_ORIGIN;
 
 // Parse CORS_ORIGIN into a value the cors middleware can use:
-//   - "*"               → pass through as a string (wildcard)
+//   - undefined           → allow loopback browser origins by default
+//   - "*"               → pass through as a string (explicit wildcard)
 //   - "a,b,c"           → array of trimmed, non-empty origins
-//   - malformed/empty   → fall back to the safe default rather than '*' so
-//                         that a misconfigured production env can't silently
-//                         fail open to wildcard CORS.
+//   - malformed/empty     → fall back to the safe default rather than '*' so
+//                           that a misconfigured production env can't silently
+//                           fail open to wildcard CORS.
 // Splitting "*" into ["*"] matches request origins literally, which never
 // equals a real origin and effectively disables CORS — so handle it explicitly.
 function parseCorsOrigin(raw: string): string | string[] {
@@ -76,7 +79,23 @@ function parseCorsOrigin(raw: string): string | string[] {
     { rawCorsOrigin: raw },
     `CORS_ORIGIN is set but parses to no origins; falling back to ${DEFAULT_CORS_ORIGIN}`,
   );
-  return DEFAULT_CORS_ORIGIN;
+  return DEFAULT_CORS_ORIGINS;
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && LOOPBACK_HOSTS.has(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function defaultCorsOrigin(origin: string): string | null {
+  if (isLoopbackOrigin(origin)) {
+    return origin;
+  }
+  return DEFAULT_CORS_ORIGINS.includes(origin) ? origin : null;
 }
 
 const app = new Hono<AppEnv>();
@@ -86,7 +105,7 @@ app.use('*', compress());
 app.use(
   '*',
   cors({
-    origin: parseCorsOrigin(CORS_ORIGIN),
+    origin: CORS_ORIGIN === undefined ? defaultCorsOrigin : parseCorsOrigin(CORS_ORIGIN),
   })
 );
 
@@ -103,7 +122,6 @@ app.use('*', async (c, next) => {
 // Routes that don't require authentication
 // Keep this list minimal — only routes needed before login
 const PUBLIC_ROUTES = [
-  '/api/health',        // Basic health check only (not /health/nodes or /health/status)
   '/api/cluster/status',
   '/api/settings',      // Settings is public (read-only auth config needed by frontend)
   '/api/oauth',         // OAuth routes must be public for initial authentication
@@ -130,9 +148,7 @@ app.use('/api/*', async (c, next) => {
   }
 
   // Skip auth for prefix-match public routes (cluster/status, settings, oauth)
-  if (PUBLIC_ROUTES.some(route =>
-    route !== '/api/health' && (path === route || path.startsWith(route + '/'))
-  )) {
+  if (PUBLIC_ROUTES.some(route => path === route || path.startsWith(route + '/'))) {
     return next();
   }
 
@@ -231,7 +247,7 @@ app.onError((err, c) => {
     return c.json(
       {
         error: {
-          message: err.message,
+          message: err.status >= 500 ? 'Internal Server Error' : err.message,
           statusCode: err.status,
         },
       },

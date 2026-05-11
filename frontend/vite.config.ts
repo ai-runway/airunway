@@ -25,9 +25,17 @@ function cspPlugin(): Plugin {
   return {
     name: 'inject-csp-meta',
     apply: 'build',
-    transformIndexHtml(html) {
-      const tag = `<meta http-equiv="Content-Security-Policy" content="${PROD_CSP}" />`
-      return html.replace('<meta name="viewport"', `${tag}\n    <meta name="viewport"`)
+    transformIndexHtml() {
+      return [
+        {
+          tag: 'meta',
+          attrs: {
+            'http-equiv': 'Content-Security-Policy',
+            content: PROD_CSP,
+          },
+          injectTo: 'head-prepend',
+        },
+      ]
     },
   }
 }

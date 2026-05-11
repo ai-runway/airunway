@@ -97,6 +97,7 @@ The following environment variables can be configured on the **dashboard** deplo
 | `PORT` | `3001` | Server port |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `AUTH_ENABLED` | `true` | Enable authentication |
+| `CORS_ORIGIN` | loopback origins | Comma-separated browser origins to allow, or explicit `*` to allow all origins |
 
 ### Authentication
 
@@ -109,6 +110,22 @@ env:
 ```
 
 To intentionally disable authentication (not recommended), remove this variable or set it to `"false"`.
+
+### CORS
+
+By default, the dashboard API accepts browser CORS requests only from loopback
+origins used for local access, such as `localhost`, `127.0.0.1`, and `[::1]`.
+For a dashboard exposed behind a real host name, set `CORS_ORIGIN` to the exact
+allowed origin or a comma-separated allowlist:
+
+```yaml
+env:
+  - name: CORS_ORIGIN
+    value: "https://airunway.example.com,https://admin.example.com"
+```
+
+Use `CORS_ORIGIN="*"` only when you intentionally want to allow every browser
+origin. Empty or malformed values fall back to the safe loopback-only default.
 
 ## Verify Deployment
 

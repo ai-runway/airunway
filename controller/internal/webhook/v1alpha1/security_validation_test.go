@@ -35,6 +35,16 @@ func requireValidationErrorField(t *testing.T, errs field.ErrorList, fieldName s
 	t.Fatalf("expected validation error for %s, got %v", fieldName, errs)
 }
 
+func requireValidationErrorDetail(t *testing.T, errs field.ErrorList, detail string) {
+	t.Helper()
+	for _, err := range errs {
+		if err.Detail == detail {
+			return
+		}
+	}
+	t.Fatalf("expected validation error detail %q, got %v", detail, errs)
+}
+
 func TestValidateOverrides_BlocksSecurityContext(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
 	overrides := map[string]interface{}{
@@ -205,6 +215,31 @@ func TestValidateOverrides_InvalidJSON(t *testing.T) {
 	errs := v.validateOverrides(spec, field.NewPath("spec"))
 	if len(errs) == 0 {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestValidateOverrides_RejectsNonObjectJSON(t *testing.T) {
+	testCases := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "array", raw: []byte(`[{}]`)},
+		{name: "string", raw: []byte(`"override"`)},
+		{name: "number", raw: []byte(`42`)},
+		{name: "null", raw: []byte(`null`)},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := &ModelDeploymentCustomValidator{}
+			spec := &airunwayv1alpha1.ModelDeploymentSpec{
+				Provider: &airunwayv1alpha1.ProviderSpec{
+					Overrides: &runtime.RawExtension{Raw: tc.raw},
+				},
+			}
+			errs := v.validateOverrides(spec, field.NewPath("spec"))
+			requireValidationErrorDetail(t, errs, "overrides must be a JSON object")
+		})
 	}
 }
 

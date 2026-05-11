@@ -768,14 +768,24 @@ func (v *ModelDeploymentCustomValidator) validateOverrides(spec *airunwayv1alpha
 		return allErrs
 	}
 
-	var overrideMap map[string]interface{}
-	if err := json.Unmarshal(spec.Provider.Overrides.Raw, &overrideMap); err != nil {
+	var overrideValue interface{}
+	if err := json.Unmarshal(spec.Provider.Overrides.Raw, &overrideValue); err != nil {
 		// Don't echo the raw payload back: it can be large and may contain
 		// data the user didn't expect to see in admission errors/logs.
 		allErrs = append(allErrs, field.Invalid(
 			specPath.Child("provider", "overrides"),
 			fmt.Sprintf("<redacted %d bytes>", len(spec.Provider.Overrides.Raw)),
 			"overrides must be valid JSON",
+		))
+		return allErrs
+	}
+
+	overrideMap, ok := overrideValue.(map[string]interface{})
+	if !ok {
+		allErrs = append(allErrs, field.Invalid(
+			specPath.Child("provider", "overrides"),
+			fmt.Sprintf("<redacted %d bytes>", len(spec.Provider.Overrides.Raw)),
+			"overrides must be a JSON object",
 		))
 		return allErrs
 	}
