@@ -285,6 +285,7 @@ const deployedQuery = useDeploymentManifest(
                   {resources.map((resource, index) => (
                     <Button
                       key={`${resource.kind}-${resource.name}`}
+                      type="button"
                       variant={selectedResourceIndex === index ? 'default' : 'outline'}
                       size="sm"
                       className="h-8"
@@ -308,12 +309,12 @@ const deployedQuery = useDeploymentManifest(
                 </span>
                 <div className="flex gap-2">
                   {resources.length > 1 && (
-                    <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); handleCopyAll(); }}>
+                    <Button type="button" variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); handleCopyAll(); }}>
                       <Copy className="h-4 w-4 mr-1" />
                       Copy All
                     </Button>
                   )}
-                  <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); handleCopy(); }}>
+                  <Button type="button" variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); handleCopy(); }}>
                     <Copy className="h-4 w-4 mr-1" />
                     Copy
                   </Button>
