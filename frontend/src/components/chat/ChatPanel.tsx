@@ -102,6 +102,16 @@ export function ChatPanel({ deploymentName, namespace, className, style }: ChatP
   }, [])
 
   useEffect(() => {
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+    shouldAutoScrollRef.current = true
+    setMessages([])
+    setInput('')
+    setError(null)
+    setIsStreaming(false)
+  }, [deploymentName, namespace])
+
+  useEffect(() => {
     if (!shouldAutoScrollRef.current) return
 
     const container = messagesContainerRef.current

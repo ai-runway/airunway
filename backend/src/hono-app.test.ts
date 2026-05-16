@@ -193,6 +193,109 @@ describe('Hono Routes', () => {
       ]);
     });
 
+    test('POST /api/deployments/:name/chat propagates authenticated user token to Kubernetes lookups and proxies', async () => {
+      let capturedValidateTokenArgs: unknown[] | undefined;
+      let capturedDeploymentArgs: unknown[] | undefined;
+      let capturedModelLookupArgs: unknown[] | undefined;
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(authService, 'isAuthEnabled', () => true),
+      );
+      restores.push(
+        mockServiceMethod(authService, 'validateToken', async (...args: unknown[]) => {
+          capturedValidateTokenArgs = args;
+          return {
+            valid: true,
+            user: {
+              username: 'test-user',
+              uid: 'test-uid',
+              groups: ['developers'],
+            },
+          };
+        }),
+      );
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async (...args: unknown[]) => {
+          capturedDeploymentArgs = args;
+          return {
+            ...mockDeployment,
+            phase: 'Running',
+            provider: 'dynamo',
+            replicas: { desired: 1, ready: 1, available: 1 },
+            frontendService: 'test-deploy-frontend:8080',
+          } as never;
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServiceGet', async (...args: unknown[]) => {
+          capturedModelLookupArgs = args;
+          return JSON.stringify({ data: [{ id: 'served-from-authenticated-models-endpoint' }] });
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer user-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expect(capturedValidateTokenArgs).toEqual(['user-token']);
+      expect(capturedDeploymentArgs).toEqual(['test-deploy', 'default', 'user-token']);
+      expect(capturedModelLookupArgs?.slice(0, 4)).toEqual([
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/models',
+      ]);
+      const modelLookupOptions = capturedModelLookupArgs?.[4] as {
+        accept?: string;
+        signal?: unknown;
+        userToken?: string;
+      } | undefined;
+      expect(modelLookupOptions?.accept).toBe('application/json');
+      expect(modelLookupOptions?.signal).toBeInstanceOf(AbortSignal);
+      expect(modelLookupOptions?.userToken).toBe('user-token');
+      expect(capturedChatProxyArgs?.slice(0, 5)).toEqual([
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'served-from-authenticated-models-endpoint',
+          stream: true,
+        },
+      ]);
+      expect(capturedChatProxyArgs?.[5]).toEqual({});
+      const chatProxyOptions = capturedChatProxyArgs?.[6] as {
+        signal?: unknown;
+        userToken?: string;
+      } | undefined;
+      expect(chatProxyOptions?.signal).toBeInstanceOf(AbortSignal);
+      expect(chatProxyOptions?.userToken).toBe('user-token');
+    });
+
     test('POST /api/deployments/:namespace/:name/chat streams proxied chat completions', async () => {
       let capturedDeploymentArgs: unknown[] | undefined;
       let capturedChatProxyArgs: unknown[] | undefined;

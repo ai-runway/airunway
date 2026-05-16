@@ -199,6 +199,19 @@ function isRunningAndReadyPod(pod: k8s.V1Pod): boolean {
     && containerStatuses.every((status) => status.ready);
 }
 
+type ProxyServiceOptions = {
+  signal?: AbortSignal;
+  userToken?: string;
+};
+
+type ProxyServiceGetOptions = ProxyServiceOptions & {
+  accept?: string;
+};
+
+type ProxyServiceRequestInit = RequestInit & {
+  userToken?: string;
+};
+
 class KubernetesService {
   private kc: k8s.KubeConfig;
   private customObjectsApi: k8s.CustomObjectsApi;
@@ -2112,7 +2125,7 @@ class KubernetesService {
     namespace: string,
     port: number,
     path: string,
-    options: { accept?: string; signal?: AbortSignal } = {},
+    options: ProxyServiceGetOptions = {},
   ): Promise<string> {
     const response = await this.proxyServiceRequest(serviceName, namespace, port, path, {
       method: 'GET',
@@ -2120,6 +2133,7 @@ class KubernetesService {
         'Accept': options.accept ?? 'text/plain',
       },
       signal: options.signal,
+      userToken: options.userToken,
     });
 
     if (!response.ok) {
@@ -2139,7 +2153,7 @@ class KubernetesService {
     path: string,
     body: unknown,
     headers: Record<string, string> = {},
-    options: { signal?: AbortSignal } = {}
+    options: ProxyServiceOptions = {}
   ): Promise<Response> {
     return await this.proxyServiceRequest(serviceName, namespace, port, path, {
       method: 'POST',
@@ -2150,6 +2164,7 @@ class KubernetesService {
       },
       body: JSON.stringify(body),
       signal: options.signal,
+      userToken: options.userToken,
     });
   }
 
@@ -2158,9 +2173,11 @@ class KubernetesService {
     namespace: string,
     port: number,
     path: string,
-    init: RequestInit
+    init: ProxyServiceRequestInit
   ): Promise<Response> {
-    const cluster = this.kc.getCurrentCluster();
+    const { userToken, ...requestInit } = init;
+    const kubeConfig = userToken ? this.createUserKubeConfig(userToken) : this.kc;
+    const cluster = kubeConfig.getCurrentCluster();
     if (!cluster) {
       throw new Error('No active Kubernetes cluster configured');
     }
@@ -2170,11 +2187,11 @@ class KubernetesService {
 
     // Extract auth headers from KubeConfig
     const reqOpts: { headers: Record<string, string>; strictSSL?: boolean } = { headers: {} };
-    await this.kc.applyToRequest(reqOpts as any);
+    await kubeConfig.applyToRequest(reqOpts as any);
 
     // Extract TLS options (CA cert, client cert/key) from KubeConfig
     const httpsOpts: { ca?: Buffer; cert?: Buffer; key?: Buffer; rejectUnauthorized?: boolean } = {};
-    this.kc.applyToHTTPSOptions(httpsOpts as any);
+    kubeConfig.applyToHTTPSOptions(httpsOpts as any);
 
     const tlsOpts: Record<string, any> = {};
     if (httpsOpts.ca) tlsOpts.ca = httpsOpts.ca;
@@ -2185,12 +2202,12 @@ class KubernetesService {
     }
 
     const headers = new Headers(reqOpts.headers);
-    if (init.headers) {
-      new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+    if (requestInit.headers) {
+      new Headers(requestInit.headers).forEach((value, key) => headers.set(key, value));
     }
 
     const fetchOpts: RequestInit & { tls?: Record<string, any> } = {
-      ...init,
+      ...requestInit,
       headers,
     };
 

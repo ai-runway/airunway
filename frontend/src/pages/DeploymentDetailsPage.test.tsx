@@ -161,6 +161,60 @@ describe('DeploymentDetailsPage chat panel', () => {
     expect(screen.queryByText(/\{"error"/)).not.toBeInTheDocument()
   })
 
+  it('aborts in-flight chat and resets the transcript when deployment identity changes', async () => {
+    let capturedSignal: AbortSignal | undefined
+    chatMock.mockImplementation((_name, _body, _namespace, options?: { signal?: AbortSignal }) => {
+      capturedSignal = options?.signal
+
+      return new Promise<Response>((_resolve, reject) => {
+        capturedSignal?.addEventListener('abort', () => {
+          const abortError = new Error('Aborted')
+          abortError.name = 'AbortError'
+          reject(abortError)
+        }, { once: true })
+      })
+    })
+
+    const { rerender } = renderDetailsPage()
+
+    await userEvent.type(screen.getByLabelText('Message'), 'Hello before reset')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(chatMock).toHaveBeenCalledWith(
+        'qwen3-0-6b-vllm-abc123',
+        { messages: [{ role: 'user', content: 'Hello before reset' }] },
+        'airunway-system',
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
+      expect(capturedSignal?.aborted).toBe(false)
+    })
+    expect(screen.getByText('Hello before reset')).toBeInTheDocument()
+
+    deploymentMock.current = createDeployment({
+      name: 'llama3-vllm-def456',
+      namespace: 'tenant-two',
+      modelId: 'meta-llama/Llama-3.1-8B-Instruct',
+      frontendService: 'llama3-vllm-def456-frontend:8000',
+      gateway: { endpoint: '20.92.155.16', modelName: 'meta-llama/Llama-3.1-8B-Instruct' },
+    })
+    rerender(
+      <MemoryRouter initialEntries={[`/deployments/${deploymentMock.current.name}?namespace=tenant-two`]}>
+        <Routes>
+          <Route path="/deployments/:name" element={<DeploymentDetailsPage />} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(capturedSignal?.aborted).toBe(true)
+      expect(screen.getByText('Start a conversation with this model.')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Hello before reset')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Message')).toHaveValue('')
+    expect(screen.getByLabelText('Message')).not.toBeDisabled()
+  })
+
   it('sends the prompt, renders streamed assistant responses, and keeps the transcript scrolled', async () => {
     chatMock.mockResolvedValue(streamResponse([
       'data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n',

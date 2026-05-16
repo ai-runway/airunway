@@ -547,7 +547,8 @@ async function discoverUpstreamChatModel(
   serviceName: string,
   namespace: string,
   servicePort: number,
-  requestSignal: AbortSignal
+  requestSignal: AbortSignal,
+  userToken?: string
 ): Promise<string | undefined> {
   const scopedSignal = createRequestScopedTimeoutSignal(
     requestSignal,
@@ -560,7 +561,7 @@ async function discoverUpstreamChatModel(
       namespace,
       servicePort,
       'v1/models',
-      { accept: CHAT_MODEL_DISCOVERY_ACCEPT_HEADER, signal: scopedSignal.signal }
+      { accept: CHAT_MODEL_DISCOVERY_ACCEPT_HEADER, signal: scopedSignal.signal, userToken }
     );
     return extractFirstModelId(JSON.parse(modelsText));
   } catch (error) {
@@ -579,7 +580,8 @@ async function resolveDeploymentChatModel(
   serviceName: string,
   namespace: string,
   servicePort: number,
-  requestSignal: AbortSignal
+  requestSignal: AbortSignal,
+  userToken?: string
 ): Promise<string> {
   const configuredModel = getDeploymentConfiguredChatModel(deployment);
   if (configuredModel) {
@@ -591,7 +593,8 @@ async function resolveDeploymentChatModel(
     serviceName,
     namespace,
     servicePort,
-    requestSignal
+    requestSignal,
+    userToken
   )) || deployment.modelId;
 }
 
@@ -601,6 +604,7 @@ async function resolveDirectChatModel(
   namespace: string,
   servicePort: number,
   requestSignal: AbortSignal,
+  userToken?: string,
   requestedModel?: string
 ): Promise<string> {
   if (requestedModel) {
@@ -612,7 +616,8 @@ async function resolveDirectChatModel(
     serviceName,
     namespace,
     servicePort,
-    requestSignal
+    requestSignal,
+    userToken
   );
 }
 
@@ -621,14 +626,16 @@ async function resolveGatewayChatModel(
   serviceName: string,
   namespace: string,
   servicePort: number,
-  requestSignal: AbortSignal
+  requestSignal: AbortSignal,
+  userToken?: string
 ): Promise<string> {
   return resolveDeploymentChatModel(
     deployment,
     serviceName,
     namespace,
     servicePort,
-    requestSignal
+    requestSignal,
+    userToken
   );
 }
 
@@ -668,6 +675,7 @@ async function handleDeploymentChat(
     resolvedNamespace,
     frontendServicePort,
     signal,
+    userToken,
     body.model
   );
 
@@ -682,7 +690,7 @@ async function handleDeploymentChat(
       stream: true,
     },
     {},
-    { signal }
+    { signal, userToken }
   );
 
   if (!upstreamResponse.ok) {
@@ -694,7 +702,8 @@ async function handleDeploymentChat(
         frontendService.serviceName,
         resolvedNamespace,
         frontendServicePort,
-        signal
+        signal,
+        userToken
       );
       const gatewayResponse = await proxyGatewayChatPostStream(
         deployment.gateway.endpoint,
