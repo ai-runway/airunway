@@ -6,12 +6,14 @@ A [Headlamp](https://headlamp.dev/) plugin that integrates AIRunway's ML deploym
 
 ## Features
 
-- **Full Feature Parity**: Complete AI Runway functionality within Headlamp
-- **Multi-Runtime Support**: KAITO, KubeRay, llm-d, and Dynamo runtimes
+- **Multi-Runtime Support**: KAITO, KubeRay, Dynamo, and llm-d runtimes
 - **Model Catalog**: Browse curated models and search HuggingFace
-- **Deployment Management**: Create, view, and delete deployments
-- **Metrics & Monitoring**: Real-time metrics, logs, and GPU capacity
-- **AI Configuration**: Intelligent model configuration suggestions
+- **Deployment Management**: Create, view, and delete deployments with manifest preview
+- **Disaggregated Mode**: Separate prefill/decode pipeline scaling for Dynamo and llm-d
+- **Gateway Integration**: Gateway API status, model routing table, and CRD installation
+- **Storage Volumes**: PVC configuration for model cache, compilation cache, and custom volumes
+- **Metrics & Monitoring**: Real-time metrics, logs, and pod status
+- **Integrations**: GPU Operator, HuggingFace OAuth, and Gateway API CRD management
 
 ## Installation
 
@@ -35,7 +37,7 @@ make setup
 
 ## Prerequisites
 
-- Headlamp v0.20+ installed
+- Headlamp v0.40+ installed
 - AI Runway backend deployed in your cluster (or running locally)
 - Kubernetes cluster with kubectl access
 
@@ -106,8 +108,9 @@ bun run tsc         # Type check
 | `src/lib/backend-discovery.ts` | Backend URL discovery logic |
 | `src/lib/plugin-storage.ts` | Headlamp plugin config storage |
 | `src/lib/theme.ts` | Theme utilities for Headlamp compatibility |
-| `src/pages/*.tsx` | Page components |
-| `src/components/*.tsx` | Reusable components |
+| `src/lib/constants.ts` | Shared constants (volume purpose labels, etc.) |
+| `src/pages/*.tsx` | Page components (Deployments, Models, Gateway, Runtimes, Integrations) |
+| `src/components/*.tsx` | Reusable components (StatusBadge, MetricsPanel, LogsViewer, etc.) |
 
 ### Using Headlamp Components
 
@@ -164,7 +167,7 @@ registerRoute({
 - Use custom CSS frameworks (use MUI via Headlamp)
 - Make direct K8s API calls (use backend proxy)
 - Store secrets in localStorage
-- Import from `@mui/material` directly (use Headlamp's re-exports)
+- Import MUI components that Headlamp re-exports (use Headlamp's versions instead)
 - Use TanStack Query (not available in Headlamp environment)
 
 ### Troubleshooting
@@ -214,6 +217,8 @@ AIRunway
 ├── Deployments      - List and manage deployments
 ├── Models           - Browse model catalog
 ├── Runtimes         - View runtime installation status
+├── Gateway          - Gateway API status and model routing
+├── Integrations     - GPU Operator, HuggingFace, Gateway CRDs
 └── Settings         - Configure plugin settings
 ```
 

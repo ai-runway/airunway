@@ -141,6 +141,12 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Create or update the Workspace
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
+			// API conflict errors (stale resourceVersion) are transient — requeue to retry
+			if errors.IsConflict(err) {
+				logger.Info("Resource version conflict, requeuing", "name", resource.GetName(), "kind", resource.GetKind())
+				return ctrl.Result{Requeue: true}, nil
+			}
+
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
 			reason := "CreateFailed"
 			if isResourceConflict(err) {

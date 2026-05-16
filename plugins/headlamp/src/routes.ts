@@ -18,6 +18,9 @@ export const ROUTES = {
   /** Runtimes status page */
   RUNTIMES: '/airunway/runtimes',
 
+  /** Gateway status page */
+  GATEWAY: '/airunway/gateway',
+
   /** Settings page */
   SETTINGS: '/airunway/settings',
 

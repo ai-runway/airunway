@@ -75,15 +75,6 @@ export function PluginSettings() {
     setTimeout(checkConnection, 100);
   }, [backendUrl, namespace, checkConnection]);
 
-  // Clear custom URL
-  const handleClear = useCallback(() => {
-    setBackendUrlState('');
-    setBackendUrl('');
-    clearBackendCache();
-    resetApiClient();
-    getBackendConfig().then(setBackendConfigState);
-  }, []);
-
   return (
     <div style={{ padding: '24px', maxWidth: '600px' }}>
       <h1 style={{ marginBottom: '24px' }}>AI Runway Settings</h1>

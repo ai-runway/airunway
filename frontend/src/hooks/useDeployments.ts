@@ -154,3 +154,16 @@ export function useDeleteDeployment() {
 }
 
 export type { DeploymentConfig, DeploymentStatus }
+
+/**
+ * Hook to list PVCs in a specific namespace
+ */
+export function usePVCs(namespace: string | undefined) {
+  return useQuery({
+    queryKey: ['pvcs', namespace],
+    queryFn: () => deploymentsApi.listPVCs(namespace!),
+    enabled: !!namespace,
+    staleTime: 30 * 1000,
+    select: (data) => data.pvcs,
+  })
+}

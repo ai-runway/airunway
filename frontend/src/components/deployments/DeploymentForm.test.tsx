@@ -16,6 +16,7 @@ vi.mock('@/hooks/useDeployments', () => ({
     status: 'idle',
     reset: vi.fn(),
   }),
+  usePVCs: () => ({ data: undefined }),
 }))
 
 vi.mock('@/hooks/useHuggingFace', () => ({

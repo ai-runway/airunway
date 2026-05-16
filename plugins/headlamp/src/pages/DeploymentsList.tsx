@@ -12,31 +12,15 @@ import {
   Link as HeadlampLink,
   Loader,
   StatusLabel,
-  StatusLabelProps,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import { Utils } from '@kinvolk/headlamp-plugin/lib';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import { Icon } from '@iconify/react';
 import { useApiClient } from '../lib/api-client';
-import type { DeploymentStatus, DeploymentPhase } from '@airunway/shared';
+import type { DeploymentStatus } from '@airunway/shared';
 import { ConnectionError } from '../components/ConnectionBanner';
-
-// Status color mapping
-function getStatusColor(phase: DeploymentPhase): StatusLabelProps['status'] {
-  switch (phase) {
-    case 'Running':
-      return 'success';
-    case 'Pending':
-    case 'Deploying':
-      return 'warning';
-    case 'Failed':
-    case 'Terminating':
-      return 'error';
-    default:
-      return '';
-  }
-}
+import { getDeploymentPhaseColor, formatAge } from '../lib/utils';
 
 export function DeploymentsList() {
   const api = useApiClient();
@@ -140,7 +124,7 @@ export function DeploymentsList() {
       label: 'Status',
       getter: (item: DeploymentStatus) => (
         <div style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-          <StatusLabel status={getStatusColor(item.phase)}>
+          <StatusLabel status={getDeploymentPhaseColor(item.phase)}>
             {item.phase}
           </StatusLabel>
         </div>
@@ -163,21 +147,20 @@ export function DeploymentsList() {
       ),
     },
     {
+      label: 'Gateway',
+      getter: (item: DeploymentStatus) => (
+        <div style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+          {item.gateway?.endpoint
+            ? <code style={{ fontSize: '12px' }}>{item.gateway.modelName || '-'}</code>
+            : <span style={{ opacity: 0.5 }}>-</span>}
+        </div>
+      ),
+    },
+    {
       label: 'Age',
       getter: (item: DeploymentStatus) => {
         if (!item.createdAt) return <div style={{ display: 'flex', alignItems: 'center', height: '100%' }}>-</div>;
-        const created = new Date(item.createdAt);
-        const now = new Date();
-        const diffMs = now.getTime() - created.getTime();
-        const diffMins = Math.floor(diffMs / 60000);
-        const diffHours = Math.floor(diffMins / 60);
-        const diffDays = Math.floor(diffHours / 24);
-
-        let age = `${diffMins}m`;
-        if (diffDays > 0) age = `${diffDays}d`;
-        else if (diffHours > 0) age = `${diffHours}h`;
-        
-        return <div style={{ display: 'flex', alignItems: 'center', height: '100%' }}>{age}</div>;
+        return <div style={{ display: 'flex', alignItems: 'center', height: '100%' }}>{formatAge(item.createdAt)}</div>;
       },
     },
     {

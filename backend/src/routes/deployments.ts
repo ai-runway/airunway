@@ -473,6 +473,25 @@ const deployments = new Hono<AppEnv>()
       primaryResource: { kind: 'ModelDeployment', apiVersion: 'airunway.ai/v1alpha1' },
     });
   })
+  // List PVCs in a namespace (for storage volume selection)
+  // Use a reserved segment to avoid conflicting with deployment names like "pvcs".
+  .get('/-/pvcs', zValidator('query', z.object({ namespace: namespaceSchema })), async (c) => {
+    const { namespace } = c.req.valid('query');
+    const userToken = c.get('token') as string | undefined;
+    try {
+      const pvcs = await kubernetesService.listPVCs(namespace, userToken);
+      return c.json({ pvcs });
+    } catch (error) {
+      const { message, statusCode } = handleK8sError(error, {
+        operation: 'listPVCs',
+        namespace,
+      });
+
+      throw new HTTPException(statusCode as 400 | 401 | 403 | 404 | 409 | 422 | 500 | 502 | 503 | 504, {
+        message: `Failed to list storage disks: ${message}`,
+      });
+    }
+  })
   .get(
     '/:name',
     zValidator('param', deploymentParamsSchema),

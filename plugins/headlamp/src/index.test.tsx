@@ -14,6 +14,7 @@ describe('AI Runway Plugin Routes', () => {
     expect(ROUTES.DEPLOYMENTS).toBe('/airunway/deployments');
     expect(ROUTES.MODELS).toBe('/airunway/models');
     expect(ROUTES.RUNTIMES).toBe('/airunway/runtimes');
+    expect(ROUTES.GATEWAY).toBe('/airunway/gateway');
     expect(ROUTES.SETTINGS).toBe('/airunway/settings');
     expect(ROUTES.CREATE_DEPLOYMENT).toBe('/airunway/deployments/create');
   });

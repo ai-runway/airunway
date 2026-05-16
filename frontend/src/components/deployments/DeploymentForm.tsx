@@ -8,7 +8,7 @@ import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useConfetti } from '@/components/ui/confetti'
-import { useCreateDeployment, type DeploymentConfig } from '@/hooks/useDeployments'
+import { useCreateDeployment, usePVCs, type DeploymentConfig } from '@/hooks/useDeployments'
 import { useHuggingFaceStatus, useGgufFiles } from '@/hooks/useHuggingFace'
 import { usePremadeModels } from '@/hooks/useAikit'
 import { useGatewayStatus } from '@/hooks/useGateway'
@@ -360,6 +360,11 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes }
       gpu: 0, // Will be set from recommendation
     },
   })
+
+  // Fetch PVCs for the selected namespace (for existing disk selection)
+  const { data: availablePVCs } = usePVCs(
+    selectedRuntime === 'dynamo' ? config.namespace : undefined
+  )
 
   // Calculate GPU recommendation based on model characteristics
   const gpuRecommendation = calculateGpuRecommendation(model, detailedCapacity)
@@ -1709,6 +1714,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes }
               }))
             }}
             deploymentName={config.name}
+            availablePVCs={availablePVCs}
           />
         </div>
       )}

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -36,6 +36,7 @@ interface StorageVolumesSectionProps {
   volumes: StorageVolume[]
   onChange: (volumes: StorageVolume[]) => void
   deploymentName?: string
+  availablePVCs?: Array<{ name: string; status: string; storageClass: string; capacity: string }>
 }
 
 // Cross-browser info tooltip using native title + visible popover on hover/focus.
@@ -96,7 +97,7 @@ function validateMountPath(mountPath: string | undefined, purpose: VolumePurpose
   return null
 }
 
-export function StorageVolumesSection({ volumes, onChange, deploymentName }: StorageVolumesSectionProps) {
+export function StorageVolumesSection({ volumes, onChange, deploymentName, availablePVCs }: StorageVolumesSectionProps) {
   // Track which volume cards have been interacted with for showing validation
   const [touched, setTouched] = useState<Record<number, Set<string>>>({})
   // Explicitly track storage source mode per volume index.
@@ -156,6 +157,41 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName }: Sto
     const updated = volumes.map((v, i) => i === index ? { ...v, ...updates } : v)
     onChange(updated)
   }
+
+  useEffect(() => {
+    if (!availablePVCs || availablePVCs.length === 0) return
+
+    const validClaimNames = new Set(availablePVCs.map((pvc) => pvc.name))
+    const clearedIndices: number[] = []
+
+    const updated = volumes.map((vol, index) => {
+      const sourceMode = sourceModes[index] ?? (
+        vol.size ? 'new' :
+        vol.claimName !== undefined ? 'existing' :
+        'new'
+      )
+
+      if (sourceMode !== 'existing' || !vol.claimName || validClaimNames.has(vol.claimName)) {
+        return vol
+      }
+
+      clearedIndices.push(index)
+      return { ...vol, claimName: '' }
+    })
+
+    if (clearedIndices.length === 0) return
+
+    onChange(updated)
+    setTouched(prev => {
+      const next = { ...prev }
+      for (const index of clearedIndices) {
+        const fields = new Set(next[index] || [])
+        fields.add('claimName')
+        next[index] = fields
+      }
+      return next
+    })
+  }, [availablePVCs, volumes, sourceModes, onChange])
 
   const handlePurposeChange = (index: number, purpose: VolumePurpose) => {
     const updates: Partial<StorageVolume> = { purpose }
@@ -406,21 +442,49 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName }: Sto
                         <Label htmlFor={`vol-claim-${index}`}>
                           Existing Disk Name <span className="text-destructive">*</span>
                         </Label>
-                        <InfoHint text="The name of a pre-provisioned persistent volume claim in your cluster" />
+                        <InfoHint text="Select a persistent volume claim from the deployment namespace" />
                       </div>
-                      <Input
-                        id={`vol-claim-${index}`}
-                        value={vol.claimName || ''}
-                        onChange={(e) => {
-                          updateVolume(index, { claimName: e.target.value || undefined })
-                          markTouched(index, 'claimName')
-                        }}
-                        onBlur={() => markTouched(index, 'claimName')}
-                        placeholder="my-shared-storage"
-                        className={isTouched(index, 'claimName') && !vol.claimName ? 'border-destructive' : ''}
-                      />
+                      {availablePVCs && availablePVCs.length > 0 ? (
+                        <Select
+                          value={vol.claimName || ''}
+                          onValueChange={(value) => {
+                            updateVolume(index, { claimName: value || undefined })
+                            markTouched(index, 'claimName')
+                          }}
+                        >
+                          <SelectTrigger
+                            id={`vol-claim-${index}`}
+                            onBlur={() => markTouched(index, 'claimName')}
+                            className={isTouched(index, 'claimName') && !vol.claimName ? 'border-destructive' : ''}
+                          >
+                            <SelectValue placeholder="Select a disk..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {availablePVCs.map((pvc) => (
+                              <SelectItem key={pvc.name} value={pvc.name}>
+                                {pvc.name}{pvc.capacity ? ` (${pvc.capacity})` : ''}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <Input
+                          id={`vol-claim-${index}`}
+                          value={vol.claimName || ''}
+                          onChange={(e) => {
+                            updateVolume(index, { claimName: e.target.value || undefined })
+                            markTouched(index, 'claimName')
+                          }}
+                          onBlur={() => markTouched(index, 'claimName')}
+                          placeholder="my-shared-storage"
+                          className={isTouched(index, 'claimName') && !vol.claimName ? 'border-destructive' : ''}
+                        />
+                      )}
                       {isTouched(index, 'claimName') && !vol.claimName && (
                         <p className="text-xs text-destructive">A disk name is required when using existing storage</p>
+                      )}
+                      {availablePVCs && availablePVCs.length === 0 && (
+                        <p className="text-xs text-muted-foreground">No existing disks found in this namespace</p>
                       )}
                     </div>
                   </div>

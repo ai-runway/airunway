@@ -2,7 +2,7 @@
  * AI Runway Headlamp Plugin
  *
  * This plugin provides ML deployment management capabilities within Headlamp,
- * supporting KAITO, KubeRay, and Dynamo runtimes.
+ * supporting KAITO, KubeRay, Dynamo, and llm-d runtimes.
  */
 
 import {
@@ -17,6 +17,7 @@ import { DeploymentsList } from './pages/DeploymentsList';
 import { DeploymentDetails } from './pages/DeploymentDetails';
 import { ModelsCatalog } from './pages/ModelsCatalog';
 import { RuntimesStatus } from './pages/RuntimesStatus';
+import { GatewayStatus } from './pages/GatewayStatus';
 import { CreateDeployment } from './pages/CreateDeployment';
 import { Integrations } from './pages/Integrations';
 import { HuggingFaceCallback } from './pages/HuggingFaceCallback';
@@ -56,6 +57,14 @@ registerSidebarEntry({
   name: 'kf-runtimes',
   label: 'Runtimes',
   url: ROUTES.RUNTIMES,
+});
+
+// Gateway
+registerSidebarEntry({
+  parent: 'airunway',
+  name: 'kf-gateway',
+  label: 'Gateway',
+  url: ROUTES.GATEWAY,
 });
 
 // Integrations
@@ -122,6 +131,15 @@ registerRoute({
   name: 'AI Runway Runtimes',
   exact: true,
   component: () => <RuntimesStatus />,
+});
+
+// Gateway status
+registerRoute({
+  path: ROUTES.GATEWAY,
+  sidebar: 'kf-gateway',
+  name: 'AI Runway Gateway',
+  exact: true,
+  component: () => <GatewayStatus />,
 });
 
 // Integrations
