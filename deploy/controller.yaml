@@ -1515,7 +1515,7 @@ metadata:
   namespace: airunway-system
 spec:
   ports:
-  - name: https
+  - name: metrics
     port: 8443
     protocol: TCP
     targetPort: 8443
