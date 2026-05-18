@@ -2,6 +2,11 @@
 FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# DYNAMO_VERSION is the upstream Dynamo runtime tag pinned in /versions.env.
+# When provided (e.g. via `make docker-build`), it is injected into the provider
+# binary via -ldflags so the in-image default tracks versions.env. When unset
+# (hand-run `docker build`), the Go source fallback in config.go wins.
+ARG DYNAMO_VERSION
 
 WORKDIR /workspace
 
@@ -25,7 +30,10 @@ COPY providers/dynamo/ providers/dynamo/
 RUN cd providers/dynamo && go mod tidy
 
 # Build
-RUN cd providers/dynamo && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider cmd/main.go
+RUN cd providers/dynamo && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a \
+      -ldflags="${DYNAMO_VERSION:+-X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=${DYNAMO_VERSION}}" \
+      -o provider cmd/main.go
 
 # Use distroless as minimal base image to package the provider binary
 FROM gcr.io/distroless/static:nonroot

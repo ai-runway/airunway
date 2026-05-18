@@ -27,7 +27,7 @@ build: verify-versions
 
 ## Build provider Docker image
 docker-build: verify-versions
-	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) -f Dockerfile -t $(IMG) ../..
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg DYNAMO_VERSION=$(DYNAMO_VERSION) -f Dockerfile -t $(IMG) ../..
 	@echo "✅ Dynamo provider image built: $(IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
 ## Deploy provider to the K8s cluster
