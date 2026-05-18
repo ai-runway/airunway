@@ -364,14 +364,14 @@ Check whether the Gateway API and Gateway API Inference Extension (GAIE) CRDs ar
   "gatewayApiInstalled": true,
   "inferenceExtInstalled": true,
   "gatewayApiVersion": "v1.2.1",
-  "inferenceExtVersion": "v0.5.0",
-  "pinnedVersion": "v0.5.0",
+  "inferenceExtVersion": "v1.5.0",
+  "pinnedVersion": "v1.5.0",
   "gatewayAvailable": true,
   "gatewayEndpoint": "10.0.0.50",
   "message": "Gateway API and Inference Extension CRDs are installed. Gateway is available.",
   "installCommands": [
     "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml",
-    "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v0.5.0/manifests.yaml"
+    "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/manifests.yaml"
   ]
 }
 ```
