@@ -1,0 +1,703 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agentdeployments.airunway.ai
+spec:
+  group: airunway.ai
+  names:
+    kind: AgentDeployment
+    listKind: AgentDeploymentList
+    plural: agentdeployments
+    shortNames:
+    - ad
+    singular: agentdeployment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.framework.name
+      name: Framework
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentDeployment is the Schema for the agentdeployments API.
+
+          An AgentDeployment describes one agent instance: which framework
+          reconciles it, which model it talks to, and the framework-specific
+          configuration that defines its behaviour.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AgentDeploymentSpec defines the desired state of an AgentDeployment.
+            properties:
+              config:
+                description: |-
+                  config carries framework-specific configuration (e.g. system
+                  prompt, skills, crew definition, graph definition).
+
+                  The shape is defined by the framework provider, validated against
+                  its JSON schema during reconciliation. Use RawExtension here so
+                  the core controller does not need to learn every framework's
+                  schema; provider controllers parse and validate this field
+                  themselves.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              framework:
+                description: |-
+                  framework selects which agent framework provider reconciles this
+                  AgentDeployment. The provider must have a matching
+                  AgentProviderConfig registered in the cluster.
+                properties:
+                  name:
+                    description: |-
+                      name is the framework identifier, e.g. "kagent", "openclaw",
+                      "crewai", "langgraph". Must match an AgentProviderConfig.metadata.name.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                    type: string
+                  version:
+                    description: |-
+                      version optionally pins a framework provider version. When empty,
+                      providers use their default version. Format is provider-defined.
+                    type: string
+                required:
+                - name
+                type: object
+              model:
+                description: |-
+                  model describes how the agent resolves its model endpoint. Exactly
+                  one binding mode must be set.
+                properties:
+                  deploymentRef:
+                    description: deploymentRef binds to an in-cluster ModelDeployment.
+                    properties:
+                      name:
+                        description: name is the ModelDeployment name to bind to.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          namespace defaults to the AgentDeployment's namespace when empty.
+                          Cross-namespace references require an AgentReferenceGrant (Phase 3).
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  externalAPI:
+                    description: externalAPI binds to an external OpenAI-compatible
+                      endpoint.
+                    properties:
+                      baseURL:
+                        description: baseURL is the OpenAI-compatible base URL, e.g.
+                          "https://api.openai.com/v1".
+                        minLength: 1
+                        type: string
+                      credentialsRef:
+                        description: credentialsRef points at a Secret holding the
+                          API credentials.
+                        properties:
+                          key:
+                            description: key inside the Secret to read.
+                            type: string
+                          name:
+                            description: name of the Secret in the AgentDeployment's
+                              namespace.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      modelName:
+                        description: modelName is the model identifier the agent will
+                          request.
+                        minLength: 1
+                        type: string
+                      type:
+                        description: |-
+                          type identifies the well-known API shape. Use "custom" for any
+                          OpenAI-compatible endpoint not covered by the named types.
+                        enum:
+                        - openai
+                        - anthropic
+                        - azureOpenAI
+                        - custom
+                        type: string
+                    required:
+                    - baseURL
+                    - modelName
+                    - type
+                    type: object
+                  gatewayEndpoint:
+                    description: gatewayEndpoint binds to a model exposed through
+                      Gateway API (GAIE).
+                    properties:
+                      gatewayRef:
+                        description: gatewayRef points at the Gateway resource that
+                          serves the model.
+                        properties:
+                          name:
+                            description: name of the Gateway resource.
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: namespace of the Gateway resource.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      modelName:
+                        description: modelName is the served model name advertised
+                          through the gateway.
+                        minLength: 1
+                        type: string
+                    required:
+                    - gatewayRef
+                    - modelName
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of deploymentRef, gatewayEndpoint, or externalAPI
+                    must be set
+                  rule: ((has(self.deploymentRef)?1:0)+(has(self.gatewayEndpoint)?1:0)+(has(self.externalAPI)?1:0))
+                    == 1
+              observability:
+                description: observability configures observability emission (OTLP
+                  export).
+                properties:
+                  otlp:
+                    description: |-
+                      otlp configures OpenTelemetry export. When set, providers MUST
+                      inject OTEL_EXPORTER_OTLP_* environment variables matching this
+                      configuration into the rendered agent workload.
+                    properties:
+                      endpoint:
+                        description: endpoint is the OTLP collector endpoint URL.
+                        minLength: 1
+                        type: string
+                      protocol:
+                        description: protocol identifies the OTLP transport (http/protobuf,
+                          grpc, ...).
+                        type: string
+                    required:
+                    - endpoint
+                    type: object
+                type: object
+              resources:
+                description: |-
+                  resources sets resource requests/limits for the rendered agent
+                  workload. Providers translate this into native scheduling hints
+                  (e.g. container resources on a Deployment, or framework-specific
+                  fields on a native CR).
+                properties:
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: limits sets the maximum CPU and memory the agent
+                      may use.
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: requests sets the minimum CPU and memory required
+                      for the agent.
+                    type: object
+                type: object
+              security:
+                description: |-
+                  security captures security/isolation policy for the rendered
+                  workload. See AgentSecuritySpec for layering semantics.
+                properties:
+                  podSecurityStandard:
+                    description: |-
+                      podSecurityStandard names the Kubernetes Pod Security Standard the
+                      rendered pod should comply with. Providers translate this into
+                      concrete defaults (e.g. dropped capabilities, no host namespaces).
+                    enum:
+                    - privileged
+                    - baseline
+                    - restricted
+                    type: string
+                  securityContext:
+                    description: |-
+                      securityContext is a pod-level SecurityContext override that the
+                      provider applies to the rendered agent workload. Provider defaults
+                      (from the AgentProviderConfig catalog entry) are used when this is
+                      unset; non-nil fields here override the provider defaults
+                      field-by-field.
+                    properties:
+                      appArmorProfile:
+                        description: |-
+                          appArmorProfile is the AppArmor options to use by the containers in this pod.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile loaded on the node that should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must match the loaded name of the profile.
+                              Must be set if and only if type is "Localhost".
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of AppArmor profile will be applied.
+                              Valid options are:
+                                Localhost - a profile pre-loaded on the node.
+                                RuntimeDefault - the container runtime's default profile.
+                                Unconfined - no AppArmor enforcement.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      fsGroup:
+                        description: |-
+                          A special supplemental group that applies to all containers in a pod.
+                          Some volume types allow the Kubelet to change the ownership of that volume
+                          to be owned by the pod:
+
+                          1. The owning GID will be the FSGroup
+                          2. The setgid bit is set (new files created in the volume will be owned by FSGroup)
+                          3. The permission bits are OR'd with rw-rw----
+
+                          If unset, the Kubelet will not modify the ownership and permissions of any volume.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      fsGroupChangePolicy:
+                        description: |-
+                          fsGroupChangePolicy defines behavior of changing ownership and permission of the volume
+                          before being exposed inside Pod. This field will only apply to
+                          volume types which support fsGroup based ownership(and permissions).
+                          It will have no effect on ephemeral volume types such as: secret, configmaps
+                          and emptydir.
+                          Valid values are "OnRootMismatch" and "Always". If not specified, "Always" is used.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      runAsGroup:
+                        description: |-
+                          The GID to run the entrypoint of the container process.
+                          Uses runtime default if unset.
+                          May also be set in SecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence
+                          for that container.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      runAsNonRoot:
+                        description: |-
+                          Indicates that the container must run as a non-root user.
+                          If true, the Kubelet will validate the image at runtime to ensure that it
+                          does not run as UID 0 (root) and fail to start the container if it does.
+                          If unset or false, no such validation will be performed.
+                          May also be set in SecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence.
+                        type: boolean
+                      runAsUser:
+                        description: |-
+                          The UID to run the entrypoint of the container process.
+                          Defaults to user specified in image metadata if unspecified.
+                          May also be set in SecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence
+                          for that container.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      seLinuxChangePolicy:
+                        description: |-
+                          seLinuxChangePolicy defines how the container's SELinux label is applied to all volumes used by the Pod.
+                          It has no effect on nodes that do not support SELinux or to volumes does not support SELinux.
+                          Valid values are "MountOption" and "Recursive".
+
+                          "Recursive" means relabeling of all files on all Pod volumes by the container runtime.
+                          This may be slow for large volumes, but allows mixing privileged and unprivileged Pods sharing the same volume on the same node.
+
+                          "MountOption" mounts all eligible Pod volumes with `-o context` mount option.
+                          This requires all Pods that share the same volume to use the same SELinux label.
+                          It is not possible to share the same volume among privileged and unprivileged Pods.
+                          Eligible volumes are in-tree FibreChannel and iSCSI volumes, and all CSI volumes
+                          whose CSI driver announces SELinux support by setting spec.seLinuxMount: true in their
+                          CSIDriver instance. Other volumes are always re-labelled recursively.
+                          "MountOption" value is allowed only when SELinuxMount feature gate is enabled.
+
+                          If not specified and SELinuxMount feature gate is enabled, "MountOption" is used.
+                          If not specified and SELinuxMount feature gate is disabled, "MountOption" is used for ReadWriteOncePod volumes
+                          and "Recursive" for all other volumes.
+
+                          This field affects only Pods that have SELinux label set, either in PodSecurityContext or in SecurityContext of all containers.
+
+                          All Pods that use the same volume should use the same seLinuxChangePolicy, otherwise some pods can get stuck in ContainerCreating state.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      seLinuxOptions:
+                        description: |-
+                          The SELinux context to be applied to all containers.
+                          If unspecified, the container runtime will allocate a random SELinux context for each
+                          container.  May also be set in SecurityContext.  If set in
+                          both SecurityContext and PodSecurityContext, the value specified in SecurityContext
+                          takes precedence for that container.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          level:
+                            description: Level is SELinux level label that applies
+                              to the container.
+                            type: string
+                          role:
+                            description: Role is a SELinux role label that applies
+                              to the container.
+                            type: string
+                          type:
+                            description: Type is a SELinux type label that applies
+                              to the container.
+                            type: string
+                          user:
+                            description: User is a SELinux user label that applies
+                              to the container.
+                            type: string
+                        type: object
+                      seccompProfile:
+                        description: |-
+                          The seccomp options to use by the containers in this pod.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile defined in a file on the node should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must be a descending path, relative to the kubelet's configured seccomp profile location.
+                              Must be set if type is "Localhost". Must NOT be set for any other type.
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of seccomp profile will be applied.
+                              Valid options are:
+
+                              Localhost - a profile defined in a file on the node should be used.
+                              RuntimeDefault - the container runtime default profile should be used.
+                              Unconfined - no profile should be applied.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      supplementalGroups:
+                        description: |-
+                          A list of groups applied to the first process run in each container, in
+                          addition to the container's primary GID and fsGroup (if specified).  If
+                          the SupplementalGroupsPolicy feature is enabled, the
+                          supplementalGroupsPolicy field determines whether these are in addition
+                          to or instead of any group memberships defined in the container image.
+                          If unspecified, no additional groups are added, though group memberships
+                          defined in the container image may still be used, depending on the
+                          supplementalGroupsPolicy field.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        items:
+                          format: int64
+                          type: integer
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      supplementalGroupsPolicy:
+                        description: |-
+                          Defines how supplemental groups of the first container processes are calculated.
+                          Valid values are "Merge" and "Strict". If not specified, "Merge" is used.
+                          (Alpha) Using the field requires the SupplementalGroupsPolicy feature gate to be enabled
+                          and the container runtime must implement support for this feature.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      sysctls:
+                        description: |-
+                          Sysctls hold a list of namespaced sysctls used for the pod. Pods with unsupported
+                          sysctls (by the container runtime) might fail to launch.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        items:
+                          description: Sysctl defines a kernel parameter to be set
+                          properties:
+                            name:
+                              description: Name of a property to set
+                              type: string
+                            value:
+                              description: Value of a property to set
+                              type: string
+                          required:
+                          - name
+                          - value
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      windowsOptions:
+                        description: |-
+                          The Windows specific settings applied to all containers.
+                          If unspecified, the options within a container's SecurityContext will be used.
+                          If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
+                          Note that this field cannot be set when spec.os.name is linux.
+                        properties:
+                          gmsaCredentialSpec:
+                            description: |-
+                              GMSACredentialSpec is where the GMSA admission webhook
+                              (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the
+                              GMSA credential spec named by the GMSACredentialSpecName field.
+                            type: string
+                          gmsaCredentialSpecName:
+                            description: GMSACredentialSpecName is the name of the
+                              GMSA credential spec to use.
+                            type: string
+                          hostProcess:
+                            description: |-
+                              HostProcess determines if a container should be run as a 'Host Process' container.
+                              All of a Pod's containers must have the same effective HostProcess value
+                              (it is not allowed to have a mix of HostProcess containers and non-HostProcess containers).
+                              In addition, if HostProcess is true then HostNetwork must also be set to true.
+                            type: boolean
+                          runAsUserName:
+                            description: |-
+                              The UserName in Windows to run the entrypoint of the container process.
+                              Defaults to the user specified in image metadata if unspecified.
+                              May also be set in PodSecurityContext. If set in both SecurityContext and
+                              PodSecurityContext, the value specified in SecurityContext takes precedence.
+                            type: string
+                        type: object
+                    type: object
+                type: object
+            required:
+            - framework
+            - model
+            type: object
+          status:
+            description: |-
+              AgentDeploymentStatus defines the observed state of an AgentDeployment.
+
+              Status ownership is split between the core controller and the
+              framework provider controller; the field-owner is shown in parens.
+
+                - framework, modelBinding                                     (core)
+                - conditions[ModelBound], conditions[FrameworkReady]          (core)
+                - conditions[Ready]                                           (core)
+                - phase, runtime, replicas, conditions[ProviderReady]         (provider)
+
+              Both writers MUST use server-side apply with distinct field owners
+              so the API server itself prevents cross-writes.
+            properties:
+              conditions:
+                description: conditions follow the standard Kubernetes condition pattern.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              framework:
+                description: framework is the resolved framework metadata. Owned by
+                  core.
+                properties:
+                  name:
+                    description: name is the resolved framework name (mirrors spec.framework.name).
+                    type: string
+                  providerVersion:
+                    description: |-
+                      providerVersion is the version reported by the AgentProviderConfig
+                      status at resolution time. Useful for debugging skew between the
+                      AgentDeployment and the framework provider.
+                    type: string
+                type: object
+              modelBinding:
+                description: |-
+                  modelBinding is the resolved model binding contract for the
+                  framework provider to consume. Owned by core.
+                properties:
+                  baseURL:
+                    description: |-
+                      baseURL is the resolved OpenAI-compatible base URL for the model
+                      endpoint (e.g. http://my-model.inference.svc.cluster.local/v1).
+                    type: string
+                  bindingMode:
+                    description: bindingMode echoes which binding mode in spec.model
+                      was used.
+                    enum:
+                    - deploymentRef
+                    - gatewayEndpoint
+                    - externalAPI
+                    type: string
+                  credentialsRef:
+                    description: |-
+                      credentialsRef points at a Secret with credentials the agent
+                      should mount. Empty when no credentials are required.
+                    properties:
+                      key:
+                        description: key inside the Secret to read.
+                        type: string
+                      name:
+                        description: name of the Secret in the AgentDeployment's namespace.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  modelName:
+                    description: modelName is the model identifier the agent should
+                      request.
+                    type: string
+                  observedResourceUID:
+                    description: |-
+                      observedResourceUID is the UID of the underlying resource (e.g.
+                      the ModelDeployment for deploymentRef bindings). The core
+                      controller uses this to detect delete+recreate so providers
+                      re-render agents when the upstream resource changes identity.
+                    type: string
+                type: object
+              observedGeneration:
+                description: |-
+                  observedGeneration is the AgentDeployment.metadata.generation
+                  observed by the core controller.
+                format: int64
+                type: integer
+              phase:
+                description: phase is the high-level lifecycle phase. Owned by the
+                  framework provider.
+                enum:
+                - Pending
+                - Deploying
+                - Running
+                - Failed
+                - Terminating
+                type: string
+              replicas:
+                description: |-
+                  replicas summarises desired/ready instance counts. Owned by the
+                  framework provider.
+                properties:
+                  ready:
+                    description: ready is the count of instances reporting ready.
+                    format: int32
+                    type: integer
+                  total:
+                    description: total is the desired number of agent instances.
+                    format: int32
+                    type: integer
+                type: object
+              runtime:
+                description: runtime describes the rendered workload. Owned by the
+                  framework provider.
+                properties:
+                  address:
+                    description: |-
+                      address is the in-cluster service URL the agent is reachable at,
+                      when applicable.
+                    type: string
+                  workloadRef:
+                    description: |-
+                      workloadRef points at the framework-native resource the provider
+                      created (e.g. Kagent Agent CR, plain Deployment).
+                    properties:
+                      apiVersion:
+                        description: apiVersion of the backing resource (e.g. "kagent.dev/v1alpha1",
+                          "apps/v1").
+                        type: string
+                      kind:
+                        description: kind of the backing resource (e.g. "Agent", "Deployment").
+                        type: string
+                      name:
+                        description: name of the backing resource.
+                        type: string
+                      namespace:
+                        description: namespace of the backing resource. Empty for
+                          cluster-scoped resources.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

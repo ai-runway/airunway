@@ -1,0 +1,78 @@
+# Container-based agent framework: OpenClaw via the generic container provider.
+# Demonstrates a non-Kubernetes-native framework whose image is supplied by
+# the catalog entry and rendered into Deployment+Service by the container
+# provider.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: openclaw
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  capabilities:
+    backend: container
+    requiresOperator: false
+    modelBindingModes:
+      - deploymentRef
+      - externalAPI
+    protocols:
+      - openaiTools
+  catalog:
+    - name: openclaw-personal-assistant
+      title: "Personal AI assistant (OpenClaw)"
+      description: >-
+        OpenClaw running as a personal automation agent. Bind to any
+        OpenAI-compatible model managed by AI Runway.
+      image: ghcr.io/openclaw/openclaw:latest
+      tags:
+        - personal
+        - automation
+      recommendedSecurity:
+        # OpenClaw writes session state to its working directory, so it
+        # cannot run with readOnlyRootFilesystem=true. Other defaults
+        # follow the Restricted PSS profile.
+        podSecurityStandard: restricted
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+---
+# CRD-native agent framework: Kagent.
+# Demonstrates a framework whose provider renders the AgentDeployment
+# into a framework-native custom resource (kagent.dev/Agent + ModelConfig).
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: kagent
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  capabilities:
+    backend: crd
+    requiresOperator: true
+    modelBindingModes:
+      - deploymentRef
+      - gatewayEndpoint
+      - externalAPI
+    protocols:
+      - mcp
+      - a2a
+      - openaiTools
+  catalog:
+    - name: kagent-k8s-sre
+      title: "Kubernetes SRE (Kagent)"
+      description: >-
+        Diagnose deployments, pods, and networking. Backed by Kagent's
+        native Agent CR.
+      tags:
+        - devops
+        - observability
+      recommendedSecurity:
+        podSecurityStandard: restricted
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault

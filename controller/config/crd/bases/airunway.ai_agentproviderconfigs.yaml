@@ -1,0 +1,524 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agentproviderconfigs.airunway.ai
+spec:
+  group: airunway.ai
+  names:
+    kind: AgentProviderConfig
+    listKind: AgentProviderConfigList
+    plural: agentproviderconfigs
+    shortNames:
+    - apc
+    singular: agentproviderconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .spec.capabilities.backend
+      name: Backend
+      type: string
+    - jsonPath: .status.version
+      name: Version
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentProviderConfig registers an agent framework with AI Runway. It is
+          the agent-marketplace analogue of InferenceProviderConfig.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentProviderConfigSpec defines the registration for an agent
+              framework provider.
+            properties:
+              capabilities:
+                description: capabilities declares what this framework supports.
+                properties:
+                  backend:
+                    description: |-
+                      backend identifies the rendering strategy this provider uses. See
+                      AgentProviderBackend for values.
+                    enum:
+                    - crd
+                    - container
+                    type: string
+                  modelBindingModes:
+                    description: |-
+                      modelBindingModes is the set of model-binding modes the framework
+                      implementation natively supports. The core controller refuses
+                      AgentDeployments whose binding mode is not in this set.
+                    items:
+                      description: ModelBindingMode identifies how the agent resolves
+                        its model endpoint.
+                      enum:
+                      - deploymentRef
+                      - gatewayEndpoint
+                      - externalAPI
+                      type: string
+                    type: array
+                  protocols:
+                    description: |-
+                      protocols is the set of tool/agent protocols the framework
+                      natively understands.
+                    items:
+                      description: |-
+                        AgentToolProtocol identifies a tool-calling protocol the framework
+                        can natively consume.
+                      enum:
+                      - mcp
+                      - a2a
+                      - openaiTools
+                      type: string
+                    type: array
+                  requiresOperator:
+                    description: |-
+                      requiresOperator indicates the framework relies on an upstream
+                      Kubernetes operator/CRD being installed in the cluster (e.g.
+                      Kagent). The dashboard uses this to gate "install upstream"
+                      flows. Mirrors InferenceProviderConfig.requiresCRD semantics.
+                    type: boolean
+                type: object
+              catalog:
+                description: |-
+                  catalog lists deployable recipes (curated model+agent combos)
+                  the dashboard surfaces under this framework on the marketplace
+                  page. Recipes are not required; a provider can register
+                  itself with no catalog and still accept hand-written
+                  AgentDeployments.
+                items:
+                  description: |-
+                    AgentCatalogItem is a curated, one-click deployable recipe. The
+                    dashboard renders these on the marketplace browse page; selecting
+                    one prefills the deploy wizard with the bundled template.
+
+                    Inspired by vLLM production-stack recipes: shipping known-good
+                    combinations of model + framework + config eliminates the empty-form
+                    experience and matches the Ollama-style "one-line launch" UX target.
+                  properties:
+                    description:
+                      description: description explains what the recipe does, in plain
+                        language.
+                      type: string
+                    icon:
+                      description: icon is an optional URL to an icon shown in the
+                        catalog tile.
+                      type: string
+                    image:
+                      description: |-
+                        image is the container image the catalog item runs when the
+                        provider's backend is "container". Ignored for CRD-backed
+                        providers, where the framework operator owns image selection.
+
+                        Carrying the image at the catalog level lets a single container-
+                        based provider serve many frameworks (OpenClaw, CrewAI,
+                        LangGraph, Hermes) by varying the catalog entry rather than the
+                        provider code.
+                      type: string
+                    name:
+                      description: |-
+                        name is a stable, machine-readable identifier within the catalog
+                        (e.g. "kagent-k8s-sre", "openclaw-personal-assistant").
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      type: string
+                    recommendedSecurity:
+                      description: |-
+                        recommendedSecurity ships sensible security defaults for this
+                        recipe. The user can override them per AgentDeployment via
+                        spec.security, but a known-good baseline here means most users
+                        never have to. Per-recipe defaults are required because agent
+                        frameworks have legitimately different requirements (e.g.
+                        OpenClaw writes the local file system, so it cannot run with
+                        readOnlyRootFilesystem=true).
+                      properties:
+                        podSecurityStandard:
+                          description: |-
+                            podSecurityStandard names the Kubernetes Pod Security Standard the
+                            rendered pod should comply with. Providers translate this into
+                            concrete defaults (e.g. dropped capabilities, no host namespaces).
+                          enum:
+                          - privileged
+                          - baseline
+                          - restricted
+                          type: string
+                        securityContext:
+                          description: |-
+                            securityContext is a pod-level SecurityContext override that the
+                            provider applies to the rendered agent workload. Provider defaults
+                            (from the AgentProviderConfig catalog entry) are used when this is
+                            unset; non-nil fields here override the provider defaults
+                            field-by-field.
+                          properties:
+                            appArmorProfile:
+                              description: |-
+                                appArmorProfile is the AppArmor options to use by the containers in this pod.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              properties:
+                                localhostProfile:
+                                  description: |-
+                                    localhostProfile indicates a profile loaded on the node that should be used.
+                                    The profile must be preconfigured on the node to work.
+                                    Must match the loaded name of the profile.
+                                    Must be set if and only if type is "Localhost".
+                                  type: string
+                                type:
+                                  description: |-
+                                    type indicates which kind of AppArmor profile will be applied.
+                                    Valid options are:
+                                      Localhost - a profile pre-loaded on the node.
+                                      RuntimeDefault - the container runtime's default profile.
+                                      Unconfined - no AppArmor enforcement.
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            fsGroup:
+                              description: |-
+                                A special supplemental group that applies to all containers in a pod.
+                                Some volume types allow the Kubelet to change the ownership of that volume
+                                to be owned by the pod:
+
+                                1. The owning GID will be the FSGroup
+                                2. The setgid bit is set (new files created in the volume will be owned by FSGroup)
+                                3. The permission bits are OR'd with rw-rw----
+
+                                If unset, the Kubelet will not modify the ownership and permissions of any volume.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              format: int64
+                              type: integer
+                            fsGroupChangePolicy:
+                              description: |-
+                                fsGroupChangePolicy defines behavior of changing ownership and permission of the volume
+                                before being exposed inside Pod. This field will only apply to
+                                volume types which support fsGroup based ownership(and permissions).
+                                It will have no effect on ephemeral volume types such as: secret, configmaps
+                                and emptydir.
+                                Valid values are "OnRootMismatch" and "Always". If not specified, "Always" is used.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              type: string
+                            runAsGroup:
+                              description: |-
+                                The GID to run the entrypoint of the container process.
+                                Uses runtime default if unset.
+                                May also be set in SecurityContext.  If set in both SecurityContext and
+                                PodSecurityContext, the value specified in SecurityContext takes precedence
+                                for that container.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              format: int64
+                              type: integer
+                            runAsNonRoot:
+                              description: |-
+                                Indicates that the container must run as a non-root user.
+                                If true, the Kubelet will validate the image at runtime to ensure that it
+                                does not run as UID 0 (root) and fail to start the container if it does.
+                                If unset or false, no such validation will be performed.
+                                May also be set in SecurityContext.  If set in both SecurityContext and
+                                PodSecurityContext, the value specified in SecurityContext takes precedence.
+                              type: boolean
+                            runAsUser:
+                              description: |-
+                                The UID to run the entrypoint of the container process.
+                                Defaults to user specified in image metadata if unspecified.
+                                May also be set in SecurityContext.  If set in both SecurityContext and
+                                PodSecurityContext, the value specified in SecurityContext takes precedence
+                                for that container.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              format: int64
+                              type: integer
+                            seLinuxChangePolicy:
+                              description: |-
+                                seLinuxChangePolicy defines how the container's SELinux label is applied to all volumes used by the Pod.
+                                It has no effect on nodes that do not support SELinux or to volumes does not support SELinux.
+                                Valid values are "MountOption" and "Recursive".
+
+                                "Recursive" means relabeling of all files on all Pod volumes by the container runtime.
+                                This may be slow for large volumes, but allows mixing privileged and unprivileged Pods sharing the same volume on the same node.
+
+                                "MountOption" mounts all eligible Pod volumes with `-o context` mount option.
+                                This requires all Pods that share the same volume to use the same SELinux label.
+                                It is not possible to share the same volume among privileged and unprivileged Pods.
+                                Eligible volumes are in-tree FibreChannel and iSCSI volumes, and all CSI volumes
+                                whose CSI driver announces SELinux support by setting spec.seLinuxMount: true in their
+                                CSIDriver instance. Other volumes are always re-labelled recursively.
+                                "MountOption" value is allowed only when SELinuxMount feature gate is enabled.
+
+                                If not specified and SELinuxMount feature gate is enabled, "MountOption" is used.
+                                If not specified and SELinuxMount feature gate is disabled, "MountOption" is used for ReadWriteOncePod volumes
+                                and "Recursive" for all other volumes.
+
+                                This field affects only Pods that have SELinux label set, either in PodSecurityContext or in SecurityContext of all containers.
+
+                                All Pods that use the same volume should use the same seLinuxChangePolicy, otherwise some pods can get stuck in ContainerCreating state.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              type: string
+                            seLinuxOptions:
+                              description: |-
+                                The SELinux context to be applied to all containers.
+                                If unspecified, the container runtime will allocate a random SELinux context for each
+                                container.  May also be set in SecurityContext.  If set in
+                                both SecurityContext and PodSecurityContext, the value specified in SecurityContext
+                                takes precedence for that container.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              properties:
+                                level:
+                                  description: Level is SELinux level label that applies
+                                    to the container.
+                                  type: string
+                                role:
+                                  description: Role is a SELinux role label that applies
+                                    to the container.
+                                  type: string
+                                type:
+                                  description: Type is a SELinux type label that applies
+                                    to the container.
+                                  type: string
+                                user:
+                                  description: User is a SELinux user label that applies
+                                    to the container.
+                                  type: string
+                              type: object
+                            seccompProfile:
+                              description: |-
+                                The seccomp options to use by the containers in this pod.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              properties:
+                                localhostProfile:
+                                  description: |-
+                                    localhostProfile indicates a profile defined in a file on the node should be used.
+                                    The profile must be preconfigured on the node to work.
+                                    Must be a descending path, relative to the kubelet's configured seccomp profile location.
+                                    Must be set if type is "Localhost". Must NOT be set for any other type.
+                                  type: string
+                                type:
+                                  description: |-
+                                    type indicates which kind of seccomp profile will be applied.
+                                    Valid options are:
+
+                                    Localhost - a profile defined in a file on the node should be used.
+                                    RuntimeDefault - the container runtime default profile should be used.
+                                    Unconfined - no profile should be applied.
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            supplementalGroups:
+                              description: |-
+                                A list of groups applied to the first process run in each container, in
+                                addition to the container's primary GID and fsGroup (if specified).  If
+                                the SupplementalGroupsPolicy feature is enabled, the
+                                supplementalGroupsPolicy field determines whether these are in addition
+                                to or instead of any group memberships defined in the container image.
+                                If unspecified, no additional groups are added, though group memberships
+                                defined in the container image may still be used, depending on the
+                                supplementalGroupsPolicy field.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              items:
+                                format: int64
+                                type: integer
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            supplementalGroupsPolicy:
+                              description: |-
+                                Defines how supplemental groups of the first container processes are calculated.
+                                Valid values are "Merge" and "Strict". If not specified, "Merge" is used.
+                                (Alpha) Using the field requires the SupplementalGroupsPolicy feature gate to be enabled
+                                and the container runtime must implement support for this feature.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              type: string
+                            sysctls:
+                              description: |-
+                                Sysctls hold a list of namespaced sysctls used for the pod. Pods with unsupported
+                                sysctls (by the container runtime) might fail to launch.
+                                Note that this field cannot be set when spec.os.name is windows.
+                              items:
+                                description: Sysctl defines a kernel parameter to
+                                  be set
+                                properties:
+                                  name:
+                                    description: Name of a property to set
+                                    type: string
+                                  value:
+                                    description: Value of a property to set
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            windowsOptions:
+                              description: |-
+                                The Windows specific settings applied to all containers.
+                                If unspecified, the options within a container's SecurityContext will be used.
+                                If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
+                                Note that this field cannot be set when spec.os.name is linux.
+                              properties:
+                                gmsaCredentialSpec:
+                                  description: |-
+                                    GMSACredentialSpec is where the GMSA admission webhook
+                                    (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the
+                                    GMSA credential spec named by the GMSACredentialSpecName field.
+                                  type: string
+                                gmsaCredentialSpecName:
+                                  description: GMSACredentialSpecName is the name
+                                    of the GMSA credential spec to use.
+                                  type: string
+                                hostProcess:
+                                  description: |-
+                                    HostProcess determines if a container should be run as a 'Host Process' container.
+                                    All of a Pod's containers must have the same effective HostProcess value
+                                    (it is not allowed to have a mix of HostProcess containers and non-HostProcess containers).
+                                    In addition, if HostProcess is true then HostNetwork must also be set to true.
+                                  type: boolean
+                                runAsUserName:
+                                  description: |-
+                                    The UserName in Windows to run the entrypoint of the container process.
+                                    Defaults to the user specified in image metadata if unspecified.
+                                    May also be set in PodSecurityContext. If set in both SecurityContext and
+                                    PodSecurityContext, the value specified in SecurityContext takes precedence.
+                                  type: string
+                              type: object
+                          type: object
+                      type: object
+                    tags:
+                      description: tags categorise the recipe (e.g. ["devops", "observability"]).
+                      items:
+                        type: string
+                      type: array
+                    template:
+                      description: |-
+                        template is a partial AgentDeployment spec the dashboard
+                        prefills into the deploy wizard when the user selects this
+                        recipe. Stored as RawExtension so catalog authors can ship
+                        framework-specific config without the core controller learning
+                        every framework's schema.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    title:
+                      description: title is the human-facing recipe name shown in
+                        the UI.
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  - title
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+            type: object
+          status:
+            description: AgentProviderConfigStatus is written by the framework provider.
+            properties:
+              conditions:
+                description: conditions follow the standard Kubernetes condition pattern.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastHeartbeat:
+                description: |-
+                  lastHeartbeat is the most recent provider status write. The
+                  dashboard treats stale heartbeats as the provider being unhealthy.
+                format: date-time
+                type: string
+              ready:
+                description: |-
+                  ready indicates whether the framework provider controller is
+                  healthy and willing to accept AgentDeployments. The dashboard
+                  uses this for the marketplace tile state.
+                type: boolean
+              version:
+                description: |-
+                  version is the running provider controller version. Useful for
+                  surfacing shim drift between the dashboard and the provider.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
