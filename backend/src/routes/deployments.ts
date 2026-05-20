@@ -10,8 +10,13 @@ import { aikitService, GGUF_RUNNER_IMAGE } from '../services/aikit';
 import { handleK8sError } from '../lib/k8s-errors';
 import models from '../data/models.json';
 import logger from '../lib/logger';
-import type { DeploymentStatus, DeploymentConfig } from '@airunway/shared';
-import { toModelDeploymentManifest } from '@airunway/shared';
+import type { AppEnv } from '../types/hono';
+import {
+  parseFrontendService,
+  toModelDeploymentManifest,
+  type DeploymentStatus,
+  type DeploymentConfig,
+} from '@airunway/shared';
 import {
   namespaceSchema,
   resourceNameSchema,
@@ -74,14 +79,14 @@ const createDeploymentSchema = z.object({
   engine: z.enum(['vllm', 'sglang', 'trtllm', 'llamacpp']),
   namespace: namespaceSchema.optional(),
   mode: z.enum(['aggregated', 'disaggregated']).optional().default('aggregated'),
-  provider: z.string().optional(),
+  provider: resourceNameSchema.optional(),
   servedModelName: z.string().optional(),
-  routerMode: z.enum(['none', 'kv', 'round-robin']).optional().default('none'),
+  routerMode: z.enum(['default', 'kv', 'round-robin']).optional().default('default'),
   replicas: z.number().int().min(0).optional().default(1),
   hfTokenSecret: z.string().optional().default(''),
   contextLength: z.number().int().positive().optional(),
   enforceEager: z.boolean().optional().default(false),
-  enablePrefixCaching: z.boolean().optional().default(false),
+  enablePrefixCaching: z.boolean().optional().default(true),
   trustRemoteCode: z.boolean().optional().default(false),
   resources: z.object({
     gpu: z.number().int().min(0),
@@ -100,6 +105,7 @@ const createDeploymentSchema = z.object({
   imageRef: z.string().optional(),
   computeType: z.enum(['cpu', 'gpu']).optional(),
   maxModelLen: z.number().int().positive().optional(),
+  gatewayEnabled: z.boolean().optional(),
   storage: storageSchema,
 }).superRefine((data, ctx) => {
   const volumes = data.storage?.volumes;
@@ -322,7 +328,7 @@ function resolveDeploymentImages(config: DeploymentConfig): DeploymentConfig {
   return config;
 }
 
-const deployments = new Hono()
+const deployments = new Hono<AppEnv>()
   .get('/', zValidator('query', listDeploymentsQuerySchema), async (c) => {
     try {
       const { namespace, limit, offset } = c.req.valid('query');
@@ -467,6 +473,25 @@ const deployments = new Hono()
       primaryResource: { kind: 'ModelDeployment', apiVersion: 'airunway.ai/v1alpha1' },
     });
   })
+  // List PVCs in a namespace (for storage volume selection)
+  // Use a reserved segment to avoid conflicting with deployment names like "pvcs".
+  .get('/-/pvcs', zValidator('query', z.object({ namespace: namespaceSchema })), async (c) => {
+    const { namespace } = c.req.valid('query');
+    const userToken = c.get('token') as string | undefined;
+    try {
+      const pvcs = await kubernetesService.listPVCs(namespace, userToken);
+      return c.json({ pvcs });
+    } catch (error) {
+      const { message, statusCode } = handleK8sError(error, {
+        operation: 'listPVCs',
+        namespace,
+      });
+
+      throw new HTTPException(statusCode as 400 | 401 | 403 | 404 | 409 | 422 | 500 | 502 | 503 | 504, {
+        message: `Failed to list storage disks: ${message}`,
+      });
+    }
+  })
   .get(
     '/:name',
     zValidator('param', deploymentParamsSchema),
@@ -599,7 +624,12 @@ const deployments = new Hono()
         throw new HTTPException(404, { message: 'Deployment not found' });
       }
 
-      const metricsResponse = await metricsService.getDeploymentMetrics(name, resolvedNamespace);
+      const frontendService = parseFrontendService(deployment.frontendService);
+      const metricsResponse = await metricsService.getDeploymentMetrics(name, resolvedNamespace, {
+        providerId: deployment.provider,
+        serviceName: frontendService?.serviceName,
+        port: frontendService?.servicePort,
+      });
       return c.json(metricsResponse);
     }
 )

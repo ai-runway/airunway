@@ -107,8 +107,11 @@ func TestTransformAggregated(t *testing.T) {
 	}
 
 	services, _ := spec["services"].(map[string]interface{})
-	if _, ok := services["Frontend"]; !ok {
-		t.Error("expected Frontend service")
+	if _, ok := services["Frontend"]; ok {
+		t.Error("did not expect Frontend service when gateway is enabled (default)")
+	}
+	if _, ok := services["Epp"]; !ok {
+		t.Error("expected Epp service when gateway is enabled (default)")
 	}
 	if _, ok := services["VllmWorker"]; !ok {
 		t.Error("expected VllmWorker service in aggregated mode")
@@ -290,6 +293,44 @@ func TestBuildEngineArgs(t *testing.T) {
 		if !sliceContainsStr(args, part) {
 			t.Errorf("expected args to contain '%s', got: %v", part, args)
 		}
+	}
+
+	// With enable prefix caching
+	md.Spec.Engine.TrustRemoteCode = false
+	md.Spec.Model.ServedName = ""
+	md.Spec.Engine.EnablePrefixCaching = true
+	args, err = tr.buildEngineArgs(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !sliceContainsStr(args, "--enable-prefix-caching") {
+		t.Errorf("expected args to contain '--enable-prefix-caching', got: %v", args)
+	}
+
+	// With enforce eager
+	md.Spec.Engine.EnablePrefixCaching = false
+	md.Spec.Engine.EnforceEager = true
+	args, err = tr.buildEngineArgs(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !sliceContainsStr(args, "--enforce-eager") {
+		t.Errorf("expected args to contain '--enforce-eager', got: %v", args)
+	}
+
+	// Prefix caching and enforce eager not added for TRT-LLM
+	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeTRTLLM
+	md.Spec.Engine.EnablePrefixCaching = true
+	md.Spec.Engine.EnforceEager = true
+	args, err = tr.buildEngineArgs(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sliceContainsStr(args, "--enable-prefix-caching") {
+		t.Errorf("--enable-prefix-caching should not be added for trtllm, got: %v", args)
+	}
+	if sliceContainsStr(args, "--enforce-eager") {
+		t.Errorf("--enforce-eager should not be added for trtllm, got: %v", args)
 	}
 }
 
@@ -481,65 +522,12 @@ func int32Ptr(i int32) *int32 {
 	return &i
 }
 
-func TestBuildFrontendService(t *testing.T) {
-	tr := NewTransformer()
-	md := newTestMD("test", "default")
-
-	// Default frontend
-	frontend := tr.buildFrontendService(md, &DynamoOverrides{})
-	if frontend["replicas"] != int64(DefaultFrontendReplicas) {
-		t.Errorf("expected default replicas, got %v", frontend["replicas"])
-	}
-	if _, ok := frontend["router-mode"]; ok {
-		t.Errorf("did not expect legacy router-mode field, got %v", frontend["router-mode"])
-	}
-	eps, _ := frontend["extraPodSpec"].(map[string]interface{})
-	mc, _ := eps["mainContainer"].(map[string]interface{})
-	if routerMode, ok := containerEnvValue(mc, "DYN_ROUTER_MODE"); !ok || routerMode != DefaultRouterMode {
-		t.Errorf("expected DYN_ROUTER_MODE=%q, got %q (found=%v)", DefaultRouterMode, routerMode, ok)
-	}
-
-	// With overrides
-	overrides := &DynamoOverrides{
-		RouterMode: "kv",
-		Frontend: &FrontendOverrides{
-			Replicas: int32Ptr(5),
-			Resources: &ResourceOverrides{
-				CPU:    "8",
-				Memory: "16Gi",
-			},
-		},
-	}
-	frontend = tr.buildFrontendService(md, overrides)
-	if frontend["replicas"] != int64(5) {
-		t.Errorf("expected replicas 5, got %v", frontend["replicas"])
-	}
-	eps, _ = frontend["extraPodSpec"].(map[string]interface{})
-	mc, _ = eps["mainContainer"].(map[string]interface{})
-	if routerMode, ok := containerEnvValue(mc, "DYN_ROUTER_MODE"); !ok || routerMode != "kv" {
-		t.Errorf("expected DYN_ROUTER_MODE=%q, got %q (found=%v)", "kv", routerMode, ok)
-	}
-}
-
-func TestBuildFrontendWithSecret(t *testing.T) {
-	tr := NewTransformer()
-	md := newTestMD("test", "default")
-	md.Spec.Secrets = &airunwayv1alpha1.SecretsSpec{
-		HuggingFaceToken: "my-hf-secret",
-	}
-
-	frontend := tr.buildFrontendService(md, &DynamoOverrides{})
-	if frontend["envFromSecret"] != "my-hf-secret" {
-		t.Errorf("expected envFromSecret 'my-hf-secret', got %v", frontend["envFromSecret"])
-	}
-}
-
 func TestBuildAggregatedWorker(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test", "default")
 	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{Replicas: 2}
 
-	worker, err := tr.buildAggregatedWorker(md, "test-image:v1")
+	worker, err := tr.buildAggregatedWorker(md, "test-image:v1", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -567,7 +555,7 @@ func TestBuildAggregatedWorkerWithSecret(t *testing.T) {
 	md := newTestMD("test", "default")
 	md.Spec.Secrets = &airunwayv1alpha1.SecretsSpec{HuggingFaceToken: "hf-secret"}
 
-	worker, err := tr.buildAggregatedWorker(md, "img")
+	worker, err := tr.buildAggregatedWorker(md, "img", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -587,9 +575,15 @@ func TestAddSchedulingConfig(t *testing.T) {
 	}
 	tr.addSchedulingConfig(service, md)
 	eps, _ := service["extraPodSpec"].(map[string]interface{})
-	ns, _ := eps["nodeSelector"].(map[string]string)
+	ns, _ := eps["nodeSelector"].(map[string]interface{})
 	if ns["gpu"] != "a100" {
 		t.Errorf("expected nodeSelector gpu=a100")
+	}
+
+	// Verify nodeSelector is a copy (safe for unstructured deep copy)
+	md.Spec.NodeSelector["gpu"] = "changed"
+	if ns["gpu"] != "a100" {
+		t.Errorf("nodeSelector should be a copy, not a reference to the original map")
 	}
 
 	// With tolerations
@@ -674,7 +668,7 @@ func TestBuildPrefillWorkerWithSecret(t *testing.T) {
 		},
 	}
 
-	worker, err := tr.buildPrefillWorker(md, "img")
+	worker, err := tr.buildPrefillWorker(md, "img", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -715,7 +709,7 @@ func TestBuildDecodeWorkerWithSecret(t *testing.T) {
 		},
 	}
 
-	worker, err := tr.buildDecodeWorker(md, "img")
+	worker, err := tr.buildDecodeWorker(md, "img", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -889,7 +883,7 @@ func TestBuildPrefillWorkerWithCustomGPUType(t *testing.T) {
 		},
 	}
 
-	worker, err := tr.buildPrefillWorker(md, "img")
+	worker, err := tr.buildPrefillWorker(md, "img", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

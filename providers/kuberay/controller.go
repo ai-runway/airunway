@@ -31,8 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -362,33 +364,42 @@ func (r *KubeRayProviderReconciler) handleDeletion(ctx context.Context, md *airu
 
 		// Resource exists and is owned by us, delete it
 		logger.Info("Deleting RayService", "name", md.Name)
-		if err := r.Delete(ctx, rs); err != nil && !errors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete RayService")
+		if err := r.Delete(ctx, rs); err != nil {
+			if upstreamResourceUnavailable(err) {
+				logger.Info("RayService unavailable during deletion, removing finalizer", "name", md.Name)
+			} else {
+				logger.Error(err, "Failed to delete RayService")
 
-			// Check if we should force-remove the finalizer
-			deletionTime := md.DeletionTimestamp.Time
-			if time.Since(deletionTime) > FinalizerTimeout {
-				logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-				controllerutil.RemoveFinalizer(md, FinalizerName)
-				return ctrl.Result{}, r.Update(ctx, md)
+				// Check if we should force-remove the finalizer
+				deletionTime := md.DeletionTimestamp.Time
+				if time.Since(deletionTime) > FinalizerTimeout {
+					logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
+					controllerutil.RemoveFinalizer(md, FinalizerName)
+					return ctrl.Result{}, r.Update(ctx, md)
+				}
+
+				// Requeue to retry deletion
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
-
-			// Requeue to retry deletion
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		} else {
+			// Requeue to wait for deletion
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-
-		// Requeue to wait for deletion
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	if !errors.IsNotFound(err) {
+	if !upstreamResourceUnavailable(err) {
 		return ctrl.Result{}, fmt.Errorf("failed to get upstream resource: %w", err)
 	}
 
-	// Resource is gone, remove finalizer
-	logger.Info("Upstream resource deleted, removing finalizer", "name", md.Name)
+	// The upstream resource is already gone or its CRD is no longer installed,
+	// so cleanup can finish by removing the finalizer.
+	logger.Info("Upstream resource unavailable or deleted, removing finalizer", "name", md.Name)
 	controllerutil.RemoveFinalizer(md, FinalizerName)
 	return ctrl.Result{}, r.Update(ctx, md)
+}
+
+func upstreamResourceUnavailable(err error) bool {
+	return errors.IsNotFound(err) || meta.IsNoMatchError(err)
 }
 
 // setCondition updates a condition on the ModelDeployment
@@ -404,35 +415,100 @@ func (r *KubeRayProviderReconciler) setCondition(md *airunwayv1alpha1.ModelDeplo
 	meta.SetStatusCondition(&md.Status.Conditions, condition)
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *KubeRayProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&airunwayv1alpha1.ModelDeployment{}).
-		// Only watch ModelDeployments where provider.name == "kuberay"
-		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-			md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
-			if !ok {
+func kubeRayProviderPredicate(obj client.Object) bool {
+	md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
+	if !ok {
+		return true // Allow secondary watches (RayServices, provider configs) through.
+	}
+	if md.Status.Provider != nil && md.Status.Provider.Name == ProviderName {
+		return true
+	}
+	if md.Spec.Provider != nil && md.Spec.Provider.Name == ProviderName {
+		return true
+	}
+	return controllerutil.ContainsFinalizer(md, FinalizerName)
+}
+
+func providerConfigChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldConfig, okOld := e.ObjectOld.(*airunwayv1alpha1.InferenceProviderConfig)
+			newConfig, okNew := e.ObjectNew.(*airunwayv1alpha1.InferenceProviderConfig)
+			if !okOld || !okNew {
 				return false
 			}
-			// Process if provider is kuberay OR if being deleted (to handle finalizer)
-			if md.Status.Provider != nil && md.Status.Provider.Name == ProviderName {
-				return true
-			}
-			// Also process if spec explicitly requests kuberay
-			if md.Spec.Provider != nil && md.Spec.Provider.Name == ProviderName {
-				return true
-			}
-			// Process if we have our finalizer (for deletion handling)
-			return controllerutil.ContainsFinalizer(md, FinalizerName)
-		})).
-		// Watch RayServices owned by ModelDeployments
+			return oldConfig.Status.Ready != newConfig.Status.Ready ||
+				!equality.Semantic.DeepEqual(oldConfig.Spec, newConfig.Spec)
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func (r *KubeRayProviderReconciler) mapProviderConfigToModelDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	providerConfig, ok := obj.(*airunwayv1alpha1.InferenceProviderConfig)
+	if !ok || providerConfig.Name != ProviderName {
+		return nil
+	}
+
+	var mdList airunwayv1alpha1.ModelDeploymentList
+	if err := r.List(ctx, &mdList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ModelDeployments for provider config change", "provider", providerConfig.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(mdList.Items))
+	seen := make(map[types.NamespacedName]struct{}, len(mdList.Items))
+	for i := range mdList.Items {
+		md := &mdList.Items[i]
+		if (md.Status.Provider == nil || md.Status.Provider.Name != ProviderName) &&
+			(md.Spec.Provider == nil || md.Spec.Provider.Name != ProviderName) {
+			continue
+		}
+
+		key := types.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+	}
+
+	return requests
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *KubeRayProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	builder := ctrl.NewControllerManagedBy(mgr).
+		For(&airunwayv1alpha1.ModelDeployment{}).
 		Watches(
+			&airunwayv1alpha1.InferenceProviderConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToModelDeployments),
+			ctrlbuilder.WithPredicates(providerConfigChangePredicate()),
+		).
+		// Only watch ModelDeployments where provider.name == "kuberay"
+		WithEventFilter(predicate.NewPredicateFuncs(kubeRayProviderPredicate))
+
+	// Only watch RayService resources if the CRD is installed.
+	// Without this check, the manager crashes at startup when
+	// the backend CRDs are not present (see #178).
+	mapper := mgr.GetRESTMapper()
+	if _, err := mapper.RESTMapping(schema.GroupKind{Group: RayAPIGroup, Kind: RayServiceKind}, RayAPIVersion); err == nil {
+		logger := mgr.GetLogger()
+		logger.Info("RayService CRD detected, enabling event-driven watch")
+		builder = builder.Watches(
 			&unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": fmt.Sprintf("%s/%s", RayAPIGroup, RayAPIVersion),
 				"kind":       RayServiceKind,
 			}},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Get owner references
 				for _, ref := range obj.GetOwnerReferences() {
 					if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
 						ref.Kind == "ModelDeployment" {
@@ -448,7 +524,10 @@ func (r *KubeRayProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 				return nil
 			}),
-		).
+		)
+	}
+
+	return builder.
 		Named("kuberay-provider").
 		Complete(r)
 }

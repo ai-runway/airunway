@@ -53,9 +53,27 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if spec.SelectionRules[0].Priority != 100 {
 		t.Errorf("expected first rule priority 100, got %d", spec.SelectionRules[0].Priority)
 	}
+}
 
-	if spec.Documentation != ProviderDocumentation {
-		t.Errorf("expected documentation %s, got %s", ProviderDocumentation, spec.Documentation)
+func TestGetInstallationInfo(t *testing.T) {
+	info := GetInstallationInfo()
+	if info == nil {
+		t.Fatal("expected non-nil installation info")
+	}
+	if info.Description == "" {
+		t.Error("expected non-empty description")
+	}
+	if info.DefaultNamespace != "kaito-workspace" {
+		t.Errorf("expected defaultNamespace 'kaito-workspace', got %s", info.DefaultNamespace)
+	}
+	if len(info.HelmRepos) != 1 {
+		t.Fatalf("expected 1 helm repo, got %d", len(info.HelmRepos))
+	}
+	if len(info.HelmCharts) != 1 {
+		t.Fatalf("expected 1 helm chart, got %d", len(info.HelmCharts))
+	}
+	if len(info.Steps) != 3 {
+		t.Fatalf("expected 3 installation steps, got %d", len(info.Steps))
 	}
 }
 

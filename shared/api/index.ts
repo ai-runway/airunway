@@ -18,6 +18,7 @@ import { createSettingsApi, type SettingsApi } from './settings';
 import { createRuntimesApi, type RuntimesApi } from './runtimes';
 import { createInstallationApi, type InstallationApi } from './installation';
 import { createGpuOperatorApi, type GpuOperatorApi } from './gpu';
+import { createGatewayApi, type GatewayApi } from './gateway';
 import { createAutoscalerApi, type AutoscalerApi } from './autoscaler';
 import { createHuggingFaceApi, type HuggingFaceApi } from './huggingface';
 import { createAikitApi, type AikitApi } from './aikit';
@@ -45,6 +46,7 @@ export type {
 export type { RuntimesApi } from './runtimes';
 export type { InstallationApi, ProviderCommandsResponse } from './installation';
 export type { GpuOperatorApi } from './gpu';
+export type { GatewayApi } from './gateway';
 export type { AutoscalerApi } from './autoscaler';
 export type {
   HuggingFaceApi,
@@ -76,6 +78,7 @@ export interface ApiClient {
   runtimes: RuntimesApi;
   installation: InstallationApi;
   gpuOperator: GpuOperatorApi;
+  gateway: GatewayApi;
   autoscaler: AutoscalerApi;
   huggingFace: HuggingFaceApi;
   aikit: AikitApi;
@@ -119,6 +122,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
     runtimes: createRuntimesApi(request),
     installation: createInstallationApi(request),
     gpuOperator: createGpuOperatorApi(request),
+    gateway: createGatewayApi(request),
     autoscaler: createAutoscalerApi(request),
     huggingFace: createHuggingFaceApi(request),
     aikit: createAikitApi(request),

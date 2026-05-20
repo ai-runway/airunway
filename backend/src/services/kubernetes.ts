@@ -1,10 +1,11 @@
 import * as k8s from '@kubernetes/client-node';
 import { configService } from './config';
 import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus } from '@airunway/shared';
-import { toModelDeploymentManifest, toDeploymentStatus } from '@airunway/shared';
+import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig } from '../lib/kubeconfig';
 import logger from '../lib/logger';
+import { getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
 
 // ModelDeployment CRD configuration
 const MODEL_DEPLOYMENT_CRD = {
@@ -13,6 +14,29 @@ const MODEL_DEPLOYMENT_CRD = {
   plural: 'modeldeployments',
   kind: 'ModelDeployment',
 };
+
+const GATEWAY_API_CRD_NAME = 'gateways.gateway.networking.k8s.io';
+const INFERENCE_POOL_CRD_NAME = 'inferencepools.inference.networking.k8s.io';
+
+const GATEWAY_API_VERSION_ANNOTATIONS = [
+  'gateway.networking.k8s.io/bundle-version',
+  'app.kubernetes.io/version',
+];
+
+const INFERENCE_EXTENSION_VERSION_ANNOTATIONS = [
+  'inference.networking.k8s.io/bundle-version',
+  'app.kubernetes.io/version',
+];
+
+const KAITO_WORKSPACE_CRD = 'workspaces.kaito.sh';
+const KAITO_NAMESPACE = 'kaito-workspace';
+const KAITO_OPERATOR_POD_SELECTOR = 'app.kubernetes.io/name=workspace,app.kubernetes.io/instance=kaito-workspace';
+const DYNAMO_CRD = 'dynamographdeployments.nvidia.com';
+const DYNAMO_NAMESPACE = 'dynamo-system';
+const DYNAMO_OPERATOR_POD_SELECTOR = 'control-plane=controller-manager,app.kubernetes.io/name=dynamo-operator,app.kubernetes.io/instance=dynamo-platform';
+const KUBERAY_CRD = 'rayservices.ray.io';
+const KUBERAY_NAMESPACE = 'ray-system';
+const KUBERAY_OPERATOR_POD_SELECTOR = 'app.kubernetes.io/name=kuberay-operator,app.kubernetes.io/instance=kuberay-operator';
 
 /**
  * GPU availability information from cluster nodes
@@ -60,6 +84,32 @@ export interface ClusterGpuCapacity {
   nodes: NodeGpuInfo[];           // Per-node breakdown
 }
 
+export interface PersistentVolumeClaimInfo {
+  name: string;
+  status: string;
+  storageClass: string;
+  capacity: string;
+}
+
+/**
+ * Extract the first non-empty version annotation from a Kubernetes CRD object or
+ * Kubernetes client response wrapper. The generated Kubernetes client has used
+ * both shapes across versions (`response.body` and the resource object itself).
+ */
+export function extractCRDVersionFromAnnotations(crdOrResponse: unknown, annotationKeys: string[]): string | undefined {
+  const crd = (crdOrResponse as any)?.body || crdOrResponse;
+  const annotations = (crd as any)?.metadata?.annotations || {};
+
+  for (const key of annotationKeys) {
+    const version = annotations[key];
+    if (typeof version === 'string' && version.trim().length > 0) {
+      return version.trim();
+    }
+  }
+
+  return undefined;
+}
+
 /**
  * Installation status for CRDs
  */
@@ -67,9 +117,62 @@ export interface InstallationStatus {
   installed: boolean;
   crdFound?: boolean;
   operatorRunning?: boolean;
+  requiresCRD?: boolean;
   version?: string;
   message?: string;
 }
+
+interface RuntimeInstallationProbe {
+  providerName: string;
+  crdDisplayName?: string;
+  crdName: string;
+  operatorNamespace: string;
+  operatorPodSelectors: string[];
+  fallbackPodSelectors: string[];
+  crossNamespaceFallbackPodSelectors?: string[];
+}
+
+interface OperatorPodProbeResult {
+  ready: boolean;
+  namespace?: string;
+  selector?: string;
+  podName?: string;
+  error?: string;
+}
+
+function getK8sStatusCode(error: any): number | undefined {
+  return error?.statusCode || error?.response?.statusCode;
+}
+
+function getK8sErrorMessage(error: any): string {
+  return error?.body?.message || error?.response?.body?.message || error?.message || String(error);
+}
+
+const RUNTIME_INSTALLATION_PROBES: Record<string, RuntimeInstallationProbe> = {
+  kaito: {
+    providerName: 'KAITO',
+    crdDisplayName: 'KAITO workspace CRD',
+    crdName: KAITO_WORKSPACE_CRD,
+    operatorNamespace: KAITO_NAMESPACE,
+    operatorPodSelectors: [KAITO_OPERATOR_POD_SELECTOR],
+    fallbackPodSelectors: ['app.kubernetes.io/name=workspace'],
+  },
+  dynamo: {
+    providerName: 'Dynamo',
+    crdName: DYNAMO_CRD,
+    operatorNamespace: DYNAMO_NAMESPACE,
+    operatorPodSelectors: [DYNAMO_OPERATOR_POD_SELECTOR],
+    fallbackPodSelectors: ['app.kubernetes.io/name=dynamo-operator', 'control-plane=controller-manager'],
+    crossNamespaceFallbackPodSelectors: ['app.kubernetes.io/name=dynamo-operator'],
+  },
+  kuberay: {
+    providerName: 'KubeRay',
+    crdName: KUBERAY_CRD,
+    operatorNamespace: KUBERAY_NAMESPACE,
+    operatorPodSelectors: [KUBERAY_OPERATOR_POD_SELECTOR],
+    fallbackPodSelectors: ['app.kubernetes.io/name=kuberay-operator'],
+  },
+};
 
 export function toPodStatus(pod: k8s.V1Pod): PodStatus {
   const initStatuses = pod.status?.initContainerStatuses || [];
@@ -89,6 +192,13 @@ export function toPodStatus(pod: k8s.V1Pod): PodStatus {
   };
 }
 
+function isRunningAndReadyPod(pod: k8s.V1Pod): boolean {
+  const containerStatuses = pod.status?.containerStatuses || [];
+  return pod.status?.phase === 'Running'
+    && containerStatuses.length > 0
+    && containerStatuses.every((status) => status.ready);
+}
+
 class KubernetesService {
   private kc: k8s.KubeConfig;
   private customObjectsApi: k8s.CustomObjectsApi;
@@ -106,6 +216,14 @@ class KubernetesService {
     this.defaultNamespace = process.env.DEFAULT_NAMESPACE || 'airunway-system';
   }
 
+  private createUserKubeConfig(userToken: string): k8s.KubeConfig {
+    const userKc = new k8s.KubeConfig();
+    const cluster = this.kc.getCurrentCluster();
+    const user: k8s.User = { name: 'user', token: userToken };
+    userKc.loadFromClusterAndUser(cluster!, user);
+    return userKc;
+  }
+
   /**
    * Create a CustomObjectsApi client authenticated with the given user token.
    */
@@ -113,21 +231,24 @@ class KubernetesService {
     if (!userToken) {
       return this.customObjectsApi;
     }
-    const userKc = new k8s.KubeConfig();
-    const cluster = this.kc.getCurrentCluster();
-    const user: k8s.User = { name: 'user', token: userToken };
-    userKc.loadFromClusterAndUser(cluster!, user);
-    return userKc.makeApiClient(k8s.CustomObjectsApi);
+    return this.createUserKubeConfig(userToken).makeApiClient(k8s.CustomObjectsApi);
+  }
+
+  /**
+   * Create a CoreV1Api client authenticated with the given user token.
+   */
+  private getCoreV1Api(userToken?: string): k8s.CoreV1Api {
+    if (!userToken) {
+      return this.coreV1Api;
+    }
+    return this.createUserKubeConfig(userToken).makeApiClient(k8s.CoreV1Api);
   }
 
   /**
    * Create user-scoped API clients for authorization checks (e.g. SSAR).
    */
   private createUserClients(userToken: string) {
-    const userKc = new k8s.KubeConfig();
-    const cluster = this.kc.getCurrentCluster();
-    const user: k8s.User = { name: 'user', token: userToken };
-    userKc.loadFromClusterAndUser(cluster!, user);
+    const userKc = this.createUserKubeConfig(userToken);
     return {
       authorizationV1Api: userKc.makeApiClient(k8s.AuthorizationV1Api),
     };
@@ -426,15 +547,28 @@ class KubernetesService {
 
   async getDeploymentPods(name: string, namespace: string): Promise<PodStatus[]> {
     const coreApi = this.coreV1Api;
-    // Try multiple label selectors since different providers use different labels
-    const labelSelectors = [
-      `app.kubernetes.io/instance=${name}`,  // Standard K8s label (Dynamo, KubeRay)
-      `airunway.ai/deployment=${name}`,  // AIRunway label
-      `kaito.sh/workspace=${name}`,          // KAITO workspace label
-      `app=${name}`,                         // Common fallback
+    const podsByName = new Map<string, k8s.V1Pod>();
+    const addPods = (pods: k8s.V1Pod[]) => {
+      for (const pod of pods) {
+        const podName = pod.metadata?.name;
+        if (podName && !podsByName.has(podName)) {
+          podsByName.set(podName, pod);
+        }
+      }
+    };
+
+    // Try multiple exact label selectors since different providers use different labels.
+    // Some deployment stacks create related components with different labels, so
+    // aggregate across all exact matches instead of stopping at the first selector.
+    const exactLabelSelectors = [
+      `app.kubernetes.io/instance=${name}`,      // Standard K8s label (Dynamo)
+      `airunway.ai/deployment=${name}`,          // AIRunway label
+      `airunway.ai/model-deployment=${name}`,    // Pod-template label used by KubeRay
+      `nvidia.com/dynamo-graph-deployment-name=${name}`, // Runtime label used by Dynamo/Grove pods
+      `kaito.sh/workspace=${name}`,              // KAITO workspace label
     ];
 
-    for (const labelSelector of labelSelectors) {
+    const listPodsByLabelSelector = async (labelSelector: string, operationName = 'getDeploymentPods'): Promise<k8s.V1Pod[]> => {
       try {
         const response = await withRetry(
           () => coreApi.listNamespacedPod(
@@ -445,22 +579,29 @@ class KubernetesService {
             undefined,
             labelSelector
           ),
-          { operationName: 'getDeploymentPods', maxRetries: 1 }
+          { operationName, maxRetries: 1 }
         );
 
         if (response.body.items.length > 0) {
           logger.debug({ name, namespace, labelSelector, podCount: response.body.items.length }, 'Found pods with selector');
-          return response.body.items.map((pod) => toPodStatus(pod));
         }
+        return response.body.items;
       } catch (error) {
         logger.debug({ error, name, namespace, labelSelector }, 'Error trying label selector');
-        // Continue to next selector
+        return [];
       }
-    }
+    };
 
-    // KubeRay creates pods with ray.io/cluster label set to a generated RayCluster name
-    // The RayCluster name is the RayService name with a random suffix, so we need to
-    // find pods where the ray.io/cluster label starts with the deployment name
+    const exactSelectorResults = await Promise.all(
+      exactLabelSelectors.map(labelSelector => listPodsByLabelSelector(labelSelector))
+    );
+    exactSelectorResults.forEach(addPods);
+
+    // KubeRay creates pods with ray.io/cluster label set to a generated RayCluster name.
+    // Modern Airunway KubeRay pods carry airunway.ai/model-deployment (handled above),
+    // but keep this as a backwards-compatible fallback. Only accept an exact name or
+    // the RayService-generated "<deployment>-raycluster..." form so deployments like
+    // "demo" do not match unrelated clusters like "demo2" or "demo-extra".
     try {
       const response = await withRetry(
         () => coreApi.listNamespacedPod(
@@ -474,22 +615,41 @@ class KubernetesService {
         { operationName: 'getDeploymentPods:kuberay', maxRetries: 1 }
       );
 
-      // Filter pods where ray.io/cluster label starts with the deployment name
       const matchingPods = response.body.items.filter(pod => {
         const clusterLabel = pod.metadata?.labels?.['ray.io/cluster'] || '';
-        return clusterLabel.startsWith(name);
+        return clusterLabel === name || clusterLabel.startsWith(`${name}-raycluster`);
       });
 
       if (matchingPods.length > 0) {
         logger.debug({ name, namespace, podCount: matchingPods.length }, 'Found KubeRay pods by cluster label prefix');
-        return matchingPods.map((pod) => toPodStatus(pod));
+        addPods(matchingPods);
       }
     } catch (error) {
       logger.debug({ error, name, namespace }, 'Error trying KubeRay cluster label selector');
     }
 
-    logger.debug({ name, namespace }, 'No pods found with any label selector');
-    return [];
+    if (podsByName.size === 0) {
+      // Last-resort fallback for older or third-party manifests that only set app=<name>.
+      // Avoid aggregating this broad label with canonical matches because unrelated pods
+      // can legitimately share the same app label in a namespace.
+      try {
+        const labelSelector = `app=${name}`;
+        const pods = await listPodsByLabelSelector(labelSelector, 'getDeploymentPods:fallbackApp');
+        addPods(pods);
+      } catch (error) {
+        logger.debug({ error, name, namespace }, 'Error trying fallback app label selector');
+      }
+    }
+
+    const pods = Array.from(podsByName.values())
+      .sort((a, b) => (a.metadata?.name || '').localeCompare(b.metadata?.name || ''));
+    if (pods.length === 0) {
+      logger.debug({ name, namespace }, 'No pods found with any label selector');
+      return [];
+    }
+
+    logger.debug({ name, namespace, podCount: pods.length }, 'Found deployment pods');
+    return pods.map((pod) => toPodStatus(pod));
   }
 
   /**
@@ -543,6 +703,33 @@ class KubernetesService {
   }
 
   /**
+   * Read a CRD once and derive both existence and version from the same response.
+   */
+  private async getCRDStatusFromAnnotations(
+    crdName: string,
+    annotationKeys: string[]
+  ): Promise<{ installed: boolean; version?: string }> {
+    try {
+      const response = await withRetry(
+        () => this.apiExtensionsApi.readCustomResourceDefinition(crdName),
+        { operationName: `getCRDStatusFromAnnotations:${crdName}`, maxRetries: 1 }
+      );
+
+      return {
+        installed: true,
+        version: extractCRDVersionFromAnnotations(response, annotationKeys),
+      };
+    } catch (error: any) {
+      const statusCode = getK8sStatusCode(error);
+      if (statusCode !== 404) {
+        logger.debug({ error: getK8sErrorMessage(error), crdName }, 'Could not read CRD status');
+      }
+    }
+
+    return { installed: false };
+  }
+
+  /**
    * Get status of all runtimes (providers) in the cluster.
    * Returns installation and health status for each runtime.
    */
@@ -565,39 +752,50 @@ class KubernetesService {
         );
 
         const items = (response.body as any)?.items || [];
-        for (const item of items) {
-          const name = item.metadata?.name || 'unknown';
-          const status = item.status || {};
-          const installation = item.spec?.installation || {};
-          const displayName = installation.description
-            ? name.charAt(0).toUpperCase() + name.slice(1)
-            : name.charAt(0).toUpperCase() + name.slice(1);
+        const runtimeEntries = await Promise.all(
+          items.map(async (item: any): Promise<RuntimeStatus> => {
+            const name = item.metadata?.name || 'unknown';
+            const status = item.status || {};
+            const annotations = item.metadata?.annotations;
+            const displayName = getProviderDisplayName(name, annotations);
+            const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
+            const requiresCRD = providerRequiresRuntimeCRD(name, item.spec?.capabilities?.requiresCRD, annotatedDisplayName);
+            const runtimeStatus = await this.checkProviderInstallationStatus(name, status, displayName, requiresCRD);
 
-          let healthy = status.ready === true;
-          let message: string | undefined = status.ready ? 'Provider ready' : 'Provider not ready';
-          let managedBy: string | undefined;
+            // providerHealth contributes managedBy enrichment and overrides
+            // health/message when the shim reports an Eno-related reason.
+            // Structural fields below remain runtimeStatus-driven.
+            let healthy = runtimeStatus.operatorRunning ?? false;
+            let message: string | undefined = runtimeStatus.message;
+            let managedBy: string | undefined;
+            try {
+              // Lazy import to avoid circular dependency (providerHealth imports kubernetesService).
+              const { getProviderHealth } = await import('./providerHealth');
+              const health = await getProviderHealth(name);
+              managedBy = health.managedBy;
+              if (health.reason === 'EnoPartialInstall' || health.reason === 'EnoPartialInstallSuspected') {
+                healthy = false;
+                message = health.message;
+              }
+            } catch (err) {
+              logger.warn({ error: (err as Error)?.message, providerId: name }, 'getProviderHealth failed, falling back to runtimeStatus');
+            }
 
-          try {
-            // Lazy import to avoid circular dependency (providerHealth imports kubernetesService)
-            const { getProviderHealth } = await import('./providerHealth');
-            const health = await getProviderHealth(name);
-            healthy = health.healthy;
-            message = health.message;
-            managedBy = health.managedBy;
-          } catch (err) {
-            logger.warn({ error: (err as Error)?.message, providerId: name }, 'getProviderHealth failed, using fallback');
-          }
-
-          runtimes.push({
-            id: name,
-            name: displayName,
-            installed: true,
-            healthy,
-            version: status.version,
-            message,
-            managedBy,
-          });
-        }
+            return {
+              id: name,
+              name: displayName,
+              installed: runtimeStatus.installed,
+              healthy,
+              crdFound: runtimeStatus.crdFound ?? runtimeStatus.installed,
+              operatorRunning: runtimeStatus.operatorRunning ?? false,
+              requiresCRD: runtimeStatus.requiresCRD ?? requiresCRD,
+              version: status.version,
+              message,
+              managedBy,
+            };
+          })
+        );
+        runtimes.push(...runtimeEntries);
       } catch (error: any) {
         const statusCode = error?.statusCode || error?.response?.statusCode;
         if (statusCode !== 404) {
@@ -774,6 +972,176 @@ class KubernetesService {
       gpuNodes: gpuAvailability.gpuNodes,
       message,
     };
+  }
+
+  /**
+   * Check whether the KAITO workspace operator is installed and running.
+   */
+  async checkKaitoInstallationStatus(): Promise<InstallationStatus> {
+    return this.checkOperatorBackedInstallationStatus('kaito');
+  }
+
+  async checkDynamoInstallationStatus(): Promise<InstallationStatus> {
+    return this.checkOperatorBackedInstallationStatus('dynamo');
+  }
+
+  async checkKubeRayInstallationStatus(): Promise<InstallationStatus> {
+    return this.checkOperatorBackedInstallationStatus('kuberay');
+  }
+
+  async checkProviderInstallationStatus(
+    providerId: string,
+    status?: { ready?: boolean },
+    _providerName?: string,
+    requiresCRD = true,
+  ): Promise<InstallationStatus> {
+    if (!requiresCRD) {
+      const ready = status?.ready === true;
+      return {
+        installed: ready,
+        crdFound: true,
+        operatorRunning: ready,
+        requiresCRD: false,
+        message: ready
+          ? 'Runtime is ready to use.'
+          : 'Provider is registered but not ready yet.',
+      };
+    }
+
+    switch (providerId) {
+      case 'kaito':
+        return this.checkKaitoInstallationStatus();
+      case 'dynamo':
+        return this.checkDynamoInstallationStatus();
+      case 'kuberay':
+        return this.checkKubeRayInstallationStatus();
+      default: {
+        const installed = status?.ready === true;
+        const displayName = _providerName || getProviderDisplayName(providerId);
+        return {
+          installed,
+          crdFound: installed,
+          operatorRunning: installed,
+          requiresCRD: true,
+          message: installed
+            ? `${displayName} is installed and running`
+            : `${displayName} is registered but not ready`,
+        };
+      }
+    }
+  }
+
+  private async checkOperatorBackedInstallationStatus(providerId: keyof typeof RUNTIME_INSTALLATION_PROBES): Promise<InstallationStatus> {
+    const probe = RUNTIME_INSTALLATION_PROBES[providerId];
+    const crdDisplayName = probe.crdDisplayName || `${probe.providerName} CRD`;
+    const [crdFound, operatorProbe] = await Promise.all([
+      this.checkCRDExists(probe.crdName),
+      this.findReadyOperatorPod(
+        probe.operatorNamespace,
+        probe.operatorPodSelectors,
+        probe.fallbackPodSelectors,
+        `check${probe.providerName.replace(/[^a-zA-Z0-9]/g, '')}OperatorPods`,
+        probe.crossNamespaceFallbackPodSelectors
+      ),
+    ]);
+    const operatorRunning = operatorProbe.ready;
+    const installed = crdFound && operatorRunning;
+
+    let message: string;
+    if (crdFound && operatorRunning) {
+      const location = operatorProbe.namespace && operatorProbe.namespace !== probe.operatorNamespace
+        ? ` in ${operatorProbe.namespace}`
+        : '';
+      message = `${crdDisplayName} found and ${probe.providerName} operator pods are ready${location}`;
+    } else if (crdFound && operatorProbe.error) {
+      message = `${crdDisplayName} found but ${probe.providerName} operator pods could not be checked: ${operatorProbe.error}`;
+    } else if (crdFound) {
+      message = `${crdDisplayName} found but no ready ${probe.providerName} operator pods were detected in ${probe.operatorNamespace} or matching known provider labels`;
+    } else {
+      message = `${crdDisplayName} not found`;
+    }
+
+    return {
+      installed,
+      crdFound,
+      operatorRunning,
+      requiresCRD: true,
+      message,
+    };
+  }
+
+  private async findReadyOperatorPod(
+    namespace: string,
+    operatorPodSelectors: string[],
+    fallbackPodSelectors: string[],
+    operationName: string,
+    crossNamespaceFallbackPodSelectors: string[] = fallbackPodSelectors,
+  ): Promise<OperatorPodProbeResult> {
+    const selectors = Array.from(new Set([...operatorPodSelectors, ...fallbackPodSelectors]));
+    const crossNamespaceSelectors = Array.from(new Set(crossNamespaceFallbackPodSelectors));
+    let firstError: string | undefined;
+
+    for (const selector of selectors) {
+      try {
+        const pods = await withRetry(
+          () => this.coreV1Api.listNamespacedPod(
+            namespace,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            selector
+          ),
+          { operationName: `${operationName}:${namespace}`, maxRetries: 1 }
+        );
+        const readyPod = pods.body.items.find((pod) => isRunningAndReadyPod(pod));
+        if (readyPod) {
+          return {
+            ready: true,
+            namespace,
+            selector,
+            podName: readyPod.metadata?.name,
+          };
+        }
+      } catch (error: any) {
+        const statusCode = getK8sStatusCode(error);
+        if (statusCode !== 404 && !firstError) {
+          firstError = getK8sErrorMessage(error);
+          logger.warn({ error: firstError, namespace, selector }, 'Unable to check provider operator pods in expected namespace');
+        }
+      }
+    }
+
+    for (const selector of crossNamespaceSelectors) {
+      try {
+        const pods = await withRetry(
+          () => this.coreV1Api.listPodForAllNamespaces(
+            undefined,
+            undefined,
+            undefined,
+            selector
+          ),
+          { operationName: `${operationName}:all-namespaces`, maxRetries: 1 }
+        );
+        const readyPod = pods.body.items.find((pod) => isRunningAndReadyPod(pod));
+        if (readyPod) {
+          return {
+            ready: true,
+            namespace: readyPod.metadata?.namespace,
+            selector,
+            podName: readyPod.metadata?.name,
+          };
+        }
+      } catch (error: any) {
+        const statusCode = getK8sStatusCode(error);
+        if (statusCode !== 404 && !firstError) {
+          firstError = getK8sErrorMessage(error);
+          logger.warn({ error: firstError, selector }, 'Unable to check provider operator pods across namespaces');
+        }
+      }
+    }
+
+    return { ready: false, error: firstError };
   }
 
   /**
@@ -1355,6 +1723,47 @@ class KubernetesService {
     }
   }
 
+  private selectLogContainer(pod: k8s.V1Pod): string | undefined {
+    const containers = pod.spec?.containers || [];
+    if (containers.length === 0) {
+      return undefined;
+    }
+
+    const statuses = new Map((pod.status?.containerStatuses || []).map(status => [status.name, status]));
+    const preferredNames = ['main', 'vllm', 'model', 'ray-head', 'ray-worker', 'inference', 'worker', 'server', 'frontend'];
+
+    for (const name of preferredNames) {
+      if (containers.some(container => container.name === name)) {
+        return name;
+      }
+    }
+
+    const readyContainer = containers.find(container => statuses.get(container.name)?.ready);
+    return readyContainer?.name || containers[0].name;
+  }
+
+  private async resolveLogContainer(podName: string, namespace: string, requestedContainer?: string): Promise<string | undefined> {
+    if (requestedContainer) {
+      return requestedContainer;
+    }
+
+    const response = await withRetry(
+      () => this.coreV1Api.listNamespacedPod(
+        namespace,
+        undefined,
+        undefined,
+        undefined,
+        `metadata.name=${podName}`,
+        undefined,
+        1
+      ),
+      { operationName: 'getPodLogs:listPodByName', maxRetries: 1 }
+    );
+
+    const pod = response.body.items[0];
+    return pod ? this.selectLogContainer(pod) : undefined;
+  }
+
   /**
    * Get logs from a pod
    */
@@ -1369,11 +1778,12 @@ class KubernetesService {
   ): Promise<string> {
     try {
       const coreApi = this.coreV1Api;
+      const container = await this.resolveLogContainer(podName, namespace, options?.container);
       const response = await withRetry(
         () => coreApi.readNamespacedPodLog(
           podName,
           namespace,
-          options?.container,         // container
+          container,                  // container
           undefined,                  // follow (not supported in this API)
           undefined,                  // insecureSkipTLSVerifyBackend
           undefined,                  // limitBytes
@@ -1564,42 +1974,75 @@ class KubernetesService {
   }
 
   /**
-   * Get gateway status: checks if Gateway API InferencePool CRD exists,
-   * lists InferencePool resources, and finds gateway endpoint from Gateway resources.
+   * Get gateway status by checking the required InferencePool, HTTPRoute, and
+   * Gateway CRDs, listing Gateway resources, and selecting the Gateway the
+   * controller auto-detection would select.
+   *
+   * `available` is true only when the CRDs exist and a Gateway can be selected
+   * (a single Gateway, or a Gateway labeled `INFERENCE_GATEWAY_LABEL=true` when
+   * multiple Gateways exist). `endpoint` is the selected Gateway's first status
+   * address value, when the Gateway has published one.
    */
   async getGatewayStatus(): Promise<GatewayInfo> {
-    // Check if InferencePool CRD exists
+    // Check if InferencePool CRD exists - without it, gateway integration is not supported.
     const inferencePoolCrdExists = await this.checkCRDExists('inferencepools.inference.networking.k8s.io');
     if (!inferencePoolCrdExists) {
       return { available: false };
     }
 
-    // Try to find a Gateway endpoint
-    let endpoint: string | undefined;
-    const gatewayCrdExists = await this.checkCRDExists('gateways.gateway.networking.k8s.io');
-    if (gatewayCrdExists) {
-      try {
-        const response = await withRetry(
-          () => this.customObjectsApi.listClusterCustomObject(
-            'gateway.networking.k8s.io',
-            'v1',
-            'gateways'
-          ),
-          { operationName: 'listGateways', maxRetries: 1 }
-        );
-        const items = (response.body as { items?: Array<{ status?: { addresses?: Array<{ value?: string }> } }> }).items || [];
-        for (const gw of items) {
-          const addr = gw.status?.addresses?.[0]?.value;
-          if (addr) {
-            endpoint = addr;
-            break;
-          }
-        }
-      } catch (error: any) {
-        logger.debug({ error: error?.message }, 'Could not list Gateway resources');
-      }
+    // The controller creates HTTPRoutes, so the HTTPRoute CRD must be present.
+    const httpRouteCrdExists = await this.checkCRDExists('httproutes.gateway.networking.k8s.io');
+    if (!httpRouteCrdExists) {
+      return { available: false };
     }
 
+    // The Gateway CRD must exist before the backend can list Gateway resources.
+    const gatewayCrdExists = await this.checkCRDExists('gateways.gateway.networking.k8s.io');
+    if (!gatewayCrdExists) {
+      return { available: false };
+    }
+
+    // "Available" means the controller auto-detection can select a Gateway -
+    // mirror that path so the UI matches what it will actually pick when
+    // reconciling a ModelDeployment with gateway.enabled=true and no explicit
+    // gateway override.
+    type GatewayItem = {
+      metadata?: { name?: string; namespace?: string; labels?: Record<string, string> };
+      status?: { addresses?: Array<{ value?: string }> };
+    };
+    let items: GatewayItem[] = [];
+    try {
+      const response = await withRetry(
+        () => this.customObjectsApi.listClusterCustomObject(
+          'gateway.networking.k8s.io',
+          'v1',
+          'gateways'
+        ),
+        { operationName: 'listGateways', maxRetries: 1 }
+      );
+      items = (response.body as { items?: GatewayItem[] }).items || [];
+    } catch (error: any) {
+      logger.debug({ error: error?.message }, 'Could not list Gateway resources');
+      return { available: false };
+    }
+
+    if (items.length === 0) {
+      return { available: false };
+    }
+
+    let selected: GatewayItem | undefined;
+    if (items.length === 1) {
+      selected = items[0];
+    } else {
+      // Multiple Gateways: require the controller's inference-gateway label to disambiguate.
+      const labeled = items.filter((gw) => gw.metadata?.labels?.[INFERENCE_GATEWAY_LABEL] === 'true');
+      if (labeled.length === 0) {
+        return { available: false };
+      }
+      selected = labeled[0];
+    }
+
+    const endpoint = selected?.status?.addresses?.[0]?.value;
     return { available: true, endpoint };
   }
 
@@ -1649,10 +2092,15 @@ class KubernetesService {
   async checkGatewayCRDStatus(): Promise<GatewayCRDStatus> {
     const { PINNED_GAIE_VERSION, GAIE_CRD_URL, GATEWAY_API_CRD_URL } = await import('@airunway/shared');
 
-    const [gatewayApiInstalled, inferenceExtInstalled] = await Promise.all([
-      this.checkCRDExists('gateways.gateway.networking.k8s.io'),
-      this.checkCRDExists('inferencepools.inference.networking.k8s.io'),
+    const [gatewayApiStatus, inferenceExtStatus] = await Promise.all([
+      this.getCRDStatusFromAnnotations(GATEWAY_API_CRD_NAME, GATEWAY_API_VERSION_ANNOTATIONS),
+      this.getCRDStatusFromAnnotations(INFERENCE_POOL_CRD_NAME, INFERENCE_EXTENSION_VERSION_ANNOTATIONS),
     ]);
+
+    const gatewayApiInstalled = gatewayApiStatus.installed;
+    const inferenceExtInstalled = inferenceExtStatus.installed;
+    const gatewayApiVersion = gatewayApiStatus.version;
+    const inferenceExtVersion = inferenceExtStatus.version;
 
     // Get live gateway status
     let gatewayAvailable = false;
@@ -1684,6 +2132,8 @@ class KubernetesService {
     return {
       gatewayApiInstalled,
       inferenceExtInstalled,
+      gatewayApiVersion,
+      inferenceExtVersion,
       pinnedVersion: PINNED_GAIE_VERSION,
       gatewayAvailable,
       gatewayEndpoint,
@@ -1742,6 +2192,31 @@ class KubernetesService {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
     return await response.text();
+  }
+
+  /**
+   * List PersistentVolumeClaims in a namespace
+   */
+  async listPVCs(namespace: string, userToken?: string): Promise<PersistentVolumeClaimInfo[]> {
+    const api = this.getCoreV1Api(userToken);
+    const response = await withRetry(
+      () => api.listNamespacedPersistentVolumeClaim(namespace),
+      { operationName: 'listPVCs', maxRetries: 1 }
+    );
+
+    return (response.body.items || []).flatMap((pvc) => {
+      const name = pvc.metadata?.name;
+      if (!name) {
+        return [];
+      }
+
+      return [{
+        name,
+        status: pvc.status?.phase || 'Unknown',
+        storageClass: pvc.spec?.storageClassName || '',
+        capacity: pvc.status?.capacity?.['storage'] || pvc.spec?.resources?.requests?.['storage'] || '',
+      }];
+    });
   }
 }
 

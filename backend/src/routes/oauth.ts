@@ -118,23 +118,14 @@ const oauth = new Hono()
       });
     }
   })
-  // Get stored PKCE verifier by state - used by callback handler
+  // Deprecated: previously returned the stored PKCE verifier so the client could
+  // call POST /huggingface/token itself. That exposed the verifier to the
+  // browser. Use POST /huggingface/token-with-state instead — the verifier
+  // never leaves the server. This handler now always returns 410 Gone.
   .get('/huggingface/verifier/:state', (c) => {
-    const state = c.req.param('state');
-    const data = pkceStore.get(state);
-
-    if (!data) {
-      throw new HTTPException(404, {
-        message: 'OAuth session not found or expired',
-      });
-    }
-
-    // Delete after retrieval (one-time use)
-    pkceStore.delete(state);
-
-    return c.json({
-      codeVerifier: data.verifier,
-      redirectUri: data.redirectUri,
+    // This endpoint is deprecated — use POST /huggingface/token-with-state instead
+    throw new HTTPException(410, {
+      message: 'This endpoint has been removed for security. Use POST /huggingface/token-with-state instead.',
     });
   })
   .post('/huggingface/token', zValidator('json', hfTokenExchangeSchema), async (c) => {
@@ -146,8 +137,29 @@ const oauth = new Hono()
     } catch (error) {
       logger.error({ error }, 'HuggingFace OAuth token exchange failed');
       throw new HTTPException(400, {
-        message: error instanceof Error ? error.message : 'OAuth token exchange failed',
+        message: 'OAuth token exchange failed',
       });
+    }
+  })
+  // Server-side token exchange using stored PKCE verifier — verifier never leaves the server
+  .post('/huggingface/token-with-state', zValidator('json', z.object({
+    code: z.string().min(1),
+    state: z.string().uuid(),
+  })), async (c) => {
+    const { code, state } = c.req.valid('json');
+
+    const data = pkceStore.get(state);
+    if (!data) {
+      throw new HTTPException(404, { message: 'OAuth session not found or expired' });
+    }
+
+    try {
+      const result = await huggingFaceService.handleOAuthCallback(code, data.verifier, data.redirectUri);
+      pkceStore.delete(state);
+      return c.json(result);
+    } catch (error) {
+      logger.error({ error }, 'HuggingFace OAuth token exchange failed');
+      throw new HTTPException(400, { message: 'OAuth token exchange failed' });
     }
   });
 

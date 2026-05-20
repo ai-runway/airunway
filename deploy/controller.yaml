@@ -80,9 +80,30 @@ spec:
                       - llamacpp
                       type: string
                     type: array
+                  gateway:
+                    description: gateway defines the provider's gateway-related capabilities.
+                    properties:
+                      inferencePoolNamePattern:
+                        description: |-
+                          inferencePoolNamePattern is the naming pattern for provider-created pools.
+                          Supports {name} and {namespace} placeholders.
+                        type: string
+                      inferencePoolNamespace:
+                        description: |-
+                          inferencePoolNamespace is the namespace where the provider creates its InferencePool.
+                          Supports {name} and {namespace} placeholders (resolved from the ModelDeployment).
+                          When the resolved namespace differs from the ModelDeployment namespace, the
+                          controller creates a ReferenceGrant for cross-namespace HTTPRoute routing.
+                        type: string
+                    type: object
                   gpuSupport:
                     description: gpuSupport indicates if the provider supports GPU
                       inference
+                    type: boolean
+                  requiresCRD:
+                    description: |-
+                      requiresCRD indicates if this provider needs an upstream CRD/operator installation.
+                      When omitted, clients should treat this as true for backward compatibility.
                     type: boolean
                   servingModes:
                     description: servingModes is the list of supported serving modes
@@ -92,95 +113,6 @@ spec:
                       - aggregated
                       - disaggregated
                       type: string
-                    type: array
-                type: object
-              documentation:
-                description: documentation is a URL to the provider documentation
-                type: string
-              installation:
-                description: installation defines how to install the provider's upstream
-                  components
-                properties:
-                  defaultNamespace:
-                    description: defaultNamespace is the default namespace for the
-                      provider's workloads
-                    type: string
-                  description:
-                    description: description is a human-readable description of the
-                      provider
-                    type: string
-                  helmCharts:
-                    description: helmCharts are the Helm charts to install
-                    items:
-                      description: HelmChart defines a Helm chart to install
-                      properties:
-                        chart:
-                          description: chart is the chart reference (e.g. "repo/chart"
-                            or a URL)
-                          type: string
-                        createNamespace:
-                          description: createNamespace indicates whether to create
-                            the namespace if it doesn't exist
-                          type: boolean
-                        name:
-                          description: name is the release name for the Helm chart
-                          type: string
-                        namespace:
-                          description: namespace is the Kubernetes namespace to install
-                            into
-                          type: string
-                        values:
-                          additionalProperties:
-                            x-kubernetes-preserve-unknown-fields: true
-                          description: values are Helm values passed via --set-json
-                            using dot-delimited keys
-                          type: object
-                        version:
-                          description: version is the chart version to install
-                          type: string
-                      required:
-                      - chart
-                      - name
-                      - namespace
-                      type: object
-                    type: array
-                  helmRepos:
-                    description: helmRepos are the Helm repositories needed for installation
-                    items:
-                      description: HelmRepo defines a Helm repository needed for installation
-                      properties:
-                        name:
-                          description: name is the local name for the Helm repository
-                          type: string
-                        url:
-                          description: url is the Helm repository URL
-                          type: string
-                      required:
-                      - name
-                      - url
-                      type: object
-                    type: array
-                  steps:
-                    description: steps are the ordered installation steps with commands
-                    items:
-                      description: InstallationStep defines a step in the provider
-                        installation process
-                      properties:
-                        command:
-                          description: command is the shell command to run for this
-                            step
-                          type: string
-                        description:
-                          description: description is a detailed explanation of what
-                            this step does
-                          type: string
-                        title:
-                          description: title is a short description of this step
-                          type: string
-                      required:
-                      - description
-                      - title
-                      type: object
                     type: array
                 type: object
               selectionRules:
@@ -379,6 +311,19 @@ spec:
                       Maps to engine-specific flags (--max-model-len for vllm, etc.)
                     format: int32
                     type: integer
+                  enablePrefixCaching:
+                    default: true
+                    description: |-
+                      enablePrefixCaching enables prefix caching for faster inference on repeated prompts
+                      Required for KV-cache-aware routing to be effective
+                      Only applicable for vllm and sglang engines
+                    type: boolean
+                  enforceEager:
+                    default: false
+                    description: |-
+                      enforceEager forces eager execution mode (disables CUDA graphs)
+                      Only applicable for vllm and sglang engines
+                    type: boolean
                   trustRemoteCode:
                     default: false
                     description: |-
@@ -1114,11 +1059,18 @@ rules:
   - secrets
   verbs:
   - create
-  - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resourceNames:
+  - airunway-webhook-server-cert
+  resources:
+  - secrets
+  verbs:
+  - get
   - patch
   - update
-  - watch
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -1282,12 +1234,8 @@ rules:
   - leases
   verbs:
   - create
-  - delete
   - get
-  - list
-  - patch
   - update
-  - watch
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
@@ -1302,6 +1250,7 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - httproutes
+  - referencegrants
   verbs:
   - create
   - delete

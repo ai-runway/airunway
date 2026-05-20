@@ -187,25 +187,10 @@ export function RuntimesStatus() {
                   size="small"
                   startIcon={<Icon icon="mdi:download" />}
                   onClick={() => handleInstall(runtime.id)}
-                  loading={installing === runtime.id}
+                  disabled={installing === runtime.id}
                 >
-                  Deploy
+                  {installing === runtime.id ? 'Deploying...' : 'Deploy'}
                 </Button>
-                // <button
-                //   onClick={() => handleInstall(runtime.id)}
-                //   disabled={installing === runtime.id}
-                //   style={{
-                //     padding: '8px 16px',
-                //     backgroundColor: '#1976d2',
-                //     color: 'white',
-                //     border: 'none',
-                //     borderRadius: '4px',
-                //     cursor: installing === runtime.id ? 'wait' : 'pointer',
-                //     opacity: installing === runtime.id ? 0.7 : 1,
-                //   }}
-                // >
-                //   {installing === runtime.id ? 'Installing...' : `Install ${runtime.name}`}
-                // </button>
               )}
               {/* Show Upgrade and Uninstall only when fully healthy */}
               {runtime.healthy && (
@@ -217,51 +202,20 @@ export function RuntimesStatus() {
                     startIcon={<Icon icon="mdi:arrow-up-circle" />}
                     sx={{ fontWeight: 600, boxShadow: 3, alignSelf: 'flex-start', mt: 'auto', display: 'flex', alignItems: 'center' }}
                     onClick={() => handleInstall(runtime.id)}
-                    loading={installing === runtime.id}
                     disabled={installing === runtime.id || uninstalling === runtime.id}
                   >
-                    Upgrade
+                    {installing === runtime.id ? 'Upgrading...' : 'Upgrade'}
                   </Button>
-                  {/* <button
-                    onClick={() => handleInstall(runtime.id)}
-                    disabled={installing === runtime.id || uninstalling === runtime.id}
-                    style={{
-                      padding: '8px 16px',
-                      backgroundColor: 'transparent',
-                      color: 'inherit',
-                      border: '1px solid rgba(128, 128, 128, 0.3)',
-                      borderRadius: '4px',
-                      cursor: installing === runtime.id ? 'wait' : 'pointer',
-                    }}
-                  >
-                    Upgrade
-                  </button> */}
                   <Button
                     variant="contained"
                     color="error"
                     size="small"
                     startIcon={<Icon icon="mdi:trash" />}
                     onClick={() => handleUninstall(runtime.id)}
-                    loading={uninstalling === runtime.id}
                     disabled={uninstalling === runtime.id || installing === runtime.id}
-                  >
-                    Uninstall
-                  </Button>
-                  {/* <button
-                    onClick={() => handleUninstall(runtime.id)}
-                    disabled={uninstalling === runtime.id || installing === runtime.id}
-                    style={{
-                      padding: '8px 16px',
-                      backgroundColor: uninstalling === runtime.id ? '#d32f2f' : 'transparent',
-                      color: uninstalling === runtime.id ? 'white' : '#d32f2f',
-                      border: '1px solid #d32f2f',
-                      borderRadius: '4px',
-                      cursor: uninstalling === runtime.id ? 'wait' : 'pointer',
-                      opacity: uninstalling === runtime.id ? 0.7 : 1,
-                    }}
                   >
                     {uninstalling === runtime.id ? 'Uninstalling...' : 'Uninstall'}
-                  </button> */}
+                  </Button>
                 </>
               )}
             </div>

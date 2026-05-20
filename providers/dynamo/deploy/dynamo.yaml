@@ -1,4 +1,9 @@
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: dynamo-system
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   labels:

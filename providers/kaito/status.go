@@ -65,7 +65,7 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 		Phase:        airunwayv1alpha1.DeploymentPhasePending,
 	}
 
-	// Try status.state first (KAITO 0.9.0+)
+	// Try status.state first (KAITO 0.10.0+)
 	state, stateFound, _ := unstructured.NestedString(upstream.Object, "status", "state")
 
 	// Always parse conditions when present (needed for replicas regardless of phase source)
@@ -149,7 +149,7 @@ func (t *StatusTranslator) mapConditionsToPhase(condMap map[string]conditionInfo
 	return airunwayv1alpha1.DeploymentPhasePending, ""
 }
 
-// mapStateToPhase maps the KAITO 0.9.0+ status.state field to a ModelDeployment phase
+// mapStateToPhase maps the KAITO 0.10.0+ status.state field to a ModelDeployment phase
 func (t *StatusTranslator) mapStateToPhase(state string) (airunwayv1alpha1.DeploymentPhase, string) {
 	switch state {
 	case "Ready":
@@ -179,7 +179,7 @@ func (t *StatusTranslator) extractReplicas(upstream *unstructured.Unstructured, 
 	}
 
 	// Mark all replicas ready when workspace is in a successful state.
-	// Two sources: status.state (KAITO 0.9.0+) or WorkspaceSucceeded condition (older KAITO).
+	// Two sources: status.state (KAITO 0.10.0+) or WorkspaceSucceeded condition (older KAITO).
 	state, _, _ := unstructured.NestedString(upstream.Object, "status", "state")
 	stateReady := state == "Ready" || state == "Succeeded"
 	condReady := func() bool {

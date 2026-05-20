@@ -47,16 +47,18 @@ The selection reason is recorded in `status.provider.selectedReason` for observa
 
 ### Provider Capability Matrix
 
-| Criteria          | KAITO   | Dynamo        | KubeRay            | llm-d              |
-| ----------------- | ------- | ------------- | ------------------ | ------------------ |
-| CPU inference     | **Yes** | No            | No                 | No                 |
-| GPU inference     | Yes     | **Yes**       | Yes                | Yes                |
-| vLLM engine       | Yes     | **Yes**       | Yes                | Yes                |
-| sglang engine     | No      | **Yes**       | No                 | No                 |
-| trtllm engine     | No      | **Yes**       | No                 | No                 |
-| llamacpp engine   | **Yes** | No            | No                 | No                 |
-| Disaggregated P/D | No      | **Yes**       | Yes                | Yes                |
-| Auto-selection    | Yes     | Yes (default) | No (explicit only) | No (explicit only) |
+| Criteria              | KAITO   | Dynamo        | KubeRay            | llm-d              |
+| --------------------- | ------- | ------------- | ------------------ | ------------------ |
+| CPU inference         | **Yes** | No            | No                 | No                 |
+| GPU inference         | Yes     | **Yes**       | Yes                | Yes                |
+| vLLM engine           | Yes     | **Yes**       | Yes                | Yes                |
+| sglang engine         | No      | **Yes**       | No                 | No                 |
+| trtllm engine         | No      | **Yes**       | No                 | No                 |
+| llamacpp engine       | **Yes** | No            | No                 | No                 |
+| Disaggregated P/D     | No      | **Yes**       | Yes                | Yes                |
+| Self-managed InferencePool | No | **Yes**       | No                 | No                 |
+| Self-managed EPP      | No      | **Yes**       | No                 | No                 |
+| Auto-selection        | Yes     | Yes (default) | No (explicit only) | No (explicit only) |
 
 ## Provider Abstraction
 

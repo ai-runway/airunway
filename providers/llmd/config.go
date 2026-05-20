@@ -18,6 +18,7 @@ package llmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -58,6 +59,8 @@ func NewProviderConfigManager(c client.Client) *ProviderConfigManager {
 
 // GetProviderConfigSpec returns the InferenceProviderConfigSpec for llm-d
 func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
+	requiresCRD := false
+
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
 			Engines: []airunwayv1alpha1.EngineType{
@@ -67,26 +70,30 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 				airunwayv1alpha1.ServingModeAggregated,
 				airunwayv1alpha1.ServingModeDisaggregated,
 			},
-			CPUSupport: false,
-			GPUSupport: true,
+			CPUSupport:  false,
+			GPUSupport:  true,
+			RequiresCRD: &requiresCRD,
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{},
-		Installation: &airunwayv1alpha1.InstallationInfo{
-			Description: "llm-d provider: deploys vLLM Deployments + Services directly. Requires GPU nodes with the NVIDIA device plugin.",
-			Steps: []airunwayv1alpha1.InstallationStep{
-				{
-					Title:       "Install NVIDIA GPU Device Plugin",
-					Command:     "kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.17.0/deployments/static/nvidia-device-plugin.yml",
-					Description: "Install the NVIDIA device plugin so GPU nodes advertise nvidia.com/gpu resources.",
-				},
-				{
-					Title:       "Create HuggingFace Token Secret",
-					Command:     "kubectl create secret generic llm-d-hf-token --from-literal=HF_TOKEN=<your-token> -n <model-namespace>",
-					Description: "Create the HuggingFace token secret in the same namespace as your ModelDeployment.",
-				},
+	}
+}
+
+// GetInstallationInfo returns the installation metadata for llm-d
+func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
+	return &airunwayv1alpha1.InstallationInfo{
+		Description: "llm-d provider: deploys vLLM Deployments + Services directly. Requires GPU nodes with the NVIDIA device plugin.",
+		Steps: []airunwayv1alpha1.InstallationStep{
+			{
+				Title:       "Install NVIDIA GPU Device Plugin",
+				Command:     "kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.17.0/deployments/static/nvidia-device-plugin.yml",
+				Description: "Install the NVIDIA device plugin so GPU nodes advertise nvidia.com/gpu resources.",
+			},
+			{
+				Title:       "Create HuggingFace Token Secret",
+				Command:     "kubectl create secret generic llm-d-hf-token --from-literal=HF_TOKEN=<your-token> -n <model-namespace>",
+				Description: "Create the HuggingFace token secret in the same namespace as your ModelDeployment.",
 			},
 		},
-		Documentation: ProviderDocumentation,
 	}
 }
 
@@ -94,19 +101,23 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 
+	annotations, err := buildAnnotations()
+	if err != nil {
+		return fmt.Errorf("failed to build annotations: %w", err)
+	}
+
 	config := &airunwayv1alpha1.InferenceProviderConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ProviderConfigName,
+			Name:        ProviderConfigName,
+			Annotations: annotations,
 		},
 		Spec: GetProviderConfigSpec(),
 	}
 
-	// Check if config already exists
 	existing := &airunwayv1alpha1.InferenceProviderConfig{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
+	err = m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
 
 	if errors.IsNotFound(err) {
-		// Create new config
 		logger.Info("Creating InferenceProviderConfig", "name", ProviderConfigName)
 		if err := m.client.Create(ctx, config); err != nil {
 			return fmt.Errorf("failed to create InferenceProviderConfig: %w", err)
@@ -114,8 +125,13 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
 	} else {
-		// Update existing config spec if changed
 		existing.Spec = config.Spec
+		if existing.Annotations == nil {
+			existing.Annotations = make(map[string]string)
+		}
+		for k, v := range annotations {
+			existing.Annotations[k] = v
+		}
 		logger.Info("Updating InferenceProviderConfig", "name", ProviderConfigName)
 		if err := m.client.Update(ctx, existing); err != nil {
 			return fmt.Errorf("failed to update InferenceProviderConfig: %w", err)
@@ -181,4 +197,15 @@ func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
 // Unregister marks the provider as not ready
 func (m *ProviderConfigManager) Unregister(ctx context.Context) error {
 	return m.UpdateStatus(ctx, false)
+}
+
+func buildAnnotations() (map[string]string, error) {
+	installJSON, err := json.Marshal(GetInstallationInfo())
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal installation info: %w", err)
+	}
+	return map[string]string{
+		airunwayv1alpha1.AnnotationInstallation:  string(installJSON),
+		airunwayv1alpha1.AnnotationDocumentation: ProviderDocumentation,
+	}, nil
 }

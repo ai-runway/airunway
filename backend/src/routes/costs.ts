@@ -64,14 +64,7 @@ export const costsRoutes = new Hono()
     }
 
     // Try real-time pricing first, fall back to static
-    const nodePoolCosts: Array<NodePoolCostEstimate & { realtimePricing?: {
-      instanceType: string;
-      hourlyPrice: number;
-      monthlyPrice: number;
-      currency: string;
-      region?: string;
-      source: 'realtime' | 'cached';
-    } }> = [];
+    const nodePoolCosts: NodePoolCostEstimate[] = [];
 
     for (const pool of nodePools) {
       // For CPU pools, create a simple cost structure

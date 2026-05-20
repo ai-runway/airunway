@@ -45,24 +45,12 @@ describe('OAuth → Secrets → Deploy Flow', () => {
 
     const { state } = startData;
 
-    // ---- Step 3: Retrieve PKCE verifier (one-time use) ----
+    // ---- Step 3: Verifier endpoint is deprecated (returns 410) ----
     const verifierRes = await app.request(`/api/oauth/huggingface/verifier/${state}`);
-    expect(verifierRes.status).toBe(200);
-    const verifierData = await verifierRes.json();
-    expect(verifierData.codeVerifier).toBeDefined();
-    expect(verifierData.codeVerifier.length).toBeGreaterThanOrEqual(43);
-    expect(verifierData.redirectUri).toBe('http://localhost:3000/callback');
+    expect(verifierRes.status).toBe(410);
 
-    // ---- Step 4: Verify verifier is consumed (one-time use) ----
-    const verifierRes2 = await app.request(`/api/oauth/huggingface/verifier/${state}`);
-    expect(verifierRes2.status).toBe(404);
-
-    // ---- Step 5: Exchange code for token ----
-    // Mock at the fetch level (not mockServiceMethod) because huggingface.test.ts
-    // uses `delete require.cache[require.resolve('./huggingface')]` which can cause
-    // the huggingFaceService singleton imported here to differ from the one the route
-    // handler uses. Mocking globalThis.fetch bypasses the singleton entirely.
-    // handleOAuthCallback calls fetch(HF_TOKEN_URL) then fetch(HF_WHOAMI_URL).
+    // ---- Step 4: Exchange code for token using server-side verifier ----
+    // The new /token-with-state endpoint keeps the PKCE verifier server-side
     restores.push(
       mockFetchByUrl({
         '/oauth/token': {
@@ -74,13 +62,12 @@ describe('OAuth → Secrets → Deploy Flow', () => {
       }),
     );
 
-    const tokenRes = await app.request('/api/oauth/huggingface/token', {
+    const tokenRes = await app.request('/api/oauth/huggingface/token-with-state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         code: 'auth-code-123',
-        codeVerifier: verifierData.codeVerifier,
-        redirectUri: 'http://localhost:3000/callback',
+        state,
       }),
     });
     expect(tokenRes.status).toBe(200);
@@ -192,6 +179,63 @@ describe('OAuth → Secrets → Deploy Flow', () => {
   // Edge cases
   // ==========================================================================
 
+  test('POST /token-with-state preserves PKCE state after transient token exchange failure', async () => {
+    const startRes = await app.request('/api/oauth/huggingface/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirectUri: 'http://localhost:3000/callback' }),
+    });
+    expect(startRes.status).toBe(200);
+    const startData = await startRes.json();
+    const { state } = startData;
+
+    const restoreFailure = mockFetchByUrl({
+      '/oauth/token': {
+        body: { error: 'temporarily_unavailable' },
+        ok: false,
+        status: 500,
+      },
+    });
+    restores.push(restoreFailure);
+
+    const firstRes = await app.request('/api/oauth/huggingface/token-with-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'auth-code-transient-failure',
+        state,
+      }),
+    });
+    expect(firstRes.status).toBe(400);
+
+    restoreFailure();
+    restores.pop();
+
+    restores.push(
+      mockFetchByUrl({
+        '/oauth/token': {
+          body: { access_token: 'hf_retry_token_abc123', expires_in: 3600, scope: 'openid profile read-repos' },
+        },
+        '/api/whoami-v2': {
+          body: { id: 'user-123', name: 'testuser', fullname: 'Test User', email: 'test@example.com', avatarUrl: 'https://huggingface.co/avatars/testuser.png' },
+        },
+      }),
+    );
+
+    const retryRes = await app.request('/api/oauth/huggingface/token-with-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'auth-code-retry',
+        state,
+      }),
+    });
+    expect(retryRes.status).toBe(200);
+    const retryData = await retryRes.json();
+    expect(retryData.accessToken).toBe('hf_retry_token_abc123');
+    expect(retryData.user.name).toBe('testuser');
+  });
+
   test('POST /token with invalid code returns 400', async () => {
     // Mock fetch to return an error from HuggingFace token endpoint
     restores.push(
@@ -236,9 +280,9 @@ describe('OAuth → Secrets → Deploy Flow', () => {
     expect(res.status).toBe(400);
   });
 
-  test('GET /verifier/:state with unknown state returns 404', async () => {
+  test('GET /verifier/:state returns 410 (deprecated endpoint)', async () => {
     const res = await app.request('/api/oauth/huggingface/verifier/nonexistent-state');
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(410);
   });
 
   test('POST /secrets/huggingface with empty body returns 400', async () => {

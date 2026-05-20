@@ -35,8 +35,11 @@ const (
 	// RayServiceKind is the kind for RayService
 	RayServiceKind = "RayService"
 
-	// DefaultImage is the default Ray image for vLLM workloads
-	DefaultImage = "rayproject/ray-ml:2.44.0-py311-gpu"
+	// DefaultImage is the default Ray image for vLLM workloads. This default uses
+	// the CUDA-specific cu128 variant and may require compatible NVIDIA
+	// driver/CUDA support in the target cluster. Users can override this via
+	// spec.image if their environment requires a different image or CUDA variant.
+	DefaultImage = "rayproject/ray-llm:2.55.0-py311-cu128"
 
 	// DefaultHeadCPU is the default CPU limit for the head node
 	DefaultHeadCPU = "4"

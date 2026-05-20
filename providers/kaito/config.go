@@ -18,6 +18,7 @@ package kaito
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -74,50 +75,51 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{
 			{
-				// Best for CPU workloads
 				Condition: "!has(spec.resources.gpu) || spec.resources.gpu.count == 0",
 				Priority:  100,
 			},
 			{
-				// Only llamacpp provider
 				Condition: "spec.engine.type == 'llamacpp'",
 				Priority:  100,
 			},
 		},
-		Installation: &airunwayv1alpha1.InstallationInfo{
-			Description:      "Kubernetes AI Toolchain Operator for simplified model deployment",
-			DefaultNamespace: "kaito-workspace",
-			HelmRepos: []airunwayv1alpha1.HelmRepo{
-				{Name: "kaito", URL: "https://kaito-project.github.io/kaito/charts/kaito"},
-			},
-			HelmCharts: []airunwayv1alpha1.HelmChart{
-				{
-					Name:            "kaito-workspace",
-					Chart:           "kaito/workspace",
-					Version:         "0.9.0",
-					Namespace:       "kaito-workspace",
-					CreateNamespace: true,
-				},
-			},
-			Steps: []airunwayv1alpha1.InstallationStep{
-				{
-					Title:       "Add KAITO Helm Repository",
-					Command:     "helm repo add kaito https://kaito-project.github.io/kaito/charts/kaito",
-					Description: "Add the KAITO Helm repository.",
-				},
-				{
-					Title:       "Update Helm Repositories",
-					Command:     "helm repo update",
-					Description: "Update local Helm repository cache.",
-				},
-				{
-					Title:       "Install KAITO Workspace Operator",
-					Command:     "helm upgrade --install kaito-workspace kaito/workspace --version 0.9.0 -n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true --set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false --set gpu-feature-discovery.gfd.enabled=false --set gpu-feature-discovery.nfd.master.deploy=false --set gpu-feature-discovery.nfd.worker.deploy=false --set image.repository=docker.io/sozercan/kaito-workspace --set image.tag=v0.9.0-fix --wait",
-					Description: "Install the KAITO workspace operator v0.9.0 with Node Auto-Provisioning disabled (BYO nodes mode), sub-chart dependencies disabled, and patched image to fix webhook panic on non-built-in models (kaito-project/kaito#1824).",
-				},
+	}
+}
+
+// GetInstallationInfo returns the installation metadata for KAITO
+func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
+	return &airunwayv1alpha1.InstallationInfo{
+		Description:      "Kubernetes AI Toolchain Operator for simplified model deployment",
+		DefaultNamespace: "kaito-workspace",
+		HelmRepos: []airunwayv1alpha1.HelmRepo{
+			{Name: "kaito", URL: "https://kaito-project.github.io/kaito/charts/kaito"},
+		},
+		HelmCharts: []airunwayv1alpha1.HelmChart{
+			{
+				Name:            "kaito-workspace",
+				Chart:           "kaito/workspace",
+				Version:         "0.10.0",
+				Namespace:       "kaito-workspace",
+				CreateNamespace: true,
 			},
 		},
-		Documentation: ProviderDocumentation,
+		Steps: []airunwayv1alpha1.InstallationStep{
+			{
+				Title:       "Add KAITO Helm Repository",
+				Command:     "helm repo add kaito https://kaito-project.github.io/kaito/charts/kaito",
+				Description: "Add the KAITO Helm repository.",
+			},
+			{
+				Title:       "Update Helm Repositories",
+				Command:     "helm repo update",
+				Description: "Update local Helm repository cache.",
+			},
+			{
+				Title:       "Install KAITO Workspace Operator",
+				Command:     "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 -n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true --set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false --set gpu-feature-discovery.gfd.enabled=false --set gpu-feature-discovery.nfd.master.deploy=false --set gpu-feature-discovery.nfd.worker.deploy=false --wait",
+				Description: "Install the KAITO workspace operator v0.10.0 with Node Auto-Provisioning disabled (BYO nodes mode), and sub-chart dependencies disabled.",
+			},
+		},
 	}
 }
 
@@ -125,19 +127,23 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 
+	annotations, err := buildAnnotations()
+	if err != nil {
+		return fmt.Errorf("failed to build annotations: %w", err)
+	}
+
 	config := &airunwayv1alpha1.InferenceProviderConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ProviderConfigName,
+			Name:        ProviderConfigName,
+			Annotations: annotations,
 		},
 		Spec: GetProviderConfigSpec(),
 	}
 
-	// Check if config already exists
 	existing := &airunwayv1alpha1.InferenceProviderConfig{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
+	err = m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
 
 	if errors.IsNotFound(err) {
-		// Create new config
 		logger.Info("Creating InferenceProviderConfig", "name", ProviderConfigName)
 		if err := m.client.Create(ctx, config); err != nil {
 			return fmt.Errorf("failed to create InferenceProviderConfig: %w", err)
@@ -145,8 +151,13 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
 	} else {
-		// Update existing config spec if changed
 		existing.Spec = config.Spec
+		if existing.Annotations == nil {
+			existing.Annotations = make(map[string]string)
+		}
+		for k, v := range annotations {
+			existing.Annotations[k] = v
+		}
 		logger.Info("Updating InferenceProviderConfig", "name", ProviderConfigName)
 		if err := m.client.Update(ctx, existing); err != nil {
 			return fmt.Errorf("failed to update InferenceProviderConfig: %w", err)
@@ -292,4 +303,15 @@ func boolToConditionStatus(b bool) metav1.ConditionStatus {
 		return metav1.ConditionTrue
 	}
 	return metav1.ConditionFalse
+}
+
+func buildAnnotations() (map[string]string, error) {
+	installJSON, err := json.Marshal(GetInstallationInfo())
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal installation info: %w", err)
+	}
+	return map[string]string{
+		airunwayv1alpha1.AnnotationInstallation:  string(installJSON),
+		airunwayv1alpha1.AnnotationDocumentation: ProviderDocumentation,
+	}, nil
 }

@@ -24,12 +24,20 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
@@ -46,6 +54,10 @@ type ModelDeploymentReconciler struct {
 
 	// GatewayDetector checks for Gateway API CRD availability and resolves gateway config
 	GatewayDetector *gateway.Detector
+
+	// ProviderResolver looks up gateway capabilities from InferenceProviderConfig CRs.
+	// When nil, the reconciler treats all providers as having no gateway capabilities.
+	ProviderResolver gateway.ProviderCapabilityResolver
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -55,11 +67,12 @@ type ModelDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=referencegrants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=create;get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;update
 // +kubebuilder:rbac:groups=inference.networking.x-k8s.io,resources=inferenceobjectives;inferencemodelrewrites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
 
@@ -199,6 +212,9 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				if isNoMatchError(err) && r.GatewayDetector != nil {
 					logger.Info("Gateway CRDs may have been removed, refreshing detection cache")
 					r.GatewayDetector.Refresh()
+				} else if apierrors.IsNotFound(err) {
+					// Return an error to trigger exponential backoff retries.
+					return ctrl.Result{}, err
 				}
 				// Non-fatal: don't block overall reconciliation
 			}
@@ -584,10 +600,86 @@ func (r *ModelDeploymentReconciler) setCondition(md *airunwayv1alpha1.ModelDeplo
 	meta.SetStatusCondition(&md.Status.Conditions, condition)
 }
 
+func providerConfigChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldConfig, okOld := e.ObjectOld.(*airunwayv1alpha1.InferenceProviderConfig)
+			newConfig, okNew := e.ObjectNew.(*airunwayv1alpha1.InferenceProviderConfig)
+			if !okOld || !okNew {
+				return false
+			}
+			return oldConfig.Status.Ready != newConfig.Status.Ready ||
+				!apiequality.Semantic.DeepEqual(oldConfig.Spec, newConfig.Spec)
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func modelDeploymentNeedsProviderSelection(md *airunwayv1alpha1.ModelDeployment) bool {
+	if md.Spec.Provider != nil && md.Spec.Provider.Name != "" {
+		return false
+	}
+	return md.Status.Provider == nil || md.Status.Provider.Name == ""
+}
+
+func providerConfigAffectsModelDeployment(md *airunwayv1alpha1.ModelDeployment, providerName string) bool {
+	if md.Spec.Provider != nil && md.Spec.Provider.Name == providerName {
+		return true
+	}
+	if md.Status.Provider != nil && md.Status.Provider.Name == providerName {
+		return true
+	}
+	return modelDeploymentNeedsProviderSelection(md)
+}
+
+func (r *ModelDeploymentReconciler) mapProviderConfigToModelDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	providerConfig, ok := obj.(*airunwayv1alpha1.InferenceProviderConfig)
+	if !ok {
+		return nil
+	}
+
+	var mdList airunwayv1alpha1.ModelDeploymentList
+	if err := r.List(ctx, &mdList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ModelDeployments for provider config change", "provider", providerConfig.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(mdList.Items))
+	seen := make(map[k8stypes.NamespacedName]struct{}, len(mdList.Items))
+	for i := range mdList.Items {
+		md := &mdList.Items[i]
+		if !providerConfigAffectsModelDeployment(md, providerConfig.Name) {
+			continue
+		}
+
+		key := k8stypes.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+	}
+
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.ModelDeployment{}).
+		Watches(
+			&airunwayv1alpha1.InferenceProviderConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToModelDeployments),
+			ctrlbuilder.WithPredicates(providerConfigChangePredicate()),
+		).
 		Named("modeldeployment")
 
 	// Watch InferencePool so the controller reconciles when one is created/deleted.

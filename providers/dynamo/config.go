@@ -18,13 +18,16 @@ package dynamo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -39,7 +42,7 @@ const (
 	ProviderVersion = "dynamo-provider:v0.2.0"
 
 	// DynamoPlatformChartVersion is the upstream Dynamo platform chart version.
-	DynamoPlatformChartVersion = "1.0.1"
+	DynamoPlatformChartVersion = "1.0.2"
 
 	// DynamoPlatformChartURL is the upstream Dynamo platform chart package.
 	DynamoPlatformChartURL = "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-" + DynamoPlatformChartVersion + ".tgz"
@@ -49,18 +52,26 @@ const (
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
+
+	dynamoPlatformValuesJSON      = `{"global.grove.install":true}`
+	dynamoGraphDeploymentResource = "dynamographdeployments"
 )
 
 // ProviderConfigManager handles registration and heartbeat for the Dynamo provider
 type ProviderConfigManager struct {
-	client client.Client
+	client          client.Client
+	discoveryClient discovery.DiscoveryInterface
 }
 
 // NewProviderConfigManager creates a new provider config manager
-func NewProviderConfigManager(c client.Client) *ProviderConfigManager {
-	return &ProviderConfigManager{
+func NewProviderConfigManager(c client.Client, discoveryClients ...discovery.DiscoveryInterface) *ProviderConfigManager {
+	manager := &ProviderConfigManager{
 		client: c,
 	}
+	if len(discoveryClients) > 0 {
+		manager.discoveryClient = discoveryClients[0]
+	}
+	return manager
 }
 
 // GetProviderConfigSpec returns the InferenceProviderConfigSpec for Dynamo
@@ -78,55 +89,65 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 			},
 			CPUSupport: false,
 			GPUSupport: true,
+			Gateway: &airunwayv1alpha1.GatewayCapabilities{
+				// The Dynamo operator creates the InferencePool as
+				// "{DynamoGraphDeployment.metadata.name}-pool" in the same
+				// namespace as the DGD.
+				InferencePoolNamePattern: "{name}-pool",
+				InferencePoolNamespace:   "{namespace}",
+				// With Dynamo v1.1.0+, the frontendSidecar feature colocates a
+				// frontend on each worker pod, making the InferencePool/EPP
+				// path viable. No need to bypass to the Frontend
+				// Service. Requests route through InferencePool directly.
+			},
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{
 			{
-				// Select Dynamo for trtllm engine (only provider supporting it)
 				Condition: "spec.engine.type == 'trtllm'",
 				Priority:  100,
 			},
 			{
-				// Select Dynamo for sglang engine (only provider supporting it)
 				Condition: "spec.engine.type == 'sglang'",
 				Priority:  100,
 			},
 			{
-				// Select Dynamo for disaggregated mode (best support)
 				Condition: "has(spec.serving) && spec.serving.mode == 'disaggregated'",
 				Priority:  90,
 			},
 			{
-				// Default selection for GPU workloads with vLLM
 				Condition: "has(spec.resources.gpu) && spec.resources.gpu.count > 0 && spec.engine.type == 'vllm'",
 				Priority:  50,
 			},
 		},
-		Installation: &airunwayv1alpha1.InstallationInfo{
-			Description:      "NVIDIA Dynamo for high-performance GPU inference",
-			DefaultNamespace: "dynamo-system",
-			HelmRepos: []airunwayv1alpha1.HelmRepo{
-				{Name: "nvidia-ai-dynamo", URL: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo"},
-			},
-			HelmCharts: []airunwayv1alpha1.HelmChart{
-				{
-					Name:            "dynamo-platform",
-					Chart:           DynamoPlatformChartURL,
-					Namespace:       "dynamo-system",
-					CreateNamespace: true,
-					Values: map[string]apiextensionsv1.JSON{
-						"global.grove.install": {Raw: []byte("true")},
-					},
-				},
-			},
-			Steps: []airunwayv1alpha1.InstallationStep{
-				{
-					Title:       "Install Dynamo Platform",
-					Command:     "helm upgrade --install dynamo-platform " + DynamoPlatformChartURL + " --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
-					Description: "Install the Dynamo platform operator v1.0.1 with bundled Grove enabled by default. This chart includes the required CRDs.",
+	}
+}
+
+// GetInstallationInfo returns the installation metadata for Dynamo
+func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
+	return &airunwayv1alpha1.InstallationInfo{
+		Description:      "NVIDIA Dynamo for high-performance GPU inference",
+		DefaultNamespace: "dynamo-system",
+		HelmRepos: []airunwayv1alpha1.HelmRepo{
+			{Name: "nvidia-ai-dynamo", URL: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo"},
+		},
+		HelmCharts: []airunwayv1alpha1.HelmChart{
+			{
+				Name:            "dynamo-platform",
+				Chart:           DynamoPlatformChartURL,
+				Namespace:       "dynamo-system",
+				CreateNamespace: true,
+				Values: &runtime.RawExtension{
+					Raw: []byte(dynamoPlatformValuesJSON),
 				},
 			},
 		},
-		Documentation: ProviderDocumentation,
+		Steps: []airunwayv1alpha1.InstallationStep{
+			{
+				Title:       "Install Dynamo Platform",
+				Command:     "helm upgrade --install dynamo-platform " + DynamoPlatformChartURL + " --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
+				Description: "Install the Dynamo platform operator v1.0.2 with bundled Grove enabled by default. This chart includes the required CRDs.",
+			},
+		},
 	}
 }
 
@@ -134,19 +155,23 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 
+	annotations, err := buildAnnotations()
+	if err != nil {
+		return fmt.Errorf("failed to build annotations: %w", err)
+	}
+
 	config := &airunwayv1alpha1.InferenceProviderConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ProviderConfigName,
+			Name:        ProviderConfigName,
+			Annotations: annotations,
 		},
 		Spec: GetProviderConfigSpec(),
 	}
 
-	// Check if config already exists
 	existing := &airunwayv1alpha1.InferenceProviderConfig{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
+	err = m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
 
 	if errors.IsNotFound(err) {
-		// Create new config
 		logger.Info("Creating InferenceProviderConfig", "name", ProviderConfigName)
 		if err := m.client.Create(ctx, config); err != nil {
 			return fmt.Errorf("failed to create InferenceProviderConfig: %w", err)
@@ -154,16 +179,57 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
 	} else {
-		// Update existing config spec if changed
 		existing.Spec = config.Spec
+		if existing.Annotations == nil {
+			existing.Annotations = make(map[string]string)
+		}
+		for k, v := range annotations {
+			existing.Annotations[k] = v
+		}
 		logger.Info("Updating InferenceProviderConfig", "name", ProviderConfigName)
 		if err := m.client.Update(ctx, existing); err != nil {
 			return fmt.Errorf("failed to update InferenceProviderConfig: %w", err)
 		}
 	}
 
-	// Update status
-	return m.UpdateStatus(ctx, true)
+	// Update status — check if backend CRD is installed
+	ready := m.checkBackendCRDInstalled()
+	if !ready {
+		logger.Info("Backend CRD not installed, provider registered as not ready", "group", DynamoAPIGroup, "kind", DynamoGraphDeploymentKind)
+	}
+	return m.UpdateStatus(ctx, ready)
+}
+
+// checkBackendCRDInstalled checks if the upstream DynamoGraphDeployment CRD is installed
+func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
+	if m.discoveryClient != nil {
+		return hasAPIResource(m.discoveryClient, DynamoAPIGroup, DynamoAPIVersion, dynamoGraphDeploymentResource)
+	}
+
+	mapper := m.client.RESTMapper()
+	if mapper == nil {
+		return false
+	}
+	_, err := mapper.RESTMapping(schema.GroupKind{
+		Group: DynamoAPIGroup,
+		Kind:  DynamoGraphDeploymentKind,
+	}, DynamoAPIVersion)
+	return err == nil
+}
+
+func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version, resource string) bool {
+	resources, err := discoveryClient.ServerResourcesForGroupVersion(fmt.Sprintf("%s/%s", group, version))
+	if err != nil {
+		return false
+	}
+
+	for _, apiResource := range resources.APIResources {
+		if apiResource.Name == resource {
+			return true
+		}
+	}
+
+	return false
 }
 
 // UpdateStatus updates the status of the InferenceProviderConfig
@@ -202,7 +268,11 @@ func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
 				logger.Info("Stopping heartbeat goroutine")
 				return
 			case <-ticker.C:
-				if err := m.UpdateStatus(ctx, true); err != nil {
+				ready := m.checkBackendCRDInstalled()
+				if !ready {
+					logger.Info("Backend CRD not installed, reporting not ready", "group", DynamoAPIGroup, "kind", DynamoGraphDeploymentKind)
+				}
+				if err := m.UpdateStatus(ctx, ready); err != nil {
 					logger.Error(err, "Failed to update heartbeat")
 				}
 			}
@@ -213,4 +283,15 @@ func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
 // Unregister marks the provider as not ready
 func (m *ProviderConfigManager) Unregister(ctx context.Context) error {
 	return m.UpdateStatus(ctx, false)
+}
+
+func buildAnnotations() (map[string]string, error) {
+	installJSON, err := json.Marshal(GetInstallationInfo())
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal installation info: %w", err)
+	}
+	return map[string]string{
+		airunwayv1alpha1.AnnotationInstallation:  string(installJSON),
+		airunwayv1alpha1.AnnotationDocumentation: ProviderDocumentation,
+	}, nil
 }

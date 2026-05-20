@@ -33,8 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -334,17 +336,62 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(ctx context.Context, r
 		return err
 	}
 
-	// Update existing resource if spec has changed
+	// Update existing resource if spec has changed.
+	// The Dynamo CRD API server adds zero-value defaults (e.g. name: "",
+	// resources: {}) that the provider never sets. Comparing raw specs would
+	// trigger an infinite update loop. Strip server-added zero-values
+	// from the existing spec before comparing.
 	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 	newSpec, _, _ := unstructured.NestedMap(resource.Object, "spec")
 
-	if !equality.Semantic.DeepEqual(existingSpec, newSpec) {
+	if !equality.Semantic.DeepEqual(stripEmptyDefaults(existingSpec), stripEmptyDefaults(newSpec)) {
 		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
 		resource.SetResourceVersion(existing.GetResourceVersion())
 		return r.Update(ctx, resource)
 	}
 
 	return nil
+}
+
+// stripEmptyDefaults recursively removes zero-value fields (empty strings,
+// empty maps) that the Kubernetes API server adds as defaults. This prevents
+// diffs when comparing the provider's desired spec against the
+// server-persisted spec.
+func stripEmptyDefaults(obj map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(obj))
+	for k, v := range obj {
+		switch val := v.(type) {
+		case string:
+			if val != "" {
+				result[k] = val
+			}
+		case map[string]interface{}:
+			stripped := stripEmptyDefaults(val)
+			if len(stripped) > 0 {
+				result[k] = stripped
+			}
+		case []interface{}:
+			result[k] = stripEmptyDefaultsSlice(val)
+		default:
+			result[k] = v
+		}
+	}
+	return result
+}
+
+func stripEmptyDefaultsSlice(arr []interface{}) []interface{} {
+	result := make([]interface{}, len(arr))
+	for i, v := range arr {
+		switch val := v.(type) {
+		case map[string]interface{}:
+			result[i] = stripEmptyDefaults(val)
+		case []interface{}:
+			result[i] = stripEmptyDefaultsSlice(val)
+		default:
+			result[i] = v
+		}
+	}
+	return result
 }
 
 // syncStatus fetches the upstream resource and syncs its status to the ModelDeployment
@@ -431,26 +478,30 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 
 		// Resource exists and is owned by us, delete it
 		logger.Info("Deleting DynamoGraphDeployment", "name", dgdName)
-		if err := r.Delete(ctx, dgd); err != nil && !errors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete DynamoGraphDeployment")
+		if err := r.Delete(ctx, dgd); err != nil {
+			if upstreamResourceUnavailable(err) {
+				logger.Info("DynamoGraphDeployment unavailable during deletion, continuing managed cleanup", "name", dgdName)
+			} else {
+				logger.Error(err, "Failed to delete DynamoGraphDeployment")
 
-			// Check if we should force-remove the finalizer
-			deletionTime := md.DeletionTimestamp.Time
-			if time.Since(deletionTime) > FinalizerTimeout {
-				logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-				controllerutil.RemoveFinalizer(md, FinalizerName)
-				return ctrl.Result{}, r.Update(ctx, md)
+				// Check if we should force-remove the finalizer
+				deletionTime := md.DeletionTimestamp.Time
+				if time.Since(deletionTime) > FinalizerTimeout {
+					logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
+					controllerutil.RemoveFinalizer(md, FinalizerName)
+					return ctrl.Result{}, r.Update(ctx, md)
+				}
+
+				// Requeue to retry deletion
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
-
-			// Requeue to retry deletion
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		} else {
+			// Requeue to wait for DGD and its Pods to be fully terminated
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-
-		// Requeue to wait for DGD and its Pods to be fully terminated
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	if !errors.IsNotFound(err) {
+	if !upstreamResourceUnavailable(err) {
 		// Unexpected error fetching DGD — check timeout before requeueing
 		deletionTime := md.DeletionTimestamp.Time
 		if time.Since(deletionTime) > FinalizerTimeout {
@@ -461,7 +512,8 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// DGD is confirmed gone — clean up managed Jobs and PVCs
+	// The upstream resource is already gone or its CRD is no longer installed,
+	// so continue with managed Jobs/PVC cleanup and remove the finalizer.
 	var cleanupErrs []error
 	if err := storage.DeleteManagedJobs(ctx, r.Client, md); err != nil {
 		logger.Error(err, "Failed to delete managed Jobs")
@@ -488,6 +540,10 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 	return ctrl.Result{}, r.Update(ctx, md)
 }
 
+func upstreamResourceUnavailable(err error) bool {
+	return errors.IsNotFound(err) || meta.IsNoMatchError(err)
+}
+
 // setCondition updates a condition on the ModelDeployment
 func (r *DynamoProviderReconciler) setCondition(md *airunwayv1alpha1.ModelDeployment, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	condition := metav1.Condition{
@@ -509,7 +565,7 @@ func (r *DynamoProviderReconciler) setCondition(md *airunwayv1alpha1.ModelDeploy
 func dynamoProviderPredicate(obj client.Object) bool {
 	md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
 	if !ok {
-		return true // Allow Owns()/Watches() events (PVCs, Jobs, DGDs) through
+		return true // Allow secondary watches (PVCs, Jobs, DGDs, provider configs) through.
 	}
 	// Process if provider is dynamo OR if being deleted (to handle finalizer)
 	if md.Status.Provider != nil && md.Status.Provider.Name == ProviderName {
@@ -523,23 +579,89 @@ func dynamoProviderPredicate(obj client.Object) bool {
 	return controllerutil.ContainsFinalizer(md, FinalizerName)
 }
 
+func providerConfigChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldConfig, okOld := e.ObjectOld.(*airunwayv1alpha1.InferenceProviderConfig)
+			newConfig, okNew := e.ObjectNew.(*airunwayv1alpha1.InferenceProviderConfig)
+			if !okOld || !okNew {
+				return false
+			}
+			return oldConfig.Status.Ready != newConfig.Status.Ready ||
+				!equality.Semantic.DeepEqual(oldConfig.Spec, newConfig.Spec)
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func (r *DynamoProviderReconciler) mapProviderConfigToModelDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	providerConfig, ok := obj.(*airunwayv1alpha1.InferenceProviderConfig)
+	if !ok || providerConfig.Name != ProviderName {
+		return nil
+	}
+
+	var mdList airunwayv1alpha1.ModelDeploymentList
+	if err := r.List(ctx, &mdList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ModelDeployments for provider config change", "provider", providerConfig.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(mdList.Items))
+	seen := make(map[types.NamespacedName]struct{}, len(mdList.Items))
+	for i := range mdList.Items {
+		md := &mdList.Items[i]
+		if (md.Status.Provider == nil || md.Status.Provider.Name != ProviderName) &&
+			(md.Spec.Provider == nil || md.Spec.Provider.Name != ProviderName) {
+			continue
+		}
+
+		key := types.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+	}
+
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.ModelDeployment{}).
 		// Watch PVCs and Jobs owned by ModelDeployments (auto-reconcile on status changes)
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
-		// Only watch ModelDeployments where provider.name == "dynamo"
-		WithEventFilter(predicate.NewPredicateFuncs(dynamoProviderPredicate)).
-		// Watch DynamoGraphDeployments owned by ModelDeployments
 		Watches(
+			&airunwayv1alpha1.InferenceProviderConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToModelDeployments),
+			ctrlbuilder.WithPredicates(providerConfigChangePredicate()),
+		).
+		// Only watch ModelDeployments where provider.name == "dynamo"
+		WithEventFilter(predicate.NewPredicateFuncs(dynamoProviderPredicate))
+
+	// Only watch DynamoGraphDeployment resources if the CRD is installed.
+	// Without this check, the manager crashes at startup when
+	// the backend CRDs are not present (see #178).
+	mapper := mgr.GetRESTMapper()
+	if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind}, DynamoAPIVersion); err == nil {
+		logger := mgr.GetLogger()
+		logger.Info("DynamoGraphDeployment CRD detected, enabling event-driven watch")
+		builder = builder.Watches(
 			&unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
 				"kind":       DynamoGraphDeploymentKind,
 			}},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				// Check owner references first
 				for _, ref := range obj.GetOwnerReferences() {
 					if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
 						ref.Kind == "ModelDeployment" {
@@ -553,7 +675,6 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 						}
 					}
 				}
-				// Fall back to label-based lookup
 				labels := obj.GetLabels()
 				if labels[airunwayv1alpha1.LabelManagedBy] == "airunway" {
 					if deployment := labels[airunwayv1alpha1.LabelModelDeployment]; deployment != "" {
@@ -569,7 +690,10 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 				return nil
 			}),
-		).
+		)
+	}
+
+	return builder.
 		Named("dynamo-provider").
 		Complete(r)
 }

@@ -1,6 +1,13 @@
 # RBAC for cert-controller to manage webhook certificates.
 # cert-controller needs to read/write Secrets (for cert storage) and
 # read/update webhook configurations (for CA bundle injection).
+#
+# Secrets access is split into two rules:
+# - create/list/watch: cannot be scoped by resourceNames (K8s ignores
+#   resourceNames for create; list/watch are collection-level operations
+#   and RBAC blocks them when resourceNames is set). The cert-controller
+#   informer cache requires list+watch on all secrets in the namespace.
+# - get/patch/update: scoped to the specific webhook cert secret
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -12,11 +19,19 @@ rules:
   - secrets
   verbs:
   - create
-  - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  # Name = kustomize namePrefix ("airunway-") + config/webhook/secret.yaml name ("webhook-server-cert")
+  resourceNames:
+  - airunway-webhook-server-cert
+  verbs:
+  - get
   - patch
   - update
-  - watch
 - apiGroups:
   - admissionregistration.k8s.io
   resources:

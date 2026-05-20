@@ -31,7 +31,7 @@ export interface StorageSpec {
 // Legacy types for backward compatibility
 export type DeploymentMode = ServingMode;
 export type GgufRunMode = 'build' | 'direct';
-export type RouterMode = 'none' | 'kv' | 'round-robin';
+export type RouterMode = 'default' | 'kv' | 'round-robin';
 export type KaitoResourceType = 'workspace' | 'inferenceset';
 
 export interface DeploymentConfig {
@@ -40,7 +40,7 @@ export interface DeploymentConfig {
   modelId: string;
   engine: Engine;
   mode: DeploymentMode;
-  provider?: 'dynamo' | 'kuberay' | 'kaito'| 'llmd';
+  provider?: string;
   servedModelName?: string;
   routerMode: RouterMode;
   replicas: number;
@@ -68,6 +68,7 @@ export interface DeploymentConfig {
   kaitoResourceType?: KaitoResourceType;
   providerOverrides?: Record<string, unknown>;
   storage?: StorageSpec;
+  gatewayEnabled?: boolean;
 }
 
 export interface ModelSpec {
@@ -86,6 +87,8 @@ export interface EngineSpec {
   type: EngineType;
   contextLength?: number;
   trustRemoteCode?: boolean;
+  enablePrefixCaching?: boolean;
+  enforceEager?: boolean;
   args?: Record<string, string>;
 }
 
@@ -135,6 +138,12 @@ export interface SecretSpec {
   custom?: string[];
 }
 
+export interface GatewaySpec {
+  enabled?: boolean;
+  modelName?: string;
+  httpRouteRef?: string;
+}
+
 export interface ModelDeploymentSpec {
   model: ModelSpec;
   provider?: ProviderSpec;
@@ -146,6 +155,7 @@ export interface ModelDeploymentSpec {
   env?: Record<string, string>;
   podTemplate?: PodTemplateSpec;
   secrets?: SecretSpec;
+  gateway?: GatewaySpec;
 }
 
 export interface ReplicaStatus {
@@ -196,9 +206,15 @@ export interface EndpointStatus {
   port?: number;
 }
 
+export interface EngineStatus {
+  selectedReason?: string;
+  type?: string;
+}
+
 export interface ModelDeploymentStatus {
   phase?: DeploymentPhase;
   message?: string;
+  engine?: EngineStatus;
   provider?: ProviderStatus;
   replicas?: ReplicaStatus;
   prefillReplicas?: {
@@ -476,6 +492,8 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
       type: resolveEngineType(config),
       contextLength: config.contextLength || config.maxModelLen,
       trustRemoteCode: config.trustRemoteCode,
+      enablePrefixCaching: config.enablePrefixCaching,
+      enforceEager: config.enforceEager,
       args: normalizeEngineArgs(config.engineArgs),
     },
     serving: {
@@ -487,10 +505,17 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
     spec.image = config.imageRef;
   }
 
-  if (config.provider || config.providerOverrides) {
+  // Merge routerMode into providerOverrides when set to a non-default value.
+  const effectiveOverrides: Record<string, unknown> = {
+    ...config.providerOverrides,
+    ...(config.routerMode && config.routerMode !== 'default' && { routerMode: config.routerMode }),
+  };
+  const hasOverrides = Object.keys(effectiveOverrides).length > 0;
+
+  if (config.provider || hasOverrides) {
     spec.provider = {
       ...(config.provider && { name: config.provider }),
-      ...(config.providerOverrides && { overrides: config.providerOverrides }),
+      ...(hasOverrides && { overrides: effectiveOverrides }),
     };
   }
 
@@ -498,7 +523,15 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
     spec.scaling = {
       replicas: config.replicas,
     };
-    if (!cpuOnlyDeployment && config.resources?.gpu) {
+    if (cpuOnlyDeployment) {
+      spec.resources = {
+        gpu: {
+          count: 0,
+          type: 'nvidia.com/gpu',
+        },
+        memory: config.resources?.memory,
+      };
+    } else if (config.resources?.gpu) {
       spec.resources = {
         gpu: {
           count: config.resources.gpu,
@@ -537,6 +570,12 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
     };
   }
 
+  if (config.gatewayEnabled !== undefined) {
+    spec.gateway = {
+      enabled: config.gatewayEnabled,
+    };
+  }
+
   return spec;
 }
 
@@ -551,7 +590,7 @@ export function toDeploymentStatus(md: ModelDeployment, pods: PodStatus[] = []):
     namespace: md.metadata.namespace,
     modelId: spec.model.id,
     servedModelName: spec.model.servedName,
-    engine: (spec.engine?.type as Engine) || undefined,
+    engine: (spec.engine?.type as Engine) || (status.engine?.type as Engine) || undefined,
     mode: spec.serving?.mode || 'aggregated',
     phase: resolveDeploymentPhase(spec, status, pods),
     provider: status.provider?.name || spec.provider?.name || 'unknown',

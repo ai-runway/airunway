@@ -1,6 +1,8 @@
-import { describe, test, expect } from 'bun:test';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { describe, test, expect, afterEach } from 'bun:test';
 import type { HelmResult, HelmRelease, HelmRepo, HelmChart } from './helm';
-import { GPU_OPERATOR_REPO, GPU_OPERATOR_CHART } from './helm';
+import { GPU_OPERATOR_REPO, GPU_OPERATOR_CHART, helmService } from './helm';
 
 describe('HelmService - GPU Operator Constants', () => {
   test('GPU_OPERATOR_REPO has correct configuration', () => {
@@ -203,7 +205,7 @@ describe('HelmService - Command Building Logic', () => {
       name: 'kaito-workspace',
       chart: 'kaito/workspace',
       namespace: 'kaito-workspace',
-      version: '0.9.0',
+      version: '0.10.0',
       values: {
         featureGates: {
           enableInferenceSetController: true,
@@ -260,53 +262,8 @@ describe('HelmService - Command Building Logic', () => {
 });
 
 describe('HelmService - getInstallCommands Logic', () => {
-  function valuesToSetJsonArgs(values: Record<string, unknown>): string[] {
-    const args: string[] = [];
-    for (const [key, value] of Object.entries(values)) {
-      args.push('--set-json', `${key}=${JSON.stringify(value)}`);
-    }
-    return args;
-  }
-
   function getInstallCommands(repos: HelmRepo[], charts: HelmChart[]): string[] {
-    const commands: string[] = [];
-
-    for (const repo of repos) {
-      commands.push(`helm repo add ${repo.name} ${repo.url}`);
-    }
-
-    if (repos.length > 0) {
-      commands.push('helm repo update');
-    }
-
-    for (const chart of charts) {
-      if (chart.fetchUrl) {
-        let cmd = `helm fetch ${chart.fetchUrl} && helm install ${chart.name} ${chart.chart}`;
-        cmd += ` --namespace ${chart.namespace}`;
-        if (chart.createNamespace) {
-          cmd += ' --create-namespace';
-        }
-        if (chart.values) {
-          cmd += ` ${valuesToSetJsonArgs(chart.values).join(' ')}`;
-        }
-        commands.push(cmd);
-      } else {
-        let cmd = `helm install ${chart.name} ${chart.chart}`;
-        cmd += ` --namespace ${chart.namespace}`;
-        if (chart.createNamespace) {
-          cmd += ' --create-namespace';
-        }
-        if (chart.version) {
-          cmd += ` --version ${chart.version}`;
-        }
-        if (chart.values) {
-          cmd += ` ${valuesToSetJsonArgs(chart.values).join(' ')}`;
-        }
-        commands.push(cmd);
-      }
-    }
-
-    return commands;
+    return helmService.getInstallCommands(repos, charts);
   }
 
   test('generates repo add commands', () => {
@@ -331,7 +288,7 @@ describe('HelmService - getInstallCommands Logic', () => {
     expect(commands[0]).toContain('--namespace default');
   });
 
-  test('includes values in generated install commands', () => {
+  test('includes simple values in generated install commands', () => {
     const repos: HelmRepo[] = [];
     const charts: HelmChart[] = [
       {
@@ -346,7 +303,7 @@ describe('HelmService - getInstallCommands Logic', () => {
     ];
 
     const commands = getInstallCommands(repos, charts);
-    expect(commands[0]).toContain('--set-json global.grove.install=true');
+    expect(commands[0]).toContain('global.grove.install=true');
   });
 
   test('generates commands for GPU Operator', () => {
@@ -373,6 +330,80 @@ describe('HelmService - getInstallCommands Logic', () => {
     const commands = getInstallCommands([], charts);
     expect(commands[0]).toContain('helm fetch https://example.com/chart.tgz');
     expect(commands[0]).toContain('--create-namespace');
+  });
+
+  test('includes --set-json overrides in generated install commands', () => {
+    const charts: HelmChart[] = [
+      {
+        name: 'dynamo-platform',
+        chart: 'https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-0.7.1.tgz',
+        namespace: 'dynamo-system',
+        createNamespace: true,
+        values: {
+          'dynamo-operator': {
+            controllerManager: {
+              kubeRbacProxy: {
+                image: {
+                  repository: 'quay.io/brancz/kube-rbac-proxy',
+                  tag: 'v0.15.0',
+                },
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const commands = getInstallCommands([], charts);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("--set-json 'dynamo-operator=");
+    expect(commands[0]).toContain('"repository":"quay.io/brancz/kube-rbac-proxy"');
+    expect(commands[0]).toContain('"tag":"v0.15.0"');
+  });
+
+  test('includes pre-CRD apply commands and --skip-crds when requested', () => {
+    const charts: HelmChart[] = [
+      {
+        name: 'kaito-workspace',
+        chart: 'kaito/workspace',
+        namespace: 'kaito-workspace',
+        createNamespace: true,
+        preCrdUrls: ['https://example.com/crd.yaml'],
+        skipCrds: true,
+      },
+    ];
+
+    const commands = getInstallCommands([], charts);
+    expect(commands[0]).toBe('kubectl apply -f https://example.com/crd.yaml');
+    expect(commands[1]).toContain('helm install kaito-workspace kaito/workspace');
+    expect(commands[1]).toContain('--skip-crds');
+  });
+
+  test('emits selective chart CRD setup commands when preInstallMissingCrds is requested', () => {
+    const charts: HelmChart[] = [
+      {
+        name: 'kaito-workspace',
+        chart: 'kaito/workspace',
+        version: '0.9.0',
+        namespace: 'kaito-workspace',
+        createNamespace: true,
+        preInstallMissingCrds: true,
+        skipCrds: true,
+      },
+    ];
+
+    const commands = getInstallCommands([], charts);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain('(KAITO_WORKSPACE_CHART_DIR=$(mktemp -d)');
+    expect(commands[0]).toContain("trap 'rm -rf -- \"$KAITO_WORKSPACE_CHART_DIR\"' EXIT");
+    expect(commands[0]).toContain('helm pull kaito/workspace --untar --untardir "$KAITO_WORKSPACE_CHART_DIR" --version 0.9.0');
+    expect(commands[0]).toContain('kubectl create --dry-run=client -f "$crd" -o name');
+    expect(commands[0]).toContain('kubectl get "$crd_name" --ignore-not-found -o name');
+    expect(commands[0]).toContain('kubectl apply --server-side --force-conflicts -f "$crd"');
+    expect(commands[0]).toContain('*.yml');
+    expect(commands[0]).toContain('helm install kaito-workspace "$KAITO_WORKSPACE_CHART_PATH"');
+    expect(commands[0]).not.toContain('helm install kaito-workspace "$KAITO_WORKSPACE_CHART_PATH" --namespace kaito-workspace --create-namespace --version');
+    expect(commands[0]).toContain('--skip-crds');
   });
 });
 
@@ -415,5 +446,125 @@ describe('HelmService - Release Status Detection', () => {
   test('does not treat deployed as pending', () => {
     expect(isPendingStatus('deployed')).toBe(false);
     expect(isPendingStatus('failed')).toBe(false);
+  });
+});
+
+describe('HelmService - Managed Chart CRDs', () => {
+  const service = helmService as any;
+  const originalExecute = service.execute;
+  const originalExecuteKubectl = service.executeKubectl;
+
+  afterEach(() => {
+    service.execute = originalExecute;
+    service.executeKubectl = originalExecuteKubectl;
+  });
+
+  test('preinstalls only missing chart CRDs before installing with --skip-crds', async () => {
+    const kubectlCalls: string[][] = [];
+    const helmCalls: string[][] = [];
+
+    service.execute = async (args: string[]) => {
+      helmCalls.push(args);
+
+      if (args[0] === 'pull') {
+        const untarDirIndex = args.indexOf('--untardir');
+        const untarDir = args[untarDirIndex + 1];
+        mkdirSync(join(untarDir, 'workspace-0.9.0.tgz'), { recursive: true });
+        const chartDir = join(untarDir, 'workspace');
+        const crdsDir = join(chartDir, 'crds');
+        mkdirSync(crdsDir, { recursive: true });
+        writeFileSync(join(chartDir, 'Chart.yaml'), 'apiVersion: v2\nname: workspace\nversion: 0.9.0\n', 'utf8');
+        writeFileSync(
+          join(crdsDir, 'workspaces.kaito.sh.yaml'),
+          [
+            'apiVersion: apiextensions.k8s.io/v1',
+            'kind: CustomResourceDefinition',
+            'metadata:',
+            '  name: workspaces.kaito.sh',
+            'spec:',
+            '  group: kaito.sh',
+          ].join('\n'),
+          'utf8',
+        );
+        writeFileSync(
+          join(crdsDir, 'inferencepools.inference.networking.k8s.io.yaml'),
+          [
+            'apiVersion: apiextensions.k8s.io/v1',
+            'kind: CustomResourceDefinition',
+            'metadata:',
+            '  name: inferencepools.inference.networking.k8s.io',
+            'spec:',
+            '  group: inference.networking.k8s.io',
+          ].join('\n'),
+          'utf8',
+        );
+        const subchartCrdsDir = join(chartDir, 'charts', 'scheduler', 'crds');
+        mkdirSync(subchartCrdsDir, { recursive: true });
+        writeFileSync(
+          join(subchartCrdsDir, 'podgroups.scheduler.example.com.yaml'),
+          [
+            'apiVersion: apiextensions.k8s.io/v1',
+            'kind: CustomResourceDefinition',
+            'metadata:',
+            '  name: podgroups.scheduler.example.com',
+            'spec:',
+            '  group: scheduler.example.com',
+          ].join('\n'),
+          'utf8',
+        );
+
+        return { success: true, stdout: '', stderr: '', exitCode: 0 };
+      }
+
+      if (args[0] === 'upgrade') {
+        expect(args).toContain('--skip-crds');
+        expect(args).not.toContain('--version');
+        expect(args[2]).toContain('/workspace');
+        return { success: true, stdout: 'installed', stderr: '', exitCode: 0 };
+      }
+
+      return { success: true, stdout: '', stderr: '', exitCode: 0 };
+    };
+
+    service.executeKubectl = async (args: string[]) => {
+      kubectlCalls.push(args);
+
+      if (args[0] === 'get' && args[2] === 'workspaces.kaito.sh') {
+        return { success: true, stdout: '', stderr: '', exitCode: 0 };
+      }
+
+      if (args[0] === 'get' && args[2] === 'inferencepools.inference.networking.k8s.io') {
+        return {
+          success: true,
+          stdout: 'crd/inferencepools.inference.networking.k8s.io\n',
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+
+      if (args[0] === 'apply') {
+        return { success: true, stdout: 'applied', stderr: '', exitCode: 0 };
+      }
+
+      return { success: true, stdout: '', stderr: '', exitCode: 0 };
+    };
+
+    const result = await helmService.installProvider([], [
+      {
+        name: 'kaito-workspace',
+        chart: 'kaito/workspace',
+        version: '0.9.0',
+        namespace: 'kaito-workspace',
+        createNamespace: true,
+        preInstallMissingCrds: true,
+        skipCrds: true,
+      },
+    ]);
+
+    expect(result.success).toBe(true);
+    expect(result.results.some((step) => step.step === 'apply-crd-workspaces-kaito-sh')).toBe(true);
+    expect(result.results.some((step) => step.step === 'skip-crd-inferencepools-inference-networking-k8s-io')).toBe(true);
+    expect(kubectlCalls.some((args) => args[0] === 'apply')).toBe(true);
+    expect(helmCalls.some((args) => args[0] === 'upgrade')).toBe(true);
   });
 });

@@ -14,6 +14,7 @@ const HF_CLIENT_ID = process.env.HF_CLIENT_ID || 'e05817a1-7053-4b9e-b292-29cd21
 const HF_TOKEN_URL = 'https://huggingface.co/oauth/token';
 const HF_WHOAMI_URL = 'https://huggingface.co/api/whoami-v2';
 const HF_MODELS_URL = 'https://huggingface.co/api/models';
+const HF_BASE_URL = 'https://huggingface.co';
 
 /**
  * HuggingFace OAuth Service
@@ -97,7 +98,7 @@ class HuggingFaceService {
       name: data.name,
       fullname: data.fullname || data.name,
       email: data.email,
-      avatarUrl: data.avatarUrl,
+      avatarUrl: data.avatarUrl && data.avatarUrl.startsWith('/') ? `${HF_BASE_URL}${data.avatarUrl}` : data.avatarUrl, // Ensure avatar URL is absolute
     };
   }
 

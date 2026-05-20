@@ -7,6 +7,8 @@ import (
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	fakediscovery "k8s.io/client-go/discovery/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -41,9 +43,27 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if spec.SelectionRules[0].Priority != 80 {
 		t.Errorf("expected priority 80, got %d", spec.SelectionRules[0].Priority)
 	}
+}
 
-	if spec.Documentation != ProviderDocumentation {
-		t.Errorf("expected documentation %s, got %s", ProviderDocumentation, spec.Documentation)
+func TestGetInstallationInfo(t *testing.T) {
+	info := GetInstallationInfo()
+	if info == nil {
+		t.Fatal("expected non-nil installation info")
+	}
+	if info.Description == "" {
+		t.Error("expected non-empty description")
+	}
+	if info.DefaultNamespace != "ray-system" {
+		t.Errorf("expected defaultNamespace 'ray-system', got %s", info.DefaultNamespace)
+	}
+	if len(info.HelmRepos) != 1 {
+		t.Fatalf("expected 1 helm repo, got %d", len(info.HelmRepos))
+	}
+	if len(info.HelmCharts) != 1 {
+		t.Fatalf("expected 1 helm chart, got %d", len(info.HelmCharts))
+	}
+	if len(info.Steps) != 3 {
+		t.Fatalf("expected 3 installation steps, got %d", len(info.Steps))
 	}
 }
 
@@ -90,6 +110,36 @@ func TestRegisterExisting(t *testing.T) {
 	err := mgr.Register(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckBackendCRDInstalledUsesDiscoveryFreshResults(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+
+	discoveryClient := &fakediscovery.FakeDiscovery{
+		Fake: &k8stesting.Fake{},
+	}
+	discoveryClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: RayAPIGroup + "/" + RayAPIVersion,
+			APIResources: []metav1.APIResource{
+				{Name: rayServiceResource},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	mgr := NewProviderConfigManager(c, discoveryClient)
+
+	if !mgr.checkBackendCRDInstalled() {
+		t.Fatal("expected backend CRD to be detected")
+	}
+
+	discoveryClient.Resources = []*metav1.APIResourceList{}
+
+	if mgr.checkBackendCRDInstalled() {
+		t.Fatal("expected backend CRD removal to be detected on the next check")
 	}
 }
 

@@ -94,9 +94,9 @@ const aikit = new Hono()
 
     if (!result.success) {
       logger.error({ error: result.error }, 'AIKit build failed');
-      throw new HTTPException(500, {
-        message: result.error || 'Build failed',
-      });
+      const message = result.error || 'Build failed';
+      const status = message.startsWith('Invalid build request:') ? 400 : 500;
+      throw new HTTPException(status, { message });
     }
 
     return c.json({

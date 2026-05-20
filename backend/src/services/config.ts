@@ -3,7 +3,7 @@ import { loadKubeConfig } from '../lib/kubeconfig';
 import logger from '../lib/logger';
 
 // Default namespace for AI Runway deployments
-const DEFAULT_KUBEAIRUNWAY_NAMESPACE = 'airunway-system';
+const DEFAULT_AIRUNWAY_NAMESPACE = 'airunway-system';
 
 /**
  * Application configuration stored in Kubernetes ConfigMap
@@ -36,7 +36,7 @@ class ConfigService {
    */
   private getDefaultConfig(): AppConfig {
     return {
-      defaultNamespace: process.env.DEFAULT_NAMESPACE || DEFAULT_KUBEAIRUNWAY_NAMESPACE,
+      defaultNamespace: process.env.DEFAULT_NAMESPACE || DEFAULT_AIRUNWAY_NAMESPACE,
     };
   }
 
@@ -167,7 +167,7 @@ class ConfigService {
    */
   async getDefaultNamespace(): Promise<string> {
     const config = await this.getConfig();
-    return config.defaultNamespace || DEFAULT_KUBEAIRUNWAY_NAMESPACE;
+    return config.defaultNamespace || DEFAULT_AIRUNWAY_NAMESPACE;
   }
 
   /**

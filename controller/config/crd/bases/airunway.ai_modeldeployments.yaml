@@ -75,6 +75,19 @@ spec:
                       Maps to engine-specific flags (--max-model-len for vllm, etc.)
                     format: int32
                     type: integer
+                  enablePrefixCaching:
+                    default: true
+                    description: |-
+                      enablePrefixCaching enables prefix caching for faster inference on repeated prompts
+                      Required for KV-cache-aware routing to be effective
+                      Only applicable for vllm and sglang engines
+                    type: boolean
+                  enforceEager:
+                    default: false
+                    description: |-
+                      enforceEager forces eager execution mode (disables CUDA graphs)
+                      Only applicable for vllm and sglang engines
+                    type: boolean
                   trustRemoteCode:
                     default: false
                     description: |-

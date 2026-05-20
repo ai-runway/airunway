@@ -36,20 +36,24 @@ const (
 	// DynamoGraphDeploymentKind is the kind for DynamoGraphDeployment
 	DynamoGraphDeploymentKind = "DynamoGraphDeployment"
 	// DynamoRuntimeVersion is the default upstream runtime tag used for Dynamo engines.
-	DynamoRuntimeVersion      = "1.0.1"
+	DynamoRuntimeVersion      = "1.0.2"
 	defaultVLLMRuntimeImage   = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:" + DynamoRuntimeVersion
 	defaultSGLangRuntimeImage = "nvcr.io/nvidia/ai-dynamo/sglang-runtime:" + DynamoRuntimeVersion
 	defaultTRTLLMRuntimeImage = "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:" + DynamoRuntimeVersion
+	defaultFrontendImage      = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:" + DynamoRuntimeVersion
 
 	// Default component settings
-	DefaultFrontendReplicas = 1
-	DefaultFrontendCPU      = "2"
-	DefaultFrontendMemory   = "4Gi"
-	DefaultRouterMode       = "round-robin"
+	DefaultEppReplicas = 1
+
+	// The KV cache block size advertised to the Dynamo
+	// EPP via DYN_KV_CACHE_BLOCK_SIZE. It MUST match the worker's vLLM --block-size
+	// (currently the vLLM default of 16). If not default, then pass --block-size
+	// on the worker args.
+	DefaultKVCacheBlockSize = "16"
 
 	// Component types
-	ComponentTypeFrontend = "frontend"
-	ComponentTypeWorker   = "worker"
+	ComponentTypeWorker = "worker"
+	ComponentTypeEpp    = "epp"
 
 	// Sub-component types for disaggregated mode
 	SubComponentTypePrefill = "prefill"
@@ -67,12 +71,21 @@ type DynamoOverrides struct {
 
 	// Frontend contains frontend/router component configuration
 	Frontend *FrontendOverrides `json:"frontend,omitempty"`
+
+	// Epp contains EPP component configuration
+	Epp *EPPOverrides `json:"epp,omitempty"`
 }
 
 // FrontendOverrides contains frontend component configuration
 type FrontendOverrides struct {
 	Replicas  *int32             `json:"replicas,omitempty"`
 	Resources *ResourceOverrides `json:"resources,omitempty"`
+}
+
+// EPPOverrides contains EPP component configuration
+type EPPOverrides struct {
+	Replicas *int32 `json:"replicas,omitempty"`
+	Image    string `json:"image,omitempty"`
 }
 
 // ResourceOverrides contains resource overrides
@@ -194,8 +207,17 @@ func (t *Transformer) buildServices(md *airunwayv1alpha1.ModelDeployment, overri
 	// Get the image to use
 	image := t.getImage(md)
 
-	// Add frontend service
-	services["Frontend"] = t.buildFrontendService(md, overrides)
+	gatewayEnabled := md.Spec.Gateway == nil || md.Spec.Gateway.Enabled == nil || *md.Spec.Gateway.Enabled
+
+	if gatewayEnabled {
+		// GAIE path: Gateway → EPP → worker frontendSidecar. No standalone
+		// Frontend — each worker's sidecar handles requests locally.
+		services["Epp"] = t.buildEPP(overrides, servingMode)
+	} else {
+		// Non-GAIE path: standalone Frontend service handles routing.
+		// No EPP or frontendSidecars needed.
+		services["Frontend"] = t.buildFrontendService(md, overrides)
+	}
 
 	if servingMode == airunwayv1alpha1.ServingModeDisaggregated {
 		if md.Spec.Scaling == nil {
@@ -208,19 +230,19 @@ func (t *Transformer) buildServices(md *airunwayv1alpha1.ModelDeployment, overri
 			return nil, fmt.Errorf("spec.scaling.decode is required for disaggregated serving mode")
 		}
 		// Disaggregated mode: separate prefill and decode workers
-		prefillWorker, err := t.buildPrefillWorker(md, image)
+		prefillWorker, err := t.buildPrefillWorker(md, image, gatewayEnabled)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build prefill worker: %w", err)
 		}
 		services["VllmPrefillWorker"] = prefillWorker
-		decodeWorker, err := t.buildDecodeWorker(md, image)
+		decodeWorker, err := t.buildDecodeWorker(md, image, gatewayEnabled)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build decode worker: %w", err)
 		}
 		services["VllmDecodeWorker"] = decodeWorker
 	} else {
 		// Aggregated mode: single worker
-		aggregatedWorker, err := t.buildAggregatedWorker(md, image)
+		aggregatedWorker, err := t.buildAggregatedWorker(md, image, gatewayEnabled)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build aggregated worker: %w", err)
 		}
@@ -230,23 +252,22 @@ func (t *Transformer) buildServices(md *airunwayv1alpha1.ModelDeployment, overri
 	return services, nil
 }
 
-// buildFrontendService creates the frontend service configuration
+// buildFrontendService creates the standalone frontend service for non-GAIE
+// deployments (gateway disabled). The Frontend handles request routing when
+// there is no InferencePool/EPP path.
 func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment, overrides *DynamoOverrides) map[string]interface{} {
-	// Determine replicas
-	replicas := int64(DefaultFrontendReplicas)
+	replicas := int64(1)
 	if overrides.Frontend != nil && overrides.Frontend.Replicas != nil {
 		replicas = int64(*overrides.Frontend.Replicas)
 	}
 
-	// Determine router mode
-	routerMode := DefaultRouterMode
+	routerMode := "round-robin"
 	if overrides.RouterMode != "" {
 		routerMode = overrides.RouterMode
 	}
 
-	// Determine resources
-	cpu := DefaultFrontendCPU
-	memory := DefaultFrontendMemory
+	cpu := "2"
+	memory := "4Gi"
 	if overrides.Frontend != nil && overrides.Frontend.Resources != nil {
 		if overrides.Frontend.Resources.CPU != "" {
 			cpu = overrides.Frontend.Resources.CPU
@@ -257,9 +278,8 @@ func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment,
 	}
 
 	frontend := map[string]interface{}{
-		"componentType":   ComponentTypeFrontend,
-		"dynamoNamespace": md.Name,
-		"replicas":        replicas,
+		"componentType": "frontend",
+		"replicas":      replicas,
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{
 				"cpu":    cpu,
@@ -267,9 +287,6 @@ func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment,
 			},
 		},
 		"extraPodSpec": map[string]interface{}{
-			"labels": map[string]interface{}{
-				"airunway.ai/model-deployment": md.Name,
-			},
 			"mainContainer": map[string]interface{}{
 				"image": t.getImage(md),
 				"env": []interface{}{
@@ -282,7 +299,6 @@ func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment,
 		},
 	}
 
-	// Add secret reference if specified
 	if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
 		frontend["envFromSecret"] = md.Spec.Secrets.HuggingFaceToken
 	}
@@ -290,8 +306,177 @@ func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment,
 	return frontend
 }
 
-// buildAggregatedWorker creates the worker service for aggregated mode
-func (t *Transformer) buildAggregatedWorker(md *airunwayv1alpha1.ModelDeployment, image string) (map[string]interface{}, error) {
+// buildEPP creates the EPP service configuration.
+//
+// The plugin set and env vars are mode-aware. Both modes set DYN_KV_CACHE_BLOCK_SIZE,
+// DYN_MODEL_NAME, and DYN_ENFORCE_DISAGG on the EPP container. The Dynamo KV scorer
+// FFI reads these at init time and create_routers fails ("code 5") without them on
+// Dynamo runtime 1.0.2. The shape mirrors the canonical examples in
+// ai-dynamo/dynamo/examples/backends/vllm/deploy/gaie/{agg,disagg}.yaml.
+func (t *Transformer) buildEPP(overrides *DynamoOverrides, servingMode airunwayv1alpha1.ServingMode) map[string]interface{} {
+	// Determine replicas
+	replicas := int64(DefaultEppReplicas)
+	if overrides.Epp != nil && overrides.Epp.Replicas != nil {
+		replicas = int64(*overrides.Epp.Replicas)
+	}
+
+	// EPP image defaults to the frontend runtime image (per Dynamo docs, the
+	// frontend image can be used for the EPP) but can be overridden if you
+	// choose to build the EPP image.
+	eppImage := defaultFrontendImage
+	if overrides.Epp != nil && overrides.Epp.Image != "" {
+		eppImage = overrides.Epp.Image
+	}
+
+	isDisagg := servingMode == airunwayv1alpha1.ServingModeDisaggregated
+
+	// In aggregated mode, set decode_fallback=true to avoid "create_routers failed" errors.
+	// In disaggregated mode, set it to false to catch missing prefill workers.
+	decodeFallback := "true"
+	// DYN_ENFORCE_DISAGG is a no-op on 1.0.2 (the binding doesn't read it) but
+	// is the equivalent knob on Dynamo main with inverted semantics. We set
+	// both so this code is forward-compatible with a future runtime bump.
+	enforceDisagg := "false"
+	if isDisagg {
+		decodeFallback = "false"
+		enforceDisagg = "true"
+	}
+
+	env := []interface{}{
+		map[string]interface{}{
+			"name":  "DYN_DECODE_FALLBACK",
+			"value": decodeFallback,
+		},
+		map[string]interface{}{
+			"name":  "DYN_ENFORCE_DISAGG",
+			"value": enforceDisagg,
+		},
+	}
+
+	plugins, schedulingProfiles := t.buildEPPPluginsAndProfiles(isDisagg)
+
+	epp := map[string]interface{}{
+		"componentType": ComponentTypeEpp,
+		"replicas":      replicas,
+		"extraPodSpec": map[string]interface{}{
+			"mainContainer": map[string]interface{}{
+				"image": eppImage,
+				"env":   env,
+			},
+		},
+		"eppConfig": map[string]interface{}{
+			"config": map[string]interface{}{
+				"plugins":            plugins,
+				"schedulingProfiles": schedulingProfiles,
+			},
+		},
+	}
+
+	return epp
+}
+
+// buildEPPPluginsAndProfiles returns the EPP plugin list and scheduling profiles
+// matching the canonical Dynamo examples for the requested serving mode.
+//
+// Aggregated mode emits: disagg-profile-handler, decode-filter (allowsNoLabel=true),
+// picker, dyn-decode-scorer, and a single "decode" scheduling profile.
+//
+// Disaggregated mode additionally emits prefill-filter (allowsNoLabel=false),
+// dyn-prefill-scorer, and a separate "prefill" scheduling profile so the
+// disagg-profile-handler can dispatch prefill and decode requests independently.
+func (t *Transformer) buildEPPPluginsAndProfiles(isDisagg bool) ([]interface{}, []interface{}) {
+	decodeFilter := map[string]interface{}{
+		"name": "decode-filter",
+		"type": "label-filter",
+		"parameters": map[string]interface{}{
+			"label": "nvidia.com/dynamo-sub-component-type",
+			"validValues": []interface{}{
+				"decode",
+			},
+			"allowsNoLabel": !isDisagg,
+		},
+	}
+
+	picker := map[string]interface{}{
+		"name": "picker",
+		"type": "max-score-picker",
+	}
+
+	dynDecode := map[string]interface{}{
+		"name": "dyn-decode",
+		"type": "dyn-decode-scorer",
+	}
+
+	disaggHandler := map[string]interface{}{
+		"type": "disagg-profile-handler",
+	}
+
+	decodeProfile := map[string]interface{}{
+		"name": "decode",
+		"plugins": []interface{}{
+			map[string]interface{}{"pluginRef": "decode-filter", "weight": int64(1)},
+			map[string]interface{}{"pluginRef": "dyn-decode", "weight": int64(1)},
+			map[string]interface{}{"pluginRef": "picker", "weight": int64(1)},
+		},
+	}
+
+	if !isDisagg {
+		return []interface{}{
+				disaggHandler,
+				decodeFilter,
+				picker,
+				dynDecode,
+			}, []interface{}{
+				decodeProfile,
+			}
+	}
+
+	prefillFilter := map[string]interface{}{
+		"name": "prefill-filter",
+		"type": "label-filter",
+		"parameters": map[string]interface{}{
+			"label": "nvidia.com/dynamo-sub-component-type",
+			"validValues": []interface{}{
+				"prefill",
+			},
+			"allowsNoLabel": false,
+		},
+	}
+
+	dynPrefill := map[string]interface{}{
+		"name": "dyn-prefill",
+		"type": "dyn-prefill-scorer",
+	}
+
+	prefillProfile := map[string]interface{}{
+		"name": "prefill",
+		"plugins": []interface{}{
+			map[string]interface{}{"pluginRef": "prefill-filter", "weight": int64(1)},
+			map[string]interface{}{"pluginRef": "dyn-prefill", "weight": int64(1)},
+			map[string]interface{}{"pluginRef": "picker", "weight": int64(1)},
+		},
+	}
+
+	return []interface{}{
+			disaggHandler,
+			prefillFilter,
+			decodeFilter,
+			picker,
+			dynPrefill,
+			dynDecode,
+		}, []interface{}{
+			prefillProfile,
+			decodeProfile,
+		}
+}
+
+// buildAggregatedWorker creates the worker service for aggregated mode.
+//
+// Phase 2 TODO (Dynamo EPP integration): pass --block-size matching
+// DefaultKVCacheBlockSize so the worker's vLLM cache geometry agrees with the
+// EPP's DYN_KV_CACHE_BLOCK_SIZE. Today we rely on the vLLM default (16) lining
+// up with the EPP env, which is fragile. See ai-dynamo/dynamo agg.yaml example.
+func (t *Transformer) buildAggregatedWorker(md *airunwayv1alpha1.ModelDeployment, image string, gatewayEnabled bool) (map[string]interface{}, error) {
 	// Get replicas
 	replicas := int64(1)
 	if md.Spec.Scaling != nil && md.Spec.Scaling.Replicas > 0 {
@@ -308,20 +493,20 @@ func (t *Transformer) buildAggregatedWorker(md *airunwayv1alpha1.ModelDeployment
 	}
 
 	worker := map[string]interface{}{
-		"componentType":   ComponentTypeWorker,
-		"dynamoNamespace": md.Name,
-		"replicas":        replicas,
-		"resources":       resources,
+		"componentType": ComponentTypeWorker,
+		"replicas":      replicas,
+		"resources":     resources,
 		"extraPodSpec": map[string]interface{}{
-			"labels": map[string]interface{}{
-				"airunway.ai/model-deployment": md.Name,
-			},
 			"mainContainer": map[string]interface{}{
 				"image":   image,
 				"command": toInterfaceSlice(t.engineCommand(md.ResolvedEngineType())),
 				"args":    toInterfaceSlice(args),
 			},
 		},
+	}
+
+	if gatewayEnabled {
+		worker["frontendSidecar"] = t.buildFrontendSidecar(md, false)
 	}
 
 	// Add secret reference if specified
@@ -339,8 +524,32 @@ func (t *Transformer) buildAggregatedWorker(md *airunwayv1alpha1.ModelDeployment
 	return worker, nil
 }
 
-// buildPrefillWorker creates the prefill worker for disaggregated mode
-func (t *Transformer) buildPrefillWorker(md *airunwayv1alpha1.ModelDeployment, image string) (map[string]interface{}, error) {
+// buildFrontendSidecar returns the frontendSidecar config for a worker service.
+// The Dynamo operator (v1.1.0+) injects a frontend container on each worker pod
+// so the InferencePool can route directly to workers on port 8000.
+//
+// Aggregated mode uses "--router-mode direct" — the sidecar forwards to the
+// colocated engine without internal routing since the EPP handles pod selection.
+//
+// Disaggregated mode omits --router-mode so the sidecar uses the Dynamo default,
+// allowing the prefill router to coordinate worker selection.
+func (t *Transformer) buildFrontendSidecar(md *airunwayv1alpha1.ModelDeployment, disagg bool) map[string]interface{} {
+	args := []interface{}{"-m", "dynamo.frontend"}
+	if !disagg {
+		args = append(args, "--router-mode", "direct")
+	}
+	sidecar := map[string]interface{}{
+		"image": defaultVLLMRuntimeImage,
+		"args":  args,
+	}
+	if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
+		sidecar["envFromSecret"] = md.Spec.Secrets.HuggingFaceToken
+	}
+	return sidecar
+}
+
+// buildPrefillWorker creates the prefill worker for disaggregated mode.
+func (t *Transformer) buildPrefillWorker(md *airunwayv1alpha1.ModelDeployment, image string, gatewayEnabled bool) (map[string]interface{}, error) {
 	prefillSpec := md.Spec.Scaling.Prefill
 
 	// Build resource limits and requests from component spec
@@ -374,19 +583,19 @@ func (t *Transformer) buildPrefillWorker(md *airunwayv1alpha1.ModelDeployment, i
 	worker := map[string]interface{}{
 		"componentType":    ComponentTypeWorker,
 		"subComponentType": SubComponentTypePrefill,
-		"dynamoNamespace":  md.Name,
 		"replicas":         int64(prefillSpec.Replicas),
 		"resources":        resources,
 		"extraPodSpec": map[string]interface{}{
-			"labels": map[string]interface{}{
-				"airunway.ai/model-deployment": md.Name,
-			},
 			"mainContainer": map[string]interface{}{
 				"image":   image,
 				"command": toInterfaceSlice(t.engineCommand(md.ResolvedEngineType())),
 				"args":    toInterfaceSlice(args),
 			},
 		},
+	}
+
+	if gatewayEnabled {
+		worker["frontendSidecar"] = t.buildFrontendSidecar(md, true)
 	}
 
 	// Add secret reference if specified
@@ -404,8 +613,8 @@ func (t *Transformer) buildPrefillWorker(md *airunwayv1alpha1.ModelDeployment, i
 	return worker, nil
 }
 
-// buildDecodeWorker creates the decode worker for disaggregated mode
-func (t *Transformer) buildDecodeWorker(md *airunwayv1alpha1.ModelDeployment, image string) (map[string]interface{}, error) {
+// buildDecodeWorker creates the decode worker for disaggregated mode.
+func (t *Transformer) buildDecodeWorker(md *airunwayv1alpha1.ModelDeployment, image string, gatewayEnabled bool) (map[string]interface{}, error) {
 	decodeSpec := md.Spec.Scaling.Decode
 
 	// Build resource limits and requests from component spec
@@ -439,19 +648,19 @@ func (t *Transformer) buildDecodeWorker(md *airunwayv1alpha1.ModelDeployment, im
 	worker := map[string]interface{}{
 		"componentType":    ComponentTypeWorker,
 		"subComponentType": SubComponentTypeDecode,
-		"dynamoNamespace":  md.Name,
 		"replicas":         int64(decodeSpec.Replicas),
 		"resources":        resources,
 		"extraPodSpec": map[string]interface{}{
-			"labels": map[string]interface{}{
-				"airunway.ai/model-deployment": md.Name,
-			},
 			"mainContainer": map[string]interface{}{
 				"image":   image,
 				"command": toInterfaceSlice(t.engineCommand(md.ResolvedEngineType())),
 				"args":    toInterfaceSlice(args),
 			},
 		},
+	}
+
+	if gatewayEnabled {
+		worker["frontendSidecar"] = t.buildFrontendSidecar(md, true)
 	}
 
 	// Add secret reference if specified
@@ -534,6 +743,22 @@ func (t *Transformer) buildEngineArgs(md *airunwayv1alpha1.ModelDeployment) ([]s
 		switch md.ResolvedEngineType() {
 		case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang:
 			args = append(args, "--trust-remote-code")
+		}
+	}
+
+	// Add prefix caching
+	if md.Spec.Engine.EnablePrefixCaching {
+		switch md.ResolvedEngineType() {
+		case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang:
+			args = append(args, "--enable-prefix-caching")
+		}
+	}
+
+	// Add enforce eager
+	if md.Spec.Engine.EnforceEager {
+		switch md.ResolvedEngineType() {
+		case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang:
+			args = append(args, "--enforce-eager")
 		}
 	}
 
@@ -778,7 +1003,11 @@ func (t *Transformer) addSchedulingConfig(service map[string]interface{}, md *ai
 	}
 
 	if len(md.Spec.NodeSelector) > 0 {
-		extraPodSpec["nodeSelector"] = md.Spec.NodeSelector
+		ns := make(map[string]interface{}, len(md.Spec.NodeSelector))
+		for k, v := range md.Spec.NodeSelector {
+			ns[k] = v
+		}
+		extraPodSpec["nodeSelector"] = ns
 	}
 
 	if len(md.Spec.Tolerations) > 0 {

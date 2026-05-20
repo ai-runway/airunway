@@ -410,7 +410,7 @@ func TestStringVal(t *testing.T) {
 	}
 }
 
-// newWorkspaceWithState creates a Workspace with status.state set (KAITO 0.9.0+).
+// newWorkspaceWithState creates a Workspace with status.state set (KAITO 0.10.0+).
 // Optionally includes conditions for backward-compat / replica tests.
 func newWorkspaceWithState(state string, conditions []interface{}) *unstructured.Unstructured {
 	ws := newWorkspaceWithStatus(conditions)

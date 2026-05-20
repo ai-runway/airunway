@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -42,6 +43,7 @@ import (
 	"github.com/kaito-project/airunway/controller/internal/gateway"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // reconcileGateway creates or updates InferencePool and HTTPRoute resources
@@ -78,15 +80,10 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return nil
 	}
 
-	// Determine target port for InferencePool (needs the pod/container port, not service port)
-	port := int32(8000) // sensible default
-	if md.Status.Endpoint != nil && md.Status.Endpoint.Service != "" {
-		// Look up the service's target port (the actual container port)
-		if targetPort := r.resolveTargetPort(ctx, md.Status.Endpoint.Service, md.Namespace); targetPort > 0 {
-			port = targetPort
-		} else if md.Status.Endpoint.Port > 0 {
-			port = md.Status.Endpoint.Port
-		}
+	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
+	// Resolve provider gateway capabilities
+	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
+		logger.V(1).Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
 	}
 
 	// Ensure model pods have the selector label for InferencePool
@@ -105,16 +102,51 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		}
 	}
 
-	// Create or update InferencePool
-	if err := r.reconcileInferencePool(ctx, md, port, gwConfig.GatewayNamespace); err != nil {
-		r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "InferencePoolFailed", err.Error())
-		return fmt.Errorf("reconciling InferencePool: %w", err)
+	// Determine the HTTPRoute backend via the GAIE InferencePool/EPP path.
+	poolName, poolNamespace := md.Name, md.Namespace
+
+	// Use provider managed inference pool if it exists,
+	// otherwise use the default inference pool.
+	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities, gwConfig); ok && err == nil {
+		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", md.Spec.Provider.Name)
+
+		// Resolve the InferencePool name for the provider.
+		// The provider-managed pool will be configured to be named with the model deployment name and namespace.
+		poolName = resolveProviderInferencePoolName(gatewayCapabilities.InferencePoolNamePattern, md.Name, md.Namespace)
+		poolNamespace = resolveProviderInferencePoolName(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace)
+
+		// Use provider-managed InferencePool
+		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace, gwConfig.GetBBRNamespace())
+		if err != nil {
+			logger.Info("Error reconciling provider-managed InferencePool", "error", err)
+			return err
+		}
+
+		// Reconcile DestinationRule for provider-managed EPP (Istio TLS)
+		if providerEPPName != "" {
+			if err := r.reconcileEPPDestinationRule(ctx, md, providerEPPName, poolNamespace); err != nil {
+				return fmt.Errorf("reconciling EPP DestinationRule for provider-managed EPP: %w", err)
+			}
+		}
+	} else if err != nil {
+		return err
 	}
 
-	// Create or update EPP (Endpoint Picker Proxy) for the InferencePool
-	if err := r.reconcileEPP(ctx, md); err != nil {
-		r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "EPPFailed", err.Error())
-		return fmt.Errorf("reconciling EPP: %w", err)
+	if gatewayCapabilities != nil {
+		logger.Info("Skipping EPP creation, provider manages EPP", "provider", md.Spec.Provider.Name)
+	} else { // Use default EPP
+		// Create or update EPP (EndPoint Picker) for the InferencePool
+		if err := r.reconcileEPP(ctx, md); err != nil {
+			r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "EPPFailed", err.Error())
+			return fmt.Errorf("reconciling EPP: %w", err)
+		}
+	}
+
+	backend := httpRouteBackendTarget{
+		group:     "inference.networking.k8s.io",
+		kind:      "InferencePool",
+		name:      poolName,
+		namespace: poolNamespace,
 	}
 
 	// Resolve model name early (needed for HTTPRoute header match and status)
@@ -124,7 +156,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	if md.Spec.Gateway != nil && md.Spec.Gateway.HTTPRouteRef != "" {
 		logger.V(1).Info("Using user-provided HTTPRoute", "httpRouteRef", md.Spec.Gateway.HTTPRouteRef)
 	} else {
-		if err := r.reconcileHTTPRoute(ctx, md, gwConfig, modelName); err != nil {
+		if err := r.reconcileHTTPRoute(ctx, md, gwConfig, modelName, backend); err != nil {
 			r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "HTTPRouteFailed", err.Error())
 			return fmt.Errorf("reconciling HTTPRoute: %w", err)
 		}
@@ -161,10 +193,7 @@ func (r *ModelDeploymentReconciler) resolveGatewayConfig(ctx context.Context) (*
 		return nil, fmt.Errorf("no Gateway resources found in cluster")
 	case 1:
 		gw := &gateways.Items[0]
-		return &gateway.GatewayConfig{
-			GatewayName:      gw.Name,
-			GatewayNamespace: gw.Namespace,
-		}, nil
+		return gatewayConfigFromResource(gw), nil
 	default:
 		// Multiple gateways: look for ones with the inference-gateway label
 		var labeled []*gatewayv1.Gateway
@@ -181,11 +210,21 @@ func (r *ModelDeploymentReconciler) resolveGatewayConfig(ctx context.Context) (*
 			log.FromContext(ctx).Info("WARNING: multiple Gateways labeled with inference-gateway, using the first one. Consider using spec.gateway.gatewayRef for explicit selection.",
 				"count", len(labeled), "selected", labeled[0].Name)
 		}
-		return &gateway.GatewayConfig{
-			GatewayName:      labeled[0].Name,
-			GatewayNamespace: labeled[0].Namespace,
-		}, nil
+		return gatewayConfigFromResource(labeled[0]), nil
 	}
+}
+
+// gatewayConfigFromResource builds a GatewayConfig from a Gateway resource,
+// reading the optional airunway.ai/bbr-namespace annotation.
+func gatewayConfigFromResource(gw *gatewayv1.Gateway) *gateway.GatewayConfig {
+	cfg := &gateway.GatewayConfig{
+		GatewayName:      gw.Name,
+		GatewayNamespace: gw.Namespace,
+	}
+	if gw.Annotations != nil {
+		cfg.BBRNamespace = gw.Annotations[gateway.AnnotationBBRNamespace]
+	}
+	return cfg
 }
 
 // reconcileInferencePool creates or updates the InferencePool for a ModelDeployment.
@@ -233,6 +272,99 @@ func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, 
 		}
 	}
 	return nil
+}
+
+func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment, poolName, poolNamespace, bbrNamespace string,
+) (string, error) {
+	logger := log.FromContext(ctx)
+	mdNamespace := md.Namespace
+
+	// Wait for the pool to exist (requeue if not ready).
+	pool := &inferencev1.InferencePool{}
+	poolKey := client.ObjectKey{Name: poolName, Namespace: poolNamespace}
+	if err := r.Get(ctx, poolKey, pool); err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("Provider-managed InferencePool not found yet, requeuing",
+				"pool", poolKey)
+			// Thread error through return path to trigger requeue with exponential
+			// backoff in main reconcile loop.
+			return "", err
+		}
+		return "", fmt.Errorf("failed to get provider-managed InferencePool %s: %w", poolKey, err)
+	}
+
+	logger.V(1).Info("Found provider-managed InferencePool", "pool", poolKey)
+
+	// BBR builds its internal model registry from HTTPRoute headers at startup and
+	// needs a rolling restart whenever a new model is added. For default (airunway-
+	// managed) pools, reconcileInferencePool handles this when CreateOrUpdate reports
+	// Created. Provider-managed pools are created by the provider's operator, so
+	// there's no Created signal. This is gated on a one-shot annotation instead,
+	// restart BBR exactly once per ModelDeployment, not on every reconcile.
+	if md.Annotations[airunwayv1alpha1.BBRRestarted] != "true" {
+		if err := r.restartBBRIfPresent(ctx, bbrNamespace); err != nil {
+			logger.Info("Could not restart BBR deployment (non-fatal)", "error", err)
+		} else {
+			mdBase := md.DeepCopy()
+			if md.Annotations == nil {
+				md.Annotations = map[string]string{}
+			}
+			md.Annotations[airunwayv1alpha1.BBRRestarted] = "true"
+			if patchErr := r.Patch(ctx, md, client.MergeFrom(mdBase)); patchErr != nil {
+				logger.V(1).Info("Could not annotate ModelDeployment after BBR restart", "error", patchErr)
+			}
+		}
+	}
+
+	// Use it as HTTPRoute backend ref (cross-namespace ref + ReferenceGrant).
+	// Create ReferenceGrant in the inference pool namespace.
+	if poolNamespace != mdNamespace {
+		rg := &gatewayv1beta1.ReferenceGrant{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName + "-referencegrant",
+				Namespace: poolNamespace,
+			},
+		}
+		result, err := ctrl.CreateOrUpdate(ctx, r.Client, rg, func() error {
+			rg.Spec.From = []gatewayv1beta1.ReferenceGrantFrom{
+				{
+					Group:     "gateway.networking.k8s.io",
+					Kind:      "HTTPRoute",
+					Namespace: gatewayv1beta1.Namespace(mdNamespace),
+				},
+			}
+			rg.Spec.To = []gatewayv1beta1.ReferenceGrantTo{
+				{
+					Group: "inference.networking.k8s.io",
+					Kind:  "InferencePool",
+					Name:  (*gatewayv1beta1.ObjectName)(&pool.Name),
+				},
+			}
+			return ctrl.SetControllerReference(pool, rg, r.Scheme)
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to create/update ReferenceGrant for provider-managed InferencePool: %w", err)
+		}
+
+		logger.V(1).Info("ReferenceGrant for provider-managed InferencePool reconciled", "name", rg.Name, "result", result)
+	}
+
+	// Return the EPP service name from the InferencePool's EndpointPickerRef
+	eppName := string(pool.Spec.EndpointPickerRef.Name)
+	return eppName, nil
+}
+
+// resolveProviderInferencePoolName applies the provider's naming pattern to produce the
+// concrete InferencePool name for a given ModelDeployment. If the provider has
+// no pattern configured, it falls back to the ModelDeployment name.
+func resolveProviderInferencePoolName(pattern, mdName, mdNamespace string) string {
+	if pattern == "" {
+		return mdName
+	}
+	result := strings.ReplaceAll(pattern, "{name}", mdName)
+	result = strings.ReplaceAll(result, "{namespace}", mdNamespace)
+	return result
 }
 
 // reconcileEPP creates or updates the Endpoint Picker Proxy deployment and service
@@ -442,7 +574,7 @@ kind: EndpointPickerConfig
 		return fmt.Errorf("failed to create/update EPP Service: %w", err)
 	}
 
-	if err := r.reconcileEPPDestinationRule(ctx, md, eppName); err != nil {
+	if err := r.reconcileEPPDestinationRule(ctx, md, eppName, md.Namespace); err != nil {
 		return fmt.Errorf("failed to create/update EPP DestinationRule: %w", err)
 	}
 
@@ -452,9 +584,10 @@ kind: EndpointPickerConfig
 
 // reconcileEPPDestinationRule creates or updates the Istio DestinationRule for the EPP service,
 // but only if Istio is detected (i.e. the DestinationRule CRD is registered in the cluster).
-// DestinationRule: tell Istio to use SIMPLE TLS (insecureSkipVerify)
-// to skip cert validation.
-func (r *ModelDeploymentReconciler) reconcileEPPDestinationRule(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, eppName string) error {
+// EPP serves TLS by default (--secure-serving=true) with a self-signed certificate.
+// kGateway handles this natively, but Istio's sidecar needs a DestinationRule with
+// mode: SIMPLE + insecureSkipVerify to connect to the EPP's TLS endpoint.
+func (r *ModelDeploymentReconciler) reconcileEPPDestinationRule(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, eppName, eppNamespace string) error {
 	gk := schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}
 	if _, err := r.Client.RESTMapper().RESTMapping(gk); err != nil {
 		log.FromContext(ctx).V(1).Info("Istio not detected, skipping DestinationRule", "eppName", eppName)
@@ -468,11 +601,11 @@ func (r *ModelDeploymentReconciler) reconcileEPPDestinationRule(ctx context.Cont
 		Kind:    "DestinationRule",
 	})
 	dr.SetName(eppName)
-	dr.SetNamespace(md.Namespace)
+	dr.SetNamespace(eppNamespace)
 
 	_, err := ctrl.CreateOrUpdate(ctx, r.Client, dr, func() error {
 		if err := unstructured.SetNestedField(dr.Object, map[string]interface{}{
-			"host": fmt.Sprintf("%s.%s.svc.cluster.local", eppName, md.Namespace),
+			"host": fmt.Sprintf("%s.%s.svc.cluster.local", eppName, eppNamespace),
 			"trafficPolicy": map[string]interface{}{
 				"tls": map[string]interface{}{
 					"mode":               "SIMPLE",
@@ -490,67 +623,109 @@ func (r *ModelDeploymentReconciler) reconcileEPPDestinationRule(ctx context.Cont
 func int64Ptr(i int64) *int64 { return &i }
 func strPtr(s string) *string { return &s }
 
+// resolveProviderGatewayCapabilities retrieves provider gateway capabilities from InferenceProviderConfig.
+func (r *ModelDeploymentReconciler) resolveProviderGatewayCapabilities(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) (*airunwayv1alpha1.GatewayCapabilities, error) {
+	var providerName string
+	if md.Spec.Provider != nil {
+		providerName = md.Spec.Provider.Name
+	} else if md.Status.Provider != nil {
+		providerName = md.Status.Provider.Name
+	} else {
+		return nil, fmt.Errorf("provider name not specified in ModelDeployment %s/%s", md.Namespace, md.Name)
+	}
+
+	gatewayCapabilities := r.ProviderResolver.GetGatewayCapabilities(ctx, providerName)
+	if gatewayCapabilities == nil {
+		return nil, fmt.Errorf("failed to resolve provider capabilities for ModelDeployment %s/%s", md.Namespace, md.Name)
+	}
+
+	return gatewayCapabilities, nil
+}
+
+// httpRouteBackendTarget describes where an HTTPRoute should forward traffic
+// via a GAIE InferencePool backend.
+type httpRouteBackendTarget struct {
+	// group is the backend API group (e.g. "inference.networking.k8s.io").
+	group gatewayv1.Group
+	// kind is the backend kind (e.g. "InferencePool").
+	kind gatewayv1.Kind
+	// name is the backend object name.
+	name string
+	// namespace is the backend object namespace. May differ from the
+	// ModelDeployment namespace for provider-managed backends.
+	namespace string
+}
+
+func buildHTTPRouteSpec(gwConfig *gateway.GatewayConfig, modelName string, backend httpRouteBackendTarget) gatewayv1.HTTPRouteSpec {
+	ns := gatewayv1.Namespace(gwConfig.GatewayNamespace)
+	pathPrefix := gatewayv1.PathMatchPathPrefix
+	timeout := gatewayv1.Duration("300s")
+
+	match := gatewayv1.HTTPRouteMatch{
+		Path: &gatewayv1.HTTPPathMatch{
+			Type:  &pathPrefix,
+			Value: strPtr("/"),
+		},
+	}
+	headerExact := gatewayv1.HeaderMatchExact
+	match.Headers = []gatewayv1.HTTPHeaderMatch{
+		{
+			Type:  &headerExact,
+			Name:  "X-Gateway-Model-Name", // https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/bbr/README.md
+			Value: modelName,
+		},
+	}
+
+	backendGroup := backend.group
+	backendKind := backend.kind
+	backendNs := gatewayv1.Namespace(backend.namespace)
+	backendRef := gatewayv1.BackendObjectReference{
+		Group:     &backendGroup,
+		Kind:      &backendKind,
+		Name:      gatewayv1.ObjectName(backend.name),
+		Namespace: &backendNs,
+	}
+
+	return gatewayv1.HTTPRouteSpec{
+		CommonRouteSpec: gatewayv1.CommonRouteSpec{
+			ParentRefs: []gatewayv1.ParentReference{
+				{
+					Name:      gatewayv1.ObjectName(gwConfig.GatewayName),
+					Namespace: &ns,
+				},
+			},
+		},
+		Rules: []gatewayv1.HTTPRouteRule{
+			{
+				Matches: []gatewayv1.HTTPRouteMatch{match},
+				BackendRefs: []gatewayv1.HTTPBackendRef{
+					{
+						BackendRef: gatewayv1.BackendRef{
+							BackendObjectReference: backendRef,
+						},
+					},
+				},
+				Timeouts: &gatewayv1.HTTPRouteTimeouts{
+					Request: &timeout,
+				},
+			},
+		},
+	}
+}
+
 // reconcileHTTPRoute creates the HTTPRoute for a ModelDeployment on first reconcile.
 // If the HTTPRoute is subsequently deleted by the user the controller will not recreate.
-// The deletion is treated as intentional (BYO / opt-out). The ModelDeployment is
+// The deletion is treated as intentional. The ModelDeployment is
 // annotated with HTTPRouteCreated after the initial creation so that future
 // reconciles will skip recreating a missing route.
-func (r *ModelDeploymentReconciler) reconcileHTTPRoute(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gwConfig *gateway.GatewayConfig, modelName string) error {
+func (r *ModelDeploymentReconciler) reconcileHTTPRoute(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gwConfig *gateway.GatewayConfig, modelName string, backend httpRouteBackendTarget) error {
 	logger := log.FromContext(ctx)
 
 	existing := &gatewayv1.HTTPRoute{}
 	err := r.Get(ctx, client.ObjectKey{Name: md.Name, Namespace: md.Namespace}, existing)
 	if err == nil {
 		// HTTPRoute exists — update it in case model name or gateway changed.
-		group := gatewayv1.Group("inference.networking.k8s.io")
-		kind := gatewayv1.Kind("InferencePool")
-		ns := gatewayv1.Namespace(gwConfig.GatewayNamespace)
-		pathPrefix := gatewayv1.PathMatchPathPrefix
-		headerExact := gatewayv1.HeaderMatchExact
-		timeout := gatewayv1.Duration("300s")
-		existing.Spec = gatewayv1.HTTPRouteSpec{
-			CommonRouteSpec: gatewayv1.CommonRouteSpec{
-				ParentRefs: []gatewayv1.ParentReference{
-					{
-						Name:      gatewayv1.ObjectName(gwConfig.GatewayName),
-						Namespace: &ns,
-					},
-				},
-			},
-			Rules: []gatewayv1.HTTPRouteRule{
-				{
-					Matches: []gatewayv1.HTTPRouteMatch{
-						{
-							Path: &gatewayv1.HTTPPathMatch{
-								Type:  &pathPrefix,
-								Value: strPtr("/"),
-							},
-							Headers: []gatewayv1.HTTPHeaderMatch{
-								{
-									Type:  &headerExact,
-									Name:  "X-Gateway-Model-Name", // https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/bbr/README.md
-									Value: modelName,
-								},
-							},
-						},
-					},
-					BackendRefs: []gatewayv1.HTTPBackendRef{
-						{
-							BackendRef: gatewayv1.BackendRef{
-								BackendObjectReference: gatewayv1.BackendObjectReference{
-									Group: &group,
-									Kind:  &kind,
-									Name:  gatewayv1.ObjectName(md.Name),
-								},
-							},
-						},
-					},
-					Timeouts: &gatewayv1.HTTPRouteTimeouts{
-						Request: &timeout,
-					},
-				},
-			},
-		}
+		existing.Spec = buildHTTPRouteSpec(gwConfig, modelName, backend)
 		if updateErr := r.Update(ctx, existing); updateErr != nil {
 			return fmt.Errorf("failed to update HTTPRoute: %w", updateErr)
 		}
@@ -566,60 +741,12 @@ func (r *ModelDeploymentReconciler) reconcileHTTPRoute(ctx context.Context, md *
 		}
 
 		// First-time creation.
-		group := gatewayv1.Group("inference.networking.k8s.io")
-		kind := gatewayv1.Kind("InferencePool")
-		ns := gatewayv1.Namespace(gwConfig.GatewayNamespace)
-		pathPrefix := gatewayv1.PathMatchPathPrefix
-		headerExact := gatewayv1.HeaderMatchExact
-		timeout := gatewayv1.Duration("300s")
 		route := &gatewayv1.HTTPRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      md.Name,
 				Namespace: md.Namespace,
 			},
-			Spec: gatewayv1.HTTPRouteSpec{
-				CommonRouteSpec: gatewayv1.CommonRouteSpec{
-					ParentRefs: []gatewayv1.ParentReference{
-						{
-							Name:      gatewayv1.ObjectName(gwConfig.GatewayName),
-							Namespace: &ns,
-						},
-					},
-				},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						Matches: []gatewayv1.HTTPRouteMatch{
-							{
-								Path: &gatewayv1.HTTPPathMatch{
-									Type:  &pathPrefix,
-									Value: strPtr("/"),
-								},
-								Headers: []gatewayv1.HTTPHeaderMatch{
-									{
-										Type:  &headerExact,
-										Name:  "X-Gateway-Model-Name", // https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/bbr/README.md
-										Value: modelName,
-									},
-								},
-							},
-						},
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Group: &group,
-										Kind:  &kind,
-										Name:  gatewayv1.ObjectName(md.Name),
-									},
-								},
-							},
-						},
-						Timeouts: &gatewayv1.HTTPRouteTimeouts{
-							Request: &timeout,
-						},
-					},
-				},
-			},
+			Spec: buildHTTPRouteSpec(gwConfig, modelName, backend),
 		}
 		if setErr := ctrl.SetControllerReference(md, route, r.Scheme); setErr != nil {
 			return fmt.Errorf("setting controller reference: %w", setErr)
@@ -939,17 +1066,30 @@ func namespaceSelectorFromSet(namespaces map[string]bool) *metav1.LabelSelector 
 // the deployment is no longer running. Also sets GatewayReady=False.
 func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
+
+	// Resolve provider gateway capabilities
+	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
+	var err error
+	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
+		logger.Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+	}
+	providerManagedPool := gatewayCapabilities != nil
+
 	eppName := md.Name + "-epp"
 
-	// Delete InferencePool if it exists
-	pool := &inferencev1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      md.Name,
-			Namespace: md.Namespace,
-		},
-	}
-	if err := r.Delete(ctx, pool); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("failed to delete InferencePool: %w", err)
+	if !providerManagedPool {
+		// Delete InferencePool if it exists
+		pool := &inferencev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      md.Name,
+				Namespace: md.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, pool); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("failed to delete InferencePool: %w", err)
+		}
+	} else {
+		logger.V(1).Info("Skipping InferencePool cleanup because provider manages the pool")
 	}
 
 	// Delete auto-created HTTPRoute (skip if user-provided)
@@ -965,28 +1105,33 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 		}
 	}
 
-	// Delete EPP resources
-	eppResources := []client.Object{
-		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
-		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
-		&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
-		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
-	}
-
-	// Conditionally delete the DestinationRule if Istio is present
-	if _, err := r.Client.RESTMapper().RESTMapping(schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}); err == nil {
-		dr := &unstructured.Unstructured{}
-		dr.SetGroupVersionKind(schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"})
-		dr.SetName(eppName)
-		dr.SetNamespace(md.Namespace)
-		eppResources = append(eppResources, dr)
-	}
-	for _, obj := range eppResources {
-		if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
-			logger.V(1).Info("Could not delete EPP resource", "resource", obj.GetObjectKind(), "error", err)
+	if !providerManagedPool {
+		// Delete EPP resources
+		eppResources := []client.Object{
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+			&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+			&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
 		}
+
+		// Conditionally delete the DestinationRule if Istio is present
+		if _, err := r.Client.RESTMapper().RESTMapping(schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}); err == nil {
+			dr := &unstructured.Unstructured{}
+			dr.SetGroupVersionKind(schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"})
+			dr.SetName(eppName)
+			dr.SetNamespace(md.Namespace)
+			eppResources = append(eppResources, dr)
+		}
+
+		for _, obj := range eppResources {
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				logger.V(1).Info("Could not delete EPP resource", "resource", obj.GetObjectKind(), "error", err)
+			}
+		}
+	} else {
+		logger.V(1).Info("Skipping deletion of EPP resources because provider manages EPP")
 	}
 
 	// Revert Gateway allowedRoutes if no other ModelDeployments in this namespace need gateway access.
@@ -1012,6 +1157,40 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 
 	logger.Info("Gateway resources cleaned up", "name", md.Name)
 	return nil
+}
+
+func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities, gwConfig *gateway.GatewayConfig) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if gatewayCapabilitities != nil {
+		// Provider manages the pool.
+		return true, nil
+	}
+
+	// Traffic routed to the InferencePool will be forwarded to this port on selected pods (needs the pod/container port, not service port).
+	port := int32(8000) // sensible default
+	if md.Status.Endpoint != nil && md.Status.Endpoint.Service != "" {
+		// Look up the service's target port (the actual container port)
+		if targetPort := r.resolveTargetPort(ctx, md.Status.Endpoint.Service, md.Namespace); targetPort > 0 {
+			port = targetPort
+		} else if md.Status.Endpoint.Port > 0 {
+			port = md.Status.Endpoint.Port
+		}
+	}
+
+	// Ensure model pods have the selector label for InferencePool
+	if err := r.labelModelPods(ctx, md); err != nil {
+		logger.V(1).Info("Could not label model pods", "error", err)
+		// Non-fatal: pods may not exist yet or provider may handle labels
+	}
+
+	// Create or update InferencePool
+	if err := r.reconcileInferencePool(ctx, md, port, gwConfig.GetBBRNamespace()); err != nil {
+		r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "InferencePoolFailed", err.Error())
+		return false, fmt.Errorf("reconciling InferencePool: %w", err)
+	}
+
+	return false, nil
 }
 
 // cleanupGatewayAllowedRoutes removes the namespace from the Gateway's allowedRoutes
@@ -1157,6 +1336,10 @@ func (r *ModelDeploymentReconciler) cleanupGatewayAllowedRoutesForNamespace(ctx 
 // restartBBRIfPresent triggers a rolling restart of the body-based-router Deployment (if present
 // in the given namespace) by updating its restart annotation. This is necessary because BBR builds
 // its internal model registry on startup and does not dynamically watch InferencePools.
+//
+// The namespace is resolved by GatewayConfig.GetBBRNamespace(), which reads the
+// airunway.ai/bbr-namespace annotation from the Gateway resource, falling back to the
+// Gateway's own namespace.
 func (r *ModelDeploymentReconciler) restartBBRIfPresent(ctx context.Context, namespace string) error {
 	var bbr appsv1.Deployment
 	if err := r.Get(ctx, client.ObjectKey{Name: "body-based-router", Namespace: namespace}, &bbr); err != nil {

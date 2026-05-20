@@ -346,6 +346,11 @@ export const deploymentsApi = {
     }>(
       `/deployments/${encodeURIComponent(name)}/manifest${namespace ? `?namespace=${encodeURIComponent(namespace)}` : ''}`
     ),
+
+  listPVCs: (namespace: string) =>
+    request<{ pvcs: Array<{ name: string; status: string; storageClass: string; capacity: string }> }>(
+      `/deployments/-/pvcs?namespace=${encodeURIComponent(namespace)}`
+    ),
 };
 
 // ============================================================================

@@ -13,6 +13,7 @@ import {
   hasStaticFiles,
 } from './static';
 import type { UserInfo } from '@airunway/shared';
+import type { AppEnv } from './types/hono';
 
 // Import route modules
 import {
@@ -44,16 +45,69 @@ logger.info(
 // Main App
 // ============================================================================
 
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+type CorsOriginOption = NonNullable<Parameters<typeof cors>[0]>['origin'];
 
-const app = new Hono();
+// Default cross-origin policy for browser-based UIs that talk to this backend.
+// Same-origin clients (the embedded production frontend) don't go through CORS.
+// When CORS_ORIGIN is unset, allow local loopback origins so Vite and Headlamp
+// Desktop/browser plugin development work out of the box without reopening CORS
+// to arbitrary internet origins.
+const CORS_ORIGIN = process.env.CORS_ORIGIN;
+
+// Parse CORS_ORIGIN into a value the cors middleware can use:
+//   - undefined           → allow loopback browser origins by default
+//   - "*"               → pass through as a string (explicit wildcard)
+//   - "a,b,c"           → array of trimmed, non-empty origins
+//   - malformed/empty     → fall back to the safe default rather than '*' so
+//                           that a misconfigured production env can't silently
+//                           fail open to wildcard CORS.
+// Splitting "*" into ["*"] matches request origins literally, which never
+// equals a real origin and effectively disables CORS — so handle it explicitly.
+export function parseCorsOrigin(raw: string): CorsOriginOption {
+  const trimmed = raw.trim();
+  if (trimmed === '*') return '*';
+  const list = trimmed
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+  if (list.length > 0) return list;
+  // Fail closed: a malformed CORS_ORIGIN (e.g. ",,") should keep the secure
+  // default rather than broaden access to '*'.
+  logger.warn(
+    { rawCorsOrigin: raw },
+    'CORS_ORIGIN is set but parses to no origins; falling back to loopback origins',
+  );
+  return defaultCorsOrigin;
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname.startsWith('[') && url.hostname.endsWith(']')
+      ? url.hostname.slice(1, -1)
+      : url.hostname;
+    return (url.protocol === 'http:' || url.protocol === 'https:') && LOOPBACK_HOSTS.has(hostname);
+  } catch {
+    return false;
+  }
+}
+
+function defaultCorsOrigin(origin: string): string | null {
+  if (isLoopbackOrigin(origin)) {
+    return origin;
+  }
+  return null;
+}
+
+const app = new Hono<AppEnv>();
 
 // Global middleware
 app.use('*', compress());
 app.use(
   '*',
   cors({
-    origin: CORS_ORIGIN,
+    origin: CORS_ORIGIN === undefined ? defaultCorsOrigin : parseCorsOrigin(CORS_ORIGIN),
   })
 );
 
@@ -68,11 +122,18 @@ app.use('*', async (c, next) => {
 // ============================================================================
 
 // Routes that don't require authentication
+// Keep this list minimal — only routes needed before login
 const PUBLIC_ROUTES = [
-  '/api/health',
   '/api/cluster/status',
-  '/api/settings',  // Settings is public (read-only auth config needed by frontend)
-  '/api/oauth',     // OAuth routes must be public for initial authentication
+  '/api/settings',      // Settings is public (read-only auth config needed by frontend)
+  '/api/oauth',         // OAuth routes must be public for initial authentication
+];
+
+// Public routes that must match exactly (no sub-path matching)
+const PUBLIC_ROUTES_EXACT = [
+  '/api/health',
+  '/api/health/',
+  '/api/health/version',
 ];
 
 // Auth middleware for protected API routes
@@ -82,8 +143,13 @@ app.use('/api/*', async (c, next) => {
     return next();
   }
 
-  // Skip auth for public routes
+  // Skip auth for exact-match public routes
   const path = c.req.path;
+  if (PUBLIC_ROUTES_EXACT.includes(path)) {
+    return next();
+  }
+
+  // Skip auth for prefix-match public routes (cluster/status, settings, oauth)
   if (PUBLIC_ROUTES.some(route => path === route || path.startsWith(route + '/'))) {
     return next();
   }
@@ -183,7 +249,7 @@ app.onError((err, c) => {
     return c.json(
       {
         error: {
-          message: err.message,
+          message: err.status >= 500 ? 'Internal Server Error' : err.message,
           statusCode: err.status,
         },
       },
@@ -191,10 +257,11 @@ app.onError((err, c) => {
     );
   }
 
+  // Don't leak internal error details to clients
   return c.json(
     {
       error: {
-        message: err.message || 'Internal Server Error',
+        message: 'Internal Server Error',
         statusCode: 500,
       },
     },

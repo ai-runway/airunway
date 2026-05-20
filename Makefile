@@ -1,4 +1,4 @@
-.PHONY: install dev dev-frontend dev-backend build compile lint test clean help
+.PHONY: install dev dev-frontend dev-backend build compile lint test clean help providers-test
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
 .PHONY: model-downloader-docker-build
 
@@ -43,12 +43,19 @@ help:
 	@echo ""
 	@echo "Controller Targets:"
 	@echo "  controller-build       Build the Go controller binary"
+	@echo "  controller-test        Run controller tests"
+	@echo "  controller-run         Run controller locally (outside cluster)"
 	@echo "  controller-docker-build Build controller Docker image"
+	@echo "  controller-generate    Generate CRD manifests and code"
 	@echo "  model-downloader-docker-build Build model downloader Docker image"
 	@echo "  controller-install     Install CRDs into cluster"
+	@echo "  controller-uninstall   Uninstall CRDs from cluster"
 	@echo "  controller-deploy      Deploy controller to cluster"
-	@echo "  controller-generate    Generate CRD manifests and code"
-	@echo "  generate-deploy-manifests  Generate deploy/controller.yaml"
+	@echo "  controller-undeploy    Undeploy controller from cluster"
+	@echo "  generate-deploy-manifests  Generate deploy/ manifests"
+	@echo ""
+	@echo "Provider Targets:"
+	@echo "  providers-test         Run all provider tests"
 	@echo ""
 	@echo "Image Build Variables:"
 	@echo "  PLATFORM=<platform>    Target platform for image builds (default: linux/amd64)"
@@ -164,6 +171,14 @@ controller-run:
 controller-test:
 	cd controller && go test ./... -coverprofile cover.out
 	@echo "✅ Controller tests completed"
+
+# Run provider tests
+providers-test:
+	cd providers/dynamo && go test ./...
+	cd providers/kaito && go test ./...
+	cd providers/kuberay && go test ./...
+	cd providers/llmd && go test ./...
+	@echo "✅ Provider tests completed"
 
 # Generate deploy manifests for controller and dashboard
 generate-deploy-manifests:

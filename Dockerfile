@@ -41,7 +41,29 @@ RUN cd backend && \
       --target=$TARGET \
       --outfile=airunway
 
-# Stage 2: Runtime with distroless
+# Stage 2: Download CLI tools used by backend installation routes
+FROM --platform=$BUILDPLATFORM alpine:3.22 AS cli-tools
+
+ARG TARGETARCH
+ARG HELM_VERSION=v4.1.4
+ARG KUBECTL_VERSION=v1.34.1
+
+RUN apk add --no-cache ca-certificates curl gzip tar && \
+    HELM_PACKAGE="helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" && \
+    curl -fsSL "https://get.helm.sh/${HELM_PACKAGE}" -o "/tmp/${HELM_PACKAGE}" && \
+    curl -fsSL "https://get.helm.sh/${HELM_PACKAGE}.sha256sum" -o "/tmp/${HELM_PACKAGE}.sha256sum" && \
+    (cd /tmp && sha256sum -c "${HELM_PACKAGE}.sha256sum") && \
+    tar -xzf "/tmp/${HELM_PACKAGE}" -C /tmp && \
+    mv "/tmp/linux-${TARGETARCH}/helm" /usr/local/bin/helm && \
+    chmod 0755 /usr/local/bin/helm && \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" -o /usr/local/bin/kubectl && \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" -o /tmp/kubectl.sha256 && \
+    echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/kubectl && \
+    helm version --short && \
+    kubectl version --client=true
+
+# Stage 3: Runtime with distroless
 # Using cc-debian12 which includes glibc (required by Bun-compiled binaries)
 FROM gcr.io/distroless/cc-debian12:nonroot
 
@@ -51,8 +73,12 @@ LABEL org.opencontainers.image.description="Web-based platform for deploying and
 LABEL org.opencontainers.image.source="https://github.com/kaito-project/airunway"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Copy the compiled binary
+# Copy the compiled binary and CLI tools used by installation routes
 COPY --from=builder /app/dist/airunway /airunway
+COPY --from=cli-tools /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=cli-tools /usr/local/bin/kubectl /usr/local/bin/kubectl
+
+ENV PATH="/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Expose the default port
 EXPOSE 3001

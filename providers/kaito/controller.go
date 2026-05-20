@@ -18,6 +18,7 @@ package kaito
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"time"
@@ -50,6 +51,9 @@ const (
 
 	// FieldManager is the server-side apply field manager name
 	FieldManager = "kaito-provider"
+
+	// lastAppliedWorkspaceAnnotation stores the Workspace fields last written by this controller.
+	lastAppliedWorkspaceAnnotation = "airunway.ai/kaito-last-applied"
 
 	// RequeueInterval is the default requeue interval for periodic reconciliation
 	RequeueInterval = 30 * time.Second
@@ -161,6 +165,12 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Create or update the Workspace
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
+			// API conflict errors (stale resourceVersion) are transient — requeue to retry
+			if errors.IsConflict(err) {
+				logger.Info("Resource version conflict, requeuing", "name", resource.GetName(), "kind", resource.GetKind())
+				return ctrl.Result{Requeue: true}, nil
+			}
+
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
 			reason := "CreateFailed"
 			if isResourceConflict(err) {
@@ -259,6 +269,10 @@ func verifyOwnerReference(existing *unstructured.Unstructured, mdUID types.UID) 
 func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, resource *unstructured.Unstructured, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
 
+	if err := setLastAppliedManagedFields(resource); err != nil {
+		return err
+	}
+
 	// Check if resource exists
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(resource.GroupVersionKind())
@@ -282,20 +296,348 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 		return err
 	}
 
-	// Update existing resource if resource or inference has changed
-	// KAITO Workspace has resource/inference at root level, not under spec
+	// Update existing resource if managed fields or desired metadata have changed. Compare only the fields we manage.
+	// Comparing full maps would cause an infinite update loop.
 	existingResource, _, _ := unstructured.NestedMap(existing.Object, "resource")
 	newResource, _, _ := unstructured.NestedMap(resource.Object, "resource")
 	existingInference, _, _ := unstructured.NestedMap(existing.Object, "inference")
 	newInference, _, _ := unstructured.NestedMap(resource.Object, "inference")
+	lastAppliedResource, lastAppliedInference, lastAppliedLabels, lastAppliedAnnotations := lastAppliedManagedFields(existing)
 
-	if !equality.Semantic.DeepEqual(existingResource, newResource) || !equality.Semantic.DeepEqual(existingInference, newInference) {
+	resourceMatches := managedFieldsMatch(newResource, existingResource, lastAppliedResource, "resource")
+	inferenceMatches := managedFieldsMatch(newInference, existingInference, lastAppliedInference, "inference")
+	metadataMatches := desiredMetadataMatches(resource, existing, lastAppliedLabels, lastAppliedAnnotations)
+	if !resourceMatches || !inferenceMatches || !metadataMatches {
 		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		resource.SetResourceVersion(existing.GetResourceVersion())
-		return r.Update(ctx, resource)
+		return r.updateManagedWorkspaceFields(ctx, existing, resource, lastAppliedResource, lastAppliedInference, lastAppliedLabels, lastAppliedAnnotations)
 	}
 
 	return nil
+}
+
+func desiredMetadataMatches(desired, existing *unstructured.Unstructured, lastAppliedLabels, lastAppliedAnnotations map[string]string) bool {
+	return managedStringMapMatches(desired.GetLabels(), existing.GetLabels(), lastAppliedLabels) &&
+		managedStringMapMatches(managedAnnotations(desired.GetAnnotations()), managedAnnotations(existing.GetAnnotations()), lastAppliedAnnotations) &&
+		existing.GetAnnotations()[lastAppliedWorkspaceAnnotation] == desired.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+}
+
+func managedStringMapMatches(desired, existing, lastApplied map[string]string) bool {
+	for key, desiredValue := range desired {
+		existingValue, found := existing[key]
+		if !found || existingValue != desiredValue {
+			return false
+		}
+	}
+
+	for key := range existing {
+		if _, desiredHasKey := desired[key]; desiredHasKey {
+			continue
+		}
+		if lastAppliedStringMapHasKey(lastApplied, key) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (r *KaitoProviderReconciler) updateManagedWorkspaceFields(ctx context.Context, existing, desired *unstructured.Unstructured, lastAppliedResource, lastAppliedInference map[string]interface{}, lastAppliedLabels, lastAppliedAnnotations map[string]string) error {
+	base := existing.DeepCopy()
+	updated := existing.DeepCopy()
+
+	if err := mergeManagedTopLevelMap(updated, desired, lastAppliedResource, "resource"); err != nil {
+		return err
+	}
+	if err := mergeManagedTopLevelMap(updated, desired, lastAppliedInference, "inference"); err != nil {
+		return err
+	}
+	mergeManagedMetadata(updated, desired, lastAppliedLabels, lastAppliedAnnotations)
+
+	return r.Patch(ctx, updated, client.MergeFrom(base))
+}
+
+func mergeManagedTopLevelMap(target, desired *unstructured.Unstructured, lastApplied map[string]interface{}, field string) error {
+	desiredMap, desiredFound, err := unstructured.NestedMap(desired.Object, field)
+	if err != nil {
+		return fmt.Errorf("failed to read desired Workspace %s: %w", field, err)
+	}
+	existingMap, existingFound, err := unstructured.NestedMap(target.Object, field)
+	if err != nil {
+		return fmt.Errorf("failed to read existing Workspace %s: %w", field, err)
+	}
+
+	if desiredFound {
+		if !existingFound {
+			existingMap = map[string]interface{}{}
+		}
+		merged := mergeManagedMap(existingMap, desiredMap, lastApplied, field)
+		if err := unstructured.SetNestedField(target.Object, merged, field); err != nil {
+			return fmt.Errorf("failed to update Workspace %s: %w", field, err)
+		}
+		return nil
+	}
+
+	if lastApplied != nil {
+		unstructured.RemoveNestedField(target.Object, field)
+	}
+	return nil
+}
+
+func mergeManagedMap(existing, desired, lastApplied map[string]interface{}, path ...string) map[string]interface{} {
+	merged := runtime.DeepCopyJSON(existing)
+	if merged == nil {
+		merged = map[string]interface{}{}
+	}
+
+	for key, desiredValue := range desired {
+		desiredMap, desiredIsMap := desiredValue.(map[string]interface{})
+		existingMap, existingIsMap := merged[key].(map[string]interface{})
+		if desiredIsMap && existingIsMap {
+			merged[key] = mergeManagedMap(existingMap, desiredMap, nestedLastAppliedMap(lastApplied, key), append(path, key)...)
+			continue
+		}
+		if desiredIsMap {
+			merged[key] = runtime.DeepCopyJSON(desiredMap)
+			continue
+		}
+
+		merged[key] = runtime.DeepCopyJSONValue(desiredValue)
+	}
+
+	for key := range merged {
+		if _, desiredHasKey := desired[key]; desiredHasKey {
+			continue
+		}
+		if lastAppliedHasKey(lastApplied, key) {
+			delete(merged, key)
+			continue
+		}
+		if lastApplied == nil && treatsUnknownExtraAsManaged(path, key) {
+			delete(merged, key)
+		}
+	}
+
+	return merged
+}
+
+func mergeManagedMetadata(target, desired *unstructured.Unstructured, lastAppliedLabels, lastAppliedAnnotations map[string]string) {
+	target.SetLabels(mergeManagedStringMap(target.GetLabels(), desired.GetLabels(), lastAppliedLabels))
+
+	annotations := mergeManagedStringMap(managedAnnotations(target.GetAnnotations()), managedAnnotations(desired.GetAnnotations()), lastAppliedAnnotations)
+	if lastApplied := desired.GetAnnotations()[lastAppliedWorkspaceAnnotation]; lastApplied != "" {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[lastAppliedWorkspaceAnnotation] = lastApplied
+	}
+	target.SetAnnotations(annotations)
+}
+
+func mergeManagedStringMap(existing, desired, lastApplied map[string]string) map[string]string {
+	if len(existing) == 0 && len(desired) == 0 {
+		return nil
+	}
+
+	merged := make(map[string]string, len(existing)+len(desired))
+	for key, value := range existing {
+		merged[key] = value
+	}
+	for key, value := range desired {
+		merged[key] = value
+	}
+	for key := range merged {
+		if _, desiredHasKey := desired[key]; desiredHasKey {
+			continue
+		}
+		if lastAppliedStringMapHasKey(lastApplied, key) {
+			delete(merged, key)
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+func managedAnnotations(annotations map[string]string) map[string]string {
+	if len(annotations) == 0 {
+		return nil
+	}
+	managed := make(map[string]string, len(annotations))
+	for key, value := range annotations {
+		if key == lastAppliedWorkspaceAnnotation {
+			continue
+		}
+		managed[key] = value
+	}
+	if len(managed) == 0 {
+		return nil
+	}
+	return managed
+}
+
+func lastAppliedStringMapHasKey(lastApplied map[string]string, key string) bool {
+	if lastApplied == nil {
+		return false
+	}
+	_, ok := lastApplied[key]
+	return ok
+}
+
+// setLastAppliedManagedFields records the desired Workspace fields that Airunway owns.
+// The annotation lets future reconciles distinguish provider/operator defaults from
+// fields that Airunway wrote previously and must delete when they disappear from the
+// desired ModelDeployment-derived Workspace.
+func setLastAppliedManagedFields(resource *unstructured.Unstructured) error {
+	managedFields := map[string]interface{}{
+		"labels":      copyStringMap(resource.GetLabels()),
+		"annotations": copyStringMap(managedAnnotations(resource.GetAnnotations())),
+	}
+	if resourceSpec, found, _ := unstructured.NestedMap(resource.Object, "resource"); found {
+		managedFields["resource"] = resourceSpec
+	}
+	if inference, found, _ := unstructured.NestedMap(resource.Object, "inference"); found {
+		managedFields["inference"] = inference
+	}
+
+	data, err := json.Marshal(managedFields)
+	if err != nil {
+		return fmt.Errorf("failed to marshal last-applied Workspace fields: %w", err)
+	}
+
+	annotations := copyStringMap(resource.GetAnnotations())
+	annotations[lastAppliedWorkspaceAnnotation] = string(data)
+	resource.SetAnnotations(annotations)
+	return nil
+}
+
+// lastAppliedManagedFields returns the Workspace fields that this controller
+// wrote on its previous create/update. A missing or malformed annotation means
+// the resource predates the annotation scheme, so callers fall back to a
+// conservative comparison for known Airunway-owned maps.
+func lastAppliedManagedFields(existing *unstructured.Unstructured) (map[string]interface{}, map[string]interface{}, map[string]string, map[string]string) {
+	annotation := existing.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+	if annotation == "" {
+		return nil, nil, nil, nil
+	}
+
+	var managedFields map[string]interface{}
+	if err := json.Unmarshal([]byte(annotation), &managedFields); err != nil {
+		return nil, nil, nil, nil
+	}
+
+	resourceSpec, _ := managedFields["resource"].(map[string]interface{})
+	inference, _ := managedFields["inference"].(map[string]interface{})
+	labels := stringMapFromInterface(managedFields["labels"])
+	annotations := stringMapFromInterface(managedFields["annotations"])
+	return resourceSpec, inference, labels, annotations
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
+}
+
+func stringMapFromInterface(value interface{}) map[string]string {
+	values, ok := value.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		stringValue, ok := value.(string)
+		if !ok {
+			return nil
+		}
+		result[key] = stringValue
+	}
+	return result
+}
+
+// managedFieldsMatch returns true when existing still matches the desired fields
+// managed by Airunway. Extra existing keys are ignored only when they were not part
+// of the last-applied desired state, which lets operator defaults such as
+// inference.preset.accessMode coexist without preventing deletion of fields that
+// Airunway wrote in an earlier reconcile.
+func managedFieldsMatch(desired, existing, lastApplied map[string]interface{}, path ...string) bool {
+	if desired == nil {
+		desired = map[string]interface{}{}
+	}
+	if existing == nil {
+		existing = map[string]interface{}{}
+	}
+
+	for k, dv := range desired {
+		ev, ok := existing[k]
+		if !ok {
+			return false
+		}
+
+		dMap, dIsMap := dv.(map[string]interface{})
+		eMap, eIsMap := ev.(map[string]interface{})
+		if dIsMap && eIsMap {
+			if !managedFieldsMatch(dMap, eMap, nestedLastAppliedMap(lastApplied, k), append(path, k)...) {
+				return false
+			}
+			continue
+		}
+
+		if !equality.Semantic.DeepEqual(dv, ev) {
+			return false
+		}
+	}
+
+	for k := range existing {
+		if _, desiredHasKey := desired[k]; desiredHasKey {
+			continue
+		}
+		if lastAppliedHasKey(lastApplied, k) {
+			return false
+		}
+		if lastApplied == nil && treatsUnknownExtraAsManaged(path, k) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func nestedLastAppliedMap(lastApplied map[string]interface{}, key string) map[string]interface{} {
+	if lastApplied == nil {
+		return nil
+	}
+	nested, _ := lastApplied[key].(map[string]interface{})
+	return nested
+}
+
+func lastAppliedHasKey(lastApplied map[string]interface{}, key string) bool {
+	if lastApplied == nil {
+		return false
+	}
+	_, ok := lastApplied[key]
+	return ok
+}
+
+func treatsUnknownExtraAsManaged(path []string, key string) bool {
+	return pathMatches(path, "resource", "labelSelector") || pathMatches(path, "resource", "labelSelector", "matchLabels")
+}
+
+func pathMatches(path []string, segments ...string) bool {
+	if len(path) != len(segments) {
+		return false
+	}
+	for i, segment := range segments {
+		if path[i] != segment {
+			return false
+		}
+	}
+	return true
 }
 
 // syncStatus fetches the upstream resource and syncs its status to the ModelDeployment
@@ -380,8 +722,14 @@ func (r *KaitoProviderReconciler) handleDeletion(ctx context.Context, md *airunw
 
 		// Resource exists and is owned by us, delete it
 		logger.Info("Deleting Workspace", "name", md.Name)
-		if err := r.Delete(ctx, ws); err != nil && !errors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete Workspace")
+		if deleteErr := r.Delete(ctx, ws); deleteErr != nil {
+			if upstreamResourceUnavailable(deleteErr) {
+				logger.Info("Workspace unavailable during deletion, removing finalizer", "name", md.Name)
+				controllerutil.RemoveFinalizer(md, FinalizerName)
+				return ctrl.Result{}, r.Update(ctx, md)
+			}
+
+			logger.Error(deleteErr, "Failed to delete Workspace")
 
 			// Check if we should force-remove the finalizer
 			deletionTime := md.DeletionTimestamp.Time
@@ -399,14 +747,33 @@ func (r *KaitoProviderReconciler) handleDeletion(ctx context.Context, md *airunw
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	if !errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("failed to get upstream resource: %w", err)
+	if !upstreamResourceUnavailable(err) {
+		// Unexpected error fetching the upstream resource (e.g. transient API
+		// server failure). Honor the finalizer timeout so the ModelDeployment
+		// can still be removed if the error persists, instead of requeueing
+		// forever.
+		deletionTime := md.DeletionTimestamp.Time
+		if time.Since(deletionTime) > FinalizerTimeout {
+			logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
+			controllerutil.RemoveFinalizer(md, FinalizerName)
+			return ctrl.Result{}, r.Update(ctx, md)
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Resource is gone, remove finalizer
-	logger.Info("Upstream resource deleted, removing finalizer", "name", md.Name)
+	// The upstream resource is already gone or its CRD is no longer installed,
+	// so cleanup can finish by removing the finalizer.
+	logger.Info("Upstream resource unavailable or deleted, removing finalizer", "name", md.Name)
 	controllerutil.RemoveFinalizer(md, FinalizerName)
 	return ctrl.Result{}, r.Update(ctx, md)
+}
+
+// upstreamResourceUnavailable returns true when the error indicates the
+// upstream resource is missing or its CRD is not installed in the cluster.
+// This mirrors the helper used by the dynamo and kuberay providers so that
+// finalizer cleanup completes even when KAITO has been uninstalled.
+func upstreamResourceUnavailable(err error) bool {
+	return errors.IsNotFound(err) || meta.IsNoMatchError(err)
 }
 
 // setCondition updates a condition on the ModelDeployment

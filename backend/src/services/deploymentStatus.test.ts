@@ -83,6 +83,36 @@ describe('toDeploymentStatus', () => {
     expect(toDeploymentStatus(deployment).frontendService).toBe('legacy-deploy');
   });
 
+  test('prefers the desired engine from spec over stale observed status', () => {
+    const deployment = createModelDeployment({
+      spec: {
+        engine: {
+          type: 'sglang',
+        },
+      },
+      status: {
+        engine: {
+          type: 'vllm',
+        },
+      },
+    });
+
+    expect(toDeploymentStatus(deployment).engine).toBe('sglang');
+  });
+
+  test('falls back to the observed engine when spec engine is not set', () => {
+    const deployment = createModelDeployment({
+      status: {
+        engine: {
+          type: 'llamacpp',
+        },
+      },
+    });
+    delete (deployment.spec as Partial<ModelDeployment['spec']>).engine;
+
+    expect(toDeploymentStatus(deployment).engine).toBe('llamacpp');
+  });
+
   test('derives aggregated replica counts from spec when CRD replica status is empty', () => {
     const deployment = createModelDeployment({
       spec: {

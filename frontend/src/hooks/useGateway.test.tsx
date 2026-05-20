@@ -16,6 +16,8 @@ describe('useGatewayCRDStatus', () => {
     expect(result.current.data).toBeDefined()
     expect(result.current.data?.gatewayApiInstalled).toBe(true)
     expect(result.current.data?.inferenceExtInstalled).toBe(true)
+    expect(result.current.data?.gatewayApiVersion).toBe('v1.2.1')
+    expect(result.current.data?.inferenceExtVersion).toBe('v1.5.0')
     expect(result.current.data?.pinnedVersion).toBe('v1.3.1')
     expect(result.current.data?.installCommands).toHaveLength(2)
   })

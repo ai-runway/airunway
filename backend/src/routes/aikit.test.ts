@@ -184,7 +184,7 @@ describe('AIKit Routes', () => {
           premadeModel: 'unknown-model-xyz',
         }),
       });
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(400);
 
       const data = await res.json();
       expect(data.error.message).toContain('Unknown premade model');

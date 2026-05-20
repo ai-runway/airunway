@@ -1,9 +1,10 @@
 # AI Runway Kubernetes Deployment
 
-This directory contains Kubernetes manifests for deploying AI Runway to a cluster. The deployment is split into two manifests:
+This directory contains Kubernetes manifests for deploying AI Runway to a cluster. The deployment is split into required, optional, and opt-in installer manifests:
 
 - **`controller.yaml`** — CRDs, controller, webhooks, and RBAC (required)
 - **`dashboard.yaml`** — Web UI dashboard deployment and service (optional)
+- **`dashboard-installer-rbac.yaml`** — optional elevated RBAC for one-click provider installation from the dashboard
 
 ## Quick Start
 
@@ -17,6 +18,10 @@ kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/p
 
 # 3. Install dashboard UI (optional)
 kubectl apply -f dashboard.yaml
+
+# 4. Optional: enable dashboard-driven provider installs
+# This grants broad cluster-scoped installer permissions. See dashboard-installer-rbac.yaml below.
+kubectl apply -f dashboard-installer-rbac.yaml
 ```
 
 > **Note:** `controller.yaml` must be applied first — it creates the CRDs and namespace that the dashboard depends on. Provider shims must be installed before providers appear in the UI. Webhooks become fully functional after the controller starts and completes certificate rotation (~10-30s).
@@ -57,6 +62,20 @@ Then open http://localhost:3001 in your browser.
 | `Service` | Controller metrics service |
 | `Role` / `RoleBinding` | Leader election RBAC |
 
+
+### dashboard-installer-rbac.yaml
+
+This manifest is optional and should be applied only when you want the dashboard
+to run Helm/kubectl for provider installation. Provider charts for KAITO, Dynamo,
+and KubeRay create cluster-scoped resources such as CRDs, admission webhooks,
+ClusterRoles, and ClusterRoleBindings. Kubernetes therefore requires elevated
+installer permissions, including RBAC `bind` and `escalate`. Treat this as
+cluster-admin-like access for the dashboard ServiceAccount.
+
+If you do not apply this manifest, the dashboard can still show the manual
+installation commands. Automatic install buttons will return a clear permission
+message when the dashboard lacks installer permissions.
+
 ### dashboard.yaml
 
 | Resource | Description |
@@ -77,17 +96,36 @@ The following environment variables can be configured on the **dashboard** deplo
 |----------|---------|-------------|
 | `PORT` | `3001` | Server port |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
-| `AUTH_ENABLED` | `false` | Enable authentication |
+| `AUTH_ENABLED` | `true` | Enable authentication |
+| `CORS_ORIGIN` | loopback origins | Comma-separated browser origins to allow, or explicit `*` to allow all origins |
 
-### Enable Authentication
+### Authentication
 
-Uncomment the `AUTH_ENABLED` environment variable in the dashboard deployment:
+Authentication is enabled by default in `dashboard.yaml`:
 
 ```yaml
 env:
   - name: AUTH_ENABLED
     value: "true"
 ```
+
+To intentionally disable authentication (not recommended), remove this variable or set it to `"false"`.
+
+### CORS
+
+By default, the dashboard API accepts browser CORS requests only from loopback
+origins used for local access, such as `localhost`, `127.0.0.1`, and `[::1]`.
+For a dashboard exposed behind a real host name, set `CORS_ORIGIN` to the exact
+allowed origin or a comma-separated allowlist:
+
+```yaml
+env:
+  - name: CORS_ORIGIN
+    value: "https://airunway.example.com,https://admin.example.com"
+```
+
+Use `CORS_ORIGIN="*"` only when you intentionally want to allow every browser
+origin. Empty or malformed values fall back to the safe loopback-only default.
 
 ## Verify Deployment
 
@@ -111,6 +149,9 @@ kubectl exec -it -n airunway-system deploy/airunway -- curl localhost:3001/api/h
 ## Uninstall
 
 ```bash
+# Remove optional dashboard installer RBAC (if installed)
+kubectl delete -f dashboard-installer-rbac.yaml
+
 # Remove dashboard (if installed)
 kubectl delete -f dashboard.yaml
 

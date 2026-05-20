@@ -60,6 +60,41 @@ describe('mockFetchByUrl', () => {
     expect(globalThis.fetch).toBe(originalFetch);
   });
 
+  test('preserves fetch.preconnect on the mock and restores the original fetch', () => {
+    const actualFetch = globalThis.fetch;
+    const preconnectCalls: Array<unknown[]> = [];
+    const tempFetch = (async () => new Response('{}')) as typeof fetch & {
+      preconnect: (...args: unknown[]) => void;
+    };
+    tempFetch.preconnect = (...args: unknown[]) => {
+      preconnectCalls.push(args);
+    };
+
+    let localRestore: (() => void) | undefined;
+    globalThis.fetch = tempFetch;
+    try {
+      localRestore = mockFetchByUrl({
+        '/test': { body: { mocked: true } },
+      });
+
+      const mockedFetch = globalThis.fetch as typeof fetch & {
+        preconnect?: (...args: unknown[]) => unknown;
+      };
+      expect(mockedFetch).not.toBe(tempFetch);
+      expect(typeof mockedFetch.preconnect).toBe('function');
+
+      mockedFetch.preconnect?.('https://example.com');
+      expect(preconnectCalls).toEqual([['https://example.com']]);
+
+      localRestore();
+      localRestore = undefined;
+      expect(globalThis.fetch).toBe(tempFetch);
+    } finally {
+      localRestore?.();
+      globalThis.fetch = actualFetch;
+    }
+  });
+
   test('first matching pattern wins for overlapping URL substrings', async () => {
     // '/api/whoami-v2' should match before '/api/whoami' when listed first
     restore = mockFetchByUrl({

@@ -172,7 +172,7 @@ This takes **10–20 minutes**. Use `--no-wait` to return immediately and poll w
 az amlfs show \
   --name <AMLFS_NAME> \
   --resource-group <RESOURCE_GROUP> \
-  --query "{mgsAddress: mgsAddress, mountCommand: mountCommand}"
+  --query "{mgsAddress: clientInfo.mgsAddress, mountCommand: clientInfo.mountCommand}"
 ```
 
 Use the `mgsAddress` value in the StorageClass below. Alternatively, find it in the Azure portal under your filesystem's **Client connection** pane.

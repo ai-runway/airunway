@@ -132,6 +132,25 @@ interface MetricsServiceOptions {
   errorCacheTtlMs?: number;
 }
 
+export interface DeploymentMetricsEndpointOptions {
+  providerId?: string;
+  serviceName?: string;
+  port?: number;
+  endpointPath?: string;
+}
+
+interface ResolvedMetricsTarget {
+  providerId?: string;
+  serviceName: string;
+  port: number;
+  endpointPath: string;
+}
+
+function normalizeEndpointPath(endpointPath?: string): string {
+  const path = endpointPath?.trim() || DEFAULT_METRICS_CONFIG.endpointPath;
+  return path.startsWith('/') ? path : `/${path}`;
+}
+
 /**
  * MetricsService class for fetching deployment metrics
  */
@@ -167,8 +186,46 @@ export class MetricsService {
     this.inFlightRequests.clear();
   }
 
-  private buildCacheKey(deploymentName: string, namespace: string, providerId?: string): string {
-    return `${namespace}/${deploymentName}/${providerId ?? 'default'}`;
+  private resolveMetricsTarget(
+    deploymentName: string,
+    options: DeploymentMetricsEndpointOptions = {}
+  ): ResolvedMetricsTarget {
+    const providerId = options.providerId?.trim();
+    const normalizedProviderId = providerId?.toLowerCase();
+    const explicitServiceName = options.serviceName?.trim();
+    const explicitPort =
+      options.port && Number.isFinite(options.port) && options.port > 0
+        ? options.port
+        : undefined;
+
+    let serviceName = explicitServiceName;
+    const port = explicitPort ?? DEFAULT_METRICS_CONFIG.port;
+
+    if (!serviceName) {
+      if (normalizedProviderId === 'dynamo') {
+        serviceName = `${deploymentName}-frontend`;
+      } else {
+        serviceName = DEFAULT_METRICS_CONFIG.serviceNamePattern.replace('{name}', deploymentName);
+      }
+    }
+
+    return {
+      providerId,
+      serviceName,
+      port,
+      endpointPath: normalizeEndpointPath(options.endpointPath),
+    };
+  }
+
+  private buildCacheKey(deploymentName: string, namespace: string, target: ResolvedMetricsTarget): string {
+    return [
+      namespace,
+      deploymentName,
+      target.providerId ?? 'default',
+      target.serviceName,
+      target.port,
+      target.endpointPath,
+    ].join('/');
   }
 
   private getCachedResponse(cacheKey: string): MetricsResponse | null {
@@ -202,11 +259,20 @@ export class MetricsService {
    *
    * @param deploymentName - Name of the deployment
    * @param namespace - Kubernetes namespace
-   * @param providerId - Optional provider ID (for future use)
+   * @param providerIdOrOptions - Optional provider ID or endpoint options
    * @returns MetricsResponse with available metrics or error
    */
-  async getDeploymentMetrics(deploymentName: string, namespace: string, providerId?: string): Promise<MetricsResponse> {
-    const cacheKey = this.buildCacheKey(deploymentName, namespace, providerId);
+  async getDeploymentMetrics(
+    deploymentName: string,
+    namespace: string,
+    providerIdOrOptions?: string | DeploymentMetricsEndpointOptions
+  ): Promise<MetricsResponse> {
+    const options: DeploymentMetricsEndpointOptions =
+      typeof providerIdOrOptions === 'string'
+        ? { providerId: providerIdOrOptions }
+        : (providerIdOrOptions ?? {});
+    const target = this.resolveMetricsTarget(deploymentName, options);
+    const cacheKey = this.buildCacheKey(deploymentName, namespace, target);
     const cachedResponse = this.getCachedResponse(cacheKey);
     if (cachedResponse) {
       logger.debug({ deploymentName, namespace }, 'Serving cached deployment metrics');
@@ -219,7 +285,7 @@ export class MetricsService {
       return inFlightRequest;
     }
 
-    const request = this.fetchDeploymentMetrics(deploymentName, namespace, cacheKey).finally(() => {
+    const request = this.fetchDeploymentMetrics(deploymentName, namespace, target, cacheKey).finally(() => {
       this.inFlightRequests.delete(cacheKey);
     });
 
@@ -230,16 +296,13 @@ export class MetricsService {
   private async fetchDeploymentMetrics(
     deploymentName: string,
     namespace: string,
+    target: ResolvedMetricsTarget,
     cacheKey: string
   ): Promise<MetricsResponse> {
     const timestamp = new Date(this.nowFn()).toISOString();
     const inCluster = this.checkInClusterFn();
 
     try {
-      // Use default metrics configuration
-      const metricsConfig = DEFAULT_METRICS_CONFIG;
-      const serviceName = metricsConfig.serviceNamePattern.replace('{name}', deploymentName);
-
       let rawText: string;
 
       if (inCluster) {
@@ -247,18 +310,39 @@ export class MetricsService {
         const url = buildMetricsUrl(
           deploymentName,
           namespace,
-          metricsConfig.serviceNamePattern,
-          metricsConfig.port,
-          metricsConfig.endpointPath
+          target.serviceName,
+          target.port,
+          target.endpointPath
         );
 
-        logger.debug({ url, deploymentName, namespace }, 'Fetching metrics from deployment (in-cluster)');
+        logger.debug(
+          {
+            url,
+            deploymentName,
+            namespace,
+            providerId: target.providerId,
+            serviceName: target.serviceName,
+            port: target.port,
+            path: target.endpointPath,
+          },
+          'Fetching metrics from deployment (in-cluster)'
+        );
         rawText = await this.fetchRawMetricsFn(url);
       } else {
         // Off-cluster: proxy through the K8s API server via kubeconfig
-        const path = metricsConfig.endpointPath.replace(/^\//, ''); // strip leading slash
-        logger.debug({ deploymentName, namespace, port: metricsConfig.port, path }, 'Fetching metrics via K8s API proxy (off-cluster)');
-        rawText = await this.proxyServiceGetFn(serviceName, namespace, metricsConfig.port, path);
+        const path = target.endpointPath.replace(/^\//, ''); // strip leading slash
+        logger.debug(
+          {
+            deploymentName,
+            namespace,
+            providerId: target.providerId,
+            serviceName: target.serviceName,
+            port: target.port,
+            path,
+          },
+          'Fetching metrics via K8s API proxy (off-cluster)'
+        );
+        rawText = await this.proxyServiceGetFn(target.serviceName, namespace, target.port, path);
       }
 
       // Parse Prometheus format
@@ -282,7 +366,15 @@ export class MetricsService {
       const userMessage = mapMetricsErrorMessage(errorMessage);
 
       logger.warn(
-        { deploymentName, namespace, error: errorMessage },
+        {
+          deploymentName,
+          namespace,
+          providerId: target.providerId,
+          serviceName: target.serviceName,
+          port: target.port,
+          path: target.endpointPath,
+          error: errorMessage,
+        },
         'Failed to fetch deployment metrics'
       );
 

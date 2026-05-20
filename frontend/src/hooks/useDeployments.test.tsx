@@ -135,7 +135,7 @@ describe('useCreateDeployment', () => {
       modelId: 'Qwen/Qwen3-0.6B',
       engine: 'vllm' as const,
       mode: 'aggregated' as const,
-      routerMode: 'none' as const,
+      routerMode: 'default' as const,
       replicas: 1,
       hfTokenSecret: 'hf-token-secret',
       enforceEager: true,

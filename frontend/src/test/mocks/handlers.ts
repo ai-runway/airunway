@@ -1,92 +1,18 @@
 import { http, HttpResponse } from 'msw'
 import { toModelDeploymentManifest } from '@airunway/shared'
 import type { DeploymentConfig } from '@airunway/shared'
+import {
+  mockModels,
+  mockDeployments,
+  mockSettings,
+  mockClusterStatus,
+} from './data'
+
+// Re-export shared mock data for backward compatibility
+export { mockModels, mockDeployments, mockSettings } from './data'
 
 // Use wildcard prefix to match both relative URLs (/api/...) and absolute URLs (http://localhost:3001/api/...)
 const API_BASE = '*/api'
-
-// Mock data
-export const mockModels = [
-  {
-    id: 'Qwen/Qwen3-0.6B',
-    name: 'Qwen3-0.6B',
-    description: 'Small but capable Qwen model',
-    size: '0.6B',
-    task: 'chat' as const,
-    parameters: 600000000,
-    contextLength: 8192,
-    license: 'Apache 2.0',
-    supportedEngines: ['vllm', 'sglang', 'trtllm'] as const,
-    minGpuMemory: '4GB',
-    gated: false,
-  },
-  {
-    id: 'meta-llama/Llama-3.2-1B-Instruct',
-    name: 'Llama-3.2-1B-Instruct',
-    description: 'Instruction-tuned Llama model',
-    size: '1B',
-    task: 'chat' as const,
-    parameters: 1000000000,
-    contextLength: 4096,
-    license: 'Meta Llama License',
-    supportedEngines: ['vllm', 'sglang', 'trtllm'] as const,
-    minGpuMemory: '8GB',
-    gated: true,
-  },
-]
-
-export const mockDeployments = [
-  {
-    name: 'qwen3-0-6b-vllm-abc123',
-    namespace: 'airunway-system',
-    modelId: 'Qwen/Qwen3-0.6B',
-    engine: 'vllm' as const,
-    mode: 'aggregated' as const,
-    phase: 'Running' as const,
-    replicas: {
-      desired: 1,
-      ready: 1,
-      available: 1,
-    },
-    pods: [
-      {
-        name: 'qwen3-0-6b-vllm-abc123-worker-0',
-        phase: 'Running' as const,
-        ready: true,
-        restarts: 0,
-        node: 'gpu-node-1',
-      },
-    ],
-    createdAt: new Date().toISOString(),
-    frontendService: 'qwen3-0-6b-vllm-abc123-frontend:8000',
-  },
-]
-
-export const mockSettings = {
-  config: {
-    defaultNamespace: 'airunway-system',
-  },
-  providers: [
-    {
-      id: 'runtime-a',
-      name: 'Primary Runtime',
-      description: 'General-purpose runtime for standard workloads',
-      defaultNamespace: 'runtime-a-system',
-    },
-    {
-      id: 'runtime-b',
-      name: 'Distributed Runtime',
-      description: 'Runtime for larger distributed workloads',
-      defaultNamespace: 'runtime-b-system',
-    },
-    {
-      id: 'runtime-c',
-      name: 'Flexible Runtime',
-      description: 'Runtime with multiple deployment styles',
-      defaultNamespace: 'runtime-c-system',
-    },
-  ],
-}
 
 export const handlers = [
   // Models API
@@ -171,21 +97,7 @@ export const handlers = [
   }),
 
   http.get(`${API_BASE}/cluster/status`, () => {
-    return HttpResponse.json({
-      connected: true,
-      namespace: 'airunway-system',
-      clusterName: 'test-cluster',
-      provider: {
-        id: 'runtime-a',
-        name: 'Primary Runtime',
-      },
-      providerInstallation: {
-        installed: true,
-        version: '1.0.0',
-        crdFound: true,
-        operatorRunning: true,
-      },
-    })
+    return HttpResponse.json(mockClusterStatus)
   }),
 
   // Settings API
@@ -293,6 +205,8 @@ export const handlers = [
     return HttpResponse.json({
       gatewayApiInstalled: true,
       inferenceExtInstalled: true,
+      gatewayApiVersion: 'v1.2.1',
+      inferenceExtVersion: 'v1.5.0',
       pinnedVersion: 'v1.3.1',
       gatewayAvailable: false,
       message: 'Gateway API and Inference Extension CRDs are installed. No active gateway detected.',
@@ -311,6 +225,13 @@ export const handlers = [
         { step: 'gateway-api-crds', success: true, output: 'created' },
         { step: 'inference-extension-crds', success: true, output: 'created' },
       ],
+    })
+  }),
+
+  // Gateway resource status (used by useGatewayStatus to drive UI gating)
+  http.get(`${API_BASE}/gateway/status`, () => {
+    return HttpResponse.json({
+      available: false,
     })
   }),
 

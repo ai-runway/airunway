@@ -46,9 +46,9 @@ export interface HfStartOAuthResponse {
   state: string;
 }
 
-export interface HfVerifierResponse {
-  codeVerifier: string;
-  redirectUri: string;
+export interface HfTokenWithStateRequest {
+  code: string;
+  state: string;
 }
 
 export interface HuggingFaceApi {
@@ -58,8 +58,13 @@ export interface HuggingFaceApi {
   /** Start OAuth flow - backend generates PKCE and returns authorization URL */
   startOAuth: (data: HfStartOAuthRequest) => Promise<HfStartOAuthResponse>;
 
-  /** Get stored PKCE verifier by state (used by callback handler) */
-  getVerifier: (state: string) => Promise<HfVerifierResponse>;
+  /**
+   * Exchange authorization code for access token using a server-side PKCE
+   * verifier looked up by `state`. The verifier never leaves the server.
+   * Use this from callbacks where the verifier is not held client-side
+   * (e.g. the Headlamp plugin).
+   */
+  exchangeTokenWithState: (data: HfTokenWithStateRequest) => Promise<HfTokenExchangeResponse>;
 
   /** Exchange authorization code for access token */
   exchangeToken: (data: HfTokenExchangeRequest) => Promise<HfTokenExchangeResponse>;
@@ -93,8 +98,11 @@ export function createHuggingFaceApi(request: RequestFn): HuggingFaceApi {
         body: JSON.stringify(data),
       }),
 
-    getVerifier: (state: string) =>
-      request<HfVerifierResponse>(`/oauth/huggingface/verifier/${encodeURIComponent(state)}`),
+    exchangeTokenWithState: (data: HfTokenWithStateRequest) =>
+      request<HfTokenExchangeResponse>('/oauth/huggingface/token-with-state', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
 
     exchangeToken: (data: HfTokenExchangeRequest) =>
       request<HfTokenExchangeResponse>('/oauth/huggingface/token', {

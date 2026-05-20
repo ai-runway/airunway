@@ -39,6 +39,11 @@ const (
 
 	// LabelInferenceGateway is the label to identify the inference gateway
 	LabelInferenceGateway = "airunway.ai/inference-gateway"
+
+	// AnnotationBBRNamespace is the annotation on the Gateway resource that specifies which
+	// namespace the body-based-router (BBR) deployment lives in. If not set, the controller
+	// assumes the BBR is in the same namespace as the Gateway.
+	AnnotationBBRNamespace = "airunway.ai/bbr-namespace"
 )
 
 // GatewayConfig holds the resolved gateway configuration
@@ -47,6 +52,20 @@ type GatewayConfig struct {
 	GatewayName string
 	// GatewayNamespace is the namespace of the Gateway resource
 	GatewayNamespace string
+	// BBRNamespace is the namespace where the body-based-router deployment lives.
+	// Resolved from the airunway.ai/bbr-namespace annotation on the Gateway resource.
+	// If empty, callers should fall back to GatewayNamespace.
+	BBRNamespace string
+}
+
+// GetBBRNamespace returns the namespace where the BBR deployment is expected.
+// Returns BBRNamespace if set (from the Gateway annotation), otherwise falls back
+// to GatewayNamespace.
+func (c *GatewayConfig) GetBBRNamespace() string {
+	if c.BBRNamespace != "" {
+		return c.BBRNamespace
+	}
+	return c.GatewayNamespace
 }
 
 // Detector checks for Gateway API CRD availability in the cluster

@@ -361,7 +361,7 @@ Get manual installation commands for a provider.
   "commands": [
     "helm repo add nvidia-ai-dynamo https://helm.ngc.nvidia.com/nvidia/ai-dynamo",
     "helm repo update",
-    "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.1.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true"
+    "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.2.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true"
   ]
 }
 ```

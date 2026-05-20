@@ -60,54 +60,6 @@ make controller-deploy CONTROLLER_IMG=<YOUR IMAGE>
 cd controller && make manifests generate
 ```
 
-## Dependabot VEX Automation
-
-The repository includes an agentic VEX flow for dismissed Dependabot alerts:
-
-- `.github/workflows/vex-dispatch-dismissed-alerts.yml` scans dismissed alerts and dispatches supported cases.
-- `.github/workflows/vex-generator.md` is the editable source workflow.
-- `.github/workflows/vex-generator.lock.yml` is the compiled workflow that GitHub Actions actually runs.
-
-After editing `.github/workflows/vex-generator.md`, always regenerate the compiled file:
-
-```bash
-gh extension install githubnext/gh-aw --pin v0.31.10
-gh aw compile
-./scripts/normalize-gh-aw-lockfiles.sh
-```
-
-CI checks for drift between the Markdown source and compiled lock file.
-
-### Maintainer Dismissal Comment Format
-
-The dispatcher only creates a VEX workflow run when the dismissal comment contains an explicit `VEX:` block:
-
-```text
-VEX:
-status: not_affected
-justification: vulnerable_code_not_present
-impact: vulnerable package is not shipped in the released product
-```
-
-`impact_statement:` is also accepted instead of `impact:`.
-
-Supported `justification` values for this repository are:
-
-- `component_not_present`
-- `vulnerable_code_not_present`
-- `vulnerable_code_not_in_execute_path`
-- `vulnerable_code_cannot_be_controlled_by_adversary`
-- `inline_mitigations_already_exist`
-
-### Manual Backfill
-
-Use the dispatcher workflow's `workflow_dispatch` inputs to backfill a specific case:
-
-- Set `alert_number` to fetch one known dismissed alert directly.
-- Set `ghsa_id` to scan dismissed alerts for one advisory across the configured pages.
-- Raise `max_pages` when backfilling an older `ghsa_id`.
-- Set `dry_run=true` first to confirm what would be dispatched before creating workflow runs.
-
 ## Building a Single Binary
 
 The project can be compiled to a standalone executable that includes both the backend API and embedded frontend assets:
@@ -413,6 +365,9 @@ bun run build:backend   # Compile TypeScript
 bun run compile         # Build single binary executable
 ```
 
+The backend pins TypeScript to `5.3.3` to keep Bun/import-meta compilation behavior stable.
+Do not widen that version without validating `bun run build:backend` and `bun run compile`.
+
 #### Backend Testing
 
 ```bash
@@ -497,9 +452,9 @@ kubectl create secret generic hf-token-secret \
 ### Install NVIDIA Dynamo (via Helm)
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.1
+export RELEASE_VERSION=1.0.2
 
-# Dynamo v1.0.1 bundles its CRDs in the platform chart
+# The Dynamo platform chart bundles its CRDs
 helm upgrade --install dynamo-platform \
   https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace ${NAMESPACE} \
@@ -540,7 +495,7 @@ ModelDeployment → Provider Controller → Upstream CRD → Upstream Operator �
    - `controller.go`: Reconcile `ModelDeployment` resources where `status.provider.name` matches
    - `transformer.go`: Convert `ModelDeployment` spec to upstream CRD resources
    - `status.go`: Map upstream CRD status back to `ModelDeployment` status
-   - `config.go`: Define `InferenceProviderConfigSpec` with capabilities, selection rules, and installation info
+   - `config.go`: Define `InferenceProviderConfigSpec` with capabilities and selection rules. Set `airunway.ai/installation` and `airunway.ai/documentation` annotations for UI metadata (see [CRD Reference](crd-reference.md#annotations))
 
 ### Native Providers (No Upstream CRD)
 
@@ -596,7 +551,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 ```
 
-The `config.go` for a native provider can omit the `installation` section (no upstream operator to install), or include it if the provider itself is installed via Helm.
+The `config.go` for a native provider can omit the `airunway.ai/installation` annotation (no upstream operator to install), or include it if the provider itself is installed via Helm. See [CRD Reference](crd-reference.md#annotations) for the annotation schema.
 
 ### Common Steps (Both Patterns)
 

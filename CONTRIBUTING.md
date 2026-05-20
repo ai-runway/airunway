@@ -34,12 +34,41 @@ bun run dev
 # Run all tests (frontend + backend)
 bun run test
 
+# Run frontend e2e tests (Playwright)
+bun run test:e2e
+
 # Build single binary (includes frontend)
 make compile
 
 # Lint all packages
 bun run lint
 ```
+
+### Running E2E Tests Locally
+
+The frontend has end-to-end tests using [Playwright](https://playwright.dev) that exercise full user flows in a real browser. No backend or Kubernetes cluster is required — all API calls are intercepted and mocked.
+
+```bash
+# One-time setup: install Playwright browsers
+cd frontend && bunx playwright install --with-deps chromium
+
+# Build frontend (required before running e2e tests)
+bun run build:frontend
+
+# Run e2e tests
+bun run test:e2e
+
+# Run with UI mode for debugging
+cd frontend && bunx playwright test --ui
+
+# Run a specific test file
+cd frontend && bunx playwright test e2e/navigation.spec.ts
+
+# View the HTML report after a test run
+cd frontend && bunx playwright show-report
+```
+
+E2e tests live in `frontend/e2e/` and use `page.route()` to intercept API requests with mock data defined in `frontend/e2e/fixtures.ts`.
 
 ### Individual Package Commands
 

@@ -6,12 +6,17 @@ import (
 	"time"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -177,6 +182,47 @@ func TestControllerConstants(t *testing.T) {
 	}
 	if FinalizerName != "airunway.ai/kuberay-provider" {
 		t.Errorf("expected finalizer 'airunway.ai/kuberay-provider', got %s", FinalizerName)
+	}
+}
+
+func TestKubeRayProviderPredicateAllowsProviderConfigEvents(t *testing.T) {
+	if !kubeRayProviderPredicate(&airunwayv1alpha1.InferenceProviderConfig{}) {
+		t.Fatal("expected provider predicate to allow InferenceProviderConfig events")
+	}
+}
+
+func TestMapProviderConfigToModelDeployments(t *testing.T) {
+	scheme := newScheme()
+	selected := newMDForController("selected", "default")
+	pinned := newMDForController("pinned", "default")
+	pinned.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: ProviderName}
+	pinned.Status.Provider = nil
+	other := newMDForController("other", "default")
+	other.Status.Provider.Name = "other"
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(selected, pinned, other).Build()
+	r := NewKubeRayProviderReconciler(c, scheme)
+
+	requests := r.mapProviderConfigToModelDeployments(context.Background(), &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderName},
+	})
+
+	got := make(map[string]struct{}, len(requests))
+	for _, request := range requests {
+		got[request.Namespace+"/"+request.Name] = struct{}{}
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 requests, got %d: %#v", len(got), got)
+	}
+	if _, ok := got["default/selected"]; !ok {
+		t.Fatalf("expected selected deployment to be requeued, got %#v", got)
+	}
+	if _, ok := got["default/pinned"]; !ok {
+		t.Fatalf("expected pinned deployment to be requeued, got %#v", got)
+	}
+	if _, ok := got["default/other"]; ok {
+		t.Fatalf("did not expect unrelated deployment to be requeued, got %#v", got)
 	}
 }
 
@@ -377,6 +423,49 @@ func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	}
 	if result.RequeueAfter != 5*time.Second {
 		t.Errorf("expected requeue after 5s, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcileDeletionWithMissingUpstreamCRDRemovesFinalizer(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	now := metav1.Now()
+	md.DeletionTimestamp = &now
+
+	interceptorFuncs := interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == RayServiceKind {
+				return &apimeta.NoKindMatchError{
+					GroupKind:        schema.GroupKind{Group: RayAPIGroup, Kind: RayServiceKind},
+					SearchedVersions: []string{RayAPIVersion},
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md).
+		WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptorFuncs).
+		Build()
+	r := NewKubeRayProviderReconciler(c, scheme)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("expected deletion to finish without requeue, got %#v", result)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected ModelDeployment to be deleted after finalizer removal, got %v", err)
 	}
 }
 

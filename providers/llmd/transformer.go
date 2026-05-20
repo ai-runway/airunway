@@ -581,8 +581,37 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		}
 	}
 
+	if hasNestedMapPath(overrides, "spec", "template", "spec") {
+		return fmt.Errorf("overriding %q is not allowed", "spec.template.spec")
+	}
+
 	obj.Object = deepMerge(obj.Object, overrides)
 	return nil
+}
+
+// hasNestedMapPath reports whether a nested map path exists in m.
+func hasNestedMapPath(m map[string]interface{}, path ...string) bool {
+	if len(path) == 0 {
+		return false
+	}
+
+	current := m
+	for i, key := range path {
+		value, exists := current[key]
+		if !exists {
+			return false
+		}
+		if i == len(path)-1 {
+			return true
+		}
+		next, ok := value.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		current = next
+	}
+
+	return false
 }
 
 // deepMerge recursively merges src into dst.

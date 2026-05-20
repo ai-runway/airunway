@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -100,7 +101,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		HealthProbeBindAddress: probeAddr,
@@ -112,6 +114,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create discovery client")
+		os.Exit(1)
+	}
+
 	// Set up the Dynamo provider reconciler
 	reconciler := dynamo.NewDynamoProviderReconciler(mgr.GetClient(), mgr.GetScheme(), downloadJobImage)
 	if err := reconciler.SetupWithManager(mgr); err != nil {
@@ -120,7 +128,7 @@ func main() {
 	}
 
 	// Set up the ProviderConfigManager for self-registration and heartbeat
-	configManager := dynamo.NewProviderConfigManager(mgr.GetClient())
+	configManager := dynamo.NewProviderConfigManager(mgr.GetClient(), discoveryClient)
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		setupLog.Info("registering Dynamo provider config")
 		if err := configManager.Register(ctx); err != nil {

@@ -7,12 +7,6 @@ spec:
   model:
     id: Qwen/Qwen3-0.6B
     source: huggingface
-    storage:
-      volumes:
-      - name: model-cache
-        purpose: modelCache
-        size: "2Gi"
-        storageClassName: azurefile-premium
   provider:
     name: dynamo
   engine:

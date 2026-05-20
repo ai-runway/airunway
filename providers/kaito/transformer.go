@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
@@ -39,6 +40,13 @@ const (
 	defaultLlamaCppPort = 5000
 	// DefaultPresetPort is the default serving port for KAITO preset models
 	DefaultPresetPort = 80
+
+	// nodeAutoProvisioningEnv enables KAITO node auto-provisioning when set to a truthy value.
+	nodeAutoProvisioningEnv = "AIRUNWAY_KAITO_NODE_AUTO_PROVISIONING"
+	// cpuInstanceTypeEnv supplies the KAITO instanceType for CPU-only deployments.
+	cpuInstanceTypeEnv = "AIRUNWAY_KAITO_CPU_INSTANCE_TYPE"
+	// gpuInstanceTypeEnv supplies the KAITO instanceType for GPU deployments.
+	gpuInstanceTypeEnv = "AIRUNWAY_KAITO_GPU_INSTANCE_TYPE"
 )
 
 // Transformer handles transformation of ModelDeployment to KAITO Workspace
@@ -87,7 +95,7 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 
 	// Merge podTemplate annotations onto the Workspace
 	if md.Spec.PodTemplate != nil && md.Spec.PodTemplate.Metadata != nil && len(md.Spec.PodTemplate.Metadata.Annotations) > 0 {
-		ws.SetAnnotations(md.Spec.PodTemplate.Metadata.Annotations)
+		ws.SetAnnotations(copyStringMap(md.Spec.PodTemplate.Metadata.Annotations))
 	}
 
 	// Build resource spec
@@ -107,7 +115,8 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 		return nil, fmt.Errorf("failed to set inference: %w", err)
 	}
 
-	// Apply escape hatch overrides last so they can override any field
+	// Apply escape hatch overrides last so they can override any field.
+	// Setting an override value to null deletes that field from the generated Workspace.
 	if err := applyOverrides(ws, md); err != nil {
 		return nil, fmt.Errorf("failed to apply provider overrides: %w", err)
 	}
@@ -126,19 +135,67 @@ func (t *Transformer) buildResource(md *airunwayv1alpha1.ModelDeployment) map[st
 	}
 	resource["count"] = count
 
-	// BYO node mode: use labelSelector instead of instanceType
+	// Node auto-provisioning mode: emit instanceType when it is explicitly
+	// enabled and the matching instance type env var is set. Keep labelSelector
+	// as well because the KAITO v1beta1 CRD requires resource.labelSelector even
+	// when node auto-provisioning uses resource.instanceType.
+	if kaitoNodeAutoProvisioningEnabled() {
+		if instanceType := kaitoInstanceTypeForMD(md); instanceType != "" {
+			resource["instanceType"] = instanceType
+		}
+	}
+
+	// Always include a labelSelector. In BYO-node mode this is the scheduler
+	// selector; in NAP mode it satisfies the Workspace schema and constrains
+	// any existing nodes KAITO may reuse.
 	matchLabels := map[string]interface{}{
 		"kubernetes.io/os": "linux",
 	}
-	// Merge nodeSelector into matchLabels
+	// Merge user-provided nodeSelector first so the forced GPU label below
+	// always wins — preventing a user from accidentally disabling GPU node
+	// targeting via spec.nodeSelector["nvidia.com/gpu.present"].
 	for k, v := range md.Spec.NodeSelector {
 		matchLabels[k] = v
+	}
+	// When GPUs are requested, force-target nodes with NVIDIA GPUs so KAITO's
+	// webhook doesn't fail validating CPU nodes.
+	//
+	// Note: this assumes nodes are labeled with `nvidia.com/gpu.present=true`
+	// (typically provided by NFD / gpu-feature-discovery). The default airunway
+	// KAITO install disables those sub-charts (see config.go install command),
+	// so operators using mixed CPU/GPU pools must either enable NFD or label
+	// their GPU nodes manually. Users with a different GPU-presence label can use
+	// spec.provider.overrides to delete this key and add their own selector.
+	if kaitoHasGPU(md) {
+		matchLabels["nvidia.com/gpu.present"] = "true"
 	}
 	resource["labelSelector"] = map[string]interface{}{
 		"matchLabels": matchLabels,
 	}
 
 	return resource
+}
+
+func kaitoNodeAutoProvisioningEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(nodeAutoProvisioningEnv))) {
+	case "1", "t", "true", "y", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func kaitoHasGPU(md *airunwayv1alpha1.ModelDeployment) bool {
+	return md.Spec.Resources != nil &&
+		md.Spec.Resources.GPU != nil &&
+		md.Spec.Resources.GPU.Count > 0
+}
+
+func kaitoInstanceTypeForMD(md *airunwayv1alpha1.ModelDeployment) string {
+	if kaitoHasGPU(md) {
+		return strings.TrimSpace(os.Getenv(gpuInstanceTypeEnv))
+	}
+	return strings.TrimSpace(os.Getenv(cpuInstanceTypeEnv))
 }
 
 // buildInference creates the inference section of the Workspace spec
@@ -346,9 +403,14 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 }
 
 // deepMerge recursively merges src into dst.
-// For maps, values are merged recursively. For all other types, src overwrites dst.
+// For maps, values are merged recursively. A nil src value deletes the field.
+// For all other types, src overwrites dst.
 func deepMerge(dst, src map[string]interface{}) map[string]interface{} {
 	for key, srcVal := range src {
+		if srcVal == nil {
+			delete(dst, key)
+			continue
+		}
 		if dstVal, exists := dst[key]; exists {
 			srcMap, srcOk := srcVal.(map[string]interface{})
 			dstMap, dstOk := dstVal.(map[string]interface{})

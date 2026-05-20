@@ -1,0 +1,26 @@
+# Keep Docker build contexts small and deterministic.
+.git
+.gitignore
+.gitattributes
+.DS_Store
+
+# Local dependencies and build outputs are recreated inside images.
+node_modules
+**/node_modules
+dist
+**/dist
+**/bin
+coverage
+**/coverage
+*.log
+
+# Local runtime/test artifacts.
+.airunway-deploy-logs
+controller/cover.out
+*.test
+*.prof
+
+# Editor/OS files.
+.vscode
+.idea
+*.swp

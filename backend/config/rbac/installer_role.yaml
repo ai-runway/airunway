@@ -1,0 +1,87 @@
+# Optional installer RBAC for dashboard-initiated provider installation.
+#
+# Do NOT include this role in the default dashboard deployment. Applying this
+# grants broad cluster-scoped permissions so the dashboard can run Helm/kubectl
+# to install provider/platform charts that create CRDs, admission webhooks, and
+# their own RBAC. Treat it as cluster-admin-like installer mode.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: airunway-installer
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/component: installer-rbac
+rules:
+  # Namespaces and namespaced resources commonly created by provider Helm charts.
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - secrets
+      - serviceaccounts
+      - services
+      - pods
+      - pods/log
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Workload resources created by provider/platform Helm charts.
+  - apiGroups: ["apps"]
+    resources:
+      - daemonsets
+      - deployments
+      - replicasets
+      - statefulsets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources:
+      - cronjobs
+      - jobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Cluster-scoped resources used by provider Helm charts.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - mutatingwebhookconfigurations
+      - validatingwebhookconfigurations
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - csidrivers
+      - csinodes
+      - csistoragecapacities
+      - storageclasses
+      - volumeattachments
+      - volumeattachments/status
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # RBAC resources created by provider/platform Helm charts.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Kubernetes requires these verbs to create or bind Roles/ClusterRoles that
+  # contain permissions not already held by the dashboard ServiceAccount.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - clusterroles
+    verbs: ["bind", "escalate"]

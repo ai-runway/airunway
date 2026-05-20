@@ -6,6 +6,18 @@ argument-hint: "[component] [registry] [push|load] [platform]"
 
 Build and redeploy an airunway component to the cluster.
 
+**⚠️ Security: This skill performs destructive cluster operations. All steps require explicit human confirmation. Never run against production clusters. Verify the target cluster context before proceeding.**
+
+## Step 0 — Safety check
+
+Before anything else, run:
+```bash
+kubectl config current-context
+```
+Show the output and ask: "You are targeting cluster `<context>`. This skill will build, push, and deploy images. Is this a dev/test cluster? Proceed? (yes/no)"
+
+**Do not proceed without explicit "yes".**
+
 ## Step 1 — Gather inputs
 
 Parse $ARGUMENTS positionally: `[component] [registry] [push|load] [platform]`

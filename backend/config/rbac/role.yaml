@@ -5,98 +5,111 @@ metadata:
   labels:
     app.kubernetes.io/name: airunway
 rules:
-  # Core API - Pods, Services (full CRUD for deployment management)
+  # Core API - Pods (listNamespacedPod, listPodForAllNamespaces; no get/watch/create/delete)
   - apiGroups: [""]
     resources:
       - pods
-      - pods/log
-      - services
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["list"]
 
-  # Secrets and ConfigMaps (needed for HF tokens, config storage)
-  # Note: secret delete is scoped per-namespace via Roles below
+  # Core API - Pod logs (readNamespacedPodLog)
+  - apiGroups: [""]
+    resources:
+      - pods/log
+    verbs: ["get"]
+
+  # Core API - Services (readNamespacedService, createNamespacedService, deleteNamespacedService)
+  - apiGroups: [""]
+    resources:
+      - services
+    verbs: ["get", "create", "delete"]
+
+  # Core API - Service proxy (proxyServiceGet via /api/v1/.../services/.../proxy/)
+  - apiGroups: [""]
+    resources:
+      - services/proxy
+    verbs: ["get"]
+
+  # Core API - Secrets (read, create, replace for hf-token-secret; no list/watch/patch)
   - apiGroups: [""]
     resources:
       - secrets
-      - configmaps
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "create", "update"]
 
-  # Events (needed for deployment event display)
+  # Core API - Secret deletion scoped to hf-token-secret only
+  - apiGroups: [""]
+    resources:
+      - secrets
+    resourceNames: ["hf-token-secret"]
+    verbs: ["delete"]
+
+  # Core API - ConfigMaps (read, create, replace; no list/watch/patch/delete)
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs: ["get", "create", "update"]
+
+  # Events (listNamespacedEvent only; no watch)
   - apiGroups: [""]
     resources:
       - events
-    verbs: ["list", "watch"]
+    verbs: ["list"]
 
-  # Namespaces (read + create)
+  # Namespaces (read, list, create; no watch/delete)
   - apiGroups: [""]
     resources:
       - namespaces
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "create"]
 
-  # Apps API - Deployments, ReplicaSets
-  - apiGroups: ["apps"]
+  # Authentication API - validate bearer tokens when auth is enabled
+  - apiGroups: ["authentication.k8s.io"]
     resources:
-      - deployments
-      - replicasets
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+      - tokenreviews
+    verbs: ["create"]
 
-  # AI Runway CRDs - ModelDeployments
-  - apiGroups: ["airunway.ai"]
-    resources:
-      - modeldeployments
-      - modeldeployments/status
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-  # AI Runway CRDs - InferenceProviderConfigs (read + delete for uninstall)
-  - apiGroups: ["airunway.ai"]
-    resources:
-      - inferenceproviderconfigs
-    verbs: ["get", "list", "watch", "delete"]
-
-  # CRD management (needed for provider detection)
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources:
-      - customresourcedefinitions
-    verbs: ["get", "list"]
-
-  # NVIDIA Dynamo CRDs
-  - apiGroups: ["nvidia.com"]
-    resources:
-      - dynamographdeployments
-      - dynamographdeployments/status
-      - clusterpolicies
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-  # KubeRay CRDs
-  - apiGroups: ["ray.io"]
-    resources:
-      - rayservices
-      - rayservices/status
-      - rayclusters
-      - rayclusters/status
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-  # Gateway API - Gateways and HTTPRoutes (read-only for status display)
-  - apiGroups: ["gateway.networking.k8s.io"]
-    resources:
-      - gateways
-      - httproutes
-    verbs: ["get", "list", "watch"]
-
-  # Gateway API Inference Extension - InferencePools (read-only for status display)
-  - apiGroups: ["inference.networking.k8s.io"]
-    resources:
-      - inferencepools
-    verbs: ["get", "list", "watch"]
-
-  # Storage - for PVCs if needed
-  - apiGroups: ["storage.k8s.io"]
-    resources:
-      - storageclasses
-    verbs: ["get", "list", "watch"]
-
-  # Node info for GPU detection
+  # Node info for GPU detection (listNode only; no get/watch)
   - apiGroups: [""]
     resources:
       - nodes
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
+
+  # Apps API - Deployments (read, list, create, delete; no update/patch/watch)
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+    verbs: ["get", "list", "create", "delete"]
+
+  # AI Runway CRDs - ModelDeployments (get, list, create, delete; no watch/update/patch)
+  - apiGroups: ["airunway.ai"]
+    resources:
+      - modeldeployments
+    verbs: ["get", "list", "create", "delete"]
+
+  # AI Runway CRDs - ModelDeployments /status subresource (read-only)
+  - apiGroups: ["airunway.ai"]
+    resources:
+      - modeldeployments/status
+    verbs: ["get"]
+
+  # AI Runway CRDs - InferenceProviderConfigs (get, list, delete; no watch)
+  - apiGroups: ["airunway.ai"]
+    resources:
+      - inferenceproviderconfigs
+    verbs: ["get", "list", "delete"]
+
+  # CRD management (readCustomResourceDefinition only; no delete)
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["get"]
+
+  # NVIDIA ClusterPolicies (listClusterCustomObject only)
+  - apiGroups: ["nvidia.com"]
+    resources:
+      - clusterpolicies
+    verbs: ["list"]
+
+  # Gateway API - Gateways (listClusterCustomObject only)
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources:
+      - gateways
+    verbs: ["list"]

@@ -106,16 +106,13 @@ export function HuggingFaceCallback() {
       }
 
       try {
-        // Get the stored PKCE verifier from the backend
-        console.log('[HF OAuth] Retrieving PKCE verifier from backend...');
-        const verifierData = await api.huggingFace.getVerifier(state);
-
-        // Exchange code for token
-        console.log('[HF OAuth] Exchanging code for token...');
-        const tokenResponse = await api.huggingFace.exchangeToken({
+        // Exchange the authorization code for an access token. The PKCE
+        // verifier is held server-side and looked up by `state`; it never
+        // travels through the browser.
+        console.log('[HF OAuth] Exchanging code for token (server-side verifier)...');
+        const tokenResponse = await api.huggingFace.exchangeTokenWithState({
           code,
-          codeVerifier: verifierData.codeVerifier,
-          redirectUri: verifierData.redirectUri,
+          state,
         });
         console.log('[HF OAuth] Token exchange successful, user:', tokenResponse.user.name);
 

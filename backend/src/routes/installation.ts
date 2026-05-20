@@ -4,6 +4,35 @@ import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
 import { getProviderHealth } from '../services/providerHealth';
 import logger from '../lib/logger';
+import { getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
+
+interface ProviderHelmChartDetails {
+  name: string;
+  chart: string;
+  namespace: string;
+  version?: string;
+  createNamespace?: boolean;
+  values?: Record<string, unknown>;
+  preInstallMissingCrds?: boolean;
+  skipCrds?: boolean;
+}
+
+/**
+ * Parse the installation annotation (JSON) from an InferenceProviderConfig CRD object.
+ */
+function parseInstallationAnnotation(config: any): any {
+  const raw = config.metadata?.annotations?.['airunway.ai/installation'];
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    logger.warn({
+      provider: config.metadata?.name,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }, 'Failed to parse installation annotation');
+    return {};
+  }
+}
 
 export type InstallConflict = {
   kind: 'preexisting-resource';
@@ -42,18 +71,23 @@ export async function checkInstallConflicts(providerId: string): Promise<Install
 
 /**
  * Extract provider details from an InferenceProviderConfig CRD object.
+ * Installation and documentation metadata are read from metadata.annotations,
+ * not from spec (which only contains controller-reconciled fields).
  */
 function extractProviderDetails(config: any) {
   const name = config.metadata?.name || 'unknown';
-  const spec = config.spec || {};
-  const installation = spec.installation || {};
-  const capabilities = spec.capabilities || {};
+  const annotations = config.metadata?.annotations;
+  const displayName = getProviderDisplayName(name, annotations);
+  const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
+  const installation = parseInstallationAnnotation(config);
+  const capabilities = config.spec?.capabilities || {};
 
   return {
     id: name,
-    name: name.charAt(0).toUpperCase() + name.slice(1),
+    name: displayName,
     description: installation.description || '',
     defaultNamespace: installation.defaultNamespace || 'default',
+    requiresCRD: providerRequiresRuntimeCRD(name, capabilities.requiresCRD, annotatedDisplayName),
     crdConfig: {
       apiGroup: capabilities.engines?.length ? '' : '',
     },
@@ -61,20 +95,66 @@ function extractProviderDetails(config: any) {
       name: r.name,
       url: r.url,
     })),
-    helmCharts: (installation.helmCharts || []).map((c: any) => ({
-      name: c.name,
-      chart: c.chart,
-      version: c.version,
-      namespace: c.namespace,
-      createNamespace: c.createNamespace,
-      values: c.values,
-    })),
+    helmCharts: (installation.helmCharts || []).map((c: any): ProviderHelmChartDetails => {
+      const values = c.values && typeof c.values === 'object' && !Array.isArray(c.values)
+        ? c.values as Record<string, unknown>
+        : undefined;
+      if (c.values !== undefined && values === undefined) {
+        logger.warn({ provider: name, chart: c.name }, 'Ignoring malformed Helm chart values in provider installation metadata');
+      }
+
+      return {
+        name: c.name,
+        chart: c.chart,
+        version: c.version,
+        namespace: c.namespace,
+        createNamespace: c.createNamespace,
+        values,
+      };
+    }),
     installationSteps: (installation.steps || []).map((s: any) => ({
       title: s.title,
       command: s.command,
       description: s.description,
     })),
   };
+}
+
+function shouldPreInstallMissingCrds(providerId: string, chart: ProviderHelmChartDetails) {
+  return (
+    (providerId === 'kaito' && chart.chart === 'kaito/workspace')
+    || (providerId === 'dynamo' && chart.name === 'dynamo-platform')
+  );
+}
+
+function normalizeInstallCharts(providerId: string, charts: ProviderHelmChartDetails[]): ProviderHelmChartDetails[] {
+  return charts.map((chart) => (
+    shouldPreInstallMissingCrds(providerId, chart)
+      ? {
+          ...chart,
+          preInstallMissingCrds: true,
+          skipCrds: true,
+        }
+      : chart
+  ));
+}
+
+const INSTALLER_PERMISSION_GUIDANCE = 'Automatic installation requires elevated installer permissions. Ask an admin to apply the optional dashboard installer permissions manifest (deploy/dashboard-installer-rbac.yaml) or run the commands manually.';
+
+function isInstallerPermissionError(output?: string): boolean {
+  if (!output) return false;
+  return /\bforbidden\b|cannot (?:create|update|patch|delete|get|list|watch)|is forbidden|attempting to grant RBAC permissions not currently held|requires.*(?:permission|privilege)/i.test(output);
+}
+
+function installationFailureStatus(output?: string): 403 | 500 {
+  return isInstallerPermissionError(output) ? 403 : 500;
+}
+
+function installationFailureMessage(prefix: string, output?: string): string {
+  const detail = output?.trim() || 'Unknown error';
+  return isInstallerPermissionError(detail)
+    ? `${prefix}: ${INSTALLER_PERMISSION_GUIDANCE} Details: ${detail}`
+    : `${prefix}: ${detail}`;
 }
 
 const installation = new Hono()
@@ -138,8 +218,9 @@ const installation = new Hono()
       });
     } else {
       const failedStep = result.results.find((r) => !r.result.success);
-      throw new HTTPException(500, {
-        message: `Installation failed at step "${failedStep?.step}": ${failedStep?.result.stderr}`,
+      const output = failedStep?.result.stderr || failedStep?.result.stdout;
+      throw new HTTPException(installationFailureStatus(output), {
+        message: installationFailureMessage(`Installation failed at step "${failedStep?.step}"`, output),
       });
     }
   })
@@ -156,20 +237,57 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
+    const charts = normalizeInstallCharts(providerId, provider.helmCharts);
+    const hasInstallMetadata = charts.length > 0;
+    const requiresCRD = provider.requiresCRD !== false;
+    const installable = requiresCRD && hasInstallMetadata;
     const status = config.status || {};
-    const health = await getProviderHealth(providerId);
+    const installationStatus = await kubernetesService.checkProviderInstallationStatus(
+      providerId,
+      status,
+      provider.name,
+      provider.requiresCRD,
+    );
+    // providerHealth is best-effort enrichment (managedBy detection,
+    // heartbeat-aware reasons). If it throws — e.g. the CR was deleted
+    // between the first read and now — fall back to installationStatus only.
+    let managedBy: string | undefined;
+    let overrideMessage: string | undefined;
+    let overrideUnhealthy = false;
+    try {
+      const health = await getProviderHealth(providerId);
+      managedBy = health.managedBy;
+      // Only override structural flags when the shim probe (or the
+      // dashboard's old-shim fallback) reports an Eno-related reason —
+      // these mean the upstream operator literally isn't running so
+      // installationStatus's view is misleading. Other reasons (e.g.
+      // ShimStale) shouldn't downgrade installed/operatorRunning here.
+      if (health.reason === 'EnoPartialInstall' || health.reason === 'EnoPartialInstallSuspected') {
+        overrideUnhealthy = !health.healthy;
+        overrideMessage = health.message;
+      }
+    } catch (err) {
+      logger.warn({ error: (err as Error)?.message, providerId }, 'getProviderHealth failed, continuing with installationStatus only');
+    }
+
+    const installed = overrideUnhealthy ? false : installationStatus.installed;
+    const operatorRunning = overrideUnhealthy ? false : (installationStatus.operatorRunning ?? false);
 
     return c.json({
       providerId: provider.id,
       providerName: provider.name,
-      installed: health.healthy,
-      crdFound: health.reason !== 'CRDMissing',
-      operatorRunning: health.healthy,
+      installed,
+      crdFound: installationStatus.crdFound,
+      operatorRunning,
+      requiresCRD: installationStatus.requiresCRD ?? provider.requiresCRD,
       version: status.version,
-      message: health.message,
-      managedBy: health.managedBy,
+      managedBy,
+      message: overrideMessage ?? (hasInstallMetadata || provider.requiresCRD === false
+        ? installationStatus.message
+        : `No installation metadata found for provider ${providerId}`),
+      installable,
       installationSteps: provider.installationSteps,
-      helmCommands: helmService.getInstallCommands(provider.helmRepos, provider.helmCharts),
+      helmCommands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
     });
   })
   .get('/providers/:providerId/commands', async (c) => {
@@ -181,11 +299,13 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
+    const charts = normalizeInstallCharts(providerId, provider.helmCharts);
+    const installable = provider.requiresCRD !== false && charts.length > 0;
 
     return c.json({
       providerId: provider.id,
       providerName: provider.name,
-      commands: helmService.getInstallCommands(provider.helmRepos, provider.helmCharts),
+      commands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
       steps: provider.installationSteps,
     });
   })
@@ -198,6 +318,19 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
+    const charts = normalizeInstallCharts(providerId, provider.helmCharts);
+
+    if (provider.requiresCRD === false) {
+      throw new HTTPException(400, {
+        message: `${provider.name} is managed by provider registration and cannot be installed from this page.`,
+      });
+    }
+
+    if (charts.length === 0) {
+      throw new HTTPException(400, {
+        message: `No installation metadata found for provider ${providerId}. Provider config is missing the airunway.ai/installation annotation or it contains no helmCharts.`,
+      });
+    }
 
     const helmStatus = await helmService.checkHelmAvailable();
     if (!helmStatus.available) {
@@ -221,7 +354,7 @@ const installation = new Hono()
     logger.info({ providerId }, `Starting installation of ${provider.name}`);
     const result = await helmService.installProvider(
       provider.helmRepos,
-      provider.helmCharts,
+      charts,
       (data, stream) => { logger.debug({ stream, providerId }, data.trim()); }
     );
 
@@ -238,8 +371,9 @@ const installation = new Hono()
       });
     } else {
       const failedStep = result.results.find((r) => !r.result.success);
-      throw new HTTPException(500, {
-        message: `Installation failed at step "${failedStep?.step}": ${failedStep?.result.stderr}`,
+      const output = failedStep?.result.stderr || failedStep?.result.stdout;
+      throw new HTTPException(installationFailureStatus(output), {
+        message: installationFailureMessage(`Installation failed at step "${failedStep?.step}"`, output),
       });
     }
   })
@@ -252,6 +386,12 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
+
+    if (provider.requiresCRD === false) {
+      throw new HTTPException(400, {
+        message: `${provider.name} is managed by provider registration and cannot be uninstalled from this page.`,
+      });
+    }
 
     const helmStatus = await helmService.checkHelmAvailable();
     if (!helmStatus.available) {
@@ -274,11 +414,13 @@ const installation = new Hono()
     }
 
     const allSuccess = results.every(r => r.success);
+    const failedResult = results.find(r => !r.success);
+    const failedOutput = failedResult?.error || failedResult?.output;
     return c.json({
       success: allSuccess,
       message: allSuccess
         ? `${provider.name} uninstalled successfully`
-        : `${provider.name} uninstall completed with errors`,
+        : installationFailureMessage(`${provider.name} uninstall failed`, failedOutput),
       results,
     });
   })
@@ -329,8 +471,9 @@ const installation = new Hono()
     });
 
     if (!gwResult.success) {
-      throw new HTTPException(500, {
-        message: `Failed to install Gateway API CRDs: ${gwResult.stderr}`,
+      const output = gwResult.stderr || gwResult.stdout;
+      throw new HTTPException(installationFailureStatus(output), {
+        message: installationFailureMessage('Failed to install Gateway API CRDs', output),
       });
     }
 
@@ -347,8 +490,9 @@ const installation = new Hono()
     });
 
     if (!gaieResult.success) {
-      throw new HTTPException(500, {
-        message: `Failed to install Inference Extension CRDs: ${gaieResult.stderr}`,
+      const output = gaieResult.stderr || gaieResult.stdout;
+      throw new HTTPException(installationFailureStatus(output), {
+        message: installationFailureMessage('Failed to install Inference Extension CRDs', output),
       });
     }
 

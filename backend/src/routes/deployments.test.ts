@@ -2,7 +2,10 @@ import { describe, test, expect, afterEach } from 'bun:test';
 import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
 import { configService } from '../services/config';
+import { authService } from '../services/auth';
+import { metricsService } from '../services/metrics';
 import { mockServiceMethod } from '../test/helpers';
+import type { MetricsResponse } from '@airunway/shared';
 import {
   mockDeployment,
   mockDeploymentWithPendingPod,
@@ -17,7 +20,7 @@ const validDeploymentBody = {
   engine: 'vllm',
   namespace: 'default',
   mode: 'aggregated',
-  routerMode: 'none',
+  routerMode: 'default',
   replicas: 1,
   enforceEager: false,
   enablePrefixCaching: false,
@@ -180,7 +183,7 @@ describe('Deployment Routes', () => {
       });
     });
 
-    test('omits GPU resources for KAITO CPU preview manifests', async () => {
+    test('emits explicit zero GPU resources for KAITO CPU preview manifests', async () => {
       restores.push(
         mockServiceMethod(configService, 'getDefaultNamespace', async () => 'kaito-workspace'),
       );
@@ -205,8 +208,61 @@ describe('Deployment Routes', () => {
       expect(res.status).toBe(200);
 
       const data = await res.json();
-      expect(data.resources[0].manifest.spec.resources).toBeUndefined();
+      expect(data.resources[0].manifest.spec.resources).toEqual({
+        gpu: {
+          count: 0,
+          type: 'nvidia.com/gpu',
+        },
+      });
       expect(data.resources[0].manifest.spec.engine.type).toBe('llamacpp');
+    });
+
+    test('omits spec.gateway when gatewayEnabled is not set', async () => {
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+
+      const res = await app.request('/api/deployments/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validDeploymentBody),
+      });
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.resources[0].manifest.spec.gateway).toBeUndefined();
+    });
+
+    test('emits spec.gateway.enabled=true when gatewayEnabled is true', async () => {
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+
+      const res = await app.request('/api/deployments/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...validDeploymentBody, gatewayEnabled: true }),
+      });
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.resources[0].manifest.spec.gateway).toEqual({ enabled: true });
+    });
+
+    test('emits spec.gateway.enabled=false when gatewayEnabled is false', async () => {
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+
+      const res = await app.request('/api/deployments/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...validDeploymentBody, gatewayEnabled: false }),
+      });
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.resources[0].manifest.spec.gateway).toEqual({ enabled: false });
     });
   });
 
@@ -610,6 +666,141 @@ describe('Deployment Routes', () => {
 
       const res = await app.request('/api/deployments/test-deploy/manifest');
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe('GET /api/deployments/-/pvcs', () => {
+    test('returns PVCs for the requested namespace', async () => {
+      let capturedNamespace: string | undefined;
+      let capturedToken: string | undefined;
+
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listPVCs', async (namespace, userToken) => {
+          capturedNamespace = namespace;
+          capturedToken = userToken;
+          return [
+            {
+              name: 'model-cache',
+              status: 'Bound',
+              storageClass: 'azure-lustre',
+              capacity: '200Gi',
+            },
+          ];
+        }),
+      );
+
+      const res = await app.request('/api/deployments/-/pvcs?namespace=dynamo-system');
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(capturedNamespace).toBe('dynamo-system');
+      expect(capturedToken).toBeUndefined();
+      expect(data).toEqual({
+        pvcs: [
+          {
+            name: 'model-cache',
+            status: 'Bound',
+            storageClass: 'azure-lustre',
+            capacity: '200Gi',
+          },
+        ],
+      });
+    });
+
+    test('passes the authenticated user token to PVC listing', async () => {
+      let tokenValidated: string | undefined;
+      let capturedToken: string | undefined;
+
+      restores.push(
+        mockServiceMethod(authService, 'isAuthEnabled', () => true),
+        mockServiceMethod(authService, 'validateToken', async (token) => {
+          tokenValidated = token;
+          return { valid: true, user: { username: 'test-user' } };
+        }),
+        mockServiceMethod(kubernetesService, 'listPVCs', async (_namespace, userToken) => {
+          capturedToken = userToken;
+          return [];
+        }),
+      );
+
+      const res = await app.request('/api/deployments/-/pvcs?namespace=dynamo-system', {
+        headers: { Authorization: 'Bearer user-token' },
+      });
+      expect(res.status).toBe(200);
+
+      expect(tokenValidated).toBe('user-token');
+      expect(capturedToken).toBe('user-token');
+      expect(await res.json()).toEqual({ pvcs: [] });
+    });
+
+    test('returns Kubernetes errors when PVC listing fails', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listPVCs', async () => {
+          const error = new Error('HTTP request failed') as Error & {
+            response: {
+              statusCode: number;
+              body: { reason: string; message: string; code: number };
+            };
+          };
+
+          error.response = {
+            statusCode: 403,
+            body: {
+              reason: 'Forbidden',
+              message: 'forbidden',
+              code: 403,
+            },
+          };
+
+          throw error;
+        }),
+      );
+
+      const res = await app.request('/api/deployments/-/pvcs?namespace=dynamo-system');
+      expect(res.status).toBe(403);
+
+      const data = await res.json();
+      expect(data.error.message).toContain('Failed to list storage disks: forbidden');
+    });
+  });
+
+  describe('GET /api/deployments/:name/metrics', () => {
+    test('passes frontend service endpoint details to the metrics service', async () => {
+      let capturedArgs: Parameters<typeof metricsService.getDeploymentMetrics> | undefined;
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          provider: 'dynamo',
+          frontendService: 'test-deploy-frontend:8080',
+        })),
+      );
+      restores.push(
+        mockServiceMethod(metricsService, 'getDeploymentMetrics', async (...args) => {
+          capturedArgs = args;
+          return {
+            available: true,
+            timestamp: '2026-05-01T00:00:00.000Z',
+            metrics: [],
+          } satisfies MetricsResponse;
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/metrics');
+      expect(res.status).toBe(200);
+
+      expect(capturedArgs).toEqual([
+        'test-deploy',
+        'default',
+        {
+          providerId: 'dynamo',
+          serviceName: 'test-deploy-frontend',
+          port: 8080,
+        },
+      ]);
     });
   });
 

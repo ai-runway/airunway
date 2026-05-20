@@ -56,9 +56,6 @@ az aks nodepool add \
 **Common GPU VM Sizes:**
 | VM Size                    | GPUs    | GPU Type | vCPUs | RAM    |
 | -------------------------- | ------- | -------- | ----- | ------ |
-| `Standard_NC6s_v3`          | 1x V100 | 16GB     | 6     | 112 GB  |
-| `Standard_NC12s_v3`         | 2x V100 | 32GB     | 12    | 224 GB  |
-| `Standard_NC24s_v3`         | 4x V100 | 64GB     | 24    | 448 GB  |
 | `Standard_NC24ads_A100_v4`  | 1x A100 | 80GB     | 24    | 220 GB  |
 | `Standard_NC48ads_A100_v4`  | 2x A100 | 160GB    | 48    | 440 GB  |
 | `Standard_NC96ads_A100_v4`  | 4x A100 | 320GB    | 96    | 880 GB  |
@@ -213,6 +210,6 @@ az aks nodepool update \
 
 ## Reference
 
-- [AKS Cluster Autoscaler](https://learn.microsoft.com/en-us/azure/aks/cluster-autoscaler)
-- [Azure GPU VM Sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes-gpu)
-- [Azure Quotas](https://learn.microsoft.com/en-us/azure/quotas/quotas-overview)
+- [AKS Cluster Autoscaler](https://learn.microsoft.com/azure/aks/cluster-autoscaler)
+- [Azure GPU VM Sizes](https://learn.microsoft.com/azure/virtual-machines/sizes-gpu)
+- [Azure Quotas](https://learn.microsoft.com/azure/quotas/quotas-overview)

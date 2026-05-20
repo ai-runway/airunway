@@ -151,23 +151,28 @@ export const mockDeploymentManifest = {
 export const mockInferenceProviderConfig = {
   apiVersion: 'airunway.ai/v1alpha1',
   kind: 'InferenceProviderConfig',
-  metadata: { name: 'kaito' },
+  metadata: {
+    name: 'kaito',
+    annotations: {
+      'airunway.ai/installation': JSON.stringify({
+        description: 'KAITO - Kubernetes AI Toolchain Operator',
+        defaultNamespace: 'kaito-workspace',
+        helmRepos: [{ name: 'kaito', url: 'https://kaito-project.github.io/kaito/charts/kaito' }],
+        helmCharts: [{ name: 'workspace', chart: 'kaito/workspace', version: '0.10.0', namespace: 'kaito-workspace', createNamespace: true }],
+        steps: [{ title: 'Install KAITO', command: 'helm install kaito-workspace kaito/workspace', description: 'Install KAITO operator' }],
+      }),
+      'airunway.ai/documentation': 'https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md',
+    },
+  },
   spec: {
     capabilities: {
       engines: ['vllm', 'llamacpp'],
       servingModes: ['aggregated'],
     },
-    installation: {
-      description: 'KAITO - Kubernetes AI Toolchain Operator',
-      defaultNamespace: 'kaito-workspace',
-      helmRepos: [{ name: 'kaito', url: 'https://kaito-project.github.io/kaito/charts/kaito' }],
-      helmCharts: [{ name: 'workspace', chart: 'kaito/workspace', version: '0.9.0', namespace: 'kaito-workspace', createNamespace: true }],
-      steps: [{ title: 'Install KAITO', command: 'helm install kaito-workspace kaito/workspace', description: 'Install KAITO operator' }],
-    },
   },
   status: {
     ready: true,
-    version: '0.9.0',
+    version: '0.10.0',
     lastHeartbeat: new Date().toISOString(),
   },
 };

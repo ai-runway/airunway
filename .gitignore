@@ -60,5 +60,8 @@ providers/*/bin/
 /test-results/
 /playwright-report/
 /playwright/.cache/
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
 
 docs/ignore

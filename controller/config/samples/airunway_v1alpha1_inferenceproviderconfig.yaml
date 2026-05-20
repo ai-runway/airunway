@@ -1,4 +1,5 @@
 # Example: KAITO provider registration (typically created by kaito-provider controller)
+# Installation and documentation metadata are stored in annotations, not in spec.
 apiVersion: airunway.ai/v1alpha1
 kind: InferenceProviderConfig
 metadata:
@@ -6,6 +7,8 @@ metadata:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
   name: kaito
+  annotations:
+    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md"
 spec:
   capabilities:
     engines:
@@ -16,11 +19,10 @@ spec:
     cpuSupport: true
     gpuSupport: true
   selectionRules:
-    - condition: "!has(spec.resources) || !has(spec.resources.gpu) || spec.resources.gpu.count == 0"
+    - condition: "!has(spec.resources.gpu) || spec.resources.gpu.count == 0"
       priority: 100
     - condition: "spec.engine.type == 'llamacpp'"
       priority: 100
-  documentation: "https://github.com/kaito-project/kaito-provider"
 ---
 # Example: Dynamo provider registration (typically created by dynamo-provider controller)
 apiVersion: airunway.ai/v1alpha1
@@ -30,6 +32,8 @@ metadata:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
   name: dynamo
+  annotations:
+    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md"
 spec:
   capabilities:
     engines:
@@ -41,14 +45,18 @@ spec:
       - disaggregated
     cpuSupport: false
     gpuSupport: true
+    gateway:
+      inferencePoolNamePattern: "{name}-pool"
+      inferencePoolNamespace: "{namespace}"
   selectionRules:
-    - condition: "has(spec.resources) && has(spec.resources.gpu) && spec.resources.gpu.count > 0"
-      priority: 50
-    - condition: "spec.engine.type == 'sglang' || spec.engine.type == 'trtllm'"
+    - condition: "spec.engine.type == 'trtllm'"
+      priority: 100
+    - condition: "spec.engine.type == 'sglang'"
       priority: 100
     - condition: "has(spec.serving) && spec.serving.mode == 'disaggregated'"
-      priority: 100
-  documentation: "https://github.com/kaito-project/dynamo-provider"
+      priority: 90
+    - condition: "has(spec.resources.gpu) && spec.resources.gpu.count > 0 && spec.engine.type == 'vllm'"
+      priority: 50
 ---
 # Example: KubeRay provider registration (typically created by kuberay-provider controller)
 apiVersion: airunway.ai/v1alpha1
@@ -58,6 +66,8 @@ metadata:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
   name: kuberay
+  annotations:
+    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md"
 spec:
   capabilities:
     engines:
@@ -67,5 +77,28 @@ spec:
       - disaggregated
     cpuSupport: false
     gpuSupport: true
-  selectionRules: []  # KubeRay is never auto-selected
-  documentation: "https://github.com/kaito-project/kuberay-provider"
+  selectionRules:
+    - condition: "has(spec.resources.gpu) && spec.resources.gpu.count > 1 && spec.engine.type == 'vllm'"
+      priority: 80
+---
+# Example: llm-d provider registration (typically created by llmd-provider controller)
+apiVersion: airunway.ai/v1alpha1
+kind: InferenceProviderConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+  name: llmd
+  annotations:
+    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md"
+spec:
+  capabilities:
+    engines:
+      - vllm
+    servingModes:
+      - aggregated
+      - disaggregated
+    cpuSupport: false
+    gpuSupport: true
+    requiresCRD: false
+  selectionRules: []

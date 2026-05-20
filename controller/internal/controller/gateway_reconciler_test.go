@@ -35,6 +35,7 @@ import (
 	"github.com/kaito-project/airunway/controller/internal/gateway"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -42,6 +43,7 @@ func newTestScheme() *runtime.Scheme {
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
 	utilruntime.Must(airunwayv1alpha1.AddToScheme(s))
 	utilruntime.Must(gatewayv1.Install(s))
+	utilruntime.Must(gatewayv1beta1.Install(s))
 	utilruntime.Must(inferencev1.Install(s))
 	return s
 }
@@ -209,7 +211,12 @@ func TestGateway_HTTPRouteCreation(t *testing.T) {
 		GatewayNamespace: "gateway-ns",
 	}
 
-	err := r.reconcileHTTPRoute(ctx, md, gwConfig, "meta-llama/Llama-3-8B")
+	err := r.reconcileHTTPRoute(ctx, md, gwConfig, "meta-llama/Llama-3-8B", httpRouteBackendTarget{
+		group:     "inference.networking.k8s.io",
+		kind:      "InferencePool",
+		name:      md.Name,
+		namespace: md.Namespace,
+	})
 	if err != nil {
 		t.Fatalf("reconcileHTTPRoute failed: %v", err)
 	}
@@ -668,6 +675,225 @@ func TestGateway_CleanupNonExistentResourcesNoError(t *testing.T) {
 	}
 	if md.Status.Gateway != nil {
 		t.Error("expected gateway status to be cleared")
+	}
+}
+
+// --- Provider Gateway Delegation Tests ---
+
+// mockProviderResolver implements gateway.ProviderCapabilityResolver for testing.
+type mockProviderResolver struct {
+	caps map[string]*airunwayv1alpha1.GatewayCapabilities
+}
+
+func (m *mockProviderResolver) GetGatewayCapabilities(_ context.Context, providerName string) *airunwayv1alpha1.GatewayCapabilities {
+	if m.caps == nil {
+		return nil
+	}
+	return m.caps[providerName]
+}
+
+func TestResolveProviderInferencePoolName_WithPattern(t *testing.T) {
+	name := resolveProviderInferencePoolName("{namespace}-{name}-pool", "llama-70b", "default")
+	if name != "default-llama-70b-pool" {
+		t.Errorf("expected 'default-llama-70b-pool', got %q", name)
+	}
+}
+
+func TestResolveProviderInferencePoolName_EmptyPattern(t *testing.T) {
+	name := resolveProviderInferencePoolName("", "llama-70b", "default")
+	if name != "llama-70b" {
+		t.Errorf("expected fallback to md name 'llama-70b', got %q", name)
+	}
+}
+
+func TestResolveProviderInferencePoolName_NameOnlyPattern(t *testing.T) {
+	name := resolveProviderInferencePoolName("{name}-pool", "llama-70b", "default")
+	if name != "llama-70b-pool" {
+		t.Errorf("expected 'llama-70b-pool', got %q", name)
+	}
+}
+
+func TestGateway_ResolveProviderCapabilities_SpecProvider(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+
+	resolver := &mockProviderResolver{
+		caps: map[string]*airunwayv1alpha1.GatewayCapabilities{
+			"dynamo": {InferencePoolNamespace: "dynamo-system", InferencePoolNamePattern: "{namespace}-{name}-pool"},
+		},
+	}
+
+	r := newTestReconciler(scheme, nil, md)
+	r.ProviderResolver = resolver
+
+	caps, err := r.resolveProviderGatewayCapabilities(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if caps.InferencePoolNamespace != "dynamo-system" {
+		t.Errorf("expected namespace 'dynamo-system', got %s", caps.InferencePoolNamespace)
+	}
+	if caps.InferencePoolNamePattern != "{namespace}-{name}-pool" {
+		t.Errorf("expected InferencePoolNamePattern to be '{namespace}-{name}-pool', got %s", caps.InferencePoolNamePattern)
+	}
+}
+
+func TestGateway_ResolveProviderCapabilities_StatusProvider(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Provider = nil
+	md.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo"}
+
+	resolver := &mockProviderResolver{
+		caps: map[string]*airunwayv1alpha1.GatewayCapabilities{
+			"dynamo": {InferencePoolNamespace: "dynamo-system"},
+		},
+	}
+
+	r := newTestReconciler(scheme, nil, md)
+	r.ProviderResolver = resolver
+
+	caps, err := r.resolveProviderGatewayCapabilities(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if caps.InferencePoolNamespace != "dynamo-system" {
+		t.Errorf("expected namespace 'dynamo-system', got %s", caps.InferencePoolNamespace)
+	}
+}
+
+func TestGateway_ResolveProviderCapabilities_NoProvider(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Provider = nil
+	md.Status.Provider = nil
+
+	r := newTestReconciler(scheme, nil, md)
+	r.ProviderResolver = &mockProviderResolver{}
+
+	_, err := r.resolveProviderGatewayCapabilities(context.Background(), md)
+	if err == nil {
+		t.Error("expected error when no provider is specified")
+	}
+}
+
+func TestGateway_ResolveProviderCapabilities_ProviderWithNoGatewayCapabilities(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "kaito"}
+
+	resolver := &mockProviderResolver{
+		caps: map[string]*airunwayv1alpha1.GatewayCapabilities{},
+	}
+
+	r := newTestReconciler(scheme, nil, md)
+	r.ProviderResolver = resolver
+
+	_, err := r.resolveProviderGatewayCapabilities(context.Background(), md)
+	if err == nil {
+		t.Error("expected error when provider has no gateway capabilities")
+	}
+}
+
+func TestGateway_ProviderManagedInferencePool_Found(t *testing.T) {
+	scheme := newTestScheme()
+
+	md := newModelDeployment("llama-70b", "default")
+
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default-llama-70b-pool",
+			Namespace: "dynamo-system",
+		},
+	}
+
+	r := newTestReconciler(scheme, nil, md, pool)
+
+	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGateway_ProviderManagedInferencePool_NotFound(t *testing.T) {
+	scheme := newTestScheme()
+
+	md := newModelDeployment("llama-70b", "default")
+	r := newTestReconciler(scheme, nil, md)
+
+	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system", "default")
+	if err == nil {
+		t.Fatal("expected error when InferencePool does not exist")
+	}
+}
+
+func TestGateway_CleanupSkipsProviderManagedResources(t *testing.T) {
+	scheme := newTestScheme()
+
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+	md.Status.Gateway = &airunwayv1alpha1.GatewayStatus{
+		Endpoint: "test-model.default:80",
+	}
+
+	// Create controller-managed resources that should NOT be deleted
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model", Namespace: "default"},
+	}
+
+	resolver := &mockProviderResolver{
+		caps: map[string]*airunwayv1alpha1.GatewayCapabilities{
+			"dynamo": {},
+		},
+	}
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, pool)
+	r.ProviderResolver = resolver
+
+	err := r.cleanupGatewayResources(context.Background(), md)
+	if err != nil {
+		t.Fatalf("cleanupGatewayResources failed: %v", err)
+	}
+
+	// InferencePool should still exist (provider manages it)
+	var existingPool inferencev1.InferencePool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "test-model", Namespace: "default"}, &existingPool); err != nil {
+		t.Errorf("InferencePool should not have been deleted (provider-managed), but got error: %v", err)
+	}
+}
+
+func TestGateway_CleanupDeletesControllerManagedResources(t *testing.T) {
+	scheme := newTestScheme()
+
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "kaito"}
+	md.Status.Gateway = &airunwayv1alpha1.GatewayStatus{
+		Endpoint: "test-model.default:80",
+	}
+
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model", Namespace: "default"},
+	}
+
+	resolver := &mockProviderResolver{
+		caps: map[string]*airunwayv1alpha1.GatewayCapabilities{},
+	}
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, pool)
+	r.ProviderResolver = resolver
+
+	err := r.cleanupGatewayResources(context.Background(), md)
+	if err != nil {
+		t.Fatalf("cleanupGatewayResources failed: %v", err)
+	}
+
+	// InferencePool should be deleted (controller manages it)
+	var deletedPool inferencev1.InferencePool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "test-model", Namespace: "default"}, &deletedPool); err == nil {
+		t.Error("InferencePool should have been deleted (controller-managed)")
 	}
 }
 

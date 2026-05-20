@@ -209,6 +209,19 @@ type EngineSpec struct {
 	// +optional
 	TrustRemoteCode bool `json:"trustRemoteCode,omitempty"`
 
+	// enablePrefixCaching enables prefix caching for faster inference on repeated prompts
+	// Required for KV-cache-aware routing to be effective
+	// Only applicable for vllm and sglang engines
+	// +kubebuilder:default=true
+	// +optional
+	EnablePrefixCaching bool `json:"enablePrefixCaching,omitempty"`
+
+	// enforceEager forces eager execution mode (disables CUDA graphs)
+	// Only applicable for vllm and sglang engines
+	// +kubebuilder:default=false
+	// +optional
+	EnforceEager bool `json:"enforceEager,omitempty"`
+
 	// args contains engine-specific arguments
 	// These are passed directly to the engine and vary by type
 	// +optional
@@ -568,6 +581,7 @@ const (
 
 const (
 	HTTPRouteCreated     = "airunway.ai/httproute-created"
+	BBRRestarted         = "airunway.ai/bbr-restarted"
 	LabelModelDeployment = "airunway.ai/model-deployment"
 	LabelManagedBy       = "airunway.ai/managed-by"
 	LabelJobType         = "airunway.ai/job-type"

@@ -2,6 +2,7 @@ package kaito
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
@@ -11,6 +12,31 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+func TestMain(m *testing.M) {
+	previousEnv := map[string]*string{}
+	for _, key := range []string{nodeAutoProvisioningEnv, cpuInstanceTypeEnv, gpuInstanceTypeEnv} {
+		if value, ok := os.LookupEnv(key); ok {
+			valueCopy := value
+			previousEnv[key] = &valueCopy
+		} else {
+			previousEnv[key] = nil
+		}
+		os.Unsetenv(key)
+	}
+
+	code := m.Run()
+
+	for key, value := range previousEnv {
+		if value == nil {
+			os.Unsetenv(key)
+		} else {
+			os.Setenv(key, *value)
+		}
+	}
+
+	os.Exit(code)
+}
 
 func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
 	return &airunwayv1alpha1.ModelDeployment{
@@ -411,6 +437,34 @@ func TestTransformWithPodTemplateLabels(t *testing.T) {
 	}
 }
 
+func TestTransformWithPodTemplateAnnotationsCopiesMap(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.PodTemplate = &airunwayv1alpha1.PodTemplateSpec{
+		Metadata: &airunwayv1alpha1.PodTemplateMetadata{
+			Annotations: map[string]string{
+				"custom-annotation": "custom-value",
+			},
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	md.Spec.PodTemplate.Metadata.Annotations["custom-annotation"] = "mutated"
+	md.Spec.PodTemplate.Metadata.Annotations["new-annotation"] = "new-value"
+
+	annotations := resources[0].GetAnnotations()
+	if annotations["custom-annotation"] != "custom-value" {
+		t.Fatalf("expected Workspace annotations to be isolated from podTemplate mutations, got %v", annotations)
+	}
+	if _, ok := annotations["new-annotation"]; ok {
+		t.Fatalf("expected Workspace annotations not to alias podTemplate annotations, got %v", annotations)
+	}
+}
+
 func TestBuildResourceRequests(t *testing.T) {
 	tr := NewTransformer()
 
@@ -644,6 +698,249 @@ func TestTransformEmptyNodeSelector(t *testing.T) {
 	}
 	if len(matchLabels) != 1 {
 		t.Errorf("expected only 1 matchLabel (os=linux), got %d: %v", len(matchLabels), matchLabels)
+	}
+}
+
+func TestTransformGPUAddsNvidiaLabel(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	matchLabels, found, _ := unstructured.NestedStringMap(ws.Object, "resource", "labelSelector", "matchLabels")
+	if !found {
+		t.Fatal("expected matchLabels")
+	}
+	if matchLabels["nvidia.com/gpu.present"] != "true" {
+		t.Error("expected nvidia.com/gpu.present=true when GPU count > 0")
+	}
+}
+
+func TestTransformDefaultBYONodeResourceOmitsInstanceType(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	if _, found, _ := unstructured.NestedString(ws.Object, "resource", "instanceType"); found {
+		t.Fatal("did not expect instanceType by default")
+	}
+	if _, found, _ := unstructured.NestedMap(ws.Object, "resource", "labelSelector"); !found {
+		t.Fatal("expected BYO-node labelSelector by default")
+	}
+}
+
+func TestTransformCPUNodeAutoProvisioningUsesCPUInstanceType(t *testing.T) {
+	t.Setenv(nodeAutoProvisioningEnv, "true")
+	t.Setenv(cpuInstanceTypeEnv, "Standard_D4s_v5")
+
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeLlamaCpp
+	md.Spec.Image = "my-image:latest"
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 0},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	instanceType, found, _ := unstructured.NestedString(ws.Object, "resource", "instanceType")
+	if !found || instanceType != "Standard_D4s_v5" {
+		t.Fatalf("expected CPU instanceType Standard_D4s_v5, got %q (found=%v)", instanceType, found)
+	}
+	if _, found, _ := unstructured.NestedMap(ws.Object, "resource", "labelSelector"); !found {
+		t.Fatal("expected labelSelector because KAITO v1beta1 requires it even when node auto-provisioning is enabled")
+	}
+}
+
+func TestTransformGPUNodeAutoProvisioningUsesGPUInstanceType(t *testing.T) {
+	t.Setenv(nodeAutoProvisioningEnv, "true")
+	t.Setenv(gpuInstanceTypeEnv, "Standard_NC24ads_A100_v4")
+
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	instanceType, found, _ := unstructured.NestedString(ws.Object, "resource", "instanceType")
+	if !found || instanceType != "Standard_NC24ads_A100_v4" {
+		t.Fatalf("expected GPU instanceType Standard_NC24ads_A100_v4, got %q (found=%v)", instanceType, found)
+	}
+	matchLabels, found, _ := unstructured.NestedStringMap(ws.Object, "resource", "labelSelector", "matchLabels")
+	if !found {
+		t.Fatal("expected labelSelector because KAITO v1beta1 requires it even when node auto-provisioning is enabled")
+	}
+	if matchLabels["nvidia.com/gpu.present"] != "true" {
+		t.Fatalf("expected GPU labelSelector in node auto-provisioning mode, got %v", matchLabels)
+	}
+}
+
+func TestTransformNodeAutoProvisioningWithoutInstanceTypeFallsBackToLabelSelector(t *testing.T) {
+	t.Setenv(nodeAutoProvisioningEnv, "true")
+
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	if _, found, _ := unstructured.NestedString(ws.Object, "resource", "instanceType"); found {
+		t.Fatal("did not expect instanceType when the matching instance type env var is missing")
+	}
+	matchLabels, found, _ := unstructured.NestedStringMap(ws.Object, "resource", "labelSelector", "matchLabels")
+	if !found {
+		t.Fatal("expected fallback labelSelector when instance type env var is missing")
+	}
+	if matchLabels["nvidia.com/gpu.present"] != "true" {
+		t.Fatalf("expected fallback GPU labelSelector, got %v", matchLabels)
+	}
+}
+
+func TestTransformOverrideCanDeleteGeneratedInstanceType(t *testing.T) {
+	t.Setenv(nodeAutoProvisioningEnv, "true")
+	t.Setenv(gpuInstanceTypeEnv, "Standard_NC24ads_A100_v4")
+
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+	}
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{
+				"resource": {
+					"instanceType": null
+				}
+			}`),
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, found, _ := unstructured.NestedString(resources[0].Object, "resource", "instanceType"); found {
+		t.Fatal("expected provider override null to delete generated instanceType")
+	}
+}
+
+func TestTransformNoGPUOmitsNvidiaLabel(t *testing.T) {
+	tr := NewTransformer()
+	// Use llamacpp here: it's the only realistic no-GPU path the webhook
+	// allows through to the transformer. For vLLM the defaulter sets
+	// GPU.Count=1 when Resources is nil and the validator rejects
+	// gpu.count==0, so a "vLLM with no GPU" state cannot reach this code.
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeLlamaCpp
+	md.Spec.Image = "my-image:latest"
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 0},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	matchLabels, _, _ := unstructured.NestedStringMap(ws.Object, "resource", "labelSelector", "matchLabels")
+	if _, exists := matchLabels["nvidia.com/gpu.present"]; exists {
+		t.Error("did not expect nvidia.com/gpu.present when no GPU requested")
+	}
+}
+
+func TestTransformGPULabelWinsOverNodeSelector(t *testing.T) {
+	// A user can put nvidia.com/gpu.present in spec.nodeSelector — possibly
+	// set to "false" — and the forced GPU label must still win, otherwise the
+	// webhook-rejection failure this fix prevents would resurface.
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+	}
+	md.Spec.NodeSelector = map[string]string{
+		"nvidia.com/gpu.present": "false",
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	matchLabels, _, _ := unstructured.NestedStringMap(ws.Object, "resource", "labelSelector", "matchLabels")
+	if matchLabels["nvidia.com/gpu.present"] != "true" {
+		t.Errorf("expected nvidia.com/gpu.present=true (forced) to win over user nodeSelector, got %q", matchLabels["nvidia.com/gpu.present"])
+	}
+}
+
+func TestTransformOverrideCanDeleteNvidiaGPULabel(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+	}
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{
+				"resource": {
+					"labelSelector": {
+						"matchLabels": {
+							"nvidia.com/gpu.present": null,
+							"accelerator.vendor": "example.com/custom"
+						}
+					}
+				}
+			}`),
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	matchLabels, found, _ := unstructured.NestedStringMap(resources[0].Object, "resource", "labelSelector", "matchLabels")
+	if !found {
+		t.Fatal("expected matchLabels")
+	}
+	if _, ok := matchLabels["nvidia.com/gpu.present"]; ok {
+		t.Fatalf("expected provider override null to delete nvidia GPU label, got %v", matchLabels)
+	}
+	if matchLabels["accelerator.vendor"] != "example.com/custom" {
+		t.Fatalf("expected provider override to add replacement GPU selector, got %v", matchLabels)
+	}
+	if matchLabels["kubernetes.io/os"] != "linux" {
+		t.Fatalf("expected deep merge to preserve default OS selector, got %v", matchLabels)
 	}
 }
 

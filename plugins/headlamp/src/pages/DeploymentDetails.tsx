@@ -6,14 +6,13 @@
  * Matches the native UI layout with status cards and access info.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useHistory } from 'react-router-dom';
 import {
   SectionBox,
   SimpleTable,
   Loader,
   StatusLabel,
-  StatusLabelProps,
   Tabs,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import { Router } from '@kinvolk/headlamp-plugin/lib';
@@ -23,43 +22,14 @@ import Tooltip from '@mui/material/Tooltip';
 import { Icon } from '@iconify/react';
 import { buildPortForwardCommand } from '@airunway/shared';
 import { useApiClient } from '../lib/api-client';
-import type { DeploymentStatus, PodStatus, MetricsResponse, PodLogsResponse, DeploymentPhase } from '@airunway/shared';
+import type { DeploymentStatus, PodStatus, MetricsResponse, PodLogsResponse } from '@airunway/shared';
 import { MetricsPanel } from '../components/MetricsPanel';
 import { LogsViewer } from '../components/LogsViewer';
+import { ConditionsTable } from '../components/ConditionsTable';
+import { StorageVolumesDisplay } from '../components/StorageVolumesDisplay';
 import { ConnectionError } from '../components/ConnectionBanner';
 import { DeleteDialog } from '../components/DeleteDialog';
-import { generateAynaUrl } from '../lib/utils';
-
-// Status color mapping
-function getStatusColor(status: DeploymentPhase | string): StatusLabelProps['status'] {
-  switch (status) {
-    case 'Running':
-      return 'success';
-    case 'Pending':
-    case 'Deploying':
-      return 'warning';
-    case 'Failed':
-    case 'Terminating':
-      return 'error';
-    default:
-      return '';
-  }
-}
-
-// Format relative time
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-
-  if (diffDays > 0) return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
-  if (diffHours > 0) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
-  if (diffMins > 0) return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
-  return 'just now';
-}
+import { generateAynaUrl, getDeploymentPhaseColor, copyToClipboard, formatRelativeTime } from '../lib/utils';
 
 export function DeploymentDetails() {
   const { name, namespace } = useParams<{ name: string; namespace: string }>();
@@ -74,16 +44,19 @@ export function DeploymentDetails() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'pods' | 'metrics' | 'logs'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'pods' | 'metrics' | 'logs' | 'conditions' | 'storage'>('overview');
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Fetch deployment details
-  const fetchDetails = useCallback(async () => {
+  const fetchDetails = useCallback(async (isInitialLoad = false) => {
     if (!name || !namespace) return;
 
-    setLoading(true);
+    if (isInitialLoad) {
+      setLoading(true);
+    }
     setError(null);
 
     try {
@@ -94,17 +67,21 @@ export function DeploymentDetails() {
 
       setDeployment(deploymentData);
       setPods(podsData.pods);
-
-      // Select first pod by default
-      if (podsData.pods.length > 0 && !selectedPod) {
-        setSelectedPod(podsData.pods[0].name);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch deployment');
     } finally {
-      setLoading(false);
+      if (isInitialLoad) {
+        setLoading(false);
+      }
     }
-  }, [api, name, namespace, selectedPod]);
+  }, [api, name, namespace]);
+
+  // Select first pod by default when pods first load
+  useEffect(() => {
+    if (pods.length > 0 && !selectedPod) {
+      setSelectedPod(pods[0].name);
+    }
+  }, [pods, selectedPod]);
 
   // Fetch metrics
   const fetchMetrics = useCallback(async () => {
@@ -150,17 +127,24 @@ export function DeploymentDetails() {
   }, [api, deployment, history]);
 
   // Copy port-forward command
-  const copyPortForwardCommand = useCallback(() => {
+  const copyPortForwardCommand = useCallback(async () => {
     if (!deployment) return;
     const command = buildPortForwardCommand(deployment);
-    navigator.clipboard.writeText(command);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const success = await copyToClipboard(command);
+    if (success) {
+      setCopied(true);
+      clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
+    }
   }, [deployment]);
+
+  useEffect(() => {
+    return () => clearTimeout(copyTimerRef.current);
+  }, []);
 
   // Initial fetch
   useEffect(() => {
-    fetchDetails();
+    fetchDetails(true);
   }, [fetchDetails]);
 
   // Fetch metrics when tab is active
@@ -209,6 +193,12 @@ export function DeploymentDetails() {
         <span style={{ opacity: 0.7 }}>Model</span>
         <span style={{ fontFamily: 'monospace' }}>{deployment.modelId || '-'}</span>
       </div>
+      {deployment.servedModelName && deployment.servedModelName !== deployment.modelId && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(128, 128, 128, 0.2)' }}>
+          <span style={{ opacity: 0.7 }}>Served Model Name</span>
+          <span style={{ fontFamily: 'monospace' }}>{deployment.servedModelName}</span>
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(128, 128, 128, 0.2)' }}>
         <span style={{ opacity: 0.7 }}>Provider</span>
         <span>{deployment.provider}</span>
@@ -225,6 +215,18 @@ export function DeploymentDetails() {
         <span style={{ opacity: 0.7 }}>Replicas</span>
         <span>{deployment.replicas?.ready || 0}/{deployment.replicas?.desired || 1}</span>
       </div>
+      {deployment.prefillReplicas && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(128, 128, 128, 0.2)' }}>
+          <span style={{ opacity: 0.7 }}>Prefill Replicas</span>
+          <span>{deployment.prefillReplicas.ready}/{deployment.prefillReplicas.desired}</span>
+        </div>
+      )}
+      {deployment.decodeReplicas && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(128, 128, 128, 0.2)' }}>
+          <span style={{ opacity: 0.7 }}>Decode Replicas</span>
+          <span>{deployment.decodeReplicas.ready}/{deployment.decodeReplicas.desired}</span>
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(128, 128, 128, 0.2)' }}>
         <span style={{ opacity: 0.7 }}>Created</span>
         <span>{deployment.createdAt ? new Date(deployment.createdAt).toLocaleString() : '-'}</span>
@@ -241,7 +243,7 @@ export function DeploymentDetails() {
       columns={[
         { label: 'Name', getter: (pod: PodStatus) => pod.name },
         { label: 'Status', getter: (pod: PodStatus) => (
-          <StatusLabel status={getStatusColor(pod.phase)}>
+          <StatusLabel status={getDeploymentPhaseColor(pod.phase)}>
             {pod.phase}
           </StatusLabel>
         )},
@@ -267,11 +269,26 @@ export function DeploymentDetails() {
     />
   );
 
+  const ConditionsContent = deployment.conditions ? (
+    <ConditionsTable conditions={deployment.conditions} />
+  ) : (
+    <div style={{ padding: '16px', opacity: 0.7, textAlign: 'center' }}>No conditions available</div>
+  );
+
+  const StorageContent = deployment.storage?.volumes?.length ? (
+    <StorageVolumesDisplay volumes={deployment.storage.volumes} />
+  ) : null;
+
+  const tabIds: Array<typeof activeTab> = ['overview', 'pods', 'metrics', 'logs', 'conditions'];
+  if (StorageContent) tabIds.push('storage');
+
   const tabs = [
     { label: 'Overview', component: OverviewContent },
     { label: `Pods (${pods.length})`, component: PodsContent },
     { label: 'Metrics', component: MetricsContent },
     { label: 'Logs', component: LogsContent },
+    { label: 'Conditions', component: ConditionsContent },
+    ...(StorageContent ? [{ label: 'Storage', component: StorageContent }] : []),
   ];
 
   return (
@@ -320,7 +337,7 @@ export function DeploymentDetails() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '24px' }}>
           <div>
             <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '4px' }}>Phase</div>
-            <StatusLabel status={getStatusColor(deployment.phase)}>
+            <StatusLabel status={getDeploymentPhaseColor(deployment.phase)}>
               {deployment.phase}
             </StatusLabel>
           </div>
@@ -356,6 +373,18 @@ export function DeploymentDetails() {
             <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '4px' }}>Mode</div>
             <div style={{ fontWeight: 500, textTransform: 'capitalize' }}>{deployment.mode || 'aggregated'}</div>
           </div>
+          {deployment.gateway?.endpoint && (
+            <div>
+              <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '4px' }}>Gateway Endpoint</div>
+              <code style={{ fontSize: '12px' }}>{deployment.gateway.endpoint}</code>
+            </div>
+          )}
+          {deployment.gateway?.modelName && (
+            <div>
+              <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '4px' }}>Gateway Model Name</div>
+              <span style={{ fontSize: '13px' }}>{deployment.gateway.modelName}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -431,14 +460,45 @@ export function DeploymentDetails() {
         </div>
       </div>
 
+      {/* Gateway Access Card */}
+      {deployment.gateway?.endpoint && (
+        <div style={{
+          border: '1px solid rgba(128, 128, 128, 0.3)',
+          borderRadius: '8px',
+          padding: '20px',
+          marginBottom: '24px',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+            <Icon icon="mdi:router-network" style={{ fontSize: '20px' }} />
+            <h3 style={{ margin: 0 }}>Gateway Access</h3>
+          </div>
+          <div style={{ fontSize: '14px', opacity: 0.7, marginBottom: '12px' }}>
+            This model is accessible through the gateway at:
+          </div>
+          <code style={{
+            display: 'block',
+            padding: '12px',
+            backgroundColor: 'rgba(128, 128, 128, 0.1)',
+            borderRadius: '4px',
+            fontSize: '13px',
+          }}>
+            {deployment.gateway.endpoint}
+          </code>
+          {deployment.gateway.modelName && (
+            <div style={{ fontSize: '12px', opacity: 0.6, marginTop: '8px' }}>
+              Use model name <code>{deployment.gateway.modelName}</code> in your inference requests
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Tabbed Content */}
       <SectionBox title="">
         <Tabs
           tabs={tabs}
           ariaLabel="Deployment details tabs"
           onTabChanged={(index) => {
-            const tabIds = ['overview', 'pods', 'metrics', 'logs'] as const;
-            setActiveTab(tabIds[index]);
+            setActiveTab(tabIds[index] || 'overview');
           }}
           sx={{ borderBottom: 1, borderColor: 'divider', marginBottom: 2 }}
         />

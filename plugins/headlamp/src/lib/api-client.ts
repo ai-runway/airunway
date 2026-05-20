@@ -134,6 +134,9 @@ export const api = {
   get gpuOperator() {
     return getApiClient().gpuOperator;
   },
+  get gateway() {
+    return getApiClient().gateway;
+  },
   get autoscaler() {
     return getApiClient().autoscaler;
   },

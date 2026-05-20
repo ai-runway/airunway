@@ -9,11 +9,13 @@ import (
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -217,6 +219,41 @@ func TestControllerConstants(t *testing.T) {
 	}
 	if FinalizerName != "airunway.ai/dynamo-provider" {
 		t.Errorf("expected finalizer 'airunway.ai/dynamo-provider', got %s", FinalizerName)
+	}
+}
+
+func TestMapProviderConfigToModelDeployments(t *testing.T) {
+	scheme := newScheme()
+	selected := newMDForController("selected", "default")
+	pinned := newMDForController("pinned", "default")
+	pinned.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: ProviderName}
+	pinned.Status.Provider = nil
+	other := newMDForController("other", "default")
+	other.Status.Provider.Name = "other"
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(selected, pinned, other).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	requests := r.mapProviderConfigToModelDeployments(context.Background(), &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderName},
+	})
+
+	got := make(map[string]struct{}, len(requests))
+	for _, request := range requests {
+		got[request.Namespace+"/"+request.Name] = struct{}{}
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 requests, got %d: %#v", len(got), got)
+	}
+	if _, ok := got["default/selected"]; !ok {
+		t.Fatalf("expected selected deployment to be requeued, got %#v", got)
+	}
+	if _, ok := got["default/pinned"]; !ok {
+		t.Fatalf("expected pinned deployment to be requeued, got %#v", got)
+	}
+	if _, ok := got["default/other"]; ok {
+		t.Fatalf("did not expect unrelated deployment to be requeued, got %#v", got)
 	}
 }
 
@@ -440,6 +477,96 @@ func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	}
 	if result.RequeueAfter != 5*time.Second {
 		t.Errorf("expected requeue after 5s, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcileDeletionWithMissingUpstreamCRDCleansUpManagedResources(t *testing.T) {
+	scheme := newScheme()
+	md := newMDWithStorage("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	now := metav1.Now()
+	md.DeletionTimestamp = &now
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model-cache",
+			Namespace: "default",
+			Labels: map[string]string{
+				airunwayv1alpha1.LabelManagedBy:       "airunway",
+				airunwayv1alpha1.LabelModelDeployment: "test",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: airunwayv1alpha1.GroupVersion.String(),
+					Kind:       "ModelDeployment",
+					Name:       "test",
+					UID:        "test-uid",
+				},
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model-download",
+			Namespace: "default",
+			Labels: map[string]string{
+				airunwayv1alpha1.LabelManagedBy:       "airunway",
+				airunwayv1alpha1.LabelModelDeployment: "test",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: airunwayv1alpha1.GroupVersion.String(),
+					Kind:       "ModelDeployment",
+					Name:       "test",
+					UID:        "test-uid",
+				},
+			},
+		},
+	}
+
+	interceptorFuncs := interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == DynamoGraphDeploymentKind {
+				return &meta.NoKindMatchError{
+					GroupKind:        schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind},
+					SearchedVersions: []string{DynamoAPIVersion},
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, pvc, job).
+		WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptorFuncs).
+		Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("expected cleanup to finish without requeue, got %#v", result)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected ModelDeployment to be deleted after finalizer removal, got %v", err)
+	}
+
+	pvcCheck := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-model-cache", Namespace: "default"}, pvcCheck); err == nil {
+		t.Fatal("expected managed PVC to be deleted when upstream CRD is missing")
+	}
+
+	jobCheck := &batchv1.Job{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-model-download", Namespace: "default"}, jobCheck); err == nil {
+		t.Fatal("expected managed Job to be deleted when upstream CRD is missing")
 	}
 }
 

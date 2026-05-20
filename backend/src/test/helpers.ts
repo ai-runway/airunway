@@ -44,7 +44,7 @@ export function mockFetchByUrl(
   routes: Record<string, { body: unknown; ok?: boolean; status?: number }>
 ): () => void {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+  const mockFetch = (async (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
     let url: string;
     if (input instanceof Request) {
       url = input.url;
@@ -68,7 +68,16 @@ export function mockFetchByUrl(
       statusText: 'Not Found',
       headers: { 'Content-Type': 'application/json' },
     });
+  }) as typeof fetch;
+
+  const fetchWithPreconnect = originalFetch as typeof fetch & {
+    preconnect?: (...args: unknown[]) => unknown;
   };
+  if (typeof fetchWithPreconnect.preconnect === 'function') {
+    Object.assign(mockFetch, { preconnect: fetchWithPreconnect.preconnect.bind(originalFetch) });
+  }
+
+  globalThis.fetch = mockFetch;
   return () => {
     globalThis.fetch = originalFetch;
   };

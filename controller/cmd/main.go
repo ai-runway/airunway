@@ -371,6 +371,7 @@ func main() {
 		Scheme:                 mgr.GetScheme(),
 		EnableProviderSelector: enableProviderSelector,
 		GatewayDetector:        gatewayDetector,
+		ProviderResolver:       gateway.NewInferenceProviderConfigResolver(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelDeployment")
 		os.Exit(1)

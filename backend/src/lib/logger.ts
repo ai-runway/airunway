@@ -3,7 +3,6 @@ import pino from 'pino';
 // Check if running in compiled binary mode
 const isCompiled = (): boolean => {
   try {
-    // @ts-expect-error - import.meta.dir is bun-specific
     return import.meta.dir?.includes('/$bunfs/') || process.env.BUN_SELF_EXECUTABLE !== undefined;
   } catch {
     return false;

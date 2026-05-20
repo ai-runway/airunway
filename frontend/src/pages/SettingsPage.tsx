@@ -50,12 +50,108 @@ import { cn } from '@/lib/utils'
 import { useSearchParams } from 'react-router-dom'
 
 type SettingsTab = 'general' | 'runtimes' | 'integrations'
-type RuntimeId = 'dynamo' | 'kuberay' | 'kaito'| 'llmd'
+type RuntimeId = string
+
+type RuntimeCrdMetadata = {
+  id?: string | null
+  name?: string | null
+  requiresCRD?: boolean | null
+}
+
+type RuntimeSelectionMetadata = RuntimeCrdMetadata & {
+  installed?: boolean | null
+}
+
+const KNOWN_RUNTIME_IDS = new Set(['dynamo', 'kuberay', 'kaito', 'llmd', 'vllm'])
+const CRD_LESS_RUNTIME_IDS = new Set(['llmd', 'vllm'])
+const CRD_LESS_RUNTIME_DISPLAY_NAMES = new Set(['LLM-D', 'vLLM'])
+
+const normalizeRuntimeId = (id: string | null | undefined) => String(id ?? '').toLowerCase()
+const isLlmdRuntimeId = (id: string | null | undefined) => normalizeRuntimeId(id) === 'llmd'
+const isVllmRuntimeId = (id: string | null | undefined) => normalizeRuntimeId(id) === 'vllm'
+const isLlmdRuntimeDisplayName = (name: string | null | undefined) => String(name ?? '').trim() === 'LLM-D'
+const isVllmRuntimeDisplayName = (name: string | null | undefined) => String(name ?? '').trim() === 'vLLM'
+const isCrdLessRuntimeId = (id: string | null | undefined) => CRD_LESS_RUNTIME_IDS.has(normalizeRuntimeId(id))
+const isCrdLessRuntimeDisplayName = (name: string | null | undefined) => CRD_LESS_RUNTIME_DISPLAY_NAMES.has(String(name ?? '').trim())
+const canonicalizeRuntimeId = (id: string) => {
+  const normalized = normalizeRuntimeId(id)
+  return KNOWN_RUNTIME_IDS.has(normalized) ? normalized : id
+}
+const runtimeIdsMatch = (left: string | null | undefined, right: string | null | undefined) =>
+  normalizeRuntimeId(left) === normalizeRuntimeId(right)
+
+const runtimeRequiresCRD = (runtime: RuntimeCrdMetadata | null | undefined, fallbackId?: string | null) => {
+  if (typeof runtime?.requiresCRD === 'boolean') {
+    return runtime.requiresCRD
+  }
+
+  if (
+    isCrdLessRuntimeId(runtime?.id) ||
+    isCrdLessRuntimeDisplayName(runtime?.name) ||
+    isCrdLessRuntimeId(fallbackId)
+  ) {
+    return false
+  }
+
+  return true
+}
+
+const runtimeDescription = (id: string, name?: string | null) => {
+  if (isLlmdRuntimeId(id) || isLlmdRuntimeDisplayName(name)) {
+    return 'LLM-D for distributed inference'
+  }
+
+  if (isVllmRuntimeId(id) || isVllmRuntimeDisplayName(name)) {
+    return 'vLLM for high-throughput inference'
+  }
+
+  switch (normalizeRuntimeId(id)) {
+    case 'kaito':
+      return 'KAITO for simplified model deployment'
+    case 'dynamo':
+      return 'NVIDIA Dynamo for high-performance GPU inference'
+    case 'kuberay':
+      return 'Ray Serve via KubeRay for distributed Ray-based model serving with vLLM'
+    default:
+      return 'Inference runtime provider'
+  }
+}
+
+const crdLessRuntimeReadinessMessage = (ready: boolean | null | undefined) => (
+  ready ? 'Runtime is ready to use.' : 'Provider is registered but not ready yet.'
+)
+
+const crdLessRuntimeStateLabel = (ready: boolean | null | undefined) => (
+  ready ? 'Ready' : 'Registered'
+)
+
+const selectDefaultRuntimeId = (runtimes: RuntimeSelectionMetadata[] | undefined): RuntimeId | null => {
+  if (!runtimes) {
+    return null
+  }
+
+  const installedRuntime = runtimes.find(r => r.installed && r.id)
+  if (installedRuntime?.id) {
+    return canonicalizeRuntimeId(installedRuntime.id)
+  }
+
+  const dynamoRuntime = runtimes.find(r => runtimeIdsMatch(r.id, 'dynamo') && r.id)
+  if (dynamoRuntime?.id) {
+    return canonicalizeRuntimeId(dynamoRuntime.id)
+  }
+
+  const firstRegisteredRuntime = runtimes.find(r => r.id)
+  if (firstRegisteredRuntime?.id) {
+    return canonicalizeRuntimeId(firstRegisteredRuntime.id)
+  }
+
+  return 'dynamo'
+}
 
 export function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { isLoading: settingsLoading } = useSettings()
-  const { data: runtimesStatus, isLoading: runtimesLoading } = useRuntimesStatus()
+  const { data: runtimesStatus, isLoading: runtimesLoading, refetch: refetchRuntimesStatus } = useRuntimesStatus()
   const { data: clusterStatus, isLoading: clusterLoading } = useClusterStatus()
   const { data: helmStatus, isLoading: helmLoading } = useHelmStatus()
   const { data: autoscaler, isLoading: autoscalerLoading } = useAutoscalerDetection()
@@ -79,24 +175,21 @@ export function SettingsPage() {
   // Runtime installation state
   const [selectedRuntime, setSelectedRuntime] = useState<RuntimeId | null>(null)
   const [isInstalling, setIsInstalling] = useState(false)
+  const [pendingInstallRuntime, setPendingInstallRuntime] = useState<RuntimeId | null>(null)
   const [isUninstalling, setIsUninstalling] = useState(false)
   const [showUninstallDialog, setShowUninstallDialog] = useState(false)
 
   const runtimes = runtimesStatus?.runtimes || []
-  const installedCount = runtimes.filter(r => r.installed).length
+  const readyRuntimeCount = runtimes.filter(r => runtimeRequiresCRD(r) ? r.installed : (r.installed || r.healthy)).length
   const helmAvailable = helmStatus?.available ?? false
+  const defaultRuntime = selectDefaultRuntimeId(runtimesStatus?.runtimes)
 
   // Set default runtime once data is loaded
   useEffect(() => {
-    if (runtimesStatus?.runtimes && selectedRuntime === null) {
-      const installedRuntime = runtimesStatus.runtimes.find(r => r.installed)
-      if (installedRuntime) {
-        setSelectedRuntime(installedRuntime.id as RuntimeId)
-      } else {
-        setSelectedRuntime('dynamo')
-      }
+    if (runtimesStatus?.runtimes && selectedRuntime === null && defaultRuntime) {
+      setSelectedRuntime(defaultRuntime)
     }
-  }, [runtimesStatus, selectedRuntime])
+  }, [runtimesStatus, selectedRuntime, defaultRuntime])
 
   // Update URL when tab changes
   useEffect(() => {
@@ -107,13 +200,20 @@ export function SettingsPage() {
     }
   }, [activeTab, setSearchParams])
 
-  const effectiveRuntime = selectedRuntime || 'dynamo'
+  const effectiveRuntime = selectedRuntime || defaultRuntime || ''
 
   const {
     data: installationStatus,
     isLoading: installationLoading,
     refetch: refetchInstallation,
   } = useProviderInstallationStatus(effectiveRuntime)
+
+  const currentRuntime = runtimes.find(r => runtimeIdsMatch(r.id, effectiveRuntime))
+  const selectedRuntimeRequiresCRD = runtimeRequiresCRD({
+    id: currentRuntime?.id ?? effectiveRuntime,
+    name: currentRuntime?.name ?? installationStatus?.providerName,
+    requiresCRD: installationStatus?.requiresCRD ?? currentRuntime?.requiresCRD,
+  }, effectiveRuntime)
 
   const installProvider = useInstallProvider()
   const uninstallProvider = useUninstallProvider()
@@ -123,8 +223,10 @@ export function SettingsPage() {
     try {
       const result = await installProvider.mutateAsync(providerId)
       if (result.success) {
-        toast({ title: 'Installation Complete', description: result.message })
+        setPendingInstallRuntime(providerId)
+        toast({ title: 'Installation Started', description: `${result.message}. Waiting for the runtime service to become ready.` })
         refetchInstallation()
+        refetchRuntimesStatus()
       } else {
         toast({ title: 'Installation Failed', description: result.message, variant: 'destructive' })
       }
@@ -141,8 +243,10 @@ export function SettingsPage() {
     try {
       const result = await uninstallProvider.mutateAsync(providerId)
       if (result.success) {
+        setPendingInstallRuntime((current) => current === providerId ? null : current)
         toast({ title: 'Uninstall Complete', description: result.message })
         refetchInstallation()
+        refetchRuntimesStatus()
       } else {
         toast({ title: 'Uninstall Failed', description: result.message, variant: 'destructive' })
       }
@@ -159,6 +263,31 @@ export function SettingsPage() {
   }
 
   const isInstalled = installationStatus?.installed ?? false
+  const isWaitingForInstall = selectedRuntimeRequiresCRD && pendingInstallRuntime !== null && runtimeIdsMatch(pendingInstallRuntime, effectiveRuntime) && !isInstalled
+  const selectedRuntimeMessage = isWaitingForInstall
+    ? 'Install command completed. Waiting for the runtime service to become ready...'
+    : selectedRuntimeRequiresCRD
+      ? installationStatus?.message || 'Checking installation status...'
+      : installationLoading && !installationStatus
+        ? 'Checking readiness...'
+        : crdLessRuntimeReadinessMessage(isInstalled)
+
+  useEffect(() => {
+    if (runtimeIdsMatch(pendingInstallRuntime, effectiveRuntime) && isInstalled) {
+      setPendingInstallRuntime(null)
+    }
+  }, [effectiveRuntime, isInstalled, pendingInstallRuntime])
+
+  useEffect(() => {
+    if (!isWaitingForInstall) return
+
+    const intervalId = window.setInterval(() => {
+      refetchInstallation()
+      refetchRuntimesStatus()
+    }, 5000)
+
+    return () => window.clearInterval(intervalId)
+  }, [isWaitingForInstall, refetchInstallation, refetchRuntimesStatus])
 
   if (settingsLoading || clusterLoading || runtimesLoading) {
     return (
@@ -261,9 +390,9 @@ export function SettingsPage() {
               )}
 
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">Runtimes Installed</span>
-                <Badge variant={installedCount > 0 ? 'default' : 'secondary'}>
-                  {installedCount} of {runtimes.length}
+                <span className="text-sm font-medium">Runtimes Ready</span>
+                <Badge variant={readyRuntimeCount > 0 ? 'default' : 'secondary'}>
+                  {readyRuntimeCount} of {runtimes.length}
                 </Badge>
               </div>
             </div>
@@ -426,53 +555,79 @@ export function SettingsPage() {
                   key={runtime.id}
                   className={cn(
                     'bg-white/[0.03] border border-white/5 rounded-2xl p-6 backdrop-blur-sm transition-all cursor-pointer',
-                    effectiveRuntime === runtime.id
+                    runtimeIdsMatch(effectiveRuntime, runtime.id)
                       ? 'ring-2 ring-cyan-400'
                       : 'hover:border-white/10'
                   )}
-                  onClick={() => setSelectedRuntime(runtime.id as RuntimeId)}
+                  onClick={() => setSelectedRuntime(canonicalizeRuntimeId(runtime.id))}
                 >
                   <div className="mb-3">
                     <div className="flex items-center justify-between">
                       <span className="font-heading font-bold">{runtime.name}</span>
-                      {runtime.installed ? (
-                        <span className="text-green-400 text-sm flex items-center gap-1">
-                          <CheckCircle className="h-4 w-4" /> Installed
+                      {!runtimeRequiresCRD(runtime) ? (
+                        runtime.installed || runtime.healthy ? (
+                          <Badge variant="success" className="shrink-0">
+                            <CheckCircle className="h-4 w-4" />
+                            {crdLessRuntimeStateLabel(true)}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground text-sm flex items-center gap-1">
+                            <AlertCircle className="h-4 w-4 text-yellow-500" />
+                            {crdLessRuntimeStateLabel(false)}
+                          </span>
+                        )
+                      ) : runtime.installed ? (
+                        <Badge variant="success" className="shrink-0">
+                          <CheckCircle className="h-4 w-4" />
+                          Installed
+                        </Badge>
+                      ) : runtimeIdsMatch(pendingInstallRuntime, runtime.id) ? (
+                        <span className="text-cyan-400 text-sm flex items-center gap-1">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Starting
                         </span>
                       ) : (
                         <span className="text-muted-foreground text-sm flex items-center gap-1">
-                          <XCircle className="h-4 w-4" /> Not Installed
+                          <XCircle className="h-4 w-4 text-red-500" />
+                          Not Installed
                         </span>
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
-                      {runtime.id === 'kaito'
-                        ? 'KAITO for simplified model deployment'
-                        : runtime.id === 'dynamo'
-                          ? 'NVIDIA Dynamo for high-performance GPU inference'
-                          : runtime.id === 'llmd'
-                        ? 'LLM-D for distributed inference'
-                          : 'Ray Serve via KubeRay for distributed Ray-based model serving with vLLM'}
+                      {runtimeDescription(runtime.id, runtime.name)}
                     </p>
                   </div>
                   <div>
                     <div className="space-y-2 text-sm">
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">CRD</span>
-                        {runtime.installed ? (
-                          <CheckCircle className="h-4 w-4 text-green-400" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-muted-foreground" />
-                        )}
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">Operator</span>
-                        {runtime.healthy ? (
-                          <CheckCircle className="h-4 w-4 text-green-400" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-muted-foreground" />
-                        )}
-                      </div>
+                      {!runtimeRequiresCRD(runtime) ? (
+                        <div className="flex items-center gap-2 rounded-lg bg-muted/60 p-3 text-muted-foreground">
+                          {runtime.installed || runtime.healthy ? (
+                            <CheckCircle className="h-4 w-4 text-green-400" />
+                          ) : (
+                            <AlertCircle className="h-4 w-4 text-yellow-500" />
+                          )}
+                          <span>{crdLessRuntimeReadinessMessage(runtime.installed || runtime.healthy)}</span>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">CRD</span>
+                            {runtime.crdFound ?? runtime.installed ? (
+                              <CheckCircle className="h-4 w-4 text-green-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-500" />
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">Operator</span>
+                            {runtime.operatorRunning ?? runtime.healthy ? (
+                              <CheckCircle className="h-4 w-4 text-green-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-500" />
+                            )}
+                          </div>
+                        </>
+                      )}
                       {runtime.version && (
                         <div className="flex items-center justify-between">
                           <span className="text-muted-foreground">Version</span>
@@ -492,21 +647,44 @@ export function SettingsPage() {
             <div className="mb-4">
               <h3 className="font-heading text-lg font-semibold flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Download className="h-5 w-5" />
-                  {installationStatus?.providerName || runtimes.find(r => r.id === effectiveRuntime)?.name || 'Runtime'} Installation
+                  {selectedRuntimeRequiresCRD ? (
+                    <Download className="h-5 w-5" />
+                  ) : (
+                    <Server className="h-5 w-5" />
+                  )}
+                  {installationStatus?.providerName || currentRuntime?.name || 'Runtime'} {selectedRuntimeRequiresCRD ? 'Installation' : 'Status'}
                 </div>
-                {isInstalled ? (
-                  <span className="text-green-400 text-sm flex items-center gap-1">
-                    <CheckCircle className="h-4 w-4" /> Installed
+                {!selectedRuntimeRequiresCRD ? (
+                  isInstalled ? (
+                    <Badge variant="success" className="shrink-0">
+                      <CheckCircle className="h-4 w-4" />
+                      {crdLessRuntimeStateLabel(true)}
+                    </Badge>
+                  ) : (
+                    <span className="text-muted-foreground text-sm flex items-center gap-1">
+                      <AlertCircle className="h-4 w-4 text-yellow-500" />
+                      {crdLessRuntimeStateLabel(false)}
+                    </span>
+                  )
+                ) : isInstalled ? (
+                  <Badge variant="success" className="shrink-0">
+                    <CheckCircle className="h-4 w-4" />
+                    Installed
+                  </Badge>
+                ) : isWaitingForInstall ? (
+                  <span className="text-cyan-400 text-sm flex items-center gap-1">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Starting
                   </span>
                 ) : (
                   <span className="text-muted-foreground text-sm flex items-center gap-1">
-                    <XCircle className="h-4 w-4" /> Not Installed
+                    <XCircle className="h-4 w-4 text-red-500" />
+                    Not Installed
                   </span>
                 )}
               </h3>
               <p className="text-sm text-muted-foreground mt-1">
-                {installationStatus?.message || 'Checking installation status...'}
+                {selectedRuntimeMessage}
               </p>
             </div>
             <div className="space-y-4">
@@ -516,77 +694,98 @@ export function SettingsPage() {
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="flex items-center justify-between rounded-lg bg-muted p-3">
-                      <span>CRD Installed</span>
-                      {installationStatus?.crdFound ? (
+                  {selectedRuntimeRequiresCRD ? (
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div className="flex items-center justify-between rounded-lg bg-muted p-3">
+                        <span>CRD Installed</span>
+                        {installationStatus?.crdFound ? (
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between rounded-lg bg-muted p-3">
+                        <span>Operator Running</span>
+                        {installationStatus?.operatorRunning ? (
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                      {isInstalled ? (
                         <CheckCircle className="h-4 w-4 text-green-500" />
                       ) : (
-                        <XCircle className="h-4 w-4 text-red-500" />
+                        <AlertCircle className="h-4 w-4 text-yellow-500" />
                       )}
+                      <span>{crdLessRuntimeReadinessMessage(isInstalled)}</span>
                     </div>
-                    <div className="flex items-center justify-between rounded-lg bg-muted p-3">
-                      <span>Operator Running</span>
-                      {installationStatus?.operatorRunning ? (
-                        <CheckCircle className="h-4 w-4 text-green-500" />
-                      ) : (
-                        <XCircle className="h-4 w-4 text-red-500" />
+                  )}
+
+                  {selectedRuntimeRequiresCRD && (
+                    <div className="flex gap-3">
+                      {!isInstalled && (
+                        <Button
+                          onClick={() => handleInstall(effectiveRuntime)}
+                          disabled={isInstalling || isWaitingForInstall || !helmAvailable || !clusterStatus?.connected}
+                          className="flex items-center gap-2"
+                        >
+                          {isInstalling ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Installing...
+                            </>
+                          ) : isWaitingForInstall ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Checking runtime...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="h-4 w-4" />
+                              Install {currentRuntime?.name || 'Runtime'}
+                            </>
+                          )}
+                        </Button>
                       )}
+
+                      {isInstalled && (
+                        <Button
+                          variant="destructive"
+                          onClick={() => setShowUninstallDialog(true)}
+                          disabled={isUninstalling || !helmAvailable || !clusterStatus?.connected}
+                          className="flex items-center gap-2"
+                        >
+                          {isUninstalling ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Uninstalling...
+                            </>
+                          ) : (
+                            <>
+                              <Trash2 className="h-4 w-4" />
+                              Uninstall
+                            </>
+                          )}
+                        </Button>
+                      )}
+
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          refetchInstallation()
+                          refetchRuntimesStatus()
+                        }}
+                        disabled={installationLoading}
+                      >
+                        <RefreshCw className={cn('h-4 w-4', installationLoading && 'animate-spin')} />
+                      </Button>
                     </div>
-                  </div>
+                  )}
 
-                  <div className="flex gap-3">
-                    {!isInstalled && (
-                      <Button
-                        onClick={() => handleInstall(effectiveRuntime)}
-                        disabled={isInstalling || !helmAvailable || !clusterStatus?.connected}
-                        className="flex items-center gap-2"
-                      >
-                        {isInstalling ? (
-                          <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Installing...
-                          </>
-                        ) : (
-                          <>
-                            <Download className="h-4 w-4" />
-                            Install {runtimes.find(r => r.id === effectiveRuntime)?.name || 'Runtime'}
-                          </>
-                        )}
-                      </Button>
-                    )}
-
-                    {isInstalled && (
-                      <Button
-                        variant="destructive"
-                        onClick={() => setShowUninstallDialog(true)}
-                        disabled={isUninstalling || !helmAvailable || !clusterStatus?.connected}
-                        className="flex items-center gap-2"
-                      >
-                        {isUninstalling ? (
-                          <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Uninstalling...
-                          </>
-                        ) : (
-                          <>
-                            <Trash2 className="h-4 w-4" />
-                            Uninstall
-                          </>
-                        )}
-                      </Button>
-                    )}
-
-                    <Button
-                      variant="outline"
-                      onClick={() => refetchInstallation()}
-                      disabled={installationLoading}
-                    >
-                      <RefreshCw className={cn('h-4 w-4', installationLoading && 'animate-spin')} />
-                    </Button>
-                  </div>
-
-                  {!helmAvailable && (
+                  {selectedRuntimeRequiresCRD && !helmAvailable && (
                     <div className="flex items-start gap-2 rounded-lg bg-yellow-50 p-4 text-sm text-yellow-800 dark:bg-yellow-950 dark:text-yellow-200">
                       <AlertTriangle className="h-5 w-5 flex-shrink-0 mt-0.5" />
                       <div>
@@ -849,8 +1048,8 @@ export function SettingsPage() {
                     <div className="flex items-center justify-between rounded-lg bg-muted p-3">
                       <div className="flex items-center gap-1">
                         <span>Inference Extension</span>
-                        {gatewayCRDStatus?.pinnedVersion && (
-                          <span className="text-xs text-muted-foreground">({gatewayCRDStatus.pinnedVersion})</span>
+                        {gatewayCRDStatus?.inferenceExtInstalled && gatewayCRDStatus?.inferenceExtVersion && (
+                          <span className="text-xs text-muted-foreground">({gatewayCRDStatus.inferenceExtVersion})</span>
                         )}
                       </div>
                       {gatewayCRDStatus?.inferenceExtInstalled ? (

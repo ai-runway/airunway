@@ -274,7 +274,7 @@ class AIConfiguratorService {
 
   /**
    * Build command line arguments for AI Configurator
-   * Uses 'cli default' subcommand with --hf_id and --system flags
+   * Uses 'cli default' subcommand with --model and --system flags
    */
   private buildCommandArgs(input: AIConfiguratorInput, saveDir: string): { args: string[]; system: GpuSystem; backend: Backend } {
     // Map GPU type to aiconfigurator system name
@@ -288,11 +288,11 @@ class AIConfiguratorService {
 
     const args: string[] = [
       'cli', 'default',
-      '--hf_id', input.modelId,
-      '--total_gpus', String(gpuCount),
+      '--model', input.modelId,
+      '--total-gpus', String(gpuCount),
       '--system', systemName,
       '--backend', backend,
-      '--save_dir', saveDir,
+      '--save-dir', saveDir,
     ];
 
     // Add latency constraints if specified

@@ -19,6 +19,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if spec.Capabilities.CPUSupport {
 		t.Error("expected no CPU support")
 	}
+	if spec.Capabilities.RequiresCRD == nil || *spec.Capabilities.RequiresCRD {
+		t.Error("expected LLMD to not require CRDs")
+	}
 
 	// Engines
 	engines := spec.Capabilities.Engines
@@ -59,19 +62,23 @@ func TestGetProviderConfigSpec(t *testing.T) {
 		t.Errorf("expected no selection rules (never auto-selected), got %d", len(spec.SelectionRules))
 	}
 
-	// Installation info
-	if spec.Installation == nil {
-		t.Fatal("expected installation info")
+}
+
+func TestGetInstallationInfo(t *testing.T) {
+	info := GetInstallationInfo()
+	if info == nil {
+		t.Fatal("expected non-nil installation info")
 	}
-	if spec.Installation.Description == "" {
+	if info.Description == "" {
 		t.Error("expected non-empty description")
 	}
-	if len(spec.Installation.Steps) == 0 {
+	if len(info.Steps) == 0 {
 		t.Error("expected installation steps")
 	}
+}
 
-	// Documentation
-	if spec.Documentation == "" {
+func TestProviderDocumentation(t *testing.T) {
+	if ProviderDocumentation == "" {
 		t.Error("expected documentation URL")
 	}
 }
