@@ -222,6 +222,26 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(obj.Spec.Model.Storage.Volumes[0].AccessMode).To(BeEmpty())
 		})
+
+		It("Should default GPU to 1 in aggregated mode when engine is explicit and no custom image is set", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
+			err := defaulter.Default(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(obj.Spec.Resources).NotTo(BeNil())
+			Expect(obj.Spec.Resources.GPU).NotTo(BeNil())
+			Expect(obj.Spec.Resources.GPU.Count).To(Equal(int32(1)))
+			Expect(obj.Spec.Resources.GPU.Type).To(Equal("nvidia.com/gpu"))
+		})
+
+		It("Should not default GPU when a custom image is set", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
+			obj.Spec.Image = "my.registry.example.com/custom-runtime:latest"
+			err := defaulter.Default(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(obj.Spec.Resources).To(BeNil())
+		})
 	})
 
 	Context("When creating or updating ModelDeployment under Validating Webhook", func() {

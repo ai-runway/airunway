@@ -101,7 +101,8 @@ func (d *ModelDeploymentCustomDefaulter) Default(_ context.Context, obj *airunwa
 	// - engine is llamacpp (supports CPU-only inference)
 	// - the user provided a custom image (may not need GPU)
 	if spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated && spec.Resources == nil &&
-		spec.Engine.Type != "" && spec.Engine.Type != airunwayv1alpha1.EngineTypeLlamaCpp {
+		spec.Engine.Type != "" && spec.Engine.Type != airunwayv1alpha1.EngineTypeLlamaCpp &&
+		spec.Image == "" {
 		spec.Resources = &airunwayv1alpha1.ResourceSpec{
 			GPU: &airunwayv1alpha1.GPUSpec{
 				Count: 1,
