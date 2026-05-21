@@ -557,6 +557,15 @@ func (md *ModelDeployment) ResolvedEngineType() EngineType {
 	return ""
 }
 
+// ResolvedServingMode returns the serving mode from spec if set,
+// otherwise defaults to ServingModeAggregated.
+func (md *ModelDeployment) ResolvedServingMode() ServingMode {
+	if md.Spec.Serving != nil && md.Spec.Serving.Mode != "" {
+		return md.Spec.Serving.Mode
+	}
+	return ServingModeAggregated
+}
+
 // Condition types for ModelDeployment
 const (
 	// ConditionTypeValidated indicates the spec has been validated

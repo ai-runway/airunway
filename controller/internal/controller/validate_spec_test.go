@@ -325,7 +325,7 @@ func TestValidateSpec(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := r.validateSpec(ctx, &tt.md, tt.providerConfigs, tt.md.ResolvedEngineType())
+			err := r.validateSpec(ctx, &tt.md, tt.providerConfigs, tt.md.ResolvedEngineType(), tt.md.ResolvedServingMode())
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Errorf("expected no error, got: %v", err)

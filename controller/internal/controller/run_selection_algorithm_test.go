@@ -85,7 +85,7 @@ func TestRunSelectionAlgorithm_AutoSelectedEngineVisibleToCEL(t *testing.T) {
 	}
 
 	resolved := md.ResolvedEngineType()
-	selected, _, err := r.runSelectionAlgorithm(md, providers, resolved)
+	selected, _, err := r.runSelectionAlgorithm(md, providers, resolved, md.ResolvedServingMode())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRunSelectionAlgorithm_ExplicitEngineUnchanged(t *testing.T) {
 		providerWithEngineRule("sglang-provider", airunwayv1alpha1.EngineTypeSGLang, 100),
 	}
 
-	selected, _, err := r.runSelectionAlgorithm(md, providers, md.ResolvedEngineType())
+	selected, _, err := r.runSelectionAlgorithm(md, providers, md.ResolvedEngineType(), md.ResolvedServingMode())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,13 +150,13 @@ func TestValidateSpec_UsesProvidedEngineType(t *testing.T) {
 
 	// No engine in spec, no engine in status, and no engineType passed in:
 	// validation must report the missing engine.
-	if err := r.validateSpec(t.Context(), md, nil, ""); err == nil {
+	if err := r.validateSpec(t.Context(), md, nil, "", md.ResolvedServingMode()); err == nil {
 		t.Errorf("expected error when engine type is unresolved, got nil")
 	}
 
 	// When the caller resolved the engine (e.g. from status), validation should
 	// succeed without the spec being mutated.
-	if err := r.validateSpec(t.Context(), md, nil, airunwayv1alpha1.EngineTypeVLLM); err != nil {
+	if err := r.validateSpec(t.Context(), md, nil, airunwayv1alpha1.EngineTypeVLLM, md.ResolvedServingMode()); err != nil {
 		t.Errorf("unexpected error with resolved engine type: %v", err)
 	}
 	if md.Spec.Engine.Type != "" {
