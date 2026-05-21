@@ -82,7 +82,7 @@ func getCELEnv() (*cel.Env, error) {
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
