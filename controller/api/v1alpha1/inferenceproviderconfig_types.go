@@ -59,7 +59,15 @@ type EngineCapability struct {
 	Gateway *GatewayCapabilities `json:"gateway,omitempty"`
 }
 
-// ProviderCapabilities defines what a provider supports
+// ProviderCapabilities defines what a provider supports.
+//
+// NOTE: the legacy-schema migration in
+// controller/internal/controller/migration.go unconditionally strips the
+// top-level keys listed in `legacyFlatKeys` (servingModes, gpuSupport,
+// cpuSupport, requiresCRD, gateway) from spec.capabilities. When adding a
+// new top-level field here, avoid those JSON tag names — or update the
+// migration to preserve the new field — otherwise it will be silently
+// dropped at controller startup.
 type ProviderCapabilities struct {
 	// engines is the list of supported inference engines with per-engine capabilities
 	// +listType=map

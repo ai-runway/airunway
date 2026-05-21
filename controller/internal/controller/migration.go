@@ -47,6 +47,15 @@ var inferenceProviderConfigGVK = schema.GroupVersionKind{
 // The migration must strip these from the stored object whether or not
 // engines were present, so a hand-crafted legacy CR with engines: [] but
 // stale flat keys doesn't leave dead fields lying around.
+//
+// FORWARD-COMPATIBILITY HAZARD: these keys are unconditionally deleted
+// from spec.capabilities on every migration pass. If a future change to
+// ProviderCapabilities (controller/api/v1alpha1/inferenceproviderconfig_types.go)
+// reintroduces a top-level field whose JSON tag collides with one of these
+// names, the migration will silently strip it at controller startup. When
+// extending ProviderCapabilities, either pick a JSON tag that does not
+// appear in this list, or update both this list and the hoist/cleanup
+// branches in applyMigration to preserve the new field.
 var legacyFlatKeys = []string{"servingModes", "gpuSupport", "cpuSupport", "requiresCRD", "gateway"}
 
 // MigrateLegacyProviderConfigs reads all InferenceProviderConfig resources using
