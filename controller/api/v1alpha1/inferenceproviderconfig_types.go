@@ -49,8 +49,6 @@ type EngineCapability struct {
 
 	// requiresCRD indicates if this engine needs an upstream CRD/operator installation.
 	// When omitted, clients should treat this as true for backward compatibility.
-	// Prefer the RequiresInstallation() helper over reading this pointer directly
-	// so the nil-means-true convention stays centralized.
 	// +optional
 	RequiresCRD *bool `json:"requiresCRD,omitempty"`
 
@@ -120,17 +118,6 @@ func (e *EngineCapability) SupportsServingMode(mode ServingMode) bool {
 		}
 	}
 	return false
-}
-
-// RequiresInstallation reports whether this engine needs an upstream
-// CRD/operator installation. The zero/nil value is treated as true for
-// backward compatibility with provider configs authored before the
-// requiresCRD field existed.
-func (e *EngineCapability) RequiresInstallation() bool {
-	if e == nil || e.RequiresCRD == nil {
-		return true
-	}
-	return *e.RequiresCRD
 }
 
 // SupportsGPU returns true if this engine supports GPU inference.
