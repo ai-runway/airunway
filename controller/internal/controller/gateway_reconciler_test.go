@@ -790,9 +790,15 @@ func TestGateway_ResolveProviderCapabilities_ProviderWithNoGatewayCapabilities(t
 	r := newTestReconciler(scheme, nil, md)
 	r.ProviderResolver = resolver
 
-	_, err := r.resolveProviderGatewayCapabilities(context.Background(), md)
-	if err == nil {
-		t.Error("expected error when provider has no gateway capabilities")
+	// A provider that declares no gateway capabilities is a legitimate
+	// no-op state, not an error: callers proceed with the default
+	// InferencePool/EPP path. The resolver should return (nil, nil).
+	caps, err := r.resolveProviderGatewayCapabilities(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error for provider without gateway capabilities: %v", err)
+	}
+	if caps != nil {
+		t.Errorf("expected nil capabilities for provider with no gateway capabilities, got %+v", caps)
 	}
 }
 

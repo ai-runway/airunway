@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -544,7 +543,7 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 				if !exists {
 					continue
 				}
-				if !reflect.DeepEqual(oldVol, newVol) {
+				if !storageVolumeEqual(&oldVol, &newVol) {
 					volPath := storagePath.Index(i)
 					allErrs = append(allErrs, field.Invalid(
 						volPath,
@@ -557,6 +556,42 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 	}
 
 	return allErrs
+}
+
+// storageVolumeEqual compares two StorageVolumes semantically. It uses
+// resource.Quantity.Cmp for Size rather than reflect.DeepEqual, because
+// Quantity carries unexported state (cached string form, format) that can
+// differ between two semantically equivalent values (e.g. "1Gi" vs "1024Mi",
+// or one Quantity that has had String() called and one that hasn't).
+func storageVolumeEqual(a, b *airunwayv1alpha1.StorageVolume) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Name != b.Name ||
+		a.ClaimName != b.ClaimName ||
+		a.MountPath != b.MountPath ||
+		a.Purpose != b.Purpose ||
+		a.ReadOnly != b.ReadOnly ||
+		a.AccessMode != b.AccessMode {
+		return false
+	}
+	// StorageClassName is a *string
+	switch {
+	case a.StorageClassName == nil && b.StorageClassName == nil:
+	case a.StorageClassName == nil || b.StorageClassName == nil:
+		return false
+	case *a.StorageClassName != *b.StorageClassName:
+		return false
+	}
+	// Size is a *resource.Quantity — compare by value, not by DeepEqual.
+	switch {
+	case a.Size == nil && b.Size == nil:
+	case a.Size == nil || b.Size == nil:
+		return false
+	case a.Size.Cmp(*b.Size) != 0:
+		return false
+	}
+	return true
 }
 
 // checkWarnings returns non-fatal warnings for the spec

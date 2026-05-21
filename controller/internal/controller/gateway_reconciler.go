@@ -624,6 +624,11 @@ func int64Ptr(i int64) *int64 { return &i }
 func strPtr(s string) *string { return &s }
 
 // resolveProviderGatewayCapabilities retrieves provider gateway capabilities from InferenceProviderConfig.
+//
+// A nil *GatewayCapabilities with a nil error means the provider was resolved
+// successfully but declares no gateway capabilities for the engine (the common
+// case for providers that do not manage their own InferencePool/EPP). A
+// non-nil error means the provider name could not be determined.
 func (r *ModelDeploymentReconciler) resolveProviderGatewayCapabilities(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) (*airunwayv1alpha1.GatewayCapabilities, error) {
 	var providerName string
 	if md.Spec.Provider != nil {
@@ -634,12 +639,11 @@ func (r *ModelDeploymentReconciler) resolveProviderGatewayCapabilities(ctx conte
 		return nil, fmt.Errorf("provider name not specified in ModelDeployment %s/%s", md.Namespace, md.Name)
 	}
 
-	gatewayCapabilities := r.ProviderResolver.GetGatewayCapabilities(ctx, providerName, md.ResolvedEngineType())
-	if gatewayCapabilities == nil {
-		return nil, fmt.Errorf("failed to resolve provider capabilities for ModelDeployment %s/%s", md.Namespace, md.Name)
-	}
-
-	return gatewayCapabilities, nil
+	// GetGatewayCapabilities returns nil when the provider declares no gateway
+	// capabilities for this engine; that is a legitimate "no-op" state, not an
+	// error. Callers should treat a nil result as "provider does not manage
+	// the gateway pool/EPP" and proceed accordingly.
+	return r.ProviderResolver.GetGatewayCapabilities(ctx, providerName, md.ResolvedEngineType()), nil
 }
 
 // httpRouteBackendTarget describes where an HTTPRoute should forward traffic
@@ -1067,11 +1071,13 @@ func namespaceSelectorFromSet(namespaces map[string]bool) *metav1.LabelSelector 
 func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Resolve provider gateway capabilities
+	// Resolve provider gateway capabilities. A nil result with nil error means
+	// the provider simply does not declare gateway capabilities — that is the
+	// common case and must NOT log an error every reconcile.
 	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
 	var err error
 	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
-		logger.Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+		logger.V(1).Info("Could not resolve provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
 	}
 	providerManagedPool := gatewayCapabilities != nil
 
