@@ -331,6 +331,110 @@ func TestMigrateLegacyProviderConfigs_PreservesPerEngineRequiresCRDWhenFlatAlsoP
 	}
 }
 
+// TestMigrateLegacyProviderConfigs_HoistsFlatKeysFromPartialMigration covers
+// the gap flagged in PR #214 review r3283298971: a partially-updated manifest
+// where engines are already object-form but the legacy flat capability keys
+// (gateway, requiresCRD, gpuSupport, ...) still sit on spec.capabilities. The
+// migration must hoist those flat values into each engine (without
+// overwriting per-engine values the author already set) and then strip the
+// legacy keys.
+func TestMigrateLegacyProviderConfigs_HoistsFlatKeysFromPartialMigration(t *testing.T) {
+	hybrid := &unstructured.Unstructured{}
+	hybrid.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "airunway.ai",
+		Version: "v1alpha1",
+		Kind:    "InferenceProviderConfig",
+	})
+	hybrid.SetName("partial")
+	if err := unstructured.SetNestedField(hybrid.Object, map[string]interface{}{
+		"engines": []interface{}{
+			// engine[0] sets nothing — should pick up all flat values.
+			map[string]interface{}{"name": "vllm"},
+			// engine[1] explicitly sets gateway — must NOT be overwritten by
+			// the flat top-level gateway.
+			map[string]interface{}{
+				"name": "llamacpp",
+				"gateway": map[string]interface{}{
+					"inferencePoolNamePattern": "engine-owned",
+				},
+			},
+		},
+		"servingModes": []interface{}{"aggregated"},
+		"gpuSupport":   true,
+		"requiresCRD":  true,
+		"gateway": map[string]interface{}{
+			"inferencePoolNamePattern": "{name}-pool",
+			"inferencePoolNamespace":   "{namespace}",
+		},
+	}, "spec", "capabilities"); err != nil {
+		t.Fatalf("failed to set capabilities: %v", err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newUnstructuredScheme()).WithObjects(hybrid).Build()
+
+	if err := MigrateLegacyProviderConfigs(context.Background(), c); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	result := &unstructured.Unstructured{}
+	result.SetGroupVersionKind(hybrid.GroupVersionKind())
+	if err := c.Get(context.Background(), client_key("partial"), result); err != nil {
+		t.Fatalf("failed to get migrated object: %v", err)
+	}
+
+	engines, found, err := unstructured.NestedSlice(result.Object, "spec", "capabilities", "engines")
+	if err != nil || !found {
+		t.Fatalf("migrated object missing engines: err=%v found=%v", err, found)
+	}
+	if len(engines) != 2 {
+		t.Fatalf("expected 2 engines, got %d", len(engines))
+	}
+
+	// engine[0]: every flat value should have been hoisted in.
+	eng0 := engines[0].(map[string]interface{})
+	if eng0["gpuSupport"] != true {
+		t.Errorf("engine[0]: expected gpuSupport=true (hoisted), got %v", eng0["gpuSupport"])
+	}
+	if eng0["requiresCRD"] != true {
+		t.Errorf("engine[0]: expected requiresCRD=true (hoisted), got %v", eng0["requiresCRD"])
+	}
+	gw0, ok := eng0["gateway"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("engine[0]: expected hoisted gateway map, got %T", eng0["gateway"])
+	}
+	if gw0["inferencePoolNamePattern"] != "{name}-pool" {
+		t.Errorf("engine[0]: expected hoisted gateway pattern, got %v", gw0["inferencePoolNamePattern"])
+	}
+
+	// engine[1]: per-engine gateway must be preserved verbatim, not clobbered.
+	eng1 := engines[1].(map[string]interface{})
+	gw1, ok := eng1["gateway"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("engine[1]: expected per-engine gateway map, got %T", eng1["gateway"])
+	}
+	if gw1["inferencePoolNamePattern"] != "engine-owned" {
+		t.Errorf("engine[1]: per-engine gateway was overwritten by hoist: got %v", gw1["inferencePoolNamePattern"])
+	}
+	if _, present := gw1["inferencePoolNamespace"]; present {
+		t.Errorf("engine[1]: per-engine gateway was merged with flat gateway; expected verbatim preservation, got %v", gw1)
+	}
+
+	// engine[0] and engine[1] gateways must be independent maps (deep-copy
+	// for hoisted, original for per-engine).
+	gw0["inferencePoolNamePattern"] = "mutated"
+	if gw1["inferencePoolNamePattern"] == "mutated" {
+		t.Error("hoisted gateway and per-engine gateway share state")
+	}
+
+	// All legacy flat keys must be stripped.
+	caps, _, _ := unstructured.NestedMap(result.Object, "spec", "capabilities")
+	for _, k := range []string{"servingModes", "gpuSupport", "cpuSupport", "requiresCRD", "gateway"} {
+		if _, exists := caps[k]; exists {
+			t.Errorf("expected top-level %q to be removed after migration, still present", k)
+		}
+	}
+}
+
 func TestMigrateLegacyProviderConfigs_NoObjects(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newUnstructuredScheme()).Build()
 

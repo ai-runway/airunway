@@ -118,6 +118,23 @@ func MigrateLegacyProviderConfigs(ctx context.Context, c client.Client) error {
 		return false
 	}
 
+	// readLegacyFlatValues extracts the legacy top-level capability fields from
+	// a capabilities map. Returned as named values so both the string-engine
+	// migration branch and the partial-migration hoist branch can reuse it.
+	readLegacyFlatValues := func(caps map[string]interface{}) (
+		servingModes []string,
+		gpuSupport, cpuSupport bool,
+		requiresCRD bool, hasRequiresCRD bool,
+		gateway map[string]interface{}, hasGateway bool,
+	) {
+		servingModes, _, _ = unstructured.NestedStringSlice(caps, "servingModes")
+		gpuSupport, _, _ = unstructured.NestedBool(caps, "gpuSupport")
+		cpuSupport, _, _ = unstructured.NestedBool(caps, "cpuSupport")
+		requiresCRD, hasRequiresCRD, _ = unstructured.NestedBool(caps, "requiresCRD")
+		gateway, hasGateway, _ = unstructured.NestedMap(caps, "gateway")
+		return
+	}
+
 	for _, item := range list.Items {
 		name := item.GetName()
 
@@ -151,20 +168,70 @@ func MigrateLegacyProviderConfigs(ctx context.Context, c client.Client) error {
 			continue
 		}
 
-		// Check if this is the legacy format (first element is a string, not an object)
+		// Object-form engines: either fully migrated, or a partially-updated
+		// manifest where someone authored object engines but the legacy flat
+		// keys (gateway, requiresCRD, gpuSupport, cpuSupport, servingModes)
+		// still sit on spec.capabilities. In that partial case we must hoist
+		// the flat values into each engine (without overwriting per-engine
+		// values the author already set) and then strip the legacy keys —
+		// otherwise gateway/CRD-requirement data is silently lost.
 		if _, isString := engines[0].(string); !isString {
-			// Already in the new format (objects), skip
+			if !hasAnyLegacyFlatKey(capabilities) {
+				continue
+			}
+
+			logger.Info("hoisting legacy flat capability keys into per-engine fields", "name", name)
+			oldServingModes, oldGPUSupport, oldCPUSupport,
+				oldRequiresCRD, hasRequiresCRD,
+				oldGateway, hasGateway := readLegacyFlatValues(capabilities)
+
+			for i, e := range engines {
+				eng, ok := e.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if _, set := eng["gpuSupport"]; !set {
+					eng["gpuSupport"] = oldGPUSupport
+				}
+				if _, set := eng["cpuSupport"]; !set {
+					eng["cpuSupport"] = oldCPUSupport
+				}
+				if _, set := eng["servingModes"]; !set && len(oldServingModes) > 0 {
+					modes := make([]interface{}, len(oldServingModes))
+					for j, m := range oldServingModes {
+						modes[j] = m
+					}
+					eng["servingModes"] = modes
+				}
+				if _, set := eng["requiresCRD"]; !set && hasRequiresCRD {
+					eng["requiresCRD"] = oldRequiresCRD
+				}
+				if _, set := eng["gateway"]; !set && hasGateway && len(oldGateway) > 0 {
+					// Deep-copy so each engine owns its own map.
+					eng["gateway"] = runtime.DeepCopyJSONValue(oldGateway)
+				}
+				engines[i] = eng
+			}
+
+			capabilities["engines"] = engines
+			for _, k := range legacyFlatKeys {
+				delete(capabilities, k)
+			}
+			if err := unstructured.SetNestedField(item.Object, capabilities, "spec", "capabilities"); err != nil {
+				return fmt.Errorf("failed to set hoisted capabilities on %s: %w", name, err)
+			}
+			if err := c.Update(ctx, &item); err != nil {
+				return fmt.Errorf("failed to update hoisted InferenceProviderConfig %s: %w", name, err)
+			}
 			continue
 		}
 
 		logger.Info("migrating legacy InferenceProviderConfig", "name", name)
 
 		// Read the old flat fields
-		oldServingModes, _, _ := unstructured.NestedStringSlice(capabilities, "servingModes")
-		oldGPUSupport, _, _ := unstructured.NestedBool(capabilities, "gpuSupport")
-		oldCPUSupport, _, _ := unstructured.NestedBool(capabilities, "cpuSupport")
-		oldRequiresCRD, hasRequiresCRD, _ := unstructured.NestedBool(capabilities, "requiresCRD")
-		oldGateway, hasGateway, _ := unstructured.NestedMap(capabilities, "gateway")
+		oldServingModes, oldGPUSupport, oldCPUSupport,
+			oldRequiresCRD, hasRequiresCRD,
+			oldGateway, hasGateway := readLegacyFlatValues(capabilities)
 
 		// Convert each string engine to the new EngineCapability format
 		newEngines := make([]interface{}, 0, len(engines))

@@ -77,7 +77,7 @@ spec:
                             CPU-only inference
                           type: boolean
                         gateway:
-                          description: gateway defines the provider's gateway-related
+                          description: gateway defines this engine's gateway-related
                             capabilities.
                           properties:
                             inferencePoolNamePattern:
@@ -107,7 +107,7 @@ spec:
                           type: string
                         requiresCRD:
                           description: |-
-                            requiresCRD indicates if this provider needs an upstream CRD/operator installation.
+                            requiresCRD indicates if this engine needs an upstream CRD/operator installation.
                             When omitted, clients should treat this as true for backward compatibility.
                             Prefer the RequiresInstallation() helper over reading this pointer directly
                             so the nil-means-true convention stays centralized.
