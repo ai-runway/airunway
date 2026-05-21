@@ -133,6 +133,22 @@ func (e *EngineCapability) RequiresInstallation() bool {
 	return *e.RequiresCRD
 }
 
+// SupportsGPU returns true if this engine supports GPU inference.
+func (e *EngineCapability) SupportsGPU() bool {
+	if e == nil {
+		return false
+	}
+	return e.GPUSupport
+}
+
+// SupportsCPU returns true if this engine supports CPU-only inference.
+func (e *EngineCapability) SupportsCPU() bool {
+	if e == nil {
+		return false
+	}
+	return e.CPUSupport
+}
+
 // SupportsServingMode returns true if the given engine supports the specified serving mode
 func (c *ProviderCapabilities) SupportsServingMode(engine EngineType, mode ServingMode) bool {
 	return c.GetEngineCapability(engine).SupportsServingMode(mode)
@@ -140,20 +156,12 @@ func (c *ProviderCapabilities) SupportsServingMode(engine EngineType, mode Servi
 
 // SupportsGPU returns true if the given engine supports GPU inference
 func (c *ProviderCapabilities) SupportsGPU(engine EngineType) bool {
-	ec := c.GetEngineCapability(engine)
-	if ec == nil {
-		return false
-	}
-	return ec.GPUSupport
+	return c.GetEngineCapability(engine).SupportsGPU()
 }
 
 // SupportsCPU returns true if the given engine supports CPU-only inference
 func (c *ProviderCapabilities) SupportsCPU(engine EngineType) bool {
-	ec := c.GetEngineCapability(engine)
-	if ec == nil {
-		return false
-	}
-	return ec.CPUSupport
+	return c.GetEngineCapability(engine).SupportsCPU()
 }
 
 // EngineNames returns a list of all engine types supported by this provider
