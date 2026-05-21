@@ -103,6 +103,21 @@ func MigrateLegacyProviderConfigs(ctx context.Context, c client.Client) error {
 		return fmt.Errorf("failed to list InferenceProviderConfig for migration after retries: %w", lastErr)
 	}
 
+	// legacyFlatKeys are the fields that used to live directly on
+	// spec.capabilities but have since moved into each EngineCapability.
+	// The migration must strip these from the stored object whether or not
+	// engines were present, so a hand-crafted legacy CR with engines: [] but
+	// stale flat keys doesn't leave dead fields lying around.
+	legacyFlatKeys := []string{"servingModes", "gpuSupport", "cpuSupport", "requiresCRD", "gateway"}
+	hasAnyLegacyFlatKey := func(caps map[string]interface{}) bool {
+		for _, k := range legacyFlatKeys {
+			if _, ok := caps[k]; ok {
+				return true
+			}
+		}
+		return false
+	}
+
 	for _, item := range list.Items {
 		name := item.GetName()
 
@@ -111,8 +126,28 @@ func MigrateLegacyProviderConfigs(ctx context.Context, c client.Client) error {
 			continue
 		}
 
-		engines, found, err := unstructured.NestedSlice(capabilities, "engines")
-		if err != nil || !found || len(engines) == 0 {
+		engines, _, err := unstructured.NestedSlice(capabilities, "engines")
+		if err != nil {
+			continue
+		}
+
+		// If engines is missing/empty, there's nothing to convert. But we
+		// still need to strip any stale legacy flat keys so a hand-crafted
+		// CR doesn't keep dead fields after migration.
+		if len(engines) == 0 {
+			if !hasAnyLegacyFlatKey(capabilities) {
+				continue
+			}
+			logger.Info("stripping stale legacy capability keys from InferenceProviderConfig", "name", name)
+			for _, k := range legacyFlatKeys {
+				delete(capabilities, k)
+			}
+			if err := unstructured.SetNestedField(item.Object, capabilities, "spec", "capabilities"); err != nil {
+				return fmt.Errorf("failed to set cleaned capabilities on %s: %w", name, err)
+			}
+			if err := c.Update(ctx, &item); err != nil {
+				return fmt.Errorf("failed to update cleaned InferenceProviderConfig %s: %w", name, err)
+			}
 			continue
 		}
 
@@ -166,11 +201,9 @@ func MigrateLegacyProviderConfigs(ctx context.Context, c client.Client) error {
 		// other top-level keys (present today or added in the future) are
 		// preserved rather than silently dropped.
 		capabilities["engines"] = newEngines
-		delete(capabilities, "servingModes")
-		delete(capabilities, "gpuSupport")
-		delete(capabilities, "cpuSupport")
-		delete(capabilities, "requiresCRD")
-		delete(capabilities, "gateway")
+		for _, k := range legacyFlatKeys {
+			delete(capabilities, k)
+		}
 
 		if err := unstructured.SetNestedField(item.Object, capabilities, "spec", "capabilities"); err != nil {
 			return fmt.Errorf("failed to set migrated capabilities on %s: %w", name, err)

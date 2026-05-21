@@ -259,6 +259,97 @@ func TestMigrateLegacyProviderConfigs_NoObjects(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacyProviderConfigs_StripsStaleFlatKeysWithEmptyEngines covers
+// the edge case where a hand-crafted legacy InferenceProviderConfig has
+// `engines: []` (or no engines) but still carries legacy flat capability
+// keys. Typed decode would ignore the unknown fields, but the migration
+// should still scrub them so the stored object stays clean.
+func TestMigrateLegacyProviderConfigs_StripsStaleFlatKeysWithEmptyEngines(t *testing.T) {
+	legacy := &unstructured.Unstructured{}
+	legacy.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "airunway.ai",
+		Version: "v1alpha1",
+		Kind:    "InferenceProviderConfig",
+	})
+	legacy.SetName("ghost")
+	if err := unstructured.SetNestedField(legacy.Object, map[string]interface{}{
+		"engines":      []interface{}{},
+		"servingModes": []interface{}{"aggregated"},
+		"gpuSupport":   true,
+		"cpuSupport":   false,
+		"requiresCRD":  true,
+		"gateway": map[string]interface{}{
+			"inferencePoolNamePattern": "{name}-pool",
+		},
+	}, "spec", "capabilities"); err != nil {
+		t.Fatalf("failed to set capabilities: %v", err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newUnstructuredScheme()).WithObjects(legacy).Build()
+
+	if err := MigrateLegacyProviderConfigs(context.Background(), c); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	result := &unstructured.Unstructured{}
+	result.SetGroupVersionKind(legacy.GroupVersionKind())
+	if err := c.Get(context.Background(), client_key("ghost"), result); err != nil {
+		t.Fatalf("failed to get migrated object: %v", err)
+	}
+
+	caps, _, _ := unstructured.NestedMap(result.Object, "spec", "capabilities")
+	for _, k := range []string{"servingModes", "gpuSupport", "cpuSupport", "requiresCRD", "gateway"} {
+		if _, exists := caps[k]; exists {
+			t.Errorf("expected top-level %q to be removed after migration, still present", k)
+		}
+	}
+
+	// engines may be an empty slice or absent — both are acceptable post-cleanup.
+	if engines, found, _ := unstructured.NestedSlice(caps, "engines"); found && len(engines) != 0 {
+		t.Errorf("expected engines to remain empty, got %v", engines)
+	}
+}
+
+// TestMigrateLegacyProviderConfigs_NoUpdateWhenClean ensures the migration
+// does NOT call Update on a capabilities map that is already clean (empty
+// engines, no legacy flat keys). This prevents needless writes / resource
+// version churn during controller startup.
+func TestMigrateLegacyProviderConfigs_NoUpdateWhenClean(t *testing.T) {
+	clean := &unstructured.Unstructured{}
+	clean.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "airunway.ai",
+		Version: "v1alpha1",
+		Kind:    "InferenceProviderConfig",
+	})
+	clean.SetName("clean")
+	clean.SetResourceVersion("1")
+	if err := unstructured.SetNestedField(clean.Object, map[string]interface{}{
+		"engines": []interface{}{},
+	}, "spec", "capabilities"); err != nil {
+		t.Fatalf("failed to set capabilities: %v", err)
+	}
+
+	base := fake.NewClientBuilder().WithScheme(newUnstructuredScheme()).Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(_ context.Context, _ client.WithWatch, list client.ObjectList, _ ...client.ListOption) error {
+			ul, ok := list.(*unstructured.UnstructuredList)
+			if !ok {
+				return fmt.Errorf("unexpected list type %T", list)
+			}
+			ul.Items = []unstructured.Unstructured{*clean}
+			return nil
+		},
+		Update: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.UpdateOption) error {
+			t.Errorf("unexpected Update call on already-clean object %q", obj.GetName())
+			return nil
+		},
+	})
+
+	if err := MigrateLegacyProviderConfigs(context.Background(), c); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+}
+
 // client_key is a helper to create a client.ObjectKey for cluster-scoped resources.
 func client_key(name string) client.ObjectKey {
 	return client.ObjectKey{Name: name}
