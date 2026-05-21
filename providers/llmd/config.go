@@ -70,10 +70,10 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
 					},
-					GPUSupport: true,
+					GPUSupport:  true,
+					RequiresCRD: &requiresCRD,
 				},
 			},
-			RequiresCRD: &requiresCRD,
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{},
 	}

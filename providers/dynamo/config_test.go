@@ -71,14 +71,23 @@ func TestGetProviderConfigSpec(t *testing.T) {
 		t.Fatalf("expected 4 selection rules, got %d", len(spec.SelectionRules))
 	}
 
-	if spec.Capabilities.Gateway == nil {
-		t.Fatal("gateway capabilities should not be nil")
-	}
-	if spec.Capabilities.Gateway.InferencePoolNamePattern != "{name}-pool" {
-		t.Errorf("expected inference pool name pattern to be '{name}-pool', got %s", spec.Capabilities.Gateway.InferencePoolNamePattern)
-	}
-	if spec.Capabilities.Gateway.InferencePoolNamespace != "{namespace}" {
-		t.Errorf("expected inference pool namespace to be '{namespace}', got %s", spec.Capabilities.Gateway.InferencePoolNamespace)
+	// Every supported engine should advertise the same Dynamo InferencePool
+	// gateway capabilities, since Dynamo routes through the operator-managed
+	// pool regardless of which engine backs the deployment.
+	for _, engineType := range expectedEngines {
+		engineCap := spec.Capabilities.GetEngineCapability(engineType)
+		if engineCap == nil {
+			t.Fatalf("expected engine capability for %s", engineType)
+		}
+		if engineCap.Gateway == nil {
+			t.Fatalf("expected gateway capabilities for engine %s to not be nil", engineType)
+		}
+		if engineCap.Gateway.InferencePoolNamePattern != "{name}-pool" {
+			t.Errorf("engine %s: expected inference pool name pattern '{name}-pool', got %s", engineType, engineCap.Gateway.InferencePoolNamePattern)
+		}
+		if engineCap.Gateway.InferencePoolNamespace != "{namespace}" {
+			t.Errorf("engine %s: expected inference pool namespace '{namespace}', got %s", engineType, engineCap.Gateway.InferencePoolNamespace)
+		}
 	}
 }
 

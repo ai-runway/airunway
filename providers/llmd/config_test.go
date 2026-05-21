@@ -13,9 +13,6 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if spec.Capabilities == nil {
 		t.Fatal("expected non-nil capabilities")
 	}
-	if spec.Capabilities.RequiresCRD == nil || *spec.Capabilities.RequiresCRD {
-		t.Error("expected LLMD to not require CRDs")
-	}
 
 	// Engines
 	engines := spec.Capabilities.Engines
@@ -27,6 +24,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	vllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeVLLM)
 	if vllmCap == nil {
 		t.Fatal("expected vllm engine capability")
+	}
+	if vllmCap.RequiresCRD == nil || *vllmCap.RequiresCRD {
+		t.Error("expected LLMD vllm engine to not require CRDs")
 	}
 	if !vllmCap.GPUSupport {
 		t.Error("expected vllm GPU support to be true")
