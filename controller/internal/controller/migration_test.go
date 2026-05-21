@@ -250,6 +250,87 @@ func TestMigrateLegacyProviderConfigs_AlreadyMigrated(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacyProviderConfigs_PreservesPerEngineRequiresCRDWhenFlatAlsoPresent
+// pins the behavior that, when an InferenceProviderConfig is already in the
+// new per-engine object format, the migration must NOT overwrite per-engine
+// requiresCRD values with a stale flat spec.capabilities.requiresCRD that
+// somehow coexists in the same object. Such a hybrid is impossible to
+// produce via normal API usage today, but a future refactor of the
+// "is this legacy?" detection could regress this guarantee; this test
+// guards against that.
+func TestMigrateLegacyProviderConfigs_PreservesPerEngineRequiresCRDWhenFlatAlsoPresent(t *testing.T) {
+	hybrid := &unstructured.Unstructured{}
+	hybrid.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "airunway.ai",
+		Version: "v1alpha1",
+		Kind:    "InferenceProviderConfig",
+	})
+	hybrid.SetName("hybrid")
+	if err := unstructured.SetNestedField(hybrid.Object, map[string]interface{}{
+		// Engines already in the new object format with explicit, non-default
+		// per-engine requiresCRD values.
+		"engines": []interface{}{
+			map[string]interface{}{
+				"name":        "vllm",
+				"gpuSupport":  true,
+				"requiresCRD": false,
+			},
+			map[string]interface{}{
+				"name":        "llamacpp",
+				"gpuSupport":  false,
+				"requiresCRD": true,
+			},
+		},
+		// Stale flat legacy key intentionally set to the opposite of engine[0]
+		// so a wrongful overwrite would be loud.
+		"requiresCRD": true,
+	}, "spec", "capabilities"); err != nil {
+		t.Fatalf("failed to set capabilities: %v", err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(newUnstructuredScheme()).WithObjects(hybrid).Build()
+
+	if err := MigrateLegacyProviderConfigs(context.Background(), c); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	result := &unstructured.Unstructured{}
+	result.SetGroupVersionKind(hybrid.GroupVersionKind())
+	if err := c.Get(context.Background(), client_key("hybrid"), result); err != nil {
+		t.Fatalf("failed to get migrated object: %v", err)
+	}
+
+	engines, found, err := unstructured.NestedSlice(result.Object, "spec", "capabilities", "engines")
+	if err != nil || !found {
+		t.Fatalf("migrated object missing engines: err=%v found=%v", err, found)
+	}
+	if len(engines) != 2 {
+		t.Fatalf("expected 2 engines, got %d", len(engines))
+	}
+
+	eng0, ok := engines[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected engine[0] to be a map, got %T", engines[0])
+	}
+	if eng0["name"] != "vllm" {
+		t.Errorf("expected engine[0].name=vllm, got %v", eng0["name"])
+	}
+	if eng0["requiresCRD"] != false {
+		t.Errorf("per-engine requiresCRD was overwritten by stale flat value: expected engine[0].requiresCRD=false, got %v", eng0["requiresCRD"])
+	}
+
+	eng1, ok := engines[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected engine[1] to be a map, got %T", engines[1])
+	}
+	if eng1["name"] != "llamacpp" {
+		t.Errorf("expected engine[1].name=llamacpp, got %v", eng1["name"])
+	}
+	if eng1["requiresCRD"] != true {
+		t.Errorf("per-engine requiresCRD was overwritten by stale flat value: expected engine[1].requiresCRD=true, got %v", eng1["requiresCRD"])
+	}
+}
+
 func TestMigrateLegacyProviderConfigs_NoObjects(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newUnstructuredScheme()).Build()
 
