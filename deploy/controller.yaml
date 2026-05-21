@@ -76,6 +76,23 @@ spec:
                           description: cpuSupport indicates if this engine supports
                             CPU-only inference
                           type: boolean
+                        gateway:
+                          description: gateway defines the provider's gateway-related
+                            capabilities.
+                          properties:
+                            inferencePoolNamePattern:
+                              description: |-
+                                inferencePoolNamePattern is the naming pattern for provider-created pools.
+                                Supports {name} and {namespace} placeholders.
+                              type: string
+                            inferencePoolNamespace:
+                              description: |-
+                                inferencePoolNamespace is the namespace where the provider creates its InferencePool.
+                                Supports {name} and {namespace} placeholders (resolved from the ModelDeployment).
+                                When the resolved namespace differs from the ModelDeployment namespace, the
+                                controller creates a ReferenceGrant for cross-namespace HTTPRoute routing.
+                              type: string
+                          type: object
                         gpuSupport:
                           description: gpuSupport indicates if this engine supports
                             GPU inference
@@ -88,6 +105,13 @@ spec:
                           - trtllm
                           - llamacpp
                           type: string
+                        requiresCRD:
+                          description: |-
+                            requiresCRD indicates if this provider needs an upstream CRD/operator installation.
+                            When omitted, clients should treat this as true for backward compatibility.
+                            Prefer the RequiresInstallation() helper over reading this pointer directly
+                            so the nil-means-true convention stays centralized.
+                          type: boolean
                         servingModes:
                           description: servingModes is the list of serving modes this
                             engine supports
@@ -105,27 +129,6 @@ spec:
                     x-kubernetes-list-map-keys:
                     - name
                     x-kubernetes-list-type: map
-                  gateway:
-                    description: gateway defines the provider's gateway-related capabilities.
-                    properties:
-                      inferencePoolNamePattern:
-                        description: |-
-                          inferencePoolNamePattern is the naming pattern for provider-created pools.
-                          Supports {name} and {namespace} placeholders.
-                        type: string
-                      inferencePoolNamespace:
-                        description: |-
-                          inferencePoolNamespace is the namespace where the provider creates its InferencePool.
-                          Supports {name} and {namespace} placeholders (resolved from the ModelDeployment).
-                          When the resolved namespace differs from the ModelDeployment namespace, the
-                          controller creates a ReferenceGrant for cross-namespace HTTPRoute routing.
-                        type: string
-                    type: object
-                  requiresCRD:
-                    description: |-
-                      requiresCRD indicates if this provider needs an upstream CRD/operator installation.
-                      When omitted, clients should treat this as true for backward compatibility.
-                    type: boolean
                 type: object
               selectionRules:
                 description: |-
