@@ -472,7 +472,8 @@ spec:
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(vllmNoGPUYAML)
-			_, _ = utils.Run(cmd)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply vllm-no-gpu ModelDeployment")
 
 			By("verifying the controller rejects vllm without GPU via data-driven validation")
 			verifyFailed := func(g Gomega) {
