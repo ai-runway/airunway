@@ -314,6 +314,17 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 		case meta.IsNoMatchError(err):
 			// CRD is not installed (cluster mid-bootstrap). Skip — the
 			// controller will catch this during reconciliation.
+		case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+			// Webhook RBAC is misconfigured (e.g. ServiceAccount missing
+			// `get` on InferenceProviderConfig). Do NOT silently skip
+			// validation — that would mask a serious misconfiguration and
+			// disable admission-time enforcement cluster-wide. Surface it
+			// as an InternalError so the apiserver rejects admission with
+			// an actionable diagnostic.
+			allErrs = append(allErrs, field.InternalError(
+				specPath.Child("provider", "name"),
+				fmt.Errorf("cannot verify provider %q: %w", spec.Provider.Name, err),
+			))
 		case err != nil:
 			// Transient API error (timeout, connection refused, etc.). Do not
 			// block admission on infra flakes — log and skip so the controller

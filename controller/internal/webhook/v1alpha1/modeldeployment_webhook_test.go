@@ -26,9 +26,11 @@ import (
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -1329,6 +1331,42 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			joined := strings.Join(warnings, "|")
 			Expect(joined).To(ContainSubstring("dynamo"))
 			Expect(joined).To(ContainSubstring("controller will re-validate"))
+		})
+
+		It("Should reject admission when provider lookup is Forbidden (webhook RBAC misconfigured)", func() {
+			// A Forbidden response from the apiserver means the webhook
+			// ServiceAccount cannot read InferenceProviderConfig. Silently
+			// skipping the compatibility check in that case would disable
+			// admission-time enforcement cluster-wide, so the webhook must
+			// fail admission with an InternalError instead.
+			forbiddenReader := &flakyReader{err: apierrors.NewForbidden(
+				schema.GroupResource{Group: airunwayv1alpha1.GroupVersion.Group, Resource: "inferenceproviderconfigs"},
+				"dynamo",
+				errors.New("user cannot get resource"),
+			)}
+			forbiddenValidator := ModelDeploymentCustomValidator{Reader: forbiddenReader}
+
+			obj.Spec.Model.ID = "Qwen/Qwen3-0.6B"
+			obj.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+			obj.Spec.Resources = &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}}
+			_, err := forbiddenValidator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("cannot verify provider"))
+			Expect(err.Error()).To(ContainSubstring("dynamo"))
+		})
+
+		It("Should reject admission when provider lookup is Unauthorized", func() {
+			unauthReader := &flakyReader{err: apierrors.NewUnauthorized("token expired")}
+			unauthValidator := ModelDeploymentCustomValidator{Reader: unauthReader}
+
+			obj.Spec.Model.ID = "Qwen/Qwen3-0.6B"
+			obj.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+			obj.Spec.Resources = &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}}
+			_, err := unauthValidator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("cannot verify provider"))
 		})
 
 		It("Should reject vllm with gpu.count=0 on dynamo (no CPU support)", func() {
