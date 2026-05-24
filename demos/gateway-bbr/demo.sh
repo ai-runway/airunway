@@ -29,6 +29,15 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Upstream component versions — single source of truth at /versions.env.
+# `set -a` exports every var sourced below so they're visible to helm/kubectl.
+# ---------------------------------------------------------------------------
+set -a
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/versions.env"
+set +a
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 CLUSTER_NAME="${CLUSTER_NAME:-airunway-bbr-demo}"
@@ -146,7 +155,7 @@ echo "============================================================"
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml
 ok "Gateway API CRDs installed"
 
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.3.1/manifests.yaml
+kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/manifests.yaml"
 ok "Inference Extension CRDs installed"
 
 # ---------------------------------------------------------------------------
@@ -402,7 +411,7 @@ echo "============================================================"
 
 helm install body-based-router \
   --set provider.name=istio \
-  --version v1.3.1 \
+  --version "${GAIE_VERSION}" \
   oci://registry.k8s.io/gateway-api-inference-extension/charts/body-based-routing \
   --wait --timeout 120s 2>/dev/null || \
   warn "BBR already installed"

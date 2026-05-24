@@ -1,4 +1,5 @@
 import { test as base, type Page, type Route } from '@playwright/test'
+import { PINNED_GAIE_VERSION } from '@airunway/shared'
 import {
   mockModels,
   mockDeployments,
@@ -155,7 +156,7 @@ export async function mockApiRoutes(page: Page) {
     }
     if (path === '/api/installation/gateway/status') {
       return json(route, {
-        gatewayApiInstalled: true, inferenceExtInstalled: true, pinnedVersion: 'v1.3.1',
+        gatewayApiInstalled: true, inferenceExtInstalled: true, pinnedVersion: PINNED_GAIE_VERSION,
         gatewayAvailable: false,
         message: 'Gateway API and Inference Extension CRDs are installed.',
         installCommands: [],
@@ -230,7 +231,7 @@ export async function mockApiRoutes(page: Page) {
 export const test = base.extend<{ mockedPage: Page }>({
   mockedPage: async ({ page }, use) => {
     await page.addInitScript(() => {
-      ;(window as any).__E2E_TEST__ = true
+      ; (window as any).__E2E_TEST__ = true
     })
     await mockApiRoutes(page)
     await use(page)

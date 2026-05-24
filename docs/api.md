@@ -78,9 +78,11 @@ See [controller-architecture.md](controller-architecture.md) for controller inte
 When updating a `ModelDeployment`, changes are handled based on field type:
 
 **Identity fields** — changing these triggers delete + recreate (brief downtime):
+
 - `model.id`, `model.source`, `engine.type` (once set), `provider.name`, `serving.mode`
 
 **Config fields** — changed in-place without recreation:
+
 - `model.servedName`, `scaling.*`, `env`, `resources`, `engine.args`, `engine.contextLength`, `image`, `secrets.*`, `podTemplate.metadata`, `nodeSelector`, `tolerations`, `provider.overrides`
 
 ### API Versioning
@@ -105,6 +107,7 @@ Common concepts are abstracted via `engine.contextLength` and `engine.trustRemot
 | llama.cpp | `--ctx-size` | Model max |
 
 **Quantization** (via `engine.args`):
+
 ```yaml
 engine:
   type: vllm
@@ -240,9 +243,11 @@ Base URL: `http://localhost:3001/api`
 ## Health & Status
 
 ### GET /health
+
 Health check endpoint.
 
 **Response:**
+
 ```json
 {
   "status": "healthy",
@@ -251,9 +256,11 @@ Health check endpoint.
 ```
 
 ### GET /health/version
+
 Get build version information.
 
 **Response:**
+
 ```json
 {
   "version": "v1.0.0",
@@ -263,9 +270,11 @@ Get build version information.
 ```
 
 ### GET /cluster/status
+
 Get Kubernetes cluster connection status.
 
 **Response:**
+
 ```json
 {
   "connected": true,
@@ -276,9 +285,11 @@ Get Kubernetes cluster connection status.
 ```
 
 ### GET /cluster/nodes
+
 Get list of cluster nodes with GPU information.
 
 **Response:**
+
 ```json
 {
   "nodes": [
@@ -299,9 +310,11 @@ Get list of cluster nodes with GPU information.
 ## Settings
 
 ### GET /settings
+
 Get current settings and available providers.
 
 **Response:**
+
 ```json
 {
   "config": {
@@ -314,9 +327,11 @@ Get current settings and available providers.
 ```
 
 ### PUT /settings
+
 Update application settings.
 
 **Request Body:**
+
 ```json
 {
   "defaultNamespace": "my-namespace"
@@ -326,9 +341,11 @@ Update application settings.
 ## Installation
 
 ### GET /installation/helm/status
+
 Check if Helm CLI is available.
 
 **Response:**
+
 ```json
 {
   "available": true,
@@ -336,10 +353,65 @@ Check if Helm CLI is available.
 }
 ```
 
+### GET /installation/gateway/status
+
+Check whether the Gateway API and Gateway API Inference Extension (GAIE) CRDs are installed in the cluster, and report the pinned GAIE version the controller expects.
+
+**Response:**
+
+```json
+{
+  "gatewayApiInstalled": true,
+  "inferenceExtInstalled": true,
+  "gatewayApiVersion": "v1.2.1",
+  "inferenceExtVersion": "v1.5.0",
+  "pinnedVersion": "v1.5.0",
+  "gatewayAvailable": true,
+  "gatewayEndpoint": "10.0.0.50",
+  "message": "Gateway API and Inference Extension CRDs are installed. Gateway is available.",
+  "installCommands": [
+    "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml",
+    "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/manifests.yaml"
+  ]
+}
+```
+
+**Notes:**
+
+- `pinnedVersion` is the GAIE version the controller is built against (`PINNED_GAIE_VERSION` from `@airunway/shared`, sourced from `versions.env`).
+- `installCommands` are the manual fallback commands; prefer the `POST` endpoint below when Helm/kubectl is available server-side.
+
+### POST /installation/gateway/install-crds
+
+Install (or re-apply) the Gateway API CRDs and the pinned Gateway API Inference Extension CRDs. This is a **prerequisite for every provider install** and only needs to be run once per cluster.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Gateway API and Inference Extension CRDs installed successfully",
+  "results": [
+    {
+      "step": "gateway-api-crds",
+      "success": true,
+      "output": "customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io created"
+    },
+    {
+      "step": "inference-extension-crds",
+      "success": true,
+      "output": "customresourcedefinition.apiextensions.k8s.io/inferencepools.inference.networking.x-k8s.io created"
+    }
+  ]
+}
+```
+
 ### GET /installation/providers/:id/status
+
 Get provider installation status.
 
 **Response:**
+
 ```json
 {
   "providerId": "dynamo",
@@ -353,23 +425,35 @@ Get provider installation status.
 ```
 
 ### GET /installation/providers/:id/commands
+
 Get manual installation commands for a provider.
 
+> **Prerequisite — install the Gateway API Inference Extension (GAIE) CRDs first.**
+> The commands returned here only cover the provider's own Helm install. GAIE is a shared dependency required by every provider and is installed through a separate flow:
+>
+> 1. Check status with [`GET /installation/gateway/status`](#get-installationgatewaystatus).
+> 2. If `inferenceExtInstalled` is `false`, install via [`POST /installation/gateway/install-crds`](#post-installationgatewayinstall-crds) (or run the `kubectl apply` lines returned in `installCommands`).
+>
+> Only then run the commands from this endpoint.
+
 **Response:**
+
 ```json
 {
   "commands": [
     "helm repo add nvidia-ai-dynamo https://helm.ngc.nvidia.com/nvidia/ai-dynamo",
     "helm repo update",
-    "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.2.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true"
+    "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.1.1.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true"
   ]
 }
 ```
 
 ### POST /installation/providers/:id/install
+
 Install a provider via Helm.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -378,9 +462,11 @@ Install a provider via Helm.
 ```
 
 ### POST /installation/providers/:id/uninstall
+
 Uninstall a provider (preserves CRDs by default).
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -401,9 +487,11 @@ Uninstall a provider (preserves CRDs by default).
 ```
 
 ### POST /installation/providers/:id/uninstall-crds
+
 Delete CRDs for a provider (complete removal).
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -424,14 +512,17 @@ Delete CRDs for a provider (complete removal).
 ```
 
 **Notes:**
+
 - This is a destructive operation - existing workloads using the CRDs will be affected
 - Use regular uninstall first to remove Helm releases while preserving CRDs
 - Use this endpoint only when you want complete removal
 
 ### GET /installation/gpu-operator/status
+
 Check NVIDIA GPU Operator installation status and GPU availability.
 
 **Response:**
+
 ```json
 {
   "installed": true,
@@ -450,9 +541,11 @@ Check NVIDIA GPU Operator installation status and GPU availability.
 ```
 
 ### GET /installation/gpu-capacity
+
 Get detailed GPU capacity information for the cluster.
 
 **Response:**
+
 ```json
 {
   "totalGpus": 4,
@@ -478,14 +571,17 @@ Get detailed GPU capacity information for the cluster.
 ```
 
 **Notes:**
+
 - `totalMemoryGb` is detected from `nvidia.com/gpu.memory` node label (MiB converted to GB)
 - Falls back to detecting memory from `nvidia.com/gpu.product` label if not available
 - Used by frontend to show GPU fit indicators for HuggingFace search results
 
 ### POST /installation/gpu-operator/install
+
 Install the NVIDIA GPU Operator via Helm.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -503,9 +599,11 @@ Install the NVIDIA GPU Operator via Helm.
 ```
 
 ### GET /installation/gpu-capacity/detailed
+
 Get detailed GPU capacity with node pool breakdown.
 
 **Response:**
+
 ```json
 {
   "totalGpus": 4,
@@ -528,6 +626,7 @@ Get detailed GPU capacity with node pool breakdown.
 ```
 
 **Notes:**
+
 - Groups nodes by node pool (agentpool, kubernetes.azure.com/agentpool, etc.)
 - Shows per-pool GPU capacity and availability
 - Used for capacity planning and autoscaler guidance
@@ -535,9 +634,11 @@ Get detailed GPU capacity with node pool breakdown.
 ## Autoscaler
 
 ### GET /autoscaler/detection
+
 Detect cluster autoscaler type and health status.
 
 **Response:**
+
 ```json
 {
   "detected": true,
@@ -549,19 +650,23 @@ Detect cluster autoscaler type and health status.
 ```
 
 **Autoscaler Types:**
+
 - `aks-managed` - AKS managed cluster autoscaler (Azure)
 - `cluster-autoscaler` - Self-managed cluster autoscaler (any cloud)
 - `none` - No autoscaler detected
 
 **Detection Logic:**
+
 - Primary: Checks for `cluster-autoscaler-status` ConfigMap in `kube-system`
 - Fallback: Checks for `cluster-autoscaler` Deployment
 - Health: ConfigMap timestamp < 5 minutes = healthy
 
 ### GET /autoscaler/status
+
 Get detailed autoscaler status from ConfigMap.
 
 **Response:**
+
 ```json
 {
   "health": "Healthy",
@@ -581,9 +686,11 @@ Get detailed autoscaler status from ConfigMap.
 ## Models
 
 ### GET /models
+
 Get the curated model catalog.
 
 **Response:**
+
 ```json
 {
   "models": [
@@ -614,6 +721,7 @@ Get the curated model catalog.
 ```
 
 **Model Fields:**
+
 - `id` - HuggingFace model ID (e.g., "Qwen/Qwen3-0.6B")
 - `name` - Display name
 - `description` - Brief description
@@ -630,12 +738,15 @@ Get the curated model catalog.
 - `fromHfSearch` - True if model came from HuggingFace search
 
 ### GET /models/:modelId/gguf-files
+
 Get available GGUF files for a HuggingFace model.
 
 **Headers:**
+
 - `X-HF-Token` (optional) - HuggingFace token for gated models
 
 **Response:**
+
 ```json
 {
   "files": [
@@ -648,17 +759,21 @@ Get available GGUF files for a HuggingFace model.
 ```
 
 ### GET /models/search
+
 Search HuggingFace Hub for compatible models.
 
 **Query Parameters:**
+
 - `q` (required) - Search query
 - `limit` (optional) - Number of results (default: 20, max: 50)
 - `offset` (optional) - Pagination offset
 
 **Headers:**
+
 - `Authorization: Bearer <hf_token>` (optional) - For accessing gated models
 
 **Response:**
+
 ```json
 {
   "models": [
@@ -683,6 +798,7 @@ Search HuggingFace Hub for compatible models.
 ```
 
 **Notes:**
+
 - Only returns models with `text-generation` pipeline tag
 - Filters out models with incompatible architectures
 - GPU memory estimated as: `(params × 2GB) × 1.2` for FP16 inference
@@ -691,12 +807,15 @@ Search HuggingFace Hub for compatible models.
 ## Deployments
 
 ### GET /deployments
+
 List all deployments for the active provider.
 
 **Query Parameters:**
+
 - `namespace` (optional) - Filter by namespace
 
 **Response:**
+
 ```json
 {
   "deployments": [
@@ -714,9 +833,11 @@ List all deployments for the active provider.
 ```
 
 ### POST /deployments
+
 Create a new deployment.
 
 **Request Body:**
+
 ```json
 {
   "name": "qwen-deployment",
@@ -734,6 +855,7 @@ Create a new deployment.
 ```
 
 **Required Fields:**
+
 - `name` - Kubernetes resource name
 - `namespace` - Target namespace
 - `provider` - Runtime provider (`dynamo`, `kuberay`, or `kaito`)
@@ -742,6 +864,7 @@ Create a new deployment.
 - `hfTokenSecret` - Name of the Kubernetes secret containing HuggingFace token
 
 **Response:**
+
 ```json
 {
   "message": "Deployment created successfully",
@@ -752,12 +875,15 @@ Create a new deployment.
 ```
 
 ### GET /deployments/:name
+
 Get deployment details including pod status.
 
 **Query Parameters:**
+
 - `namespace` (required)
 
 **Response:**
+
 ```json
 {
   "name": "qwen-deployment",
@@ -780,12 +906,15 @@ Get deployment details including pod status.
 ```
 
 ### GET /deployments/:name/manifest
+
 Get the Kubernetes manifest resources for a deployment.
 
 **Query Parameters:**
+
 - `namespace` (optional)
 
 **Response:**
+
 ```json
 {
   "resources": [
@@ -806,9 +935,11 @@ Get the Kubernetes manifest resources for a deployment.
 ## Runtimes
 
 ### GET /runtimes/status
+
 Get installation and health status of all runtimes.
 
 **Response:**
+
 ```json
 {
   "runtimes": [
@@ -840,6 +971,7 @@ Get installation and health status of all runtimes.
 ```
 
 **Fields:**
+
 - `id` - Runtime identifier (`dynamo`, `kuberay`, or `kaito`)
 - `name` - Display name
 - `installed` - Whether the CRD is installed
@@ -848,16 +980,20 @@ Get installation and health status of all runtimes.
 - `message` - Status message
 
 **Notes:**
+
 - Used by the frontend to show available runtimes in the deployment wizard
 - Checks CRD existence and operator pod status for each provider
 
 ### DELETE /deployments/:name
+
 Delete a deployment.
 
 **Query Parameters:**
+
 - `namespace` (required)
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -866,12 +1002,15 @@ Delete a deployment.
 ```
 
 ### GET /deployments/:name/pods
+
 Get pods for a deployment.
 
 **Query Parameters:**
+
 - `namespace` (optional)
 
 **Response:**
+
 ```json
 {
   "pods": [
@@ -887,9 +1026,11 @@ Get pods for a deployment.
 ```
 
 ### GET /deployments/:name/logs
+
 Get logs from a deployment's pods.
 
 **Query Parameters:**
+
 - `namespace` (optional) - Deployment namespace
 - `podName` (optional) - Specific pod to get logs from (defaults to first pod)
 - `container` (optional) - Specific container name
@@ -897,6 +1038,7 @@ Get logs from a deployment's pods.
 - `timestamps` (optional) - Include timestamps in log lines (true/false)
 
 **Response:**
+
 ```json
 {
   "logs": "[INFO] Model loaded successfully\n[INFO] Server started on port 8000\n...",
@@ -906,16 +1048,20 @@ Get logs from a deployment's pods.
 ```
 
 **Notes:**
+
 - ANSI color codes are automatically stripped from logs
 - If no pods exist for the deployment, returns empty logs with a message
 
 ### GET /deployments/:name/metrics
+
 Get Prometheus metrics from a deployment's inference service.
 
 **Query Parameters:**
+
 - `namespace` (optional) - Deployment namespace
 
 **Response (available):**
+
 ```json
 {
   "available": true,
@@ -936,6 +1082,7 @@ Get Prometheus metrics from a deployment's inference service.
 ```
 
 **Response (off-cluster):**
+
 ```json
 {
   "available": false,
@@ -947,17 +1094,21 @@ Get Prometheus metrics from a deployment's inference service.
 ```
 
 **Notes:**
+
 - Metrics require AI Runway to be running inside the cluster
 - Supports both vLLM and llama.cpp metric formats
 - Returns `runningOffCluster: true` when running locally
 
 ### GET /deployments/:name/pending-reasons
+
 Get reasons why deployment pods are pending (unschedulable).
 
 **Query Parameters:**
+
 - `namespace` (optional) - Deployment namespace
 
 **Response:**
+
 ```json
 {
   "reasons": [
@@ -973,11 +1124,13 @@ Get reasons why deployment pods are pending (unschedulable).
 ```
 
 **Resource Types:**
+
 - `gpu` - Insufficient GPU resources
 - `cpu` - Insufficient CPU resources
 - `memory` - Insufficient memory
 
 **Notes:**
+
 - Only returns reasons for pending pods
 - `canAutoscalerHelp` indicates if cluster autoscaler can provision resources
 - Taint and node selector issues will have `canAutoscalerHelp: false`
@@ -987,9 +1140,11 @@ Get reasons why deployment pods are pending (unschedulable).
 AI Runway supports HuggingFace OAuth with PKCE for secure token acquisition. This enables access to gated models (e.g., Llama, Mistral) without manually managing tokens.
 
 ### GET /oauth/huggingface/config
+
 Get OAuth configuration for initiating HuggingFace sign-in.
 
 **Response:**
+
 ```json
 {
   "clientId": "e05817a1-7053-4b9e-b292-29cd219fccf8",
@@ -999,9 +1154,11 @@ Get OAuth configuration for initiating HuggingFace sign-in.
 ```
 
 ### POST /oauth/huggingface/start
+
 Start an OAuth flow with PKCE. Generates a code verifier and state parameter.
 
 **Request Body:**
+
 ```json
 {
   "redirectUri": "http://localhost:3000/oauth/callback/huggingface"
@@ -1009,6 +1166,7 @@ Start an OAuth flow with PKCE. Generates a code verifier and state parameter.
 ```
 
 **Response:**
+
 ```json
 {
   "authorizationUrl": "https://huggingface.co/oauth/authorize?client_id=...&state=...",
@@ -1017,9 +1175,11 @@ Start an OAuth flow with PKCE. Generates a code verifier and state parameter.
 ```
 
 ### GET /oauth/huggingface/verifier/:state
+
 Retrieve the PKCE code verifier for a given OAuth state. One-time use — the verifier is deleted after retrieval.
 
 **Response:**
+
 ```json
 {
   "codeVerifier": "pkce_code_verifier_string",
@@ -1028,9 +1188,11 @@ Retrieve the PKCE code verifier for a given OAuth state. One-time use — the ve
 ```
 
 ### POST /oauth/huggingface/token
+
 Exchange OAuth authorization code for access token using PKCE.
 
 **Request Body:**
+
 ```json
 {
   "code": "authorization_code_from_callback",
@@ -1040,6 +1202,7 @@ Exchange OAuth authorization code for access token using PKCE.
 ```
 
 **Response:**
+
 ```json
 {
   "accessToken": "hf_xxxxx",
@@ -1061,9 +1224,11 @@ Exchange OAuth authorization code for access token using PKCE.
 Manages HuggingFace tokens as Kubernetes secrets across provider namespaces.
 
 ### GET /secrets/huggingface/status
+
 Get the status of HuggingFace token secrets across namespaces.
 
 **Response:**
+
 ```json
 {
   "configured": true,
@@ -1081,9 +1246,11 @@ Get the status of HuggingFace token secrets across namespaces.
 ```
 
 ### POST /secrets/huggingface
+
 Save HuggingFace access token as Kubernetes secrets in all required namespaces.
 
 **Request Body:**
+
 ```json
 {
   "accessToken": "hf_xxxxx"
@@ -1091,6 +1258,7 @@ Save HuggingFace access token as Kubernetes secrets in all required namespaces.
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1109,9 +1277,11 @@ Save HuggingFace access token as Kubernetes secrets in all required namespaces.
 ```
 
 ### DELETE /secrets/huggingface
+
 Delete HuggingFace token secrets from all namespaces.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1129,9 +1299,11 @@ Delete HuggingFace token secrets from all namespaces.
 Endpoints for building and managing KAITO/AIKit images for GGUF model deployment.
 
 ### GET /aikit/models
+
 List available pre-made AIKit models.
 
 **Response:**
+
 ```json
 {
   "models": [
@@ -1153,9 +1325,11 @@ List available pre-made AIKit models.
 ```
 
 ### GET /aikit/models/:id
+
 Get details for a specific pre-made model.
 
 **Response:**
+
 ```json
 {
   "id": "llama3.2-1b",
@@ -1166,9 +1340,11 @@ Get details for a specific pre-made model.
 ```
 
 ### POST /aikit/build
+
 Build an AIKit image from a HuggingFace GGUF model or get pre-made image reference.
 
 **Request Body (Pre-made):**
+
 ```json
 {
   "modelSource": "premade",
@@ -1177,6 +1353,7 @@ Build an AIKit image from a HuggingFace GGUF model or get pre-made image referen
 ```
 
 **Request Body (HuggingFace GGUF):**
+
 ```json
 {
   "modelSource": "huggingface",
@@ -1188,6 +1365,7 @@ Build an AIKit image from a HuggingFace GGUF model or get pre-made image referen
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1199,9 +1377,11 @@ Build an AIKit image from a HuggingFace GGUF model or get pre-made image referen
 ```
 
 ### POST /aikit/build/preview
+
 Preview what image would be built (dry-run, no actual build).
 
 **Response:**
+
 ```json
 {
   "imageRef": "registry.airunway-system.svc.cluster.local:5000/my-model:v1",
@@ -1212,9 +1392,11 @@ Preview what image would be built (dry-run, no actual build).
 ```
 
 ### GET /aikit/infrastructure/status
+
 Check build infrastructure (registry and BuildKit) status.
 
 **Response:**
+
 ```json
 {
   "ready": true,
@@ -1233,9 +1415,11 @@ Check build infrastructure (registry and BuildKit) status.
 ```
 
 ### POST /aikit/infrastructure/setup
+
 Set up build infrastructure (deploy registry and BuildKit if needed).
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1256,9 +1440,11 @@ Set up build infrastructure (deploy registry and BuildKit if needed).
 Endpoints for NVIDIA AI Configurator integration to get optimal inference configurations.
 
 ### GET /aiconfigurator/status
+
 Check if AI Configurator CLI is available on the system.
 
 **Response (available):**
+
 ```json
 {
   "available": true,
@@ -1267,6 +1453,7 @@ Check if AI Configurator CLI is available on the system.
 ```
 
 **Response (unavailable):**
+
 ```json
 {
   "available": false,
@@ -1275,6 +1462,7 @@ Check if AI Configurator CLI is available on the system.
 ```
 
 **Response (running in-cluster):**
+
 ```json
 {
   "available": false,
@@ -1284,14 +1472,17 @@ Check if AI Configurator CLI is available on the system.
 ```
 
 **Notes:**
+
 - Status is cached for 5 minutes to avoid repeated CLI calls
-- AI Configurator must be installed locally: https://github.com/ai-dynamo/aiconfigurator
+- AI Configurator must be installed locally: <https://github.com/ai-dynamo/aiconfigurator>
 - When running inside Kubernetes, returns `runningInCluster: true` (AI Configurator is local-only)
 
 ### POST /aiconfigurator/analyze
+
 Analyze a model + GPU combination and return optimal configuration.
 
 **Request Body:**
+
 ```json
 {
   "modelId": "Qwen/Qwen3-0.6B",
@@ -1303,15 +1494,18 @@ Analyze a model + GPU combination and return optimal configuration.
 ```
 
 **Required Fields:**
+
 - `modelId` - HuggingFace model ID (validated format: `org/model-name` or `model-name`)
 - `gpuType` - GPU type (e.g., "A100-80GB", "H100", "L40S")
 - `gpuCount` - Number of GPUs available (minimum: 1)
 
 **Optional Fields:**
+
 - `optimizeFor` - Optimization target: `"throughput"` (default) or `"latency"`
 - `maxLatencyMs` - Target time-to-first-token latency constraint in milliseconds
 
 **Response (success):**
+
 ```json
 {
   "success": true,
@@ -1338,6 +1532,7 @@ Analyze a model + GPU combination and return optimal configuration.
 ```
 
 **Response (disaggregated mode):**
+
 ```json
 {
   "success": true,
@@ -1368,6 +1563,7 @@ Analyze a model + GPU combination and return optimal configuration.
 ```
 
 **Response (CLI unavailable - returns defaults):**
+
 ```json
 {
   "success": false,
@@ -1385,17 +1581,21 @@ Analyze a model + GPU combination and return optimal configuration.
 ```
 
 **Modes:**
+
 - `aggregated` - Traditional serving where prefill and decode run on same GPUs
 - `disaggregated` - Prefill and decode separated for lower latency (NVIDIA Dynamo feature)
 
 **Supported Backends by GPU:**
+
 - H100: vLLM, SGLang, TensorRT-LLM
 - A100, H200, L40S, B200, GB200: TensorRT-LLM only (vLLM data not available in AI Configurator)
 
 ### POST /aiconfigurator/normalize-gpu
+
 Normalize a GPU product string to AI Configurator format.
 
 **Request Body:**
+
 ```json
 {
   "gpuProduct": "nvidia-a100-sxm4-80gb"
@@ -1403,6 +1603,7 @@ Normalize a GPU product string to AI Configurator format.
 ```
 
 **Response:**
+
 ```json
 {
   "gpuProduct": "nvidia-a100-sxm4-80gb",
@@ -1411,6 +1612,7 @@ Normalize a GPU product string to AI Configurator format.
 ```
 
 **Notes:**
+
 - Useful for converting Kubernetes node GPU labels to AI Configurator expected format
 - Handles various formats: NVIDIA prefixes, SXM/PCIe variants, Tesla prefixes
 
@@ -1419,9 +1621,11 @@ Normalize a GPU product string to AI Configurator format.
 Endpoints for real-time cloud pricing and cost estimation for GPU node pools.
 
 ### POST /costs/estimate
+
 Estimate deployment cost based on GPU configuration (static estimate).
 
 **Request Body:**
+
 ```json
 {
   "gpuType": "A100-80GB",
@@ -1432,14 +1636,17 @@ Estimate deployment cost based on GPU configuration (static estimate).
 ```
 
 **Required Fields:**
+
 - `gpuType` - GPU model name (e.g., "A100-80GB", "H100", "T4")
 - `gpuCount` - Number of GPUs per replica (minimum: 1)
 - `replicas` - Number of replicas (minimum: 1)
 
 **Optional Fields:**
+
 - `hoursPerMonth` - Hours per month for cost calculation (1-744, default: 730)
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1461,19 +1668,23 @@ Estimate deployment cost based on GPU configuration (static estimate).
 ```
 
 **Notes:**
+
 - Static pricing is deprecated; use `/costs/node-pools` for real-time cloud pricing
 - Returns `confidence: "low"` to indicate static estimates should not be relied upon
 
 ### GET /costs/node-pools
+
 Get cost estimates for all node pools using real-time cloud pricing.
 
 **Query Parameters:**
+
 - `gpuCount` (optional) - Number of GPUs per deployment (default: 1)
 - `replicas` (optional) - Number of replicas (default: 1)
 - `realtime` (optional) - Enable real-time pricing, set to "false" for static (default: true)
 - `computeType` (optional) - Filter by "gpu" or "cpu" (default: "gpu")
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1516,19 +1727,23 @@ Get cost estimates for all node pools using real-time cloud pricing.
 ```
 
 **Notes:**
+
 - Fetches real-time pricing from Azure Retail Prices API
 - Falls back to static estimates if cloud pricing unavailable
 - Pricing is cached for 1 hour to reduce API calls
 - AWS and GCP pricing not yet implemented
 
 ### GET /costs/instance-price
+
 Get real-time pricing for a specific instance type.
 
 **Query Parameters:**
+
 - `instanceType` (required) - Cloud instance type (e.g., "Standard_NC24ads_A100_v4")
 - `region` (optional) - Cloud region (e.g., "eastus")
 
 **Response (success):**
+
 ```json
 {
   "success": true,
@@ -1548,6 +1763,7 @@ Get real-time pricing for a specific instance type.
 ```
 
 **Response (provider not detected):**
+
 ```json
 {
   "success": false,
@@ -1556,6 +1772,7 @@ Get real-time pricing for a specific instance type.
 ```
 
 **Response (pricing not found):**
+
 ```json
 {
   "success": false,
@@ -1565,14 +1782,17 @@ Get real-time pricing for a specific instance type.
 ```
 
 **Provider Detection:**
+
 - Azure: Instance types starting with `Standard_` or `Basic_`
 - AWS: Instance types with format like `p4d.24xlarge`, `g5.xlarge` (not yet implemented)
 - GCP: Instance types like `n1-standard-4`, `a2-highgpu-1g` (not yet implemented)
 
 ### GET /costs/gpu-models
+
 Get list of supported GPU models with specifications.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1598,17 +1818,21 @@ Get list of supported GPU models with specifications.
 ```
 
 **Notes:**
+
 - Returns GPU specifications only (memory, generation)
 - For real-time pricing, use `/costs/node-pools` or `/costs/instance-price` endpoints
 - GPU models are used for normalization and capacity planning
 
 ### GET /costs/normalize-gpu
+
 Normalize a GPU label to a standard GPU model name.
 
 **Query Parameters:**
+
 - `label` (required) - GPU label from Kubernetes node (e.g., "NVIDIA-A100-SXM4-80GB")
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1622,6 +1846,7 @@ Normalize a GPU label to a standard GPU model name.
 ```
 
 **Notes:**
+
 - Handles various GPU label formats: NVIDIA prefixes, SXM/PCIe variants, Tesla prefixes
 - Returns GPU specifications when available
 
@@ -1630,9 +1855,11 @@ Normalize a GPU label to a standard GPU model name.
 > **Authentication:** Gateway endpoints require a valid Bearer token when authentication is enabled (same as all other non-public API routes). Access control is governed by Kubernetes TokenReview. When auth is disabled (default single-cluster mode), these endpoints are publicly accessible.
 
 ### GET /gateway/status
+
 Get Gateway API Inference Extension availability and endpoint.
 
 **Response:**
+
 ```json
 {
   "available": true,
@@ -1641,9 +1868,11 @@ Get Gateway API Inference Extension availability and endpoint.
 ```
 
 ### GET /gateway/models
+
 List all models accessible through the unified gateway endpoint.
 
 **Response:**
+
 ```json
 [
   {
@@ -1668,6 +1897,7 @@ All endpoints return errors in this format:
 ```
 
 Common error codes:
+
 - `CLUSTER_UNAVAILABLE` - Cannot connect to Kubernetes
 - `PROVIDER_NOT_INSTALLED` - Active provider not installed
 - `VALIDATION_ERROR` - Invalid request body

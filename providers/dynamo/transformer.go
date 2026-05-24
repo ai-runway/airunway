@@ -35,12 +35,6 @@ const (
 	DynamoAPIVersion = "v1alpha1"
 	// DynamoGraphDeploymentKind is the kind for DynamoGraphDeployment
 	DynamoGraphDeploymentKind = "DynamoGraphDeployment"
-	// DynamoRuntimeVersion is the default upstream runtime tag used for Dynamo engines.
-	DynamoRuntimeVersion      = "1.0.2"
-	defaultVLLMRuntimeImage   = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:" + DynamoRuntimeVersion
-	defaultSGLangRuntimeImage = "nvcr.io/nvidia/ai-dynamo/sglang-runtime:" + DynamoRuntimeVersion
-	defaultTRTLLMRuntimeImage = "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:" + DynamoRuntimeVersion
-	defaultFrontendImage      = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:" + DynamoRuntimeVersion
 
 	// Default component settings
 	DefaultEppReplicas = 1
@@ -62,6 +56,16 @@ const (
 	// VLLMKVTransferConfig is the --kv-transfer-config value required by
 	// newer vLLM for NIXL-based disaggregated serving (replaces --connector).
 	VLLMKVTransferConfig = `{"kv_connector":"NixlConnector","kv_role":"kv_both"}`
+)
+
+// Default upstream runtime image tags, derived from DynamoVersion.
+// Declared as vars (not consts) so a build-time ldflags override of
+// DynamoVersion in config.go flows through automatically.
+var (
+	defaultVLLMRuntimeImage   = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:" + DynamoVersion
+	defaultSGLangRuntimeImage = "nvcr.io/nvidia/ai-dynamo/sglang-runtime:" + DynamoVersion
+	defaultTRTLLMRuntimeImage = "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:" + DynamoVersion
+	defaultFrontendImage      = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:" + DynamoVersion
 )
 
 // DynamoOverrides contains Dynamo-specific override configuration
@@ -311,7 +315,7 @@ func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment,
 // The plugin set and env vars are mode-aware. Both modes set DYN_KV_CACHE_BLOCK_SIZE,
 // DYN_MODEL_NAME, and DYN_ENFORCE_DISAGG on the EPP container. The Dynamo KV scorer
 // FFI reads these at init time and create_routers fails ("code 5") without them on
-// Dynamo runtime 1.0.2. The shape mirrors the canonical examples in
+// Dynamo runtime 1.0.2+. The shape mirrors the canonical examples in
 // ai-dynamo/dynamo/examples/backends/vllm/deploy/gaie/{agg,disagg}.yaml.
 func (t *Transformer) buildEPP(overrides *DynamoOverrides, servingMode airunwayv1alpha1.ServingMode) map[string]interface{} {
 	// Determine replicas
@@ -333,9 +337,9 @@ func (t *Transformer) buildEPP(overrides *DynamoOverrides, servingMode airunwayv
 	// In aggregated mode, set decode_fallback=true to avoid "create_routers failed" errors.
 	// In disaggregated mode, set it to false to catch missing prefill workers.
 	decodeFallback := "true"
-	// DYN_ENFORCE_DISAGG is a no-op on 1.0.2 (the binding doesn't read it) but
-	// is the equivalent knob on Dynamo main with inverted semantics. We set
-	// both so this code is forward-compatible with a future runtime bump.
+	// DYN_ENFORCE_DISAGG is a no-op on 1.0.2 / 1.1.1 (the binding doesn't read
+	// it) but is the equivalent knob on Dynamo main with inverted semantics.
+	// We set both so this code is forward-compatible with a future runtime bump.
 	enforceDisagg := "false"
 	if isDisagg {
 		decodeFallback = "false"

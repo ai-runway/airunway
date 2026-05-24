@@ -3,12 +3,17 @@
  */
 
 import { InstallationStep } from './settings';
+import { GAIE_VERSION } from './versions.generated';
 
 /**
  * Pinned Gateway API Inference Extension version.
- * Must match the controller's DefaultGAIEVersion in controller/internal/gateway/detection.go.
+ *
+ * Single source of truth: /versions.env at the repo root. The value is
+ * codegen'd into ./versions.generated.ts; the controller's
+ * gateway.DefaultGAIEVersion is injected from the same file via ldflags.
+ * Run `make verify-versions` to confirm everything is in sync.
  */
-export const PINNED_GAIE_VERSION = 'v1.3.1';
+export const PINNED_GAIE_VERSION = GAIE_VERSION;
 export const GAIE_CRD_URL = `https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${PINNED_GAIE_VERSION}/manifests.yaml`;
 export const GATEWAY_API_CRD_URL = 'https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml';
 

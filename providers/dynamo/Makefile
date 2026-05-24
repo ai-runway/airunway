@@ -5,16 +5,31 @@ PUSH ?= false
 PUSH_ENABLED := $(filter true TRUE 1 yes YES on ON,$(PUSH))
 IMAGE_OUTPUT_FLAG := $(if $(PUSH_ENABLED),--push,--load)
 
-.PHONY: build docker-build deploy generate-deploy-manifests setup-dynamo cleanup-dynamo test-e2e
+# Upstream component versions (single source of truth at /versions.env).
+include ../../versions.env
+export
+
+# Inject the build-time Dynamo runtime tag into the provider binary so it
+# tracks /versions.env automatically. The Go fallback in config.go only
+# applies when bypassing this Makefile (e.g. `go run`, `go test`).
+LDFLAGS := -X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=$(DYNAMO_VERSION)
+
+.PHONY: build docker-build deploy generate-deploy-manifests setup-dynamo cleanup-dynamo test-e2e verify-versions
+
+## Verify upstream versions are in sync (delegates to root Makefile).
+verify-versions:
+ifneq ($(VERIFIED_VERSIONS),1)
+	@$(MAKE) -C ../.. verify-versions
+endif
 
 ## Build the provider binary
-build:
-	go build -o bin/provider ./cmd/main.go
+build: verify-versions
+	go build -ldflags="$(LDFLAGS)" -o bin/provider ./cmd/main.go
 	@echo "✅ Dynamo provider built"
 
 ## Build provider Docker image
-docker-build:
-	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) -f Dockerfile -t $(IMG) ../..
+docker-build: verify-versions
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg DYNAMO_VERSION=$(DYNAMO_VERSION) -f Dockerfile -t $(IMG) ../..
 	@echo "✅ Dynamo provider image built: $(IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
 ## Deploy provider to the K8s cluster
@@ -34,21 +49,20 @@ generate-deploy-manifests:
 
 ## Install Dynamo platform on the cluster (run before test-e2e)
 DYNAMO_NAMESPACE ?= dynamo-system
-DYNAMO_VERSION ?= 1.1.1
 DYNAMO_CHART_URL := https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$(DYNAMO_VERSION).tgz
 DYNAMO_PRE_DEPLOY_URL := https://raw.githubusercontent.com/ai-dynamo/dynamo/v$(DYNAMO_VERSION)/deploy/pre-deployment/pre-deployment-check.sh
-GAIE_VERSION := v1.5.0
 GAIE_MANIFEST_URL := https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$(GAIE_VERSION)/manifests.yaml
 
-setup-dynamo:
+setup-dynamo: verify-versions
 	@echo "Running Dynamo pre-deployment checks..."
 	@TMPSCRIPT=$$(mktemp) && \
 		trap 'rm -f "$$TMPSCRIPT"' EXIT && \
 		curl -fsSL "$(DYNAMO_PRE_DEPLOY_URL)" -o "$$TMPSCRIPT" && \
 		chmod +x "$$TMPSCRIPT" && \
 		bash "$$TMPSCRIPT"
-	@echo "Installing Dynamo platform v$(DYNAMO_VERSION)..."
+	@echo "Pre-deployment checks passed. Installing GAIE components..."
 	@kubectl apply -f $(GAIE_MANIFEST_URL)
+	@echo "Installing Dynamo platform v$(DYNAMO_VERSION)..."
 	@helm upgrade -i dynamo-platform "$(DYNAMO_CHART_URL)" \
 			--namespace $(DYNAMO_NAMESPACE) \
 			--create-namespace \
@@ -57,8 +71,11 @@ setup-dynamo:
 
 ## Uninstall Dynamo platform from the cluster
 cleanup-dynamo:
-	helm uninstall dynamo-platform --namespace $(DYNAMO_NAMESPACE) --ignore-not-found
-	@kubectl delete -f $(GAIE_MANIFEST_URL) --ignore-not-found
+	@echo "⚠️ Skipping GAIE components uninstall as they may be shared. Please uninstall them manually if needed by running:"
+	@echo
+	@echo "kubectl delete -f \"$(GAIE_MANIFEST_URL)\" --ignore-not-found"
+	@echo
+	@helm uninstall dynamo-platform --namespace $(DYNAMO_NAMESPACE) --ignore-not-found
 	@echo "✅ Dynamo platform uninstalled from namespace $(DYNAMO_NAMESPACE)"
 
 ## Run e2e tests (requires DYNAMO_INSTALLED=true and a cluster with dynamo provider deployed)

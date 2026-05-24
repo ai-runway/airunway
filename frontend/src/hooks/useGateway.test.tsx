@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
+import { PINNED_GAIE_VERSION } from '@airunway/shared'
 import { useGatewayCRDStatus, useInstallGatewayCRDs } from './useGateway'
 import { createWrapper } from '@/test/test-utils'
 
@@ -17,8 +18,8 @@ describe('useGatewayCRDStatus', () => {
     expect(result.current.data?.gatewayApiInstalled).toBe(true)
     expect(result.current.data?.inferenceExtInstalled).toBe(true)
     expect(result.current.data?.gatewayApiVersion).toBe('v1.2.1')
-    expect(result.current.data?.inferenceExtVersion).toBe('v1.5.0')
-    expect(result.current.data?.pinnedVersion).toBe('v1.3.1')
+    expect(result.current.data?.inferenceExtVersion).toBe(PINNED_GAIE_VERSION)
+    expect(result.current.data?.pinnedVersion).toBe(PINNED_GAIE_VERSION)
     expect(result.current.data?.installCommands).toHaveLength(2)
   })
 })

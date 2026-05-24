@@ -41,12 +41,6 @@ const (
 	// ProviderVersion is the version of the AIRunway Dynamo provider controller.
 	ProviderVersion = "dynamo-provider:v0.2.0"
 
-	// DynamoPlatformChartVersion is the upstream Dynamo platform chart version.
-	DynamoPlatformChartVersion = "1.0.2"
-
-	// DynamoPlatformChartURL is the upstream Dynamo platform chart package.
-	DynamoPlatformChartURL = "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-" + DynamoPlatformChartVersion + ".tgz"
-
 	// ProviderDocumentation is the documentation URL for the Dynamo provider
 	ProviderDocumentation = "https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md"
 
@@ -56,6 +50,22 @@ const (
 	dynamoPlatformValuesJSON      = `{"global.grove.install":true}`
 	dynamoGraphDeploymentResource = "dynamographdeployments"
 )
+
+// DynamoVersion is the upstream Dynamo platform chart and runtime image tag.
+//
+// Single source of truth: /versions.env at the repo root. The build-time value
+// is injected via:
+//
+//	-ldflags "-X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=$(DYNAMO_VERSION)"
+//
+// (see providers/dynamo/Makefile). The string literal below is a fallback for
+// `go run` / `go test` invocations that bypass the Makefile.
+var DynamoVersion = "1.1.1"
+
+// DynamoPlatformChartURL is the upstream Dynamo platform chart package.
+// Computed from DynamoVersion so an ldflags override of DynamoVersion flows
+// through automatically.
+var DynamoPlatformChartURL = "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-" + DynamoVersion + ".tgz"
 
 // ProviderConfigManager handles registration and heartbeat for the Dynamo provider
 type ProviderConfigManager struct {
@@ -145,7 +155,7 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 			{
 				Title:       "Install Dynamo Platform",
 				Command:     "helm upgrade --install dynamo-platform " + DynamoPlatformChartURL + " --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
-				Description: "Install the Dynamo platform operator v1.0.2 with bundled Grove enabled by default. This chart includes the required CRDs.",
+				Description: "Install the Dynamo platform operator v" + DynamoVersion + " with bundled Grove enabled by default. This chart includes the required CRDs.",
 			},
 		},
 	}

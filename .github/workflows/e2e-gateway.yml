@@ -19,11 +19,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Load component versions
+        run: |
+          set -a
+          source versions.env
+          set +a
+          echo "GAIE_VERSION=${GAIE_VERSION}" >> "$GITHUB_ENV"
+
       - name: Setup Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: "1.25"
           cache-dependency-path: controller/go.sum
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
 
       - name: Setup Kind
         run: |
@@ -45,7 +57,7 @@ jobs:
 
       - name: Install Gateway API Inference Extension CRDs
         run: |
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.3.1/manifests.yaml
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/manifests.yaml"
 
       - name: Install Istio with Inference Extension support
         run: |
@@ -241,7 +253,7 @@ jobs:
         run: |
           helm install body-based-router \
             --set provider.name=istio \
-            --version v1.3.1 \
+            --version "${GAIE_VERSION}" \
             oci://registry.k8s.io/gateway-api-inference-extension/charts/body-based-routing \
             --wait --timeout 120s
           echo "✅ BBR installed"

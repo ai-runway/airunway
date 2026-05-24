@@ -1,5 +1,7 @@
 # Gateway API Inference Extension Integration
 
+> **Pinned versions:** the `GAIE_VERSION` referenced in this document is sourced from [`/versions.env`](../versions.env) at the repo root. Substitute that value (currently `v1.5.0`) when running the commands below, or `source` the file in your shell: `set -a; source versions.env; set +a`.
+
 ## Overview
 
 AI Runway integrates with the [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) to provide a unified inference gateway. Instead of accessing each model's Service individually, you deploy a single Gateway and call **all** models through one endpoint using the standard OpenAI-compatible API. The Gateway routes requests to the correct model based on the `model` field in the request body.
@@ -42,11 +44,13 @@ When gateway integration is active, AI Runway automatically creates an **Inferen
 **Request flow:** Client → Gateway (+BBR) → HTTPRoute → InferencePool → Endpoint Picker (EPP) → Model Server Pod
 
 **What AI Runway creates automatically** (when `gateway.enabled` is `true` or omitted, and Gateway CRDs are detected):
+
 - `InferencePool` — selects pods labeled with `airunway.ai/model-deployment: <name>` on the model's serving port
 - `HTTPRoute` — routes from the Gateway to the InferencePool (unless `httpRouteRef` is set)
 - `EPP` — Endpoint Picker Proxy for intelligent endpoint selection
 
 **What you provide:**
+
 - A Gateway resource (with any compatible implementation)
 
 ## Prerequisites
@@ -79,7 +83,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/
 ### Step 2: Install Gateway API Inference Extension CRDs
 
 ```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.3.1/manifests.yaml
+kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/manifests.yaml"
 ```
 
 ### Step 3: Install a Gateway Implementation
@@ -187,12 +191,12 @@ Install BBR using the upstream helm chart:
 ```bash
 helm install body-based-router \
   --set provider.name=istio \
-  --version v1.3.1 \
+  --version "${GAIE_VERSION}" \
   oci://registry.k8s.io/gateway-api-inference-extension/charts/body-based-routing
 ```
 
 > [!NOTE]
-> It is recommended that BBR chart version to match the GAIE version used by AI Runway (currently v1.3.1). Check the [go.mod](https://github.com/kaito-project/airunway/blob/main/controller/go.mod) for the `sigs.k8s.io/gateway-api-inference-extension` dependency version.
+> The BBR chart version should match the GAIE version used by AI Runway. The pinned value lives in [`/versions.env`](../versions.env); update both at the same time when bumping.
 
 Replace `provider.name` with your gateway implementation (`istio`, `gke`, or omit for others). The chart deploys the BBR container and any provider-specific resources (e.g. EnvoyFilter for Istio).
 
@@ -395,13 +399,17 @@ curl http://${GATEWAY_IP}/v1/chat/completions \
 **Symptom:** No InferencePool or HTTPRoute created for deployments.
 
 1. Check that CRDs are installed:
+
    ```bash
    kubectl api-resources | grep -E "inferencepools|httproutes|gateways"
    ```
+
 2. Check controller logs for detection messages:
+
    ```bash
    kubectl logs -n airunway-system deploy/airunway-controller-manager | grep -i gateway
    ```
+
 3. If CRDs were installed after the controller started, restart the controller to refresh detection.
 
 ### GatewayReady condition is False
@@ -409,9 +417,11 @@ curl http://${GATEWAY_IP}/v1/chat/completions \
 **Symptom:** `ModelDeployment` has `GatewayReady=False`.
 
 1. Check the condition message:
+
    ```bash
    kubectl get modeldeployment <name> -o jsonpath='{.status.conditions}' | jq '.[] | select(.type=="GatewayReady")'
    ```
+
 2. Common reasons:
    - **NoGateway** — No Gateway resource found. Create one or set `--gateway-name`/`--gateway-namespace`.
    - **Multiple Gateways** — Multiple Gateways exist but none is labeled `airunway.ai/inference-gateway=true`.
@@ -420,24 +430,32 @@ curl http://${GATEWAY_IP}/v1/chat/completions \
 ### Requests return 404 or connection refused
 
 1. Verify the Gateway has an address:
+
    ```bash
    kubectl get gateway inference-gateway -o jsonpath='{.status.addresses}'
    ```
+
 2. Verify the HTTPRoute is accepted:
+
    ```bash
    kubectl get httproute <deployment-name> -o yaml
    ```
+
 3. Verify the InferencePool matches running pods:
+
    ```bash
    kubectl get inferencepool <deployment-name> -o yaml
    kubectl get pods -l airunway.ai/model-deployment=<deployment-name>
    ```
+
 4. If the Gateway has a public IP on AKS but requests to that IP time out, make sure the Gateway sets:
+
    ```yaml
    spec:
      infrastructure:
        annotations:
          service.beta.kubernetes.io/port_80_health-probe_protocol: tcp
    ```
+
    Azure can otherwise probe `GET /` on port `80`. Istio's gateway returns `404` there, so the load balancer marks the
    backend unhealthy even though requests succeed through `kubectl port-forward`.
