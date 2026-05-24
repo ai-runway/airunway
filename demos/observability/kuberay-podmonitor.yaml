@@ -26,16 +26,19 @@ spec:
         operator: In
         values: ["head"]
   podMetricsEndpoints:
-    - portNumber: 8000
+    - port: metrics
       path: /metrics
       interval: 30s
       scrapeTimeout: 10s
       relabelings:
-        - sourceLabels: [__meta_kubernetes_pod_name]
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_name]
           targetLabel: pod
-        - sourceLabels: [__meta_kubernetes_namespace]
+        - action: replace
+          sourceLabels: [__meta_kubernetes_namespace]
           targetLabel: namespace
-        - sourceLabels:
+        - action: replace
+          sourceLabels:
             [__meta_kubernetes_pod_label_airunway_ai_model_deployment]
           targetLabel: model_deployment
         - action: replace

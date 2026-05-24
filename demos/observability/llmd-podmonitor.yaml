@@ -20,17 +20,26 @@ spec:
     matchExpressions:
       - key: airunway.ai/deployment
         operator: Exists
+      - key: nvidia.com/dynamo-component
+        operator: DoesNotExist
+      - key: kaito.sh/workspace
+        operator: DoesNotExist
+      - key: ray.io/node-type
+        operator: DoesNotExist
   podMetricsEndpoints:
     - port: http
       path: /metrics
       interval: 15s
       scrapeTimeout: 10s
       relabelings:
-        - sourceLabels: [__meta_kubernetes_pod_name]
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_name]
           targetLabel: pod
-        - sourceLabels: [__meta_kubernetes_namespace]
+        - action: replace
+          sourceLabels: [__meta_kubernetes_namespace]
           targetLabel: namespace
-        - sourceLabels: [__meta_kubernetes_pod_label_airunway_ai_deployment]
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_airunway_ai_deployment]
           targetLabel: model_deployment
         - action: replace
           targetLabel: provider

@@ -121,6 +121,9 @@ kubectl delete -f ./demos/observability/sample-modeldeployment.yaml
 
 Each provider (KAITO, Dynamo, KubeRay, llm-d) runs inference pods that can expose vLLM or engine-specific metrics. PodMonitor manifests are provided in this directory for each provider.
 
+> [!WARNING]
+> Review the PodMonitor manifests and adjust the selectors as needed.
+
 Apply the ones matching the providers you have installed:
 
 ```bash
@@ -139,7 +142,8 @@ kubectl apply -f ./demos/observability/llmd-podmonitor.yaml
 
 Each PodMonitor:
 
-- Targets pods by provider-specific labels (e.g., `kaito.sh/workspace`, `ray.io/node-type`)
+- Targets pods by provider-specific labels (e.g., `kaito.sh/workspace`, `ray.io/node-type`, etc.)
+- Allows cross-namespace discovery of provider pods
 - Adds a `provider` label for cross-provider querying
 - Adds a `model_deployment` label linking metrics back to the ModelDeployment name
 
