@@ -98,6 +98,11 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: controller/go.sum
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
       - name: Run controller unit tests
         run: |
           cd controller
@@ -107,3 +112,37 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           go tool cover -func=cover.out | tail -1 >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Test verify-versions guard
+        run: make test-verify-versions
+
+      - name: Build controller and assert ldflags injection
+        # `make controller-build` delegates to controller/Makefile, which
+        # injects -X .../gateway.DefaultGAIEVersion=$(GAIE_VERSION) via
+        # ldflags. Read it back from the binary build info to confirm
+        # the injection actually landed (commit 83c53f8).
+        run: |
+          set -euo pipefail
+          source versions.env
+          make controller-build
+          if ! go version -m controller/bin/manager \
+            | grep -F -- "-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}"; then
+            echo "❌ ldflags injection of DefaultGAIEVersion=${GAIE_VERSION} did not land in controller/bin/manager"
+            exit 1
+          fi
+          echo "✅ ldflags injection landed: DefaultGAIEVersion=${GAIE_VERSION}"
+
+      - name: Build dynamo provider and assert ldflags injection
+        # Mirrors the controller assertion above. providers/dynamo/Makefile
+        # injects -X .../providers/dynamo.DynamoVersion=$(DYNAMO_VERSION).
+        # Note the binary is bin/provider, not bin/manager.
+        run: |
+          set -euo pipefail
+          source versions.env
+          cd providers/dynamo && make build && cd -
+          if ! go version -m providers/dynamo/bin/provider \
+            | grep -F -- "-X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=${DYNAMO_VERSION}"; then
+            echo "❌ ldflags injection of DynamoVersion=${DYNAMO_VERSION} did not land in providers/dynamo/bin/provider"
+            exit 1
+          fi
+          echo "✅ ldflags injection landed: DynamoVersion=${DYNAMO_VERSION}"

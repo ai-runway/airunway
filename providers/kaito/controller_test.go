@@ -722,6 +722,141 @@ func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	}
 }
 
+func TestManagedFieldsMatch(t *testing.T) {
+	tests := []struct {
+		name        string
+		desired     map[string]interface{}
+		existing    map[string]interface{}
+		lastApplied map[string]interface{}
+		path        []string
+		want        bool
+	}{
+		{
+			name:        "exact scalar fields match",
+			desired:     map[string]interface{}{"count": int64(1)},
+			existing:    map[string]interface{}{"count": int64(1)},
+			lastApplied: map[string]interface{}{"count": int64(1)},
+			path:        []string{"resource"},
+			want:        true,
+		},
+		{
+			name:        "changed desired field does not match",
+			desired:     map[string]interface{}{"count": int64(2)},
+			existing:    map[string]interface{}{"count": int64(1)},
+			lastApplied: map[string]interface{}{"count": int64(1)},
+			path:        []string{"resource"},
+			want:        false,
+		},
+		{
+			name: "unmanaged nested operator default is ignored",
+			desired: map[string]interface{}{
+				"preset": map[string]interface{}{"name": "test"},
+			},
+			existing: map[string]interface{}{
+				"preset": map[string]interface{}{"name": "test", "accessMode": "public"},
+			},
+			lastApplied: map[string]interface{}{
+				"preset": map[string]interface{}{"name": "test"},
+			},
+			path: []string{"inference"},
+			want: true,
+		},
+		{
+			name: "deleted managed nested field does not match",
+			desired: map[string]interface{}{
+				"preset": map[string]interface{}{"name": "test"},
+			},
+			existing: map[string]interface{}{
+				"preset": map[string]interface{}{"name": "test", "accessMode": "private"},
+			},
+			lastApplied: map[string]interface{}{
+				"preset": map[string]interface{}{"name": "test", "accessMode": "private"},
+			},
+			path: []string{"inference"},
+			want: false,
+		},
+		{
+			name:        "matching slices match",
+			desired:     map[string]interface{}{"presetOptions": []interface{}{"a", "b"}},
+			existing:    map[string]interface{}{"presetOptions": []interface{}{"a", "b"}},
+			lastApplied: map[string]interface{}{"presetOptions": []interface{}{"a", "b"}},
+			path:        []string{"inference", "preset"},
+			want:        true,
+		},
+		{
+			name:        "changed slices do not match",
+			desired:     map[string]interface{}{"presetOptions": []interface{}{"a", "b"}},
+			existing:    map[string]interface{}{"presetOptions": []interface{}{"b", "a"}},
+			lastApplied: map[string]interface{}{"presetOptions": []interface{}{"a", "b"}},
+			path:        []string{"inference", "preset"},
+			want:        false,
+		},
+		{
+			name: "legacy BYO label selector extras are treated as managed",
+			desired: map[string]interface{}{
+				"labelSelector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux"},
+				},
+			},
+			existing: map[string]interface{}{
+				"labelSelector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux", "airunway.ai/old": "true"},
+				},
+			},
+			path: []string{"resource"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := managedFieldsMatch(tt.desired, tt.existing, tt.lastApplied, tt.path...); got != tt.want {
+				t.Fatalf("managedFieldsMatch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestManagedStringMapMatches(t *testing.T) {
+	tests := []struct {
+		name        string
+		desired     map[string]string
+		existing    map[string]string
+		lastApplied map[string]string
+		want        bool
+	}{
+		{
+			name:        "desired labels present",
+			desired:     map[string]string{"app": "test"},
+			existing:    map[string]string{"app": "test", "operator.example.com/defaulted": "true"},
+			lastApplied: map[string]string{"app": "test"},
+			want:        true,
+		},
+		{
+			name:        "desired label missing",
+			desired:     map[string]string{"app": "test"},
+			existing:    map[string]string{"app": "other"},
+			lastApplied: map[string]string{"app": "test"},
+			want:        false,
+		},
+		{
+			name:        "deleted managed label remains",
+			desired:     map[string]string{"app": "test"},
+			existing:    map[string]string{"app": "test", "airunway.ai/old": "true"},
+			lastApplied: map[string]string{"app": "test", "airunway.ai/old": "true"},
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := managedStringMapMatches(tt.desired, tt.existing, tt.lastApplied); got != tt.want {
+				t.Fatalf("managedStringMapMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCreateOrUpdateResourceNew(t *testing.T) {
 	scheme := newScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -817,6 +952,546 @@ func TestCreateOrUpdateResourceNoChange(t *testing.T) {
 	err := r.createOrUpdateResource(context.Background(), same, md)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCreateOrUpdateResourceBackfillsLastAppliedForLegacyWorkspace(t *testing.T) {
+	scheme := newScheme()
+
+	existing := &unstructured.Unstructured{}
+	setWorkspaceGVK(existing)
+	existing.SetName("test")
+	existing.SetNamespace("default")
+	existing.SetAnnotations(map[string]string{"operator.example.com/defaulted": "true"})
+	existing.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	existing.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	existing.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"accessMode":    "private",
+			"presetOptions": []interface{}{"operator-default"},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewKaitoProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Name = "test"
+	md.Namespace = "default"
+	md.UID = "test-uid"
+
+	desired := &unstructured.Unstructured{}
+	setWorkspaceGVK(desired)
+	desired.SetName("test")
+	desired.SetNamespace("default")
+	desired.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	desired.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":       "test",
+			"accessMode": "private",
+		},
+	}
+
+	if err := r.createOrUpdateResource(context.Background(), desired, md); err != nil {
+		t.Fatalf("unexpected error backfilling annotation: %v", err)
+	}
+
+	backfilled := &unstructured.Unstructured{}
+	setWorkspaceGVK(backfilled)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, backfilled); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+	if backfilled.GetAnnotations()[lastAppliedWorkspaceAnnotation] == "" {
+		t.Fatal("expected legacy Workspace to receive last-applied annotation")
+	}
+	if backfilled.GetAnnotations()["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected annotation-only backfill to preserve other annotations, got %v", backfilled.GetAnnotations())
+	}
+	presetOptions, found, _ := unstructured.NestedSlice(backfilled.Object, "inference", "preset", "presetOptions")
+	if !found || len(presetOptions) != 1 || presetOptions[0] != "operator-default" {
+		t.Fatalf("expected annotation-only backfill to preserve operator defaults, got %v (found=%v)", presetOptions, found)
+	}
+	_, backfilledInference, _, _ := lastAppliedManagedFields(backfilled)
+	preset, ok := backfilledInference["preset"].(map[string]interface{})
+	if !ok || preset["accessMode"] != "private" {
+		t.Fatalf("expected backfilled last-applied annotation to track managed accessMode, got %v", backfilledInference)
+	}
+
+	desiredWithoutOverride := &unstructured.Unstructured{}
+	setWorkspaceGVK(desiredWithoutOverride)
+	desiredWithoutOverride.SetName("test")
+	desiredWithoutOverride.SetNamespace("default")
+	desiredWithoutOverride.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	desiredWithoutOverride.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{"name": "test"},
+	}
+
+	if err := r.createOrUpdateResource(context.Background(), desiredWithoutOverride, md); err != nil {
+		t.Fatalf("unexpected error removing managed override after backfill: %v", err)
+	}
+
+	updated := &unstructured.Unstructured{}
+	setWorkspaceGVK(updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+	if _, found, _ := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); found {
+		t.Fatalf("expected deleted managed accessMode override to be removed after backfill, got %v", updated.Object["inference"])
+	}
+	presetOptions, found, _ = unstructured.NestedSlice(updated.Object, "inference", "preset", "presetOptions")
+	if !found || len(presetOptions) != 1 || presetOptions[0] != "operator-default" {
+		t.Fatalf("expected deletion update to preserve operator defaults, got %v (found=%v)", presetOptions, found)
+	}
+}
+
+func TestCreateOrUpdateResourceRemovesStaleManagedLabel(t *testing.T) {
+	scheme := newScheme()
+
+	existing := &unstructured.Unstructured{}
+	setWorkspaceGVK(existing)
+	existing.SetName("test")
+	existing.SetNamespace("default")
+	existing.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	existingResource := map[string]interface{}{
+		"count": int64(1),
+		"labelSelector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{
+				"kubernetes.io/os": "linux",
+				"stale":            "true",
+			},
+		},
+	}
+	existing.Object["resource"] = existingResource
+	setLastAppliedForTest(t, existing, existingResource, nil)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewKaitoProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Name = "test"
+	md.Namespace = "default"
+	md.UID = "test-uid"
+
+	desired := &unstructured.Unstructured{}
+	setWorkspaceGVK(desired)
+	desired.SetName("test")
+	desired.SetNamespace("default")
+	desired.Object["resource"] = map[string]interface{}{
+		"count": int64(1),
+		"labelSelector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{
+				"kubernetes.io/os": "linux",
+			},
+		},
+	}
+
+	if err := r.createOrUpdateResource(context.Background(), desired, md); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &unstructured.Unstructured{}
+	setWorkspaceGVK(updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+	matchLabels, found, _ := unstructured.NestedStringMap(updated.Object, "resource", "labelSelector", "matchLabels")
+	if !found {
+		t.Fatal("expected matchLabels")
+	}
+	if _, ok := matchLabels["stale"]; ok {
+		t.Fatalf("expected stale managed label to be removed, got %v", matchLabels)
+	}
+	if matchLabels["kubernetes.io/os"] != "linux" {
+		t.Fatalf("expected kubernetes.io/os label to remain, got %v", matchLabels)
+	}
+}
+
+func TestCreateOrUpdateResourceAppliesMetadataOnlyChanges(t *testing.T) {
+	scheme := newScheme()
+
+	existing := &unstructured.Unstructured{}
+	setWorkspaceGVK(existing)
+	existing.SetName("test")
+	existing.SetNamespace("default")
+	existing.SetLabels(map[string]string{
+		"operator.example.com/defaulted": "true",
+		"airunway.example.com/revision":  "old",
+	})
+	existing.SetAnnotations(map[string]string{
+		"operator.example.com/defaulted": "true",
+		"airunway.example.com/revision":  "old",
+	})
+	existing.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	existingResource := map[string]interface{}{"count": int64(1)}
+	existingInference := map[string]interface{}{"preset": map[string]interface{}{"name": "test"}}
+	existing.Object["resource"] = existingResource
+	existing.Object["inference"] = existingInference
+	setLastAppliedForTest(t, existing, existingResource, existingInference)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewKaitoProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Name = "test"
+	md.Namespace = "default"
+	md.UID = "test-uid"
+
+	desired := &unstructured.Unstructured{}
+	setWorkspaceGVK(desired)
+	desired.SetName("test")
+	desired.SetNamespace("default")
+	desired.SetLabels(map[string]string{"airunway.example.com/revision": "new"})
+	desired.SetAnnotations(map[string]string{"airunway.example.com/revision": "new"})
+	desired.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	desired.Object["inference"] = map[string]interface{}{"preset": map[string]interface{}{"name": "test"}}
+
+	if err := r.createOrUpdateResource(context.Background(), desired, md); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &unstructured.Unstructured{}
+	setWorkspaceGVK(updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+
+	labels := updated.GetLabels()
+	if labels["airunway.example.com/revision"] != "new" {
+		t.Fatalf("expected desired label to be updated, got %v", labels)
+	}
+	if labels["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected unrelated operator label to remain, got %v", labels)
+	}
+
+	annotations := updated.GetAnnotations()
+	if annotations["airunway.example.com/revision"] != "new" {
+		t.Fatalf("expected desired annotation to be updated, got %v", annotations)
+	}
+	if annotations["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected unrelated operator annotation to remain, got %v", annotations)
+	}
+	if annotations[lastAppliedWorkspaceAnnotation] == "" {
+		t.Fatalf("expected last-applied annotation to remain, got %v", annotations)
+	}
+}
+
+func TestCreateOrUpdateResourceRemovesDeletedManagedMetadata(t *testing.T) {
+	scheme := newScheme()
+
+	existing := &unstructured.Unstructured{}
+	setWorkspaceGVK(existing)
+	existing.SetName("test")
+	existing.SetNamespace("default")
+	existing.SetLabels(map[string]string{
+		"operator.example.com/defaulted": "true",
+		"airunway.example.com/keep":      "true",
+		"airunway.example.com/stale":     "true",
+	})
+	existing.SetAnnotations(map[string]string{
+		"operator.example.com/defaulted": "true",
+		"airunway.example.com/keep":      "true",
+		"airunway.example.com/stale":     "true",
+	})
+	existing.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	existingResource := map[string]interface{}{"count": int64(1)}
+	existingInference := map[string]interface{}{"preset": map[string]interface{}{"name": "test"}}
+	existing.Object["resource"] = existingResource
+	existing.Object["inference"] = existingInference
+	setLastAppliedForTestWithMetadata(
+		t,
+		existing,
+		existingResource,
+		existingInference,
+		map[string]string{
+			"airunway.example.com/keep":  "true",
+			"airunway.example.com/stale": "true",
+		},
+		map[string]string{
+			"airunway.example.com/keep":  "true",
+			"airunway.example.com/stale": "true",
+		},
+	)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewKaitoProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Name = "test"
+	md.Namespace = "default"
+	md.UID = "test-uid"
+
+	desired := &unstructured.Unstructured{}
+	setWorkspaceGVK(desired)
+	desired.SetName("test")
+	desired.SetNamespace("default")
+	desired.SetLabels(map[string]string{"airunway.example.com/keep": "true"})
+	desired.SetAnnotations(map[string]string{"airunway.example.com/keep": "true"})
+	desired.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	desired.Object["inference"] = map[string]interface{}{"preset": map[string]interface{}{"name": "test"}}
+
+	if err := r.createOrUpdateResource(context.Background(), desired, md); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &unstructured.Unstructured{}
+	setWorkspaceGVK(updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+
+	labels := updated.GetLabels()
+	if _, ok := labels["airunway.example.com/stale"]; ok {
+		t.Fatalf("expected stale managed label to be removed, got %v", labels)
+	}
+	if labels["airunway.example.com/keep"] != "true" || labels["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected desired and operator labels to remain, got %v", labels)
+	}
+
+	annotations := updated.GetAnnotations()
+	if _, ok := annotations["airunway.example.com/stale"]; ok {
+		t.Fatalf("expected stale managed annotation to be removed, got %v", annotations)
+	}
+	if annotations["airunway.example.com/keep"] != "true" || annotations["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected desired and operator annotations to remain, got %v", annotations)
+	}
+	if annotations[lastAppliedWorkspaceAnnotation] == "" {
+		t.Fatalf("expected last-applied annotation to remain, got %v", annotations)
+	}
+
+	_, _, lastAppliedLabels, lastAppliedAnnotations := lastAppliedManagedFields(updated)
+	if _, ok := lastAppliedLabels["airunway.example.com/stale"]; ok {
+		t.Fatalf("expected stale label to be removed from last-applied metadata, got %v", lastAppliedLabels)
+	}
+	if _, ok := lastAppliedAnnotations["airunway.example.com/stale"]; ok {
+		t.Fatalf("expected stale annotation to be removed from last-applied metadata, got %v", lastAppliedAnnotations)
+	}
+}
+
+func TestCreateOrUpdateResourceIgnoresUnmanagedOperatorDefaults(t *testing.T) {
+	scheme := newScheme()
+
+	existing := &unstructured.Unstructured{}
+	setWorkspaceGVK(existing)
+	existing.SetName("test")
+	existing.SetNamespace("default")
+	existing.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	existingResource := map[string]interface{}{"count": int64(1)}
+	existing.Object["resource"] = existingResource
+	existing.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"accessMode":    "public",
+			"presetOptions": []interface{}{"operator-default"},
+		},
+	}
+	setLastAppliedForTest(t, existing, existingResource, map[string]interface{}{
+		"preset": map[string]interface{}{"name": "test"},
+	})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewKaitoProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Name = "test"
+	md.Namespace = "default"
+	md.UID = "test-uid"
+
+	desired := &unstructured.Unstructured{}
+	setWorkspaceGVK(desired)
+	desired.SetName("test")
+	desired.SetNamespace("default")
+	desired.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	desired.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{"name": "test"},
+	}
+
+	if err := r.createOrUpdateResource(context.Background(), desired, md); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	unchanged := &unstructured.Unstructured{}
+	setWorkspaceGVK(unchanged)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, unchanged); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+	accessMode, found, _ := unstructured.NestedString(unchanged.Object, "inference", "preset", "accessMode")
+	if !found || accessMode != "public" {
+		t.Fatalf("expected unmanaged operator default accessMode to remain, got %q (found=%v)", accessMode, found)
+	}
+	presetOptions, found, _ := unstructured.NestedSlice(unchanged.Object, "inference", "preset", "presetOptions")
+	if !found || len(presetOptions) != 1 || presetOptions[0] != "operator-default" {
+		t.Fatalf("expected unmanaged operator default presetOptions to remain, got %v (found=%v)", presetOptions, found)
+	}
+}
+
+func TestCreateOrUpdateResourceRemovesDeletedManagedInferenceOverride(t *testing.T) {
+	scheme := newScheme()
+
+	existing := &unstructured.Unstructured{}
+	setWorkspaceGVK(existing)
+	existing.SetName("test")
+	existing.SetNamespace("default")
+	existing.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	existing.SetAnnotations(map[string]string{"operator.example.com/defaulted": "true"})
+	existingResource := map[string]interface{}{"count": int64(1)}
+	existingInference := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"accessMode":    "private",
+			"presetOptions": []interface{}{"operator-default"},
+		},
+	}
+	lastAppliedInference := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":       "test",
+			"accessMode": "private",
+		},
+	}
+	existing.Object["resource"] = existingResource
+	existing.Object["inference"] = existingInference
+	setLastAppliedForTest(t, existing, existingResource, lastAppliedInference)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewKaitoProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Name = "test"
+	md.Namespace = "default"
+	md.UID = "test-uid"
+
+	desired := &unstructured.Unstructured{}
+	setWorkspaceGVK(desired)
+	desired.SetName("test")
+	desired.SetNamespace("default")
+	desired.Object["resource"] = map[string]interface{}{"count": int64(1)}
+	desired.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{"name": "test"},
+	}
+
+	if err := r.createOrUpdateResource(context.Background(), desired, md); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &unstructured.Unstructured{}
+	setWorkspaceGVK(updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("expected resource to exist: %v", err)
+	}
+	if _, found, _ := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); found {
+		t.Fatalf("expected deleted managed accessMode override to be removed, got %v", updated.Object["inference"])
+	}
+	presetOptions, found, _ := unstructured.NestedSlice(updated.Object, "inference", "preset", "presetOptions")
+	if !found || len(presetOptions) != 1 || presetOptions[0] != "operator-default" {
+		t.Fatalf("expected unmanaged operator default presetOptions to remain, got %v (found=%v)", presetOptions, found)
+	}
+	if updated.GetAnnotations()["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected update to preserve operator annotations, got %v", updated.GetAnnotations())
+	}
+}
+
+func TestSetLastAppliedManagedFieldsCopiesAnnotations(t *testing.T) {
+	ws := &unstructured.Unstructured{}
+	ws.SetName("test")
+	original := map[string]string{
+		"operator.example.com/defaulted": "true",
+	}
+	ws.SetAnnotations(original)
+
+	if err := setLastAppliedManagedFields(ws); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := original[lastAppliedWorkspaceAnnotation]; ok {
+		t.Fatalf("expected setLastAppliedManagedFields not to mutate caller annotation map, got %v", original)
+	}
+	if ws.GetAnnotations()[lastAppliedWorkspaceAnnotation] == "" {
+		t.Fatalf("expected Workspace to receive last-applied annotation, got %v", ws.GetAnnotations())
+	}
+
+	original["operator.example.com/defaulted"] = "mutated"
+	original["operator.example.com/new"] = "true"
+	if ws.GetAnnotations()["operator.example.com/defaulted"] != "true" {
+		t.Fatalf("expected Workspace annotations to be isolated from caller map mutations, got %v", ws.GetAnnotations())
+	}
+	if _, ok := ws.GetAnnotations()["operator.example.com/new"]; ok {
+		t.Fatalf("expected Workspace annotations not to alias caller map, got %v", ws.GetAnnotations())
+	}
+}
+
+func TestManagedFieldsMatchSliceBehavior(t *testing.T) {
+	desired := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"presetOptions": []interface{}{"desired"},
+		},
+	}
+	existingSame := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"presetOptions": []interface{}{"desired"},
+		},
+	}
+	if !managedFieldsMatch(desired, existingSame, desired, "inference") {
+		t.Fatal("expected identical managed slice fields to match")
+	}
+
+	existingWithExtraSliceItem := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"presetOptions": []interface{}{"desired", "operator-default"},
+		},
+	}
+	if managedFieldsMatch(desired, existingWithExtraSliceItem, desired, "inference") {
+		t.Fatal("expected managed slice values to require exact semantic equality")
+	}
+
+	desiredWithoutSlice := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name": "test",
+		},
+	}
+	lastAppliedWithoutSlice := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name": "test",
+		},
+	}
+	existingWithUnmanagedDefaultedSlice := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"presetOptions": []interface{}{"operator-default"},
+		},
+	}
+	if !managedFieldsMatch(desiredWithoutSlice, existingWithUnmanagedDefaultedSlice, lastAppliedWithoutSlice, "inference") {
+		t.Fatal("expected unmanaged operator-defaulted slice field to be ignored")
+	}
+
+	lastAppliedWithSlice := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"presetOptions": []interface{}{"old-managed"},
+		},
+	}
+	existingWithDeletedManagedSlice := map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name":          "test",
+			"presetOptions": []interface{}{"old-managed"},
+		},
+	}
+	if managedFieldsMatch(desiredWithoutSlice, existingWithDeletedManagedSlice, lastAppliedWithSlice, "inference") {
+		t.Fatal("expected a previously managed slice field to require deletion when removed from desired state")
 	}
 }
 
@@ -938,6 +1613,35 @@ func TestSyncStatusDeploying(t *testing.T) {
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
 		t.Errorf("expected Deploying phase, got %s", md.Status.Phase)
 	}
+}
+
+func setLastAppliedForTest(t *testing.T, obj *unstructured.Unstructured, resource, inference map[string]interface{}) {
+	t.Helper()
+	setLastAppliedForTestWithMetadata(t, obj, resource, inference, nil, nil)
+}
+
+func setLastAppliedForTestWithMetadata(t *testing.T, obj *unstructured.Unstructured, resource, inference map[string]interface{}, labels, annotations map[string]string) {
+	t.Helper()
+
+	lastApplied := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	lastApplied.SetLabels(labels)
+	lastApplied.SetAnnotations(annotations)
+	if resource != nil {
+		lastApplied.Object["resource"] = resource
+	}
+	if inference != nil {
+		lastApplied.Object["inference"] = inference
+	}
+	if err := setLastAppliedManagedFields(lastApplied); err != nil {
+		t.Fatalf("failed to set last-applied annotation: %v", err)
+	}
+
+	objAnnotations := obj.GetAnnotations()
+	if objAnnotations == nil {
+		objAnnotations = map[string]string{}
+	}
+	objAnnotations[lastAppliedWorkspaceAnnotation] = lastApplied.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+	obj.SetAnnotations(objAnnotations)
 }
 
 func setWorkspaceGVK(u *unstructured.Unstructured) {

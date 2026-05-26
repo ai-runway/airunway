@@ -523,7 +523,15 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
     spec.scaling = {
       replicas: config.replicas,
     };
-    if (!cpuOnlyDeployment && config.resources?.gpu) {
+    if (cpuOnlyDeployment) {
+      spec.resources = {
+        gpu: {
+          count: 0,
+          type: 'nvidia.com/gpu',
+        },
+        memory: config.resources?.memory,
+      };
+    } else if (config.resources?.gpu) {
       spec.resources = {
         gpu: {
           count: config.resources.gpu,

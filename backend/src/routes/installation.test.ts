@@ -1,4 +1,5 @@
 import { describe, test, expect, afterEach } from 'bun:test';
+import { PINNED_GAIE_VERSION } from '@airunway/shared';
 import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
@@ -819,14 +820,14 @@ describe('Gateway Installation Routes', () => {
           gatewayApiInstalled: true,
           inferenceExtInstalled: true,
           gatewayApiVersion: 'v1.2.1',
-          inferenceExtVersion: 'v1.5.0',
-          pinnedVersion: 'v1.3.1',
+          inferenceExtVersion: PINNED_GAIE_VERSION,
+          pinnedVersion: PINNED_GAIE_VERSION,
           gatewayAvailable: true,
           gatewayEndpoint: '10.0.0.50',
           message: 'Gateway API and Inference Extension CRDs are installed. Gateway is available.',
           installCommands: [
             'kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml',
-            'kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.3.1/manifests.yaml',
+            `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${PINNED_GAIE_VERSION}/manifests.yaml`,
           ],
         })),
       );
@@ -838,8 +839,8 @@ describe('Gateway Installation Routes', () => {
       expect(data.gatewayApiInstalled).toBe(true);
       expect(data.inferenceExtInstalled).toBe(true);
       expect(data.gatewayApiVersion).toBe('v1.2.1');
-      expect(data.inferenceExtVersion).toBe('v1.5.0');
-      expect(data.pinnedVersion).toBe('v1.3.1');
+      expect(data.inferenceExtVersion).toBe(PINNED_GAIE_VERSION);
+      expect(data.pinnedVersion).toBe(PINNED_GAIE_VERSION);
       expect(data.gatewayAvailable).toBe(true);
       expect(data.gatewayEndpoint).toBe('10.0.0.50');
       expect(data.installCommands).toHaveLength(2);
@@ -850,12 +851,12 @@ describe('Gateway Installation Routes', () => {
         mockServiceMethod(kubernetesService, 'checkGatewayCRDStatus', async () => ({
           gatewayApiInstalled: false,
           inferenceExtInstalled: false,
-          pinnedVersion: 'v1.3.1',
+          pinnedVersion: PINNED_GAIE_VERSION,
           gatewayAvailable: false,
           message: 'Gateway API and Inference Extension CRDs are not installed.',
           installCommands: [
             'kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml',
-            'kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.3.1/manifests.yaml',
+            `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${PINNED_GAIE_VERSION}/manifests.yaml`,
           ],
         })),
       );

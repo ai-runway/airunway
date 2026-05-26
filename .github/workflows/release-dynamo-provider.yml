@@ -35,6 +35,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Load pinned versions
+        run: |
+          set -a
+          # shellcheck disable=SC1091
+          . ./versions.env
+          set +a
+          echo "DYNAMO_VERSION=$DYNAMO_VERSION" >> "$GITHUB_ENV"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
@@ -45,5 +53,7 @@ jobs:
           tags: |
             ghcr.io/kaito-project/airunway/dynamo-provider:${{ inputs.version }}
             ghcr.io/kaito-project/airunway/dynamo-provider:latest
+          build-args: |
+            DYNAMO_VERSION=${{ env.DYNAMO_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

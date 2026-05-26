@@ -1,6 +1,7 @@
 # CRD Reference
 
 ## ModelDeployment
+
 Unified API for deploying ML models.
 
 ```yaml
@@ -63,6 +64,7 @@ Each entry is a `StorageVolume`. Maximum 8 volumes per deployment.
 | `accessMode` | string | no | PVC access mode for controller-created PVCs. One of `ReadWriteOnce`, `ReadWriteMany`, `ReadOnlyMany`, `ReadWriteOncePod`. Default: `ReadWriteMany`. Only used when `size` is set. |
 
 ## InferenceProviderConfig
+
 Cluster-scoped resource for provider registration. Each provider controller self-registers its `InferenceProviderConfig` at startup, declaring capabilities and selection rules in `spec`, and installation/documentation metadata in `metadata.annotations`:
 
 ```yaml
@@ -82,7 +84,7 @@ metadata:
         "helmCharts": [
           {
             "name": "dynamo-platform",
-            "chart": "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.2.tgz",
+            "chart": "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.1.1.tgz",
             "namespace": "dynamo-system",
             "createNamespace": true,
             "values": { "global.grove.install": true }
@@ -91,7 +93,7 @@ metadata:
         "steps": [
           {
             "title": "Install Dynamo Platform",
-            "command": "helm upgrade --install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.2.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
+            "command": "helm upgrade --install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.1.1.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
             "description": "Install the Dynamo platform operator with bundled Grove and CRDs"
           }
         ]

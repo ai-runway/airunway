@@ -18,6 +18,8 @@
     }
   },
   "scripts": {
+    "generate-versions": "bun run scripts/generate-versions.ts",
+    "prebuild": "bun run generate-versions",
     "build": "tsc",
     "watch": "tsc --watch"
   },

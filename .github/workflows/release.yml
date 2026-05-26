@@ -31,6 +31,9 @@ jobs:
       - name: Install dependencies
         run: bun ci
 
+      - name: Verify generated versions are up to date
+        run: bun run verify-versions
+
       - name: Build frontend
         run: bun run build:frontend
 
@@ -183,6 +186,14 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') }}
 
+      - name: Load pinned versions
+        run: |
+          set -a
+          # shellcheck disable=SC1091
+          . ./versions.env
+          set +a
+          echo "GAIE_VERSION=$GAIE_VERSION" >> "$GITHUB_ENV"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
@@ -195,6 +206,7 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
+            GAIE_VERSION=${{ env.GAIE_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -183,7 +183,7 @@ describe('Deployment Routes', () => {
       });
     });
 
-    test('omits GPU resources for KAITO CPU preview manifests', async () => {
+    test('emits explicit zero GPU resources for KAITO CPU preview manifests', async () => {
       restores.push(
         mockServiceMethod(configService, 'getDefaultNamespace', async () => 'kaito-workspace'),
       );
@@ -208,7 +208,12 @@ describe('Deployment Routes', () => {
       expect(res.status).toBe(200);
 
       const data = await res.json();
-      expect(data.resources[0].manifest.spec.resources).toBeUndefined();
+      expect(data.resources[0].manifest.spec.resources).toEqual({
+        gpu: {
+          count: 0,
+          type: 'nvidia.com/gpu',
+        },
+      });
       expect(data.resources[0].manifest.spec.engine.type).toBe('llamacpp');
     });
 

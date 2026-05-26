@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { PINNED_GAIE_VERSION } from '@airunway/shared'
 import { SettingsPage } from './SettingsPage'
 
 const mutateAsync = vi.fn()
@@ -34,7 +35,7 @@ let mockGatewayStatus = {
   gatewayAvailable: false,
   installCommands: [] as string[],
   message: '',
-  pinnedVersion: 'v1.3.1',
+  pinnedVersion: PINNED_GAIE_VERSION,
   gatewayApiVersion: undefined as string | undefined,
   inferenceExtVersion: undefined as string | undefined,
 }
@@ -328,7 +329,7 @@ describe('SettingsPage', () => {
       gatewayAvailable: false,
       installCommands: [],
       message: '',
-      pinnedVersion: 'v1.3.1',
+      pinnedVersion: PINNED_GAIE_VERSION,
       gatewayApiVersion: undefined,
       inferenceExtVersion: undefined,
     }
@@ -738,9 +739,12 @@ describe('SettingsPage', () => {
       gatewayAvailable: false,
       installCommands: [],
       message: 'Gateway API and Inference Extension CRDs are installed. No active gateway detected.',
-      pinnedVersion: 'v1.3.1',
+      pinnedVersion: PINNED_GAIE_VERSION,
       gatewayApiVersion: undefined,
-      inferenceExtVersion: 'v1.5.0',
+      // Intentionally a known-old value distinct from PINNED_GAIE_VERSION so
+      // this test continues to exercise the "installed differs from pinned"
+      // path after future version bumps.
+      inferenceExtVersion: 'v1.4.0',
     }
 
     render(
@@ -750,8 +754,8 @@ describe('SettingsPage', () => {
     )
 
     const inferenceExtensionLabel = screen.getByText('Inference Extension').closest('div')
-    expect(inferenceExtensionLabel).toHaveTextContent('(v1.5.0)')
-    expect(inferenceExtensionLabel).not.toHaveTextContent('v1.3.1')
+    expect(inferenceExtensionLabel).toHaveTextContent('(v1.4.0)')
+    expect(inferenceExtensionLabel).not.toHaveTextContent(`(${PINNED_GAIE_VERSION})`)
   })
 
   it('uses the Hugging Face emoji on the connect button', () => {

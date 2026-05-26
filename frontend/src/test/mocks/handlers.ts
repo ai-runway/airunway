@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import { toModelDeploymentManifest } from '@airunway/shared'
+import { PINNED_GAIE_VERSION, toModelDeploymentManifest } from '@airunway/shared'
 import type { DeploymentConfig } from '@airunway/shared'
 import {
   mockModels,
@@ -206,13 +206,13 @@ export const handlers = [
       gatewayApiInstalled: true,
       inferenceExtInstalled: true,
       gatewayApiVersion: 'v1.2.1',
-      inferenceExtVersion: 'v1.5.0',
-      pinnedVersion: 'v1.3.1',
+      inferenceExtVersion: PINNED_GAIE_VERSION,
+      pinnedVersion: PINNED_GAIE_VERSION,
       gatewayAvailable: false,
       message: 'Gateway API and Inference Extension CRDs are installed. No active gateway detected.',
       installCommands: [
         'kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml',
-        'kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.3.1/manifests.yaml',
+        `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${PINNED_GAIE_VERSION}/manifests.yaml`,
       ],
     })
   }),
