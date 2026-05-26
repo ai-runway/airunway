@@ -718,6 +718,72 @@ describe('Installation Provider Routes', () => {
       expect(data.error.message).not.toContain('Automatic installation requires elevated installer permissions');
     });
 
+    test('returns 409 with short adoption guidance when Helm refuses to import existing CRDs', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(helmService, 'installProvider', async () => ({
+          success: false,
+          results: [{
+            step: 'install-kaito-workspace',
+            result: {
+              success: false,
+              stdout: '',
+              stderr: 'Error: Unable to continue with install: CustomResourceDefinition "inferencesets.kaito.sh" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; label validation error: missing key "app.kubernetes.io/managed-by": must be set to "Helm"; annotation validation error: missing key "meta.helm.sh/release-name": must be set to "kaito-workspace"',
+              exitCode: 1,
+            },
+          }],
+        })),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/install', { method: 'POST' });
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      // 4xx errors must not be scrubbed by the global handler
+      expect(data.error.message).not.toBe('Internal Server Error');
+      // Concise, actionable, names the offending resource so the user knows what to look for
+      expect(data.error.message).toContain('CustomResourceDefinition "inferencesets.kaito.sh"');
+      expect(data.error.message).toContain('already exists on the cluster and is owned by another tool');
+      expect(data.error.message).toContain('Uninstall the conflicting tool');
+      expect(data.error.message).toContain('manual installation commands shown below');
+      // Verbose helm boilerplate is not leaked to the UI toast (kept in backend logs)
+      expect(data.error.message).not.toContain('invalid ownership metadata');
+      expect(data.error.message).not.toContain('label validation error');
+      expect(data.error.message).not.toContain('annotation validation error');
+      // Keep message length sane for a toast/banner — under 350 chars
+      expect(data.error.message.length).toBeLessThan(350);
+      // Ownership errors are not installer-permission errors
+      expect(data.error.message).not.toContain('Automatic installation requires elevated installer permissions');
+    });
+
+    test('falls back to generic subject when ownership error stderr lacks a parseable resource', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(helmService, 'installProvider', async () => ({
+          success: false,
+          results: [{
+            step: 'install-kaito-workspace',
+            result: {
+              success: false,
+              stdout: '',
+              // Synthetic: triggers ownership detector but offers no parseable resource name
+              stderr: 'rendered manifests contain a resource with invalid ownership metadata',
+              exitCode: 1,
+            },
+          }],
+        })),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/install', { method: 'POST' });
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      expect(data.error.message).toContain('a required cluster resource');
+      expect(data.error.message).toContain('Uninstall the conflicting tool');
+    });
+
   });
 
   // ==========================================================================

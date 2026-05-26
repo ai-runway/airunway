@@ -111,15 +111,36 @@ function isInstallerPermissionError(output?: string): boolean {
   return /\bforbidden\b|cannot (?:create|update|patch|delete|get|list|watch)|is forbidden|attempting to grant RBAC permissions not currently held|requires.*(?:permission|privilege)/i.test(output);
 }
 
-function installationFailureStatus(output?: string): 403 | 500 {
-  return isInstallerPermissionError(output) ? 403 : 500;
+function isHelmOwnershipError(output?: string): boolean {
+  if (!output) return false;
+  return /invalid ownership metadata|cannot be imported into the current release|missing key "app\.kubernetes\.io\/managed-by"|missing key "meta\.helm\.sh\/release-name"/i.test(output);
+}
+
+function extractOwnershipConflictResource(output: string): string | null {
+  // Helm formats: `CustomResourceDefinition "name" in namespace "ns" exists ...`
+  const match = output.match(/(\w[\w-]*)\s+"([^"]+)"\s+in namespace\s+"([^"]*)"\s+exists/i);
+  if (!match) return null;
+  const [, kind, name, ns] = match;
+  return ns ? `${kind} "${name}" in namespace "${ns}"` : `${kind} "${name}"`;
+}
+
+function installationFailureStatus(output?: string): 403 | 409 | 500 {
+  if (isInstallerPermissionError(output)) return 403;
+  if (isHelmOwnershipError(output)) return 409;
+  return 500;
 }
 
 function installationFailureMessage(prefix: string, output?: string): string {
   const detail = output?.trim() || 'Unknown error';
-  return isInstallerPermissionError(detail)
-    ? `${prefix}: ${INSTALLER_PERMISSION_GUIDANCE} Details: ${detail}`
-    : `${prefix}: ${detail}`;
+  if (isInstallerPermissionError(detail)) {
+    return `${prefix}: ${INSTALLER_PERMISSION_GUIDANCE} Details: ${detail}`;
+  }
+  if (isHelmOwnershipError(detail)) {
+    const resource = extractOwnershipConflictResource(detail);
+    const subject = resource ?? 'a required cluster resource';
+    return `${prefix}: Cannot install because ${subject} already exists on the cluster and is owned by another tool. Uninstall the conflicting tool, or use the manual installation commands shown below.`;
+  }
+  return `${prefix}: ${detail}`;
 }
 
 const installation = new Hono()
