@@ -3,10 +3,12 @@ package kaito
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -24,7 +28,33 @@ import (
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(s)
+	_ = clientgoscheme.AddToScheme(s)
 	return s
+}
+
+// newSchemeWithWorkspace returns a scheme that additionally has the kaito.sh/Workspace
+// GVK registered so the probe's REST-mapper check passes in fake-client tests.
+func newSchemeWithWorkspace() *runtime.Scheme {
+	s := newScheme()
+	gvk := schema.GroupVersionKind{Group: "kaito.sh", Version: "v1beta1", Kind: "Workspace"}
+	s.AddKnownTypeWithName(gvk, &metav1.PartialObjectMetadata{})
+	gvkList := schema.GroupVersionKind{Group: "kaito.sh", Version: "v1beta1", Kind: "WorkspaceList"}
+	s.AddKnownTypeWithName(gvkList, &metav1.PartialObjectMetadataList{})
+	metav1.AddToGroupVersion(s, schema.GroupVersion{Group: "kaito.sh", Version: "v1beta1"})
+	return s
+}
+
+// newReadyKaitoDeployment returns an appsv1.Deployment that satisfies the upstream
+// health probe (label app.kubernetes.io/name=workspace, ReadyReplicas=1).
+func newReadyKaitoDeployment() *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kaito-workspace",
+			Namespace: "kaito-workspace",
+			Labels:    map[string]string{kaitoDeploymentSelectorKey: kaitoDeploymentSelectorValue},
+		},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
+	}
 }
 
 func newMDForController(name, ns string) *airunwayv1alpha1.ModelDeployment {
@@ -181,7 +211,7 @@ func TestSetCondition(t *testing.T) {
 }
 
 func TestNewKaitoProviderReconciler(t *testing.T) {
-	r := NewKaitoProviderReconciler(nil, nil)
+	r := NewKaitoProviderReconciler(nil, nil, nil, record.NewFakeRecorder(10))
 	if r == nil {
 		t.Fatal("expected non-nil reconciler")
 	}
@@ -205,7 +235,7 @@ func TestControllerConstants(t *testing.T) {
 func TestReconcileNotFound(t *testing.T) {
 	scheme := newScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "missing", Namespace: "default"},
@@ -224,7 +254,7 @@ func TestReconcileWrongProvider(t *testing.T) {
 	md.Status.Provider.Name = "other-provider"
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -243,7 +273,7 @@ func TestReconcilePaused(t *testing.T) {
 	md.Annotations = map[string]string{"airunway.ai/reconcile-paused": "true"}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -261,7 +291,7 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 	md := newMDForController("test", "default")
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -290,7 +320,7 @@ func TestReconcileIncompatibleEngine(t *testing.T) {
 	controllerutil.AddFinalizer(md, FinalizerName)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -314,7 +344,9 @@ func TestReconcileTransformFailure(t *testing.T) {
 	controllerutil.AddFinalizer(md, FinalizerName)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	deploy := newReadyKaitoDeployment()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -336,7 +368,7 @@ func TestReconcileNilProvider(t *testing.T) {
 	md.Status.Provider = nil
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -355,7 +387,9 @@ func TestReconcileSuccessfulCreate(t *testing.T) {
 	controllerutil.AddFinalizer(md, FinalizerName)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	deploy := newReadyKaitoDeployment()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -413,8 +447,10 @@ func TestReconcileAlreadyRunning(t *testing.T) {
 		},
 	}
 
+	deploy := newReadyKaitoDeployment()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, ws).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -441,7 +477,7 @@ func TestReconcileHandleDeletion(t *testing.T) {
 	md.DeletionTimestamp = &now
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -489,7 +525,7 @@ func TestReconcileDeletionWithMissingUpstreamCRDRemovesFinalizer(t *testing.T) {
 		WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptorFuncs).
 		Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -560,7 +596,7 @@ func TestReconcileDeletionWithUpstreamUnavailableDeleteRemovesFinalizer(t *testi
 				WithStatusSubresource(md).
 				WithInterceptorFuncs(interceptorFuncs).
 				Build()
-			r := NewKaitoProviderReconciler(c, scheme)
+			r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 			result, err := r.Reconcile(context.Background(), ctrl.Request{
 				NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -606,7 +642,7 @@ func TestReconcileDeletionTransientGetErrorBeforeTimeout(t *testing.T) {
 		WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptorFuncs).
 		Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -652,7 +688,7 @@ func TestReconcileDeletionTransientGetErrorAfterTimeout(t *testing.T) {
 		WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptorFuncs).
 		Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -677,7 +713,7 @@ func TestReconcileDeletionNoFinalizer(t *testing.T) {
 	md.Finalizers = []string{"other-finalizer"}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -708,7 +744,7 @@ func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	})
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, ws).WithStatusSubresource(md).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -860,7 +896,7 @@ func TestManagedStringMapMatches(t *testing.T) {
 func TestCreateOrUpdateResourceNew(t *testing.T) {
 	scheme := newScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -900,7 +936,7 @@ func TestCreateOrUpdateResourceUpdate(t *testing.T) {
 	existing.Object["resource"] = map[string]interface{}{"count": int64(1)}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -934,7 +970,7 @@ func TestCreateOrUpdateResourceNoChange(t *testing.T) {
 	existing.Object["inference"] = map[string]interface{}{"preset": map[string]interface{}{"name": "test"}}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -976,7 +1012,7 @@ func TestCreateOrUpdateResourceBackfillsLastAppliedForLegacyWorkspace(t *testing
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -1070,7 +1106,7 @@ func TestCreateOrUpdateResourceRemovesStaleManagedLabel(t *testing.T) {
 	setLastAppliedForTest(t, existing, existingResource, nil)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -1136,7 +1172,7 @@ func TestCreateOrUpdateResourceAppliesMetadataOnlyChanges(t *testing.T) {
 	setLastAppliedForTest(t, existing, existingResource, existingInference)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -1222,7 +1258,7 @@ func TestCreateOrUpdateResourceRemovesDeletedManagedMetadata(t *testing.T) {
 	)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -1300,7 +1336,7 @@ func TestCreateOrUpdateResourceIgnoresUnmanagedOperatorDefaults(t *testing.T) {
 	})
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -1365,7 +1401,7 @@ func TestCreateOrUpdateResourceRemovesDeletedManagedInferenceOverride(t *testing
 	setLastAppliedForTest(t, existing, existingResource, lastAppliedInference)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
@@ -1498,7 +1534,7 @@ func TestManagedFieldsMatchSliceBehavior(t *testing.T) {
 func TestSyncStatusNotFound(t *testing.T) {
 	scheme := newScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	desired := &unstructured.Unstructured{}
@@ -1529,7 +1565,7 @@ func TestSyncStatusRunning(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	desired := &unstructured.Unstructured{}
@@ -1564,7 +1600,7 @@ func TestSyncStatusFailed(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	desired := &unstructured.Unstructured{}
@@ -1598,7 +1634,7 @@ func TestSyncStatusDeploying(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws).Build()
-	r := NewKaitoProviderReconciler(c, scheme)
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	md := &airunwayv1alpha1.ModelDeployment{}
 	desired := &unstructured.Unstructured{}
@@ -1612,6 +1648,102 @@ func TestSyncStatusDeploying(t *testing.T) {
 	}
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
 		t.Errorf("expected Deploying phase, got %s", md.Status.Phase)
+	}
+}
+
+func TestReconcile_InvalidSpecReportsCompatibilityBeforeProbe(t *testing.T) {
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "default", Finalizers: []string{FinalizerName}},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{
+			Model:   airunwayv1alpha1.ModelSpec{ID: "m", Source: airunwayv1alpha1.ModelSourceHuggingFace},
+			Engine:  airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeVLLM},
+			Serving: &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated},
+		},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{
+			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName},
+		},
+	}
+	s := newScheme()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(md).WithStatusSubresource(md).Build()
+	rec := record.NewFakeRecorder(10)
+	r := &KaitoProviderReconciler{
+		Client:           c,
+		Scheme:           s,
+		Transformer:      NewTransformer(),
+		StatusTranslator: NewStatusTranslator(),
+		DirectClient:     c,
+		Recorder:         rec,
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "bad", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := &airunwayv1alpha1.ModelDeployment{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "bad", Namespace: "default"}, got)
+
+	// Must see IncompatibleConfiguration, NOT an upstream-health reason.
+	if got.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("expected Phase=Failed, got %q", got.Status.Phase)
+	}
+	if !strings.Contains(got.Status.Message, "disaggregated") {
+		t.Errorf("expected message about disaggregated, got %q", got.Status.Message)
+	}
+}
+
+func TestReconcile_UnhealthyProbeRefusesFast(t *testing.T) {
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mymd", Namespace: "default", Finalizers: []string{FinalizerName}},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{
+			Model:  airunwayv1alpha1.ModelSpec{ID: "m", Source: airunwayv1alpha1.ModelSourceHuggingFace},
+			Engine: airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeVLLM},
+			Resources: &airunwayv1alpha1.ResourceSpec{
+				GPU: &airunwayv1alpha1.GPUSpec{Count: 1},
+			},
+		},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{
+			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName},
+		},
+	}
+	s := newScheme()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(md).WithStatusSubresource(md).Build()
+	// directC: has Workspace CRD but no controller Deployment → UpstreamControllerMissing
+	directC := probeClientBuilderWithWorkspace(t).Build()
+	rec := record.NewFakeRecorder(10)
+	r := &KaitoProviderReconciler{
+		Client:           c,
+		Scheme:           s,
+		Transformer:      NewTransformer(),
+		StatusTranslator: NewStatusTranslator(),
+		DirectClient:     directC,
+		Recorder:         rec,
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "mymd", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected RequeueAfter=%v, got %v", RequeueInterval, res.RequeueAfter)
+	}
+
+	got := &airunwayv1alpha1.ModelDeployment{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "mymd", Namespace: "default"}, got)
+
+	// Phase must NOT be set to Failed (transient state).
+	if got.Status.Phase == airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("expected Phase to be left untouched, got Failed")
+	}
+
+	// Event must have been recorded.
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, ReasonUpstreamControllerMissing) {
+			t.Errorf("expected event with %s, got %q", ReasonUpstreamControllerMissing, ev)
+		}
+	default:
+		t.Error("expected a Warning event, none recorded")
 	}
 }
 
