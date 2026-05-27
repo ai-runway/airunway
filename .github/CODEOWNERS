@@ -1,2 +1,5 @@
 # Default code owners for the repository
 * @kaito-project/airunway-maintainers
+
+# Headlamp plugin owners
+/plugins/headlamp/ @kaito-project/airunway-maintainers @gambtho
