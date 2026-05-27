@@ -74,7 +74,7 @@ describe('aggregateRequiresCRDFromCapabilities', () => {
       aggregateRequiresCRDFromCapabilities({
         engines: [
           { name: 'vllm', requiresCRD: false },
-          { name: 'kaito', requiresCRD: true },
+          { name: 'trtllm', requiresCRD: true },
         ],
       }),
     ).toBe(true);
