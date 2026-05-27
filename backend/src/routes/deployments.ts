@@ -547,15 +547,14 @@ function isKaitoLlamaCppDeployment(deployment: DeploymentStatus): boolean {
   return deployment.provider === 'kaito' && deployment.engine === 'llamacpp';
 }
 
-function getDeploymentConfiguredChatModel(deployment: DeploymentStatus): string | undefined {
-  if (deployment.gateway?.modelName) {
-    return deployment.gateway.modelName;
-  }
-
+// Returns the name the underlying model server is serving on its /v1/* API,
+// or undefined when we should ask the server (or fall back to modelId).
+// Excludes deployment.gateway.modelName on purpose — that's the HTTPRoute alias
+// used by the gateway and is unrelated to what the frontend service responds to.
+function getServedChatModelName(deployment: DeploymentStatus): string | undefined {
   if (deployment.servedModelName && !isKaitoLlamaCppDeployment(deployment)) {
     return deployment.servedModelName;
   }
-
   return undefined;
 }
 
@@ -627,7 +626,7 @@ async function discoverUpstreamChatModel(
   }
 }
 
-async function resolveDeploymentChatModel(
+async function resolveServedChatModel(
   deployment: DeploymentStatus,
   serviceName: string,
   namespace: string,
@@ -635,9 +634,9 @@ async function resolveDeploymentChatModel(
   requestSignal: AbortSignal,
   userToken?: string
 ): Promise<string> {
-  const configuredModel = getDeploymentConfiguredChatModel(deployment);
-  if (configuredModel) {
-    return configuredModel;
+  const served = getServedChatModelName(deployment);
+  if (served) {
+    return served;
   }
 
   return (await discoverUpstreamChatModel(
@@ -663,7 +662,10 @@ async function resolveDirectChatModel(
     return requestedModel;
   }
 
-  return resolveDeploymentChatModel(
+  // Direct service-proxy path: ignore deployment.gateway.modelName (that's the
+  // HTTPRoute alias the gateway routes by; the frontend service doesn't know it
+  // and would return a model-not-found error).
+  return resolveServedChatModel(
     deployment,
     serviceName,
     namespace,
@@ -681,7 +683,12 @@ async function resolveGatewayChatModel(
   requestSignal: AbortSignal,
   userToken?: string
 ): Promise<string> {
-  return resolveDeploymentChatModel(
+  // Gateway path: the HTTPRoute alias is exactly what the gateway routes by.
+  if (deployment.gateway?.modelName) {
+    return deployment.gateway.modelName;
+  }
+
+  return resolveServedChatModel(
     deployment,
     serviceName,
     namespace,

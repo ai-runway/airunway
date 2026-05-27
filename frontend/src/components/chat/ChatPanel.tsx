@@ -65,20 +65,46 @@ async function getChatResponseError(response: Response): Promise<string> {
   }
 }
 
-function getChatDelta(payload: string): string {
+type ChatStreamEvent =
+  | { kind: 'content'; content: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'empty' }
+
+function parseChatStreamPayload(payload: string): ChatStreamEvent {
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(payload) as {
-      choices?: Array<{
-        delta?: {
-          content?: unknown
-        }
-      }>
-    }
-    const content = parsed.choices?.[0]?.delta?.content
-    return typeof content === 'string' ? content : ''
+    parsed = JSON.parse(payload)
   } catch {
-    return ''
+    return { kind: 'empty' }
   }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { kind: 'empty' }
+  }
+
+  const errorMessage = getMessageFromErrorPayload(parsed)
+  if (errorMessage) {
+    return { kind: 'error', message: errorMessage }
+  }
+
+  const choices = (parsed as {
+    choices?: Array<{
+      delta?: { content?: unknown }
+      finish_reason?: unknown
+    }>
+  }).choices
+  const firstChoice = choices?.[0]
+
+  if (firstChoice?.finish_reason === 'error') {
+    return { kind: 'error', message: 'Upstream model server returned an error' }
+  }
+
+  const content = firstChoice?.delta?.content
+  if (typeof content === 'string' && content) {
+    return { kind: 'content', content }
+  }
+
+  return { kind: 'empty' }
 }
 
 export function ChatPanel({ deploymentName, namespace, className, style }: ChatPanelProps) {
@@ -188,7 +214,13 @@ export function ChatPanel({ deploymentName, namespace, className, style }: ChatP
       const data = trimmed.slice('data:'.length).trim()
       if (data === '[DONE]') return true
 
-      appendAssistantContent(getChatDelta(data))
+      const event = parseChatStreamPayload(data)
+      if (event.kind === 'error') {
+        throw new Error(event.message)
+      }
+      if (event.kind === 'content') {
+        appendAssistantContent(event.content)
+      }
       return false
     }
 

@@ -436,7 +436,7 @@ describe('Hono Routes', () => {
             provider: 'dynamo',
             replicas: { desired: 1, ready: 1, available: 1 },
             frontendService: 'test-deploy-frontend:8080',
-            gateway: { endpoint: '20.92.155.15', modelName: 'served-from-gateway' },
+            servedModelName: 'deployment-served-model',
           } as never;
         }),
       );
@@ -468,7 +468,61 @@ describe('Hono Routes', () => {
         'v1/chat/completions',
         {
           messages: [{ role: 'user', content: 'Hello' }],
-          model: 'served-from-gateway',
+          model: 'deployment-served-model',
+          stream: true,
+        },
+      ]);
+    });
+
+    test('POST /api/deployments/:name/chat direct path ignores gateway.modelName (HTTPRoute alias)', async () => {
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      // Deployment exposes a gateway alias ('served-from-gateway') AND a real
+      // served model name. The direct service-proxy path must use the served
+      // model name; the gateway alias would 404 against the frontend service.
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          gateway: { endpoint: 'https://gateway.example.com', modelName: 'served-from-gateway' },
+          servedModelName: 'deployment-served-model',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'deployment-served-model',
           stream: true,
         },
       ]);
