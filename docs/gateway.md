@@ -267,10 +267,22 @@ metadata:
   name: dynamo
 spec:
   capabilities:
-    engines: [vllm, sglang, trtllm]
-    gateway:
-      inferencePoolNamePattern: "{namespace}-{name}-pool"  # Pattern for the pool name
-      inferencePoolNamespace: "dynamo-system"        # Namespace where the pool is created
+    engines:
+      - name: vllm
+        gateway:
+          managesInferencePool: true                # Provider creates and owns the InferencePool/EPP
+          inferencePoolNamePattern: "{name}-pool"   # Pattern for the pool name
+          inferencePoolNamespace: "{namespace}"     # Namespace where the pool is created
+      - name: sglang
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
+      - name: trtllm
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
 ```
 
 The controller adapts its reconciliation based on these flags:

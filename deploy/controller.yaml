@@ -65,55 +65,87 @@ spec:
               capabilities:
                 description: capabilities defines what this provider supports
                 properties:
-                  cpuSupport:
-                    description: cpuSupport indicates if the provider supports CPU-only
-                      inference
-                    type: boolean
                   engines:
                     description: engines is the list of supported inference engines
+                      with per-engine capabilities
                     items:
-                      description: EngineType defines the inference engine type
-                      enum:
-                      - vllm
-                      - sglang
-                      - trtllm
-                      - llamacpp
-                      type: string
+                      description: EngineCapability defines per-engine capability
+                        metadata
+                      properties:
+                        cpuSupport:
+                          description: cpuSupport indicates if this engine supports
+                            CPU-only inference
+                          type: boolean
+                        gateway:
+                          description: gateway defines this engine's gateway-related
+                            capabilities.
+                          properties:
+                            ignoresServedName:
+                              description: |-
+                                ignoresServedName indicates that gateway routing for this provider+engine
+                                pair does not honor spec.model.servedName, so the controller should fall
+                                back to auto-discovery / spec.model.id when computing the route model
+                                name. Set this when the provider's serving mode for this engine does not
+                                expose the OpenAI-style served name (e.g. KAITO's llama.cpp deployment).
+                              type: boolean
+                            inferencePoolNamePattern:
+                              description: |-
+                                inferencePoolNamePattern is the naming pattern for provider-created pools.
+                                Supports {name} and {namespace} placeholders. Only consulted when
+                                managesInferencePool is true.
+                              type: string
+                            inferencePoolNamespace:
+                              description: |-
+                                inferencePoolNamespace is the namespace where the provider creates its InferencePool.
+                                Supports {name} and {namespace} placeholders (resolved from the ModelDeployment).
+                                When the resolved namespace differs from the ModelDeployment namespace, the
+                                controller creates a ReferenceGrant for cross-namespace HTTPRoute routing.
+                              type: string
+                            managesInferencePool:
+                              description: |-
+                                managesInferencePool indicates that the provider's operator creates and
+                                owns the GAIE InferencePool (and EPP) for ModelDeployments using this
+                                engine. When true, the airunway controller will not create an
+                                InferencePool itself: it waits for the provider-managed one to appear
+                                and uses it as the HTTPRoute backend. When false (the default), the
+                                controller creates and manages the InferencePool/EPP, even if other
+                                fields on this struct (e.g. ignoresServedName) are set.
+                              type: boolean
+                          type: object
+                        gpuSupport:
+                          description: gpuSupport indicates if this engine supports
+                            GPU inference
+                          type: boolean
+                        name:
+                          description: name is the inference engine type
+                          enum:
+                          - vllm
+                          - sglang
+                          - trtllm
+                          - llamacpp
+                          type: string
+                        requiresCRD:
+                          description: |-
+                            requiresCRD indicates if this engine needs an upstream CRD/operator installation.
+                            When omitted, clients should treat this as true for backward compatibility.
+                          type: boolean
+                        servingModes:
+                          description: servingModes is the list of serving modes this
+                            engine supports
+                          items:
+                            description: ServingMode defines the serving mode
+                            enum:
+                            - aggregated
+                            - disaggregated
+                            type: string
+                          type: array
+                      required:
+                      - name
+                      type: object
                     type: array
-                  gateway:
-                    description: gateway defines the provider's gateway-related capabilities.
-                    properties:
-                      inferencePoolNamePattern:
-                        description: |-
-                          inferencePoolNamePattern is the naming pattern for provider-created pools.
-                          Supports {name} and {namespace} placeholders.
-                        type: string
-                      inferencePoolNamespace:
-                        description: |-
-                          inferencePoolNamespace is the namespace where the provider creates its InferencePool.
-                          Supports {name} and {namespace} placeholders (resolved from the ModelDeployment).
-                          When the resolved namespace differs from the ModelDeployment namespace, the
-                          controller creates a ReferenceGrant for cross-namespace HTTPRoute routing.
-                        type: string
-                    type: object
-                  gpuSupport:
-                    description: gpuSupport indicates if the provider supports GPU
-                      inference
-                    type: boolean
-                  requiresCRD:
-                    description: |-
-                      requiresCRD indicates if this provider needs an upstream CRD/operator installation.
-                      When omitted, clients should treat this as true for backward compatibility.
-                    type: boolean
-                  servingModes:
-                    description: servingModes is the list of supported serving modes
-                    items:
-                      description: ServingMode defines the serving mode
-                      enum:
-                      - aggregated
-                      - disaggregated
-                      type: string
-                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                 type: object
               selectionRules:
                 description: |-
@@ -1189,6 +1221,8 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - airunway.ai

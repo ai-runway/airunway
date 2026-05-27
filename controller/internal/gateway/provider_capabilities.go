@@ -28,9 +28,10 @@ import (
 // ProviderCapabilityResolver looks up the gateway capabilities declared by
 // a provider's InferenceProviderConfig.
 type ProviderCapabilityResolver interface {
-	// GetGatewayCapabilities returns the GatewayCapabilities for the given
-	// provider name, or nil if the provider does not declare any GatewayCapabilities.
-	GetGatewayCapabilities(ctx context.Context, providerName string) *airunwayv1alpha1.GatewayCapabilities
+	// GetGatewayCapabilities returns the GatewayCapabilities declared by the
+	// given provider for the given engine, or nil if the provider does not
+	// declare any GatewayCapabilities for that engine.
+	GetGatewayCapabilities(ctx context.Context, providerName string, engine airunwayv1alpha1.EngineType) *airunwayv1alpha1.GatewayCapabilities
 }
 
 // InferenceProviderConfigResolver implements ProviderCapabilityResolver by
@@ -46,9 +47,10 @@ func NewInferenceProviderConfigResolver(c client.Client) *InferenceProviderConfi
 }
 
 // GetGatewayCapabilities fetches the InferenceProviderConfig for the given
-// provider name and returns its gateway capabilities. Returns nil if the
-// provider has no gateway config.
-func (r *InferenceProviderConfigResolver) GetGatewayCapabilities(ctx context.Context, providerName string) *airunwayv1alpha1.GatewayCapabilities {
+// provider name and returns the gateway capabilities declared for the given
+// engine. Returns nil if the provider, the engine, or the engine's gateway
+// section is absent.
+func (r *InferenceProviderConfigResolver) GetGatewayCapabilities(ctx context.Context, providerName string, engine airunwayv1alpha1.EngineType) *airunwayv1alpha1.GatewayCapabilities {
 	logger := log.FromContext(ctx)
 
 	var ipc airunwayv1alpha1.InferenceProviderConfig
@@ -58,9 +60,10 @@ func (r *InferenceProviderConfigResolver) GetGatewayCapabilities(ctx context.Con
 		return nil
 	}
 
-	if ipc.Spec.Capabilities == nil {
+	engineCap := ipc.Spec.Capabilities.GetEngineCapability(engine)
+	if engineCap == nil {
 		return nil
 	}
 
-	return ipc.Spec.Capabilities.Gateway
+	return engineCap.Gateway
 }

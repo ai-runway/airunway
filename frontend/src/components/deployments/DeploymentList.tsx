@@ -13,8 +13,8 @@ import {
 } from '@/components/ui/dialog'
 import { useDeleteDeployment, type DeploymentStatus } from '@/hooks/useDeployments'
 import { useToast } from '@/hooks/useToast'
-import { formatRelativeTime, generateAynaUrl } from '@/lib/utils'
-import { Eye, Trash2, MessageSquare, Rocket } from 'lucide-react'
+import { formatRelativeTime } from '@/lib/utils'
+import { Eye, Trash2, Rocket } from 'lucide-react'
 
 interface DeploymentListProps {
   deployments: DeploymentStatus[]
@@ -166,19 +166,6 @@ export function DeploymentList({ deployments, isLoading }: DeploymentListProps) 
                   <Eye className="h-4 w-4" />
                 </Button>
               </Link>
-              <a
-                href={generateAynaUrl({
-                  model: deployment.modelId,
-                  provider: 'openai',
-                  endpoint: 'http://localhost:8000',
-                  type: 'chat',
-                })}
-                title="Open in Ayna"
-              >
-                <Button size="sm" variant="ghost">
-                  <MessageSquare className="h-4 w-4" />
-                </Button>
-              </a>
               <Button
                 size="sm"
                 variant="ghost"

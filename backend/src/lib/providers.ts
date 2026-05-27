@@ -29,6 +29,55 @@ function isCrdLessProviderDisplayName(providerName: string | null | undefined): 
   return CRD_LESS_PROVIDER_DISPLAY_NAMES.has(String(providerName ?? '').trim());
 }
 
+/**
+ * Aggregate a provider-level `requiresCRD` verdict from
+ * `spec.capabilities.engines[].requiresCRD`.
+ *
+ * The CRD migration in controller/internal/controller/migration.go strips the
+ * legacy top-level `capabilities.requiresCRD` field and hoists it into each
+ * engine entry, so backend code must derive a provider-level value from the
+ * per-engine flags.
+ *
+ * Semantics:
+ * - Returns `true` if any engine explicitly sets `requiresCRD: true`. A
+ *   provider needs a runtime CRD if any of its engines needs one.
+ * - Returns `false` only when every engine in a non-empty list explicitly
+ *   opts out via `requiresCRD: false`.
+ * - Returns `undefined` when nothing is explicitly set, or when some engines
+ *   omit the flag (per the Go API doc, an omitted value should be treated as
+ *   `true` for backward compatibility — but we keep it `undefined` here so
+ *   the canonical-id / display-name fallback in `providerRequiresRuntimeCRD`
+ *   still runs for legacy configs).
+ */
+export function aggregateRequiresCRDFromCapabilities(
+  capabilities: unknown,
+): boolean | undefined {
+  const engines = (capabilities as { engines?: unknown })?.engines;
+  if (!Array.isArray(engines) || engines.length === 0) {
+    return undefined;
+  }
+
+  let sawExplicit = false;
+  let allFalse = true;
+  for (const engine of engines) {
+    const value = (engine as { requiresCRD?: unknown })?.requiresCRD;
+    if (typeof value === 'boolean') {
+      sawExplicit = true;
+      if (value) {
+        return true;
+      }
+    } else {
+      // omitted — treat as "not explicitly false" so we do not collapse to false.
+      allFalse = false;
+    }
+  }
+
+  if (!sawExplicit) {
+    return undefined;
+  }
+  return allFalse ? false : undefined;
+}
+
 export function providerRequiresRuntimeCRD(
   providerId: string,
   explicitRequiresCRD?: unknown,

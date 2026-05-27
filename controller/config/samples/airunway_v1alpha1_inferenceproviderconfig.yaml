@@ -12,12 +12,13 @@ metadata:
 spec:
   capabilities:
     engines:
-      - vllm
-      - llamacpp
-    servingModes:
-      - aggregated
-    cpuSupport: true
-    gpuSupport: true
+      - name: vllm
+        servingModes: [aggregated]
+        gpuSupport: true
+      - name: llamacpp
+        servingModes: [aggregated]
+        gpuSupport: true
+        cpuSupport: true
   selectionRules:
     - condition: "!has(spec.resources.gpu) || spec.resources.gpu.count == 0"
       priority: 100
@@ -37,17 +38,27 @@ metadata:
 spec:
   capabilities:
     engines:
-      - vllm
-      - sglang
-      - trtllm
-    servingModes:
-      - aggregated
-      - disaggregated
-    cpuSupport: false
-    gpuSupport: true
-    gateway:
-      inferencePoolNamePattern: "{name}-pool"
-      inferencePoolNamespace: "{namespace}"
+      - name: vllm
+        servingModes: [aggregated, disaggregated]
+        gpuSupport: true
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
+      - name: sglang
+        servingModes: [aggregated, disaggregated]
+        gpuSupport: true
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
+      - name: trtllm
+        servingModes: [aggregated]
+        gpuSupport: true
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
   selectionRules:
     - condition: "spec.engine.type == 'trtllm'"
       priority: 100
@@ -71,12 +82,9 @@ metadata:
 spec:
   capabilities:
     engines:
-      - vllm
-    servingModes:
-      - aggregated
-      - disaggregated
-    cpuSupport: false
-    gpuSupport: true
+      - name: vllm
+        servingModes: [aggregated, disaggregated]
+        gpuSupport: true
   selectionRules:
     - condition: "has(spec.resources.gpu) && spec.resources.gpu.count > 1 && spec.engine.type == 'vllm'"
       priority: 80
@@ -94,11 +102,8 @@ metadata:
 spec:
   capabilities:
     engines:
-      - vllm
-    servingModes:
-      - aggregated
-      - disaggregated
-    cpuSupport: false
-    gpuSupport: true
-    requiresCRD: false
+      - name: vllm
+        servingModes: [aggregated, disaggregated]
+        gpuSupport: true
+        requiresCRD: false
   selectionRules: []

@@ -184,8 +184,9 @@ describe('KubernetesService - Runtime Status', () => {
       spec: {
         ...mockInferenceProviderConfig.spec,
         capabilities: {
-          ...mockInferenceProviderConfig.spec.capabilities,
-          requiresCRD: true,
+          engines: [
+            { name: 'vllm', servingModes: ['aggregated'], gpuSupport: true, requiresCRD: true },
+          ],
         },
       },
       status: {
@@ -211,6 +212,52 @@ describe('KubernetesService - Runtime Status', () => {
     expect(vllm?.requiresCRD).toBe(true);
     expect(vllm?.version).toBe('0.8.0');
     expect(vllm?.message).toBe('vLLM is installed and running');
+  });
+
+  test('honors per-engine requiresCRD: false on the migrated schema for custom-named runtime entries', async () => {
+    // Post-migration: legacy top-level capabilities.requiresCRD has been
+    // stripped, and the verdict lives on each engine. The provider id/display
+    // name are non-canonical, so the canonical-id fallback cannot mask a
+    // buggy aggregation.
+    const customConfig = {
+      ...mockInferenceProviderConfig,
+      metadata: {
+        ...mockInferenceProviderConfig.metadata,
+        name: 'mycustom-runtime',
+        annotations: {
+          ...mockInferenceProviderConfig.metadata.annotations,
+          'airunway.ai/provider-name': 'My Custom Runtime',
+        },
+      },
+      spec: {
+        capabilities: {
+          engines: [
+            { name: 'vllm', servingModes: ['aggregated'], gpuSupport: true, requiresCRD: false },
+            { name: 'sglang', servingModes: ['aggregated'], gpuSupport: true, requiresCRD: false },
+          ],
+        },
+      },
+      status: {
+        ready: true,
+        version: '0.1.0',
+      },
+    };
+
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
+    );
+    mockProviderConfigs([customConfig]);
+
+    const runtimes = await kubernetesService.getRuntimesStatus();
+    const custom = runtimes.find((runtime) => runtime.id === 'mycustom-runtime');
+
+    expect(custom).toBeDefined();
+    expect(custom?.name).toBe('My Custom Runtime');
+    expect(custom?.installed).toBe(true);
+    expect(custom?.requiresCRD).toBe(false);
+    expect(custom?.crdFound).toBe(true);
+    expect(custom?.operatorRunning).toBe(true);
+    expect(custom?.message).toBe('Runtime is ready to use.');
   });
 
   test('reports ready providers that do not require runtime CRDs as installed without probing an operator', async () => {

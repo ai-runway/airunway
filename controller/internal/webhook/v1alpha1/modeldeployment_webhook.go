@@ -20,17 +20,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	"github.com/kaito-project/airunway/controller/internal/validation"
 )
 
 const (
@@ -51,7 +54,20 @@ var modeldeploymentlog = logf.Log.WithName("modeldeployment-resource")
 // SetupModelDeploymentWebhookWithManager registers the webhook for ModelDeployment in the manager.
 func SetupModelDeploymentWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, &airunwayv1alpha1.ModelDeployment{}).
-		WithValidator(&ModelDeploymentCustomValidator{}).
+		WithValidator(&ModelDeploymentCustomValidator{
+			// Reader is the cached client — every admission request used to
+			// hit the API server via mgr.GetAPIReader(), which on a busy
+			// cluster turns admission into a synchronous round-trip and a
+			// load multiplier on apiserver. The reconciler already watches
+			// InferenceProviderConfig, so the cache is warm by the time
+			// admission starts serving traffic.
+			Reader: mgr.GetClient(),
+			// APIReader is a non-cached fallback used only when the cached
+			// Reader returns NotFound, to disambiguate "truly absent" from
+			// "informer hasn't yet observed a freshly-created provider".
+			// In steady state it is never called.
+			APIReader: mgr.GetAPIReader(),
+		}).
 		WithDefaulter(&ModelDeploymentCustomDefaulter{}).
 		Complete()
 }
@@ -95,7 +111,13 @@ func (d *ModelDeploymentCustomDefaulter) Default(_ context.Context, obj *airunwa
 	}
 
 	// Default GPU to 1 in aggregated mode when resources are unspecified
-	if spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated && spec.Resources == nil {
+	// and an engine type is explicitly set. Skip the default when:
+	// - engine is not specified (auto-selection will determine GPU requirements)
+	// - engine is llamacpp (supports CPU-only inference)
+	// - the user provided a custom image (may not need GPU)
+	if spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated && spec.Resources == nil &&
+		spec.Engine.Type != "" && spec.Engine.Type != airunwayv1alpha1.EngineTypeLlamaCpp &&
+		spec.Image == "" {
 		spec.Resources = &airunwayv1alpha1.ResourceSpec{
 			GPU: &airunwayv1alpha1.GPUSpec{
 				Count: 1,
@@ -157,10 +179,22 @@ func (d *ModelDeploymentCustomDefaulter) Default(_ context.Context, obj *airunwa
 
 // ModelDeploymentCustomValidator struct is responsible for validating the ModelDeployment resource
 // when it is created, updated, or deleted.
-type ModelDeploymentCustomValidator struct{}
+type ModelDeploymentCustomValidator struct {
+	// Reader is used to look up InferenceProviderConfig resources for
+	// provider compatibility validation at admission time. In production
+	// this is the manager's cached client so admission does not synchronously
+	// hit the API server on every request.
+	Reader client.Reader
+
+	// APIReader is an optional uncached fallback consulted only when Reader
+	// returns NotFound, so we can distinguish a missing provider from an
+	// informer cache that has not yet observed a freshly-created one. May be
+	// nil in tests; in that case a Reader NotFound is treated as authoritative.
+	APIReader client.Reader
+}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type ModelDeployment.
-func (v *ModelDeploymentCustomValidator) ValidateCreate(_ context.Context, obj *airunwayv1alpha1.ModelDeployment) (admission.Warnings, error) {
+func (v *ModelDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj *airunwayv1alpha1.ModelDeployment) (admission.Warnings, error) {
 	modeldeploymentlog.Info("Validation for ModelDeployment upon creation", "name", obj.GetName())
 
 	var warnings admission.Warnings
@@ -176,7 +210,9 @@ func (v *ModelDeploymentCustomValidator) ValidateCreate(_ context.Context, obj *
 	}
 
 	// Validate the spec
-	allErrs = append(allErrs, v.validateSpec(obj)...)
+	specWarnings, specErrs := v.validateSpec(ctx, obj)
+	warnings = append(warnings, specWarnings...)
+	allErrs = append(allErrs, specErrs...)
 
 	// Check for warnings
 	warnings = append(warnings, v.checkWarnings(obj)...)
@@ -188,14 +224,16 @@ func (v *ModelDeploymentCustomValidator) ValidateCreate(_ context.Context, obj *
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type ModelDeployment.
-func (v *ModelDeploymentCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj *airunwayv1alpha1.ModelDeployment) (admission.Warnings, error) {
+func (v *ModelDeploymentCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *airunwayv1alpha1.ModelDeployment) (admission.Warnings, error) {
 	modeldeploymentlog.Info("Validation for ModelDeployment upon update", "name", newObj.GetName())
 
 	var warnings admission.Warnings
 	var allErrs field.ErrorList
 
 	// Validate the spec
-	allErrs = append(allErrs, v.validateSpec(newObj)...)
+	specWarnings, specErrs := v.validateSpec(ctx, newObj)
+	warnings = append(warnings, specWarnings...)
+	allErrs = append(allErrs, specErrs...)
 
 	// Validate immutable fields (identity fields that trigger delete+recreate)
 	allErrs = append(allErrs, v.validateImmutableFields(oldObj, newObj)...)
@@ -218,7 +256,8 @@ func (v *ModelDeploymentCustomValidator) ValidateDelete(_ context.Context, obj *
 }
 
 // validateSpec validates the ModelDeployment spec
-func (v *ModelDeploymentCustomValidator) validateSpec(obj *airunwayv1alpha1.ModelDeployment) field.ErrorList {
+func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *airunwayv1alpha1.ModelDeployment) (admission.Warnings, field.ErrorList) {
+	var warnings admission.Warnings
 	var allErrs field.ErrorList
 	spec := &obj.Spec
 	specPath := field.NewPath("spec")
@@ -238,65 +277,86 @@ func (v *ModelDeploymentCustomValidator) validateSpec(obj *airunwayv1alpha1.Mode
 		// Validation of engine type value is handled by the Enum marker on EngineType
 	}
 
-	// Validate GPU requirements for certain engines (only when engine is specified)
-	gpuCount := int32(0)
-	if spec.Resources != nil && spec.Resources.GPU != nil {
-		gpuCount = spec.Resources.GPU.Count
-	}
-
-	// Resource ceilings
-	if gpuCount > MaxGPUCount {
-		allErrs = append(allErrs, field.Invalid(
-			specPath.Child("resources", "gpu", "count"),
-			gpuCount,
-			fmt.Sprintf("GPU count exceeds maximum allowed (%d)", MaxGPUCount),
-		))
-	}
-	if spec.Resources != nil {
-		allErrs = append(allErrs, validateResourceQuantity(spec.Resources.CPU, MaxCPU, specPath.Child("resources", "cpu"))...)
-		allErrs = append(allErrs, validateResourceQuantity(spec.Resources.Memory, MaxMemory, specPath.Child("resources", "memory"))...)
-	}
-	if spec.Scaling != nil {
-		if spec.Scaling.Replicas > MaxReplicas {
-			allErrs = append(allErrs, field.Invalid(specPath.Child("scaling", "replicas"), spec.Scaling.Replicas, fmt.Sprintf("exceeds maximum replicas (%d)", MaxReplicas)))
-		}
-		if spec.Scaling.Prefill != nil {
-			if spec.Scaling.Prefill.Replicas > MaxReplicas {
-				allErrs = append(allErrs, field.Invalid(specPath.Child("scaling", "prefill", "replicas"), spec.Scaling.Prefill.Replicas, fmt.Sprintf("exceeds maximum replicas (%d)", MaxReplicas)))
-			}
-			if spec.Scaling.Prefill.GPU != nil && spec.Scaling.Prefill.GPU.Count > MaxGPUCount {
-				allErrs = append(allErrs, field.Invalid(specPath.Child("scaling", "prefill", "gpu", "count"), spec.Scaling.Prefill.GPU.Count, fmt.Sprintf("exceeds maximum GPU count (%d)", MaxGPUCount)))
-			}
-			allErrs = append(allErrs, validateResourceQuantity(spec.Scaling.Prefill.Memory, MaxMemory, specPath.Child("scaling", "prefill", "memory"))...)
-		}
-		if spec.Scaling.Decode != nil {
-			if spec.Scaling.Decode.Replicas > MaxReplicas {
-				allErrs = append(allErrs, field.Invalid(specPath.Child("scaling", "decode", "replicas"), spec.Scaling.Decode.Replicas, fmt.Sprintf("exceeds maximum replicas (%d)", MaxReplicas)))
-			}
-			if spec.Scaling.Decode.GPU != nil && spec.Scaling.Decode.GPU.Count > MaxGPUCount {
-				allErrs = append(allErrs, field.Invalid(specPath.Child("scaling", "decode", "gpu", "count"), spec.Scaling.Decode.GPU.Count, fmt.Sprintf("exceeds maximum GPU count (%d)", MaxGPUCount)))
-			}
-			allErrs = append(allErrs, validateResourceQuantity(spec.Scaling.Decode.Memory, MaxMemory, specPath.Child("scaling", "decode", "memory"))...)
-		}
-	}
-
 	// Validate provider overrides don't contain dangerous fields
 	allErrs = append(allErrs, v.validateOverrides(spec, specPath)...)
 
+	// Resolve serving mode for validation checks below
 	servingMode := airunwayv1alpha1.ServingModeAggregated
 	if spec.Serving != nil && spec.Serving.Mode != "" {
 		servingMode = spec.Serving.Mode
 	}
 
-	switch spec.Engine.Type {
-	case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang, airunwayv1alpha1.EngineTypeTRTLLM:
-		// These engines require GPU (unless in disaggregated mode with component-level GPUs)
-		if servingMode == airunwayv1alpha1.ServingModeAggregated && gpuCount == 0 {
+	// Validate provider compatibility when both provider and engine are specified.
+	// Uses the cached Reader to avoid a synchronous apiserver round-trip per
+	// admission; falls back to the uncached APIReader only when the cache
+	// reports NotFound, to absorb the race where a brand-new
+	// InferenceProviderConfig hasn't yet propagated to informers.
+	if spec.Provider != nil && spec.Provider.Name != "" && spec.Engine.Type != "" && v.Reader != nil {
+		var providerConfig airunwayv1alpha1.InferenceProviderConfig
+		err := v.Reader.Get(ctx, client.ObjectKey{Name: spec.Provider.Name}, &providerConfig)
+		if apierrors.IsNotFound(err) && v.APIReader != nil {
+			// Cache may be stale for a just-created provider; confirm against
+			// the API server before we tell the user the provider doesn't
+			// exist. Any error from the fallback is preserved verbatim so
+			// the existing switch below classifies it the same way it would
+			// have under the old all-APIReader path.
+			err = v.APIReader.Get(ctx, client.ObjectKey{Name: spec.Provider.Name}, &providerConfig)
+		}
+		switch {
+		case apierrors.IsNotFound(err):
+			// Reject obviously-bogus provider names at admission time so the
+			// user gets immediate feedback rather than waiting for reconcile.
 			allErrs = append(allErrs, field.Invalid(
-				specPath.Child("resources", "gpu", "count"),
-				gpuCount,
-				fmt.Sprintf("%s engine requires GPU (set resources.gpu.count > 0)", spec.Engine.Type),
+				specPath.Child("provider", "name"),
+				spec.Provider.Name,
+				fmt.Sprintf("InferenceProviderConfig %q not found", spec.Provider.Name),
 			))
+		case meta.IsNoMatchError(err):
+			// CRD is not installed (cluster mid-bootstrap). Skip — the
+			// controller will catch this during reconciliation.
+		case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+			// Webhook RBAC is misconfigured (e.g. ServiceAccount missing
+			// `get` on InferenceProviderConfig). Do NOT silently skip
+			// validation — that would mask a serious misconfiguration and
+			// disable admission-time enforcement cluster-wide. Surface it
+			// as an InternalError so the apiserver rejects admission with
+			// an actionable diagnostic.
+			allErrs = append(allErrs, field.InternalError(
+				specPath.Child("provider", "name"),
+				fmt.Errorf("cannot verify provider %q: %w", spec.Provider.Name, err),
+			))
+		case err != nil:
+			// Transient API error (timeout, connection refused, etc.). Do not
+			// block admission on infra flakes — log and skip so the controller
+			// can re-validate later.
+			logf.FromContext(ctx).Info(
+				"failed to look up InferenceProviderConfig for webhook validation; skipping provider/engine compatibility check",
+				"provider", spec.Provider.Name,
+				"error", err.Error(),
+			)
+			warnings = append(warnings, fmt.Sprintf(
+				"could not verify provider %q compatibility at admission time (%v); the controller will re-validate during reconciliation",
+				spec.Provider.Name, err,
+			))
+		case providerConfig.Spec.Capabilities != nil:
+			gpuCount := int32(0)
+			if spec.Resources != nil && spec.Resources.GPU != nil {
+				gpuCount = spec.Resources.GPU.Count
+			}
+			for _, ce := range validation.CheckProviderCompatibility(
+				spec.Provider.Name,
+				&providerConfig,
+				nil,
+				spec.Engine.Type,
+				servingMode,
+				gpuCount,
+			) {
+				fp := specPath
+				for _, seg := range ce.FieldPath {
+					fp = fp.Child(seg)
+				}
+				allErrs = append(allErrs, field.Invalid(fp, ce.BadValue, ce.Message))
+			}
 		}
 	}
 
@@ -351,6 +411,66 @@ func (v *ModelDeploymentCustomValidator) validateSpec(obj *airunwayv1alpha1.Mode
 	// Validate storage configuration
 	allErrs = append(allErrs, v.validateStorage(obj)...)
 
+	// Enforce resource ceilings to prevent runaway resource requests at admission time.
+	allErrs = append(allErrs, validateResourceCeilings(spec, specPath)...)
+
+	return warnings, allErrs
+}
+
+// validateResourceCeilings enforces the Max* limits on resource and scaling fields.
+func validateResourceCeilings(spec *airunwayv1alpha1.ModelDeploymentSpec, specPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if spec.Resources != nil {
+		resPath := specPath.Child("resources")
+		if spec.Resources.GPU != nil && spec.Resources.GPU.Count > MaxGPUCount {
+			allErrs = append(allErrs, field.Invalid(
+				resPath.Child("gpu", "count"),
+				spec.Resources.GPU.Count,
+				fmt.Sprintf("exceeds maximum allowed (%d)", MaxGPUCount),
+			))
+		}
+		allErrs = append(allErrs, validateResourceQuantity(spec.Resources.CPU, MaxCPU, resPath.Child("cpu"))...)
+		allErrs = append(allErrs, validateResourceQuantity(spec.Resources.Memory, MaxMemory, resPath.Child("memory"))...)
+	}
+
+	if spec.Scaling != nil {
+		scalingPath := specPath.Child("scaling")
+		if spec.Scaling.Replicas > MaxReplicas {
+			allErrs = append(allErrs, field.Invalid(
+				scalingPath.Child("replicas"),
+				spec.Scaling.Replicas,
+				fmt.Sprintf("exceeds maximum allowed (%d)", MaxReplicas),
+			))
+		}
+		allErrs = append(allErrs, validateComponentCeilings(spec.Scaling.Prefill, scalingPath.Child("prefill"))...)
+		allErrs = append(allErrs, validateComponentCeilings(spec.Scaling.Decode, scalingPath.Child("decode"))...)
+	}
+
+	return allErrs
+}
+
+// validateComponentCeilings enforces ceilings on a prefill/decode component.
+func validateComponentCeilings(comp *airunwayv1alpha1.ComponentScalingSpec, compPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	if comp == nil {
+		return allErrs
+	}
+	if comp.Replicas > MaxReplicas {
+		allErrs = append(allErrs, field.Invalid(
+			compPath.Child("replicas"),
+			comp.Replicas,
+			fmt.Sprintf("exceeds maximum allowed (%d)", MaxReplicas),
+		))
+	}
+	if comp.GPU != nil && comp.GPU.Count > MaxGPUCount {
+		allErrs = append(allErrs, field.Invalid(
+			compPath.Child("gpu", "count"),
+			comp.GPU.Count,
+			fmt.Sprintf("exceeds maximum allowed (%d)", MaxGPUCount),
+		))
+	}
+	allErrs = append(allErrs, validateResourceQuantity(comp.Memory, MaxMemory, compPath.Child("memory"))...)
 	return allErrs
 }
 
@@ -466,7 +586,7 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 				if !exists {
 					continue
 				}
-				if !reflect.DeepEqual(oldVol, newVol) {
+				if !storageVolumeEqual(&oldVol, &newVol) {
 					volPath := storagePath.Index(i)
 					allErrs = append(allErrs, field.Invalid(
 						volPath,
@@ -479,6 +599,42 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 	}
 
 	return allErrs
+}
+
+// storageVolumeEqual compares two StorageVolumes semantically. It uses
+// resource.Quantity.Cmp for Size rather than reflect.DeepEqual, because
+// Quantity carries unexported state (cached string form, format) that can
+// differ between two semantically equivalent values (e.g. "1Gi" vs "1024Mi",
+// or one Quantity that has had String() called and one that hasn't).
+func storageVolumeEqual(a, b *airunwayv1alpha1.StorageVolume) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Name != b.Name ||
+		a.ClaimName != b.ClaimName ||
+		a.MountPath != b.MountPath ||
+		a.Purpose != b.Purpose ||
+		a.ReadOnly != b.ReadOnly ||
+		a.AccessMode != b.AccessMode {
+		return false
+	}
+	// StorageClassName is a *string
+	switch {
+	case a.StorageClassName == nil && b.StorageClassName == nil:
+	case a.StorageClassName == nil || b.StorageClassName == nil:
+		return false
+	case *a.StorageClassName != *b.StorageClassName:
+		return false
+	}
+	// Size is a *resource.Quantity — compare by value, not by DeepEqual.
+	switch {
+	case a.Size == nil && b.Size == nil:
+	case a.Size == nil || b.Size == nil:
+		return false
+	case a.Size.Cmp(*b.Size) != 0:
+		return false
+	}
+	return true
 }
 
 // checkWarnings returns non-fatal warnings for the spec
@@ -829,13 +985,23 @@ func checkSizingOverrideKeys(m map[string]interface{}, fldPath *field.Path) fiel
 func checkForbiddenOverrideKeys(m map[string]interface{}, fldPath *field.Path, forbiddenKeys []string, detailFor func(string) string) field.ErrorList {
 	var allErrs field.ErrorList
 	for key, val := range m {
+		matched := false
 		for _, forbidden := range forbiddenKeys {
 			if key == forbidden {
 				allErrs = append(allErrs, field.Forbidden(
 					fldPath.Child(key),
 					detailFor(key),
 				))
+				matched = true
+				break
 			}
+		}
+		// If this key is itself forbidden, the entire subtree is rejected.
+		// Skip descending into it — otherwise a forbidden key whose value
+		// contains another forbidden key (or the same key nested deeper)
+		// produces redundant sibling errors for an already-rejected path.
+		if matched {
+			continue
 		}
 		allErrs = append(allErrs, checkForbiddenOverrideKeysInValue(val, fldPath.Child(key), forbiddenKeys, detailFor)...)
 	}

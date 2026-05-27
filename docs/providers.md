@@ -6,14 +6,12 @@ When `spec.engine.type` is omitted, the controller auto-selects the engine from 
 
 ### Engine Auto-Selection
 
-The controller selects the engine in two passes:
+The controller selects the engine by scanning per-engine capabilities from all ready `InferenceProviderConfig` resources:
 
-1. **Filter providers** by compatibility with the deployment:
-   - GPU/CPU: GPU deployments need `gpuSupport`, CPU deployments need `cpuSupport`
-   - Serving mode: provider must support the requested mode (aggregated/disaggregated)
-2. **Filter engines** from compatible providers:
-   - CPU deployments skip GPU-requiring engines (`vllm`, `sglang`, `trtllm`)
-   - Remaining engines are ranked by preference: `vllm` > `sglang` > `trtllm` > `llamacpp`
+1. **Filter engines** by per-engine compatibility with the deployment:
+   - GPU/CPU: each engine declares `gpuSupport` and `cpuSupport` independently
+   - Serving mode: each engine declares its supported `servingModes`
+2. **Rank available engines** by preference: `vllm` > `sglang` > `trtllm` > `llamacpp`
 3. **Pick the first available** engine by preference
 
 The selected engine is stored in `status.engine.type` with a reason in `status.engine.selectedReason`.
@@ -47,18 +45,22 @@ The selection reason is recorded in `status.provider.selectedReason` for observa
 
 ### Provider Capability Matrix
 
-| Criteria              | KAITO   | Dynamo        | KubeRay            | llm-d              |
-| --------------------- | ------- | ------------- | ------------------ | ------------------ |
-| CPU inference         | **Yes** | No            | No                 | No                 |
-| GPU inference         | Yes     | **Yes**       | Yes                | Yes                |
-| vLLM engine           | Yes     | **Yes**       | Yes                | Yes                |
-| sglang engine         | No      | **Yes**       | No                 | No                 |
-| trtllm engine         | No      | **Yes**       | No                 | No                 |
-| llamacpp engine       | **Yes** | No            | No                 | No                 |
-| Disaggregated P/D     | No      | **Yes**       | Yes                | Yes                |
-| Self-managed InferencePool | No | **Yes**       | No                 | No                 |
-| Self-managed EPP      | No      | **Yes**       | No                 | No                 |
-| Auto-selection        | Yes     | Yes (default) | No (explicit only) | No (explicit only) |
+Capabilities are declared per-engine in each provider's `InferenceProviderConfig`:
+
+| Criteria            | KAITO   | Dynamo        | KubeRay            | llm-d              |
+| ------------------- | ------- | ------------- | ------------------ | ------------------ |
+| **vllm** GPU        | Yes     | **Yes**       | Yes                | Yes                |
+| **vllm** CPU        | No      | No            | No                 | No                 |
+| **vllm** disagg     | No      | **Yes**       | Yes                | Yes                |
+| **sglang** GPU      | No      | **Yes**       | No                 | No                 |
+| **sglang** disagg   | No      | **Yes**       | No                 | No                 |
+| **trtllm** GPU      | No      | **Yes**       | No                 | No                 |
+| **trtllm** disagg   | No      | No            | No                 | No                 |
+| **llamacpp** GPU    | **Yes** | No            | No                 | No                 |
+| **llamacpp** CPU    | **Yes** | No            | No                 | No                 |
+| Self-managed InferencePool | No | **Yes**  | No                 | No                 |
+| Self-managed EPP    | No      | **Yes**       | No                 | No                 |
+| Auto-selection      | Yes     | Yes (default) | No (explicit only) | No (explicit only) |
 
 ## Provider Abstraction
 

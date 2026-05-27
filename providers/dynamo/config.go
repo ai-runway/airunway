@@ -84,31 +84,53 @@ func NewProviderConfigManager(c client.Client, discoveryClients ...discovery.Dis
 	return manager
 }
 
+// dynamoGatewayCapabilities returns the GatewayCapabilities applied to each
+// engine supported by the Dynamo provider.
+//
+// The Dynamo operator creates the InferencePool as
+// "{DynamoGraphDeployment.metadata.name}-pool" in the same namespace as the
+// DGD. With Dynamo v1.1.0+, the frontendSidecar feature colocates a frontend on
+// each worker pod, making the InferencePool/EPP path viable. No need to bypass
+// to the Frontend Service — requests route through InferencePool directly.
+func dynamoGatewayCapabilities() *airunwayv1alpha1.GatewayCapabilities {
+	return &airunwayv1alpha1.GatewayCapabilities{
+		ManagesInferencePool:     true,
+		InferencePoolNamePattern: "{name}-pool",
+		InferencePoolNamespace:   "{namespace}",
+	}
+}
+
 // GetProviderConfigSpec returns the InferenceProviderConfigSpec for Dynamo
 func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
-			Engines: []airunwayv1alpha1.EngineType{
-				airunwayv1alpha1.EngineTypeVLLM,
-				airunwayv1alpha1.EngineTypeSGLang,
-				airunwayv1alpha1.EngineTypeTRTLLM,
-			},
-			ServingModes: []airunwayv1alpha1.ServingMode{
-				airunwayv1alpha1.ServingModeAggregated,
-				airunwayv1alpha1.ServingModeDisaggregated,
-			},
-			CPUSupport: false,
-			GPUSupport: true,
-			Gateway: &airunwayv1alpha1.GatewayCapabilities{
-				// The Dynamo operator creates the InferencePool as
-				// "{DynamoGraphDeployment.metadata.name}-pool" in the same
-				// namespace as the DGD.
-				InferencePoolNamePattern: "{name}-pool",
-				InferencePoolNamespace:   "{namespace}",
-				// With Dynamo v1.1.0+, the frontendSidecar feature colocates a
-				// frontend on each worker pod, making the InferencePool/EPP
-				// path viable. No need to bypass to the Frontend
-				// Service. Requests route through InferencePool directly.
+			Engines: []airunwayv1alpha1.EngineCapability{
+				{
+					Name: airunwayv1alpha1.EngineTypeVLLM,
+					ServingModes: []airunwayv1alpha1.ServingMode{
+						airunwayv1alpha1.ServingModeAggregated,
+						airunwayv1alpha1.ServingModeDisaggregated,
+					},
+					GPUSupport: true,
+					Gateway:    dynamoGatewayCapabilities(),
+				},
+				{
+					Name: airunwayv1alpha1.EngineTypeSGLang,
+					ServingModes: []airunwayv1alpha1.ServingMode{
+						airunwayv1alpha1.ServingModeAggregated,
+						airunwayv1alpha1.ServingModeDisaggregated,
+					},
+					GPUSupport: true,
+					Gateway:    dynamoGatewayCapabilities(),
+				},
+				{
+					Name: airunwayv1alpha1.EngineTypeTRTLLM,
+					ServingModes: []airunwayv1alpha1.ServingMode{
+						airunwayv1alpha1.ServingModeAggregated,
+					},
+					GPUSupport: true,
+					Gateway:    dynamoGatewayCapabilities(),
+				},
 			},
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{

@@ -353,6 +353,24 @@ func main() {
 		close(setupFinished)
 	}
 
+	// Migrate legacy InferenceProviderConfig objects from the flat capabilities
+	// schema to the per-engine EngineCapability format. Registered as a
+	// leader-elected manager.Runnable so that with --leader-elect and multiple
+	// replicas only the leader performs the rewrites (followers would otherwise
+	// race the leader's Update and crashloop on 409 Conflict).
+	//
+	// Registered before the reconciler so it is first in the manager's
+	// runnable order — controller-runtime starts leader-elected runnables in
+	// registration order, so the reconciler will not start reading typed
+	// InferenceProviderConfig objects until the migration has had a turn.
+	if err := mgr.Add(&controller.LegacyProviderConfigMigrator{
+		Config: mgr.GetConfig(),
+		Scheme: scheme,
+	}); err != nil {
+		setupLog.Error(err, "unable to register legacy provider config migration")
+		os.Exit(1)
+	}
+
 	// Create gateway detector
 	dc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {

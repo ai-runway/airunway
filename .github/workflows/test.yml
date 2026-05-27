@@ -85,6 +85,39 @@ jobs:
             exit 1
           fi
 
+  provider-go-checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [dynamo, kaito, kuberay, llmd]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.25"
+          cache-dependency-path: providers/${{ matrix.provider }}/go.sum
+
+      # `providers/dynamo/Makefile`'s `build` target depends on
+      # `verify-versions`, which regenerates `shared/types/versions.generated.ts`
+      # via bun. Install bun on every matrix job (the other three providers
+      # don't need it but skipping conditionally would be more brittle than
+      # the ~3s install).
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: make build
+        run: make -C providers/${{ matrix.provider }} build
+
+      - name: make test
+        run: make -C providers/${{ matrix.provider }} test
+
   controller-unit-tests:
     runs-on: ubuntu-latest
 

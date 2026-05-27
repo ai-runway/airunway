@@ -42,9 +42,14 @@ func TestGetGatewayCapabilities_ProviderWithGateway(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "dynamo"},
 		Spec: airunwayv1alpha1.InferenceProviderConfigSpec{
 			Capabilities: &airunwayv1alpha1.ProviderCapabilities{
-				Gateway: &airunwayv1alpha1.GatewayCapabilities{
-					InferencePoolNamePattern: "{namespace}-{name}-pool",
-					InferencePoolNamespace:   "dynamo-system",
+				Engines: []airunwayv1alpha1.EngineCapability{
+					{
+						Name: airunwayv1alpha1.EngineTypeVLLM,
+						Gateway: &airunwayv1alpha1.GatewayCapabilities{
+							InferencePoolNamePattern: "{namespace}-{name}-pool",
+							InferencePoolNamespace:   "dynamo-system",
+						},
+					},
 				},
 			},
 		},
@@ -53,7 +58,7 @@ func TestGetGatewayCapabilities_ProviderWithGateway(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ipc).Build()
 	resolver := NewInferenceProviderConfigResolver(c)
 
-	caps := resolver.GetGatewayCapabilities(context.Background(), "dynamo")
+	caps := resolver.GetGatewayCapabilities(context.Background(), "dynamo", airunwayv1alpha1.EngineTypeVLLM)
 	if caps == nil {
 		t.Fatal("expected gateway capabilities, got nil")
 	}
@@ -70,7 +75,7 @@ func TestGetGatewayCapabilities_ProviderNotFound(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	resolver := NewInferenceProviderConfigResolver(c)
 
-	caps := resolver.GetGatewayCapabilities(context.Background(), "nonexistent")
+	caps := resolver.GetGatewayCapabilities(context.Background(), "nonexistent", airunwayv1alpha1.EngineTypeVLLM)
 	if caps != nil {
 		t.Errorf("expected nil capabilities for missing provider, got %+v", caps)
 	}
@@ -86,7 +91,7 @@ func TestGetGatewayCapabilities_ProviderWithNilCapabilities(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ipc).Build()
 	resolver := NewInferenceProviderConfigResolver(c)
 
-	caps := resolver.GetGatewayCapabilities(context.Background(), "kaito")
+	caps := resolver.GetGatewayCapabilities(context.Background(), "kaito", airunwayv1alpha1.EngineTypeVLLM)
 	if caps != nil {
 		t.Errorf("expected nil capabilities for provider without capabilities, got %+v", caps)
 	}
@@ -98,7 +103,9 @@ func TestGetGatewayCapabilities_ProviderWithNoGateway(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "kaito"},
 		Spec: airunwayv1alpha1.InferenceProviderConfigSpec{
 			Capabilities: &airunwayv1alpha1.ProviderCapabilities{
-				GPUSupport: true,
+				Engines: []airunwayv1alpha1.EngineCapability{
+					{Name: airunwayv1alpha1.EngineTypeVLLM, GPUSupport: true},
+				},
 			},
 		},
 	}
@@ -106,8 +113,37 @@ func TestGetGatewayCapabilities_ProviderWithNoGateway(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ipc).Build()
 	resolver := NewInferenceProviderConfigResolver(c)
 
-	caps := resolver.GetGatewayCapabilities(context.Background(), "kaito")
+	caps := resolver.GetGatewayCapabilities(context.Background(), "kaito", airunwayv1alpha1.EngineTypeVLLM)
 	if caps != nil {
 		t.Errorf("expected nil capabilities for provider without gateway config, got %+v", caps)
+	}
+}
+
+func TestGetGatewayCapabilities_EngineNotDeclared(t *testing.T) {
+	scheme := newTestScheme()
+	ipc := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "dynamo"},
+		Spec: airunwayv1alpha1.InferenceProviderConfigSpec{
+			Capabilities: &airunwayv1alpha1.ProviderCapabilities{
+				Engines: []airunwayv1alpha1.EngineCapability{
+					{
+						Name: airunwayv1alpha1.EngineTypeVLLM,
+						Gateway: &airunwayv1alpha1.GatewayCapabilities{
+							InferencePoolNamePattern: "{name}-pool",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ipc).Build()
+	resolver := NewInferenceProviderConfigResolver(c)
+
+	// Asking for a different engine should return nil even though the provider
+	// declares gateway capabilities for vllm.
+	caps := resolver.GetGatewayCapabilities(context.Background(), "dynamo", airunwayv1alpha1.EngineTypeSGLang)
+	if caps != nil {
+		t.Errorf("expected nil capabilities for engine not declared by provider, got %+v", caps)
 	}
 }

@@ -5,10 +5,20 @@ PUSH ?= false
 PUSH_ENABLED := $(filter true TRUE 1 yes YES on ON,$(PUSH))
 IMAGE_OUTPUT_FLAG := $(if $(PUSH_ENABLED),--push,--load)
 
-.PHONY: build docker-build deploy generate-deploy-manifests
+.PHONY: build vet test docker-build deploy generate-deploy-manifests
+
+## Run go vet against code
+vet:
+	go vet ./...
+	@echo "✅ KAITO provider vet passed"
+
+## Run unit tests
+test: vet
+	go test ./...
+	@echo "✅ KAITO provider unit tests passed"
 
 ## Build the provider binary
-build:
+build: vet
 	go build -o bin/provider ./cmd/main.go
 	@echo "✅ KAITO provider built"
 

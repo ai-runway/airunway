@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { HTTPException } from 'hono/http-exception';
@@ -44,9 +46,66 @@ const deploymentParamsSchema = z.object({
   name: resourceNameSchema,
 });
 
+const namespacedDeploymentParamsSchema = z.object({
+  namespace: namespaceSchema,
+  name: resourceNameSchema,
+});
+
+const chatMessageSchema = z.object({
+  role: z.string().min(1),
+  content: z.unknown(),
+}).passthrough();
+
+const chatCompletionSchema = z.object({
+  messages: z.array(chatMessageSchema).min(1),
+  model: z.string().min(1).optional(),
+  temperature: z.number().optional(),
+  max_tokens: z.number().int().positive().optional(),
+  max_completion_tokens: z.number().int().positive().optional(),
+  top_p: z.number().optional(),
+  n: z.number().int().positive().optional(),
+  stop: z.union([z.string(), z.array(z.string())]).optional(),
+  presence_penalty: z.number().optional(),
+  frequency_penalty: z.number().optional(),
+  user: z.string().optional(),
+  tools: z.unknown().optional(),
+  tool_choice: z.unknown().optional(),
+  response_format: z.unknown().optional(),
+  seed: z.number().int().optional(),
+}).passthrough();
+
 const DNS_LABEL_REGEX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
 const SYSTEM_PATHS = ['/dev', '/proc', '/sys', '/etc', '/var/run'];
+const DEFAULT_FRONTEND_SERVICE_PORT = 8000;
+const CHAT_MODEL_DISCOVERY_TIMEOUT_MS = 1000;
+const CHAT_MODEL_DISCOVERY_ACCEPT_HEADER = 'application/json';
+const UPSTREAM_CHAT_ERROR_DETAILS_MAX_LENGTH = 1000;
+const UPSTREAM_CHAT_ERROR_STATUS_CODES = [
+  400,
+  401,
+  403,
+  404,
+  408,
+  409,
+  410,
+  413,
+  415,
+  422,
+  429,
+  500,
+  501,
+  502,
+  503,
+  504,
+] as const satisfies readonly ContentfulStatusCode[];
+const CHAT_STREAM_HEADERS = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache, no-transform',
+  'Connection': 'keep-alive',
+  'X-Accel-Buffering': 'no',
+  'Content-Encoding': 'identity',
+};
 
 // Matches Kubernetes resource.Quantity: a valid decimal number with optional
 // binary (Ki, Mi, Gi, Ti, Pi, Ei) or decimal (n, u, m, k, M, G, T, P, E) suffix.
@@ -292,6 +351,498 @@ const createDeploymentSchema = z.object({
   }
 });
 
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getNestedStringValue(source: unknown, path: string[]): string | undefined {
+  let current = source;
+  for (const segment of path) {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+
+  return typeof current === 'string' && current.trim() ? current : undefined;
+}
+
+function truncateErrorMessage(message: string, maxLength = 500): string {
+  return message.length > maxLength ? `${message.slice(0, maxLength)}…` : message;
+}
+
+function toUpstreamChatErrorStatusCode(statusCode: number): ContentfulStatusCode {
+  return UPSTREAM_CHAT_ERROR_STATUS_CODES.includes(
+    statusCode as (typeof UPSTREAM_CHAT_ERROR_STATUS_CODES)[number]
+  )
+    ? statusCode as ContentfulStatusCode
+    : 502;
+}
+
+function sanitizeUpstreamErrorDetails(details: string): string | undefined {
+  const normalized = details
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
+
+  if (!normalized || normalized.startsWith('<')) {
+    return undefined;
+  }
+
+  return normalized.length > UPSTREAM_CHAT_ERROR_DETAILS_MAX_LENGTH
+    ? `${normalized.slice(0, UPSTREAM_CHAT_ERROR_DETAILS_MAX_LENGTH - 1)}…`
+    : normalized;
+}
+
+async function readUpstreamErrorDetails(
+  response: Response,
+  maxBytes = UPSTREAM_CHAT_ERROR_DETAILS_MAX_LENGTH + 1
+): Promise<string> {
+  if (!response.body) {
+    return '';
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let bytesRead = 0;
+  let reachedLimit = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+
+      const remaining = maxBytes - bytesRead;
+      if (remaining <= 0) {
+        reachedLimit = true;
+        break;
+      }
+
+      const chunk = value.byteLength > remaining
+        ? value.slice(0, remaining)
+        : value;
+      bytesRead += chunk.byteLength;
+      chunks.push(decoder.decode(chunk, { stream: true }));
+
+      if (value.byteLength >= remaining) {
+        reachedLimit = true;
+        break;
+      }
+    }
+
+    chunks.push(decoder.decode());
+    return chunks.join('');
+  } finally {
+    if (reachedLimit) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+}
+
+function getUpstreamChatErrorMessage(
+  statusCode: number,
+  details: string,
+  deploymentName: string
+): string {
+  const status = parseJsonObject(details);
+  const statusMessage = getNestedStringValue(status, ['message']);
+  const openAiErrorMessage = getNestedStringValue(status, ['error', 'message']);
+  const detailMessage = getNestedStringValue(status, ['detail']);
+  const reason = getNestedStringValue(status, ['reason']);
+  const detailObject = status?.details && typeof status.details === 'object'
+    ? status.details as Record<string, unknown>
+    : undefined;
+  const kind = getNestedStringValue(detailObject, ['kind']);
+
+  if (statusCode === 404 && reason === 'NotFound' && kind === 'services') {
+    return `The model endpoint for '${deploymentName}' is not available yet. The deployment may still be starting, or its endpoint may have changed. Try again in a moment or check the logs.`;
+  }
+
+  const parsedMessage = openAiErrorMessage || statusMessage || detailMessage;
+  if (parsedMessage) {
+    return truncateErrorMessage(parsedMessage);
+  }
+
+  const plainDetails = details.trim();
+  if (plainDetails && !plainDetails.startsWith('<')) {
+    return truncateErrorMessage(plainDetails);
+  }
+
+  return `The model did not accept the chat request (HTTP ${statusCode}). Try again in a moment.`;
+}
+
+function isMissingServiceProxyResponse(statusCode: number, details: string): boolean {
+  const status = parseJsonObject(details);
+  const reason = typeof status?.reason === 'string' ? status.reason : undefined;
+  const detailObject = status?.details && typeof status.details === 'object'
+    ? status.details as Record<string, unknown>
+    : undefined;
+  const kind = typeof detailObject?.kind === 'string' ? detailObject.kind : undefined;
+
+  return statusCode === 404 && reason === 'NotFound' && kind === 'services';
+}
+
+function buildGatewayChatUrl(endpoint: string): string {
+  const withScheme = endpoint.includes('://') ? endpoint : `http://${endpoint}`;
+  const baseUrl = new URL(withScheme);
+  const normalizedPath = baseUrl.pathname.replace(/\/+$/, '');
+  baseUrl.pathname = normalizedPath.endsWith('/v1')
+    ? `${normalizedPath}/chat/completions`
+    : `${normalizedPath}/v1/chat/completions`;
+  baseUrl.search = '';
+  baseUrl.hash = '';
+  return baseUrl.toString();
+}
+
+async function proxyGatewayChatPostStream(
+  endpoint: string,
+  body: unknown,
+  modelName: string,
+  signal?: AbortSignal
+): Promise<Response> {
+  return fetch(buildGatewayChatUrl(endpoint), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      'X-Gateway-Model-Name': modelName,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+function extractFirstModelId(modelsResponse: unknown): string | undefined {
+  if (!modelsResponse || typeof modelsResponse !== 'object') {
+    return undefined;
+  }
+
+  const data = (modelsResponse as { data?: unknown }).data;
+  if (!Array.isArray(data) || data.length === 0) {
+    return undefined;
+  }
+
+  const firstModel = data[0];
+  if (!firstModel || typeof firstModel !== 'object') {
+    return undefined;
+  }
+
+  const id = (firstModel as { id?: unknown }).id;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
+function isKaitoLlamaCppDeployment(deployment: DeploymentStatus): boolean {
+  return deployment.provider === 'kaito' && deployment.engine === 'llamacpp';
+}
+
+// Returns the name the underlying model server is serving on its /v1/* API,
+// or undefined when we should ask the server (or fall back to modelId).
+// Excludes deployment.gateway.modelName on purpose — that's the HTTPRoute alias
+// used by the gateway and is unrelated to what the frontend service responds to.
+function getServedChatModelName(deployment: DeploymentStatus): string | undefined {
+  if (deployment.servedModelName && !isKaitoLlamaCppDeployment(deployment)) {
+    return deployment.servedModelName;
+  }
+  return undefined;
+}
+
+function createRequestScopedTimeoutSignal(
+  requestSignal: AbortSignal,
+  timeoutMs: number
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  const abort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  };
+
+  if (requestSignal.aborted) {
+    abort();
+  } else {
+    requestSignal.addEventListener('abort', abort, { once: true });
+    timeout = setTimeout(abort, timeoutMs);
+
+    if (requestSignal.aborted) {
+      abort();
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      requestSignal.removeEventListener('abort', abort);
+    },
+  };
+}
+
+async function discoverUpstreamChatModel(
+  deployment: DeploymentStatus,
+  serviceName: string,
+  namespace: string,
+  servicePort: number,
+  requestSignal: AbortSignal,
+  userToken?: string
+): Promise<string | undefined> {
+  const scopedSignal = createRequestScopedTimeoutSignal(
+    requestSignal,
+    CHAT_MODEL_DISCOVERY_TIMEOUT_MS
+  );
+
+  try {
+    const modelsText = await kubernetesService.proxyServiceGet(
+      serviceName,
+      namespace,
+      servicePort,
+      'v1/models',
+      { accept: CHAT_MODEL_DISCOVERY_ACCEPT_HEADER, signal: scopedSignal.signal, userToken }
+    );
+    return extractFirstModelId(JSON.parse(modelsText));
+  } catch (error) {
+    logger.debug(
+      { error, deploymentName: deployment.name, namespace, serviceName, servicePort },
+      'Could not resolve model from upstream /v1/models; falling back to deployment model ID'
+    );
+    return undefined;
+  } finally {
+    scopedSignal.cleanup();
+  }
+}
+
+async function resolveServedChatModel(
+  deployment: DeploymentStatus,
+  serviceName: string,
+  namespace: string,
+  servicePort: number,
+  requestSignal: AbortSignal,
+  userToken?: string
+): Promise<string> {
+  const served = getServedChatModelName(deployment);
+  if (served) {
+    return served;
+  }
+
+  return (await discoverUpstreamChatModel(
+    deployment,
+    serviceName,
+    namespace,
+    servicePort,
+    requestSignal,
+    userToken
+  )) || deployment.modelId;
+}
+
+async function resolveDirectChatModel(
+  deployment: DeploymentStatus,
+  serviceName: string,
+  namespace: string,
+  servicePort: number,
+  requestSignal: AbortSignal,
+  userToken?: string,
+  requestedModel?: string
+): Promise<string> {
+  if (requestedModel) {
+    return requestedModel;
+  }
+
+  // Direct service-proxy path: ignore deployment.gateway.modelName (that's the
+  // HTTPRoute alias the gateway routes by; the frontend service doesn't know it
+  // and would return a model-not-found error).
+  return resolveServedChatModel(
+    deployment,
+    serviceName,
+    namespace,
+    servicePort,
+    requestSignal,
+    userToken
+  );
+}
+
+async function resolveGatewayChatModel(
+  deployment: DeploymentStatus,
+  serviceName: string,
+  namespace: string,
+  servicePort: number,
+  requestSignal: AbortSignal,
+  userToken?: string
+): Promise<string> {
+  // Gateway path: the HTTPRoute alias is exactly what the gateway routes by.
+  if (deployment.gateway?.modelName) {
+    return deployment.gateway.modelName;
+  }
+
+  return resolveServedChatModel(
+    deployment,
+    serviceName,
+    namespace,
+    servicePort,
+    requestSignal,
+    userToken
+  );
+}
+
+async function handleDeploymentChat(
+  c: Context<AppEnv>,
+  name: string,
+  body: z.infer<typeof chatCompletionSchema>,
+  namespace?: string
+) {
+  const resolvedNamespace = namespace || (await configService.getDefaultNamespace());
+  const userToken = c.get('token') as string | undefined;
+  const signal = c.req.raw.signal;
+
+  const deployment = await kubernetesService.getDeployment(name, resolvedNamespace, userToken);
+  if (!deployment) {
+    throw new HTTPException(404, { message: 'Deployment not found' });
+  }
+
+  if (deployment.phase !== 'Running') {
+    throw new HTTPException(409, {
+      message: `Deployment '${name}' is not running (current phase: ${deployment.phase})`,
+    });
+  }
+
+  const frontendService = parseFrontendService(deployment.frontendService);
+  if (!frontendService?.serviceName) {
+    throw new HTTPException(409, {
+      message: `Deployment '${name}' does not expose a frontend service for chat`,
+    });
+  }
+
+  const frontendServicePort = frontendService.servicePort || DEFAULT_FRONTEND_SERVICE_PORT;
+
+  const directModel = await resolveDirectChatModel(
+    deployment,
+    frontendService.serviceName,
+    resolvedNamespace,
+    frontendServicePort,
+    signal,
+    userToken,
+    body.model
+  );
+
+  const upstreamResponse = await kubernetesService.proxyServicePostStream(
+    frontendService.serviceName,
+    resolvedNamespace,
+    frontendServicePort,
+    'v1/chat/completions',
+    {
+      ...body,
+      model: directModel,
+      stream: true,
+    },
+    {},
+    { signal, userToken }
+  );
+
+  if (!upstreamResponse.ok) {
+    const details = await readUpstreamErrorDetails(upstreamResponse);
+
+    if (deployment.gateway?.endpoint && isMissingServiceProxyResponse(upstreamResponse.status, details)) {
+      const gatewayModel = await resolveGatewayChatModel(
+        deployment,
+        frontendService.serviceName,
+        resolvedNamespace,
+        frontendServicePort,
+        signal,
+        userToken
+      );
+      const gatewayResponse = await proxyGatewayChatPostStream(
+        deployment.gateway.endpoint,
+        {
+          ...body,
+          model: gatewayModel,
+          stream: true,
+        },
+        gatewayModel,
+        signal
+      );
+
+      if (gatewayResponse.ok) {
+        if (!gatewayResponse.body) {
+          return c.json(
+            {
+              error: {
+                message: 'Gateway chat response did not include a stream body',
+                statusCode: 502,
+              },
+            },
+            502
+          );
+        }
+
+        return new Response(gatewayResponse.body, {
+          status: 200,
+          headers: CHAT_STREAM_HEADERS,
+        });
+      }
+
+      const gatewayDetails = await readUpstreamErrorDetails(gatewayResponse);
+      const statusCode = toUpstreamChatErrorStatusCode(gatewayResponse.status);
+      const sanitizedDetails = sanitizeUpstreamErrorDetails(gatewayDetails);
+
+      return c.json(
+        {
+          error: {
+            message: getUpstreamChatErrorMessage(gatewayResponse.status, gatewayDetails, name),
+            statusCode,
+            ...(sanitizedDetails ? { details: sanitizedDetails } : {}),
+          },
+        },
+        statusCode
+      );
+    }
+
+    const statusCode = toUpstreamChatErrorStatusCode(upstreamResponse.status);
+    const sanitizedDetails = sanitizeUpstreamErrorDetails(details);
+
+    return c.json(
+      {
+        error: {
+          message: getUpstreamChatErrorMessage(upstreamResponse.status, details, name),
+          statusCode,
+          ...(sanitizedDetails ? { details: sanitizedDetails } : {}),
+        },
+      },
+      statusCode
+    );
+  }
+
+  if (!upstreamResponse.body) {
+    return c.json(
+      {
+        error: {
+          message: 'Upstream chat completion response did not include a stream body',
+          statusCode: 502,
+        },
+      },
+      502
+    );
+  }
+
+  return new Response(upstreamResponse.body, {
+    status: 200,
+    headers: CHAT_STREAM_HEADERS,
+  });
+}
+
 function resolveDeploymentImages(config: DeploymentConfig): DeploymentConfig {
   if (config.provider !== 'kaito') {
     return config;
@@ -473,6 +1024,26 @@ const deployments = new Hono<AppEnv>()
       primaryResource: { kind: 'ModelDeployment', apiVersion: 'airunway.ai/v1alpha1' },
     });
   })
+  .post(
+    '/:namespace/:name/chat',
+    zValidator('param', namespacedDeploymentParamsSchema),
+    zValidator('json', chatCompletionSchema),
+    async (c) => {
+      const { namespace, name } = c.req.valid('param');
+      return handleDeploymentChat(c, name, c.req.valid('json'), namespace);
+    }
+  )
+  .post(
+    '/:name/chat',
+    zValidator('param', deploymentParamsSchema),
+    zValidator('query', deploymentQuerySchema),
+    zValidator('json', chatCompletionSchema),
+    async (c) => {
+      const { name } = c.req.valid('param');
+      const { namespace } = c.req.valid('query');
+      return handleDeploymentChat(c, name, c.req.valid('json'), namespace);
+    }
+  )
   // List PVCs in a namespace (for storage volume selection)
   // Use a reserved segment to avoid conflicting with deployment names like "pvcs".
   .get('/-/pvcs', zValidator('query', z.object({ namespace: namespaceSchema })), async (c) => {

@@ -363,6 +363,13 @@ var _ = Describe("Manager", Ordered, func() {
 				"--ignore-not-found", "-n", "default")
 			_, _ = utils.Run(cmd)
 
+			By("cleaning up per-engine capability test ModelDeployments")
+			for _, name := range []string{"e2e-vllm-no-gpu", "e2e-llamacpp-no-gpu"} {
+				cmd = exec.Command("kubectl", "delete", "modeldeployment", name,
+					"--ignore-not-found", "-n", "default")
+				_, _ = utils.Run(cmd)
+			}
+
 			if portForwardCmd != nil && portForwardCmd.Process != nil {
 				_ = portForwardCmd.Process.Kill()
 			}
@@ -382,6 +389,152 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(Equal("true"), "KAITO provider should be ready")
 			}
 			Eventually(verifyProvider, 2*time.Minute, time.Second).Should(Succeed())
+		})
+
+		It("should have per-engine capabilities in KAITO provider config", func() {
+			By("verifying engines are stored as objects with per-engine fields")
+			cmd := exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.engines[*].name}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("vllm"), "KAITO should list vllm engine")
+			Expect(output).To(ContainSubstring("llamacpp"), "KAITO should list llamacpp engine")
+
+			By("verifying vllm engine has GPU support but not CPU support")
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.engines[?(@.name=='vllm')].gpuSupport}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("true"), "vllm engine should have GPU support")
+
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.engines[?(@.name=='vllm')].cpuSupport}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			// cpuSupport is omitempty and false, so it should be empty or not present
+			Expect(output).To(BeEmpty(), "vllm engine should NOT have CPU support")
+
+			By("verifying llamacpp engine has both GPU and CPU support")
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.engines[?(@.name=='llamacpp')].gpuSupport}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("true"), "llamacpp engine should have GPU support")
+
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.engines[?(@.name=='llamacpp')].cpuSupport}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("true"), "llamacpp engine should have CPU support")
+
+			By("verifying per-engine serving modes are set")
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.engines[?(@.name=='vllm')].servingModes}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("aggregated"), "vllm engine should support aggregated mode")
+
+			By("verifying top-level servingModes, cpuSupport, gpuSupport are absent (per-engine only)")
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.servingModes}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(BeEmpty(), "top-level servingModes should not exist")
+
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.cpuSupport}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(BeEmpty(), "top-level cpuSupport should not exist")
+
+			cmd = exec.Command("kubectl", "get", "inferenceproviderconfig", "kaito",
+				"-o", "jsonpath={.spec.capabilities.gpuSupport}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(BeEmpty(), "top-level gpuSupport should not exist")
+		})
+
+		It("should reject vllm engine without GPU using per-engine capabilities", func() {
+			By("creating a ModelDeployment with vllm engine but no GPU")
+			vllmNoGPUYAML := `apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: e2e-vllm-no-gpu
+  namespace: default
+spec:
+  model:
+    source: custom
+  engine:
+    type: vllm
+  resources:
+    cpu: "4"
+  image: "ghcr.io/kaito-project/aikit/llama3.2:1b"`
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(vllmNoGPUYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply vllm-no-gpu ModelDeployment")
+
+			By("verifying the controller rejects vllm without GPU via data-driven validation")
+			verifyFailed := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "modeldeployment", "e2e-vllm-no-gpu",
+					"-n", "default", "-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Failed"),
+					fmt.Sprintf("ModelDeployment phase is %q, expected Failed", output))
+			}
+			Eventually(verifyFailed, 30*time.Second, time.Second).Should(Succeed())
+
+			By("verifying the failure message mentions GPU requirement")
+			cmd = exec.Command("kubectl", "get", "modeldeployment", "e2e-vllm-no-gpu",
+				"-n", "default", "-o", "jsonpath={.status.message}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("requires GPU"),
+				"Failure message should mention GPU requirement")
+		})
+
+		It("should auto-select llamacpp for CPU-only deployment via per-engine capabilities", func() {
+			By("creating a CPU-only ModelDeployment without specifying engine")
+			cpuOnlyYAML := `apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: e2e-llamacpp-no-gpu
+  namespace: default
+spec:
+  model:
+    source: custom
+  resources:
+    cpu: "4"
+  image: "ghcr.io/kaito-project/aikit/llama3.2:1b"`
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(cpuOnlyYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply CPU-only ModelDeployment")
+
+			By("verifying engine auto-selected to llamacpp (the only CPU-capable engine)")
+			verifyEngine := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "modeldeployment", "e2e-llamacpp-no-gpu",
+					"-n", "default", "-o", "jsonpath={.status.engine.type}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("llamacpp"),
+					fmt.Sprintf("Expected engine llamacpp (CPU-capable), got %q", output))
+			}
+			Eventually(verifyEngine, 30*time.Second, time.Second).Should(Succeed())
+
+			By("verifying EngineSelected condition mentions auto-selection")
+			verifyCondition := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "modeldeployment", "e2e-llamacpp-no-gpu",
+					"-n", "default", "-o",
+					"jsonpath={.status.conditions[?(@.type=='EngineSelected')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"), "EngineSelected condition should be True")
+			}
+			Eventually(verifyCondition, 30*time.Second, time.Second).Should(Succeed())
 		})
 
 		It("should create a CPU-only ModelDeployment and reach Running phase", func() {

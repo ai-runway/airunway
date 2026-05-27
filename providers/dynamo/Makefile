@@ -14,7 +14,7 @@ export
 # applies when bypassing this Makefile (e.g. `go run`, `go test`).
 LDFLAGS := -X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=$(DYNAMO_VERSION)
 
-.PHONY: build docker-build deploy generate-deploy-manifests setup-dynamo cleanup-dynamo test-e2e verify-versions
+.PHONY: build vet test docker-build deploy generate-deploy-manifests setup-dynamo cleanup-dynamo test-e2e verify-versions
 
 ## Verify upstream versions are in sync (delegates to root Makefile).
 verify-versions:
@@ -22,8 +22,18 @@ ifneq ($(VERIFIED_VERSIONS),1)
 	@$(MAKE) -C ../.. verify-versions
 endif
 
+## Run go vet against code
+vet:
+	go vet ./...
+	@echo "✅ Dynamo provider vet passed"
+
+## Run unit tests
+test: vet
+	go test ./...
+	@echo "✅ Dynamo provider unit tests passed"
+
 ## Build the provider binary
-build: verify-versions
+build: verify-versions vet
 	go build -ldflags="$(LDFLAGS)" -o bin/provider ./cmd/main.go
 	@echo "✅ Dynamo provider built"
 

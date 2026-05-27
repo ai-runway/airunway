@@ -30,29 +30,67 @@ func TestGetProviderConfigSpec(t *testing.T) {
 		t.Fatalf("expected %d engines, got %d", len(expectedEngines), len(spec.Capabilities.Engines))
 	}
 
-	if len(spec.Capabilities.ServingModes) != 2 {
-		t.Fatalf("expected 2 serving modes, got %d", len(spec.Capabilities.ServingModes))
+	// Verify per-engine capabilities
+	vllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeVLLM)
+	if vllmCap == nil {
+		t.Fatal("expected vllm engine capability")
+	}
+	if !vllmCap.GPUSupport {
+		t.Error("expected vllm GPU support to be true")
+	}
+	if vllmCap.CPUSupport {
+		t.Error("expected vllm CPU support to be false")
+	}
+	if len(vllmCap.ServingModes) != 2 {
+		t.Fatalf("expected vllm to support 2 serving modes, got %d", len(vllmCap.ServingModes))
 	}
 
-	if spec.Capabilities.CPUSupport {
-		t.Error("expected CPU support to be false")
+	sglangCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeSGLang)
+	if sglangCap == nil {
+		t.Fatal("expected sglang engine capability")
 	}
-	if !spec.Capabilities.GPUSupport {
-		t.Error("expected GPU support to be true")
+	if !sglangCap.GPUSupport {
+		t.Error("expected sglang GPU support to be true")
+	}
+	if len(sglangCap.ServingModes) != 2 {
+		t.Fatalf("expected sglang to support 2 serving modes, got %d", len(sglangCap.ServingModes))
+	}
+
+	trtllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeTRTLLM)
+	if trtllmCap == nil {
+		t.Fatal("expected trtllm engine capability")
+	}
+	if !trtllmCap.GPUSupport {
+		t.Error("expected trtllm GPU support to be true")
+	}
+	if len(trtllmCap.ServingModes) != 1 || trtllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
+		t.Errorf("expected trtllm to support only aggregated serving mode")
 	}
 
 	if len(spec.SelectionRules) != 4 {
 		t.Fatalf("expected 4 selection rules, got %d", len(spec.SelectionRules))
 	}
 
-	if spec.Capabilities.Gateway == nil {
-		t.Fatal("gateway capabilities should not be nil")
-	}
-	if spec.Capabilities.Gateway.InferencePoolNamePattern != "{name}-pool" {
-		t.Errorf("expected inference pool name pattern to be '{name}-pool', got %s", spec.Capabilities.Gateway.InferencePoolNamePattern)
-	}
-	if spec.Capabilities.Gateway.InferencePoolNamespace != "{namespace}" {
-		t.Errorf("expected inference pool namespace to be '{namespace}', got %s", spec.Capabilities.Gateway.InferencePoolNamespace)
+	// Every supported engine should advertise the same Dynamo InferencePool
+	// gateway capabilities, since Dynamo routes through the operator-managed
+	// pool regardless of which engine backs the deployment.
+	for _, engineType := range expectedEngines {
+		engineCap := spec.Capabilities.GetEngineCapability(engineType)
+		if engineCap == nil {
+			t.Fatalf("expected engine capability for %s", engineType)
+		}
+		if engineCap.Gateway == nil {
+			t.Fatalf("expected gateway capabilities for engine %s to not be nil", engineType)
+		}
+		if !engineCap.Gateway.ManagesInferencePool {
+			t.Errorf("engine %s: expected ManagesInferencePool=true", engineType)
+		}
+		if engineCap.Gateway.InferencePoolNamePattern != "{name}-pool" {
+			t.Errorf("engine %s: expected inference pool name pattern '{name}-pool', got %s", engineType, engineCap.Gateway.InferencePoolNamePattern)
+		}
+		if engineCap.Gateway.InferencePoolNamespace != "{namespace}" {
+			t.Errorf("engine %s: expected inference pool namespace '{namespace}', got %s", engineType, engineCap.Gateway.InferencePoolNamespace)
+		}
 	}
 }
 

@@ -39,6 +39,7 @@ rules:
   - services/proxy
   verbs:
   - get
+  - create
 - apiGroups:
   - ""
   resources:

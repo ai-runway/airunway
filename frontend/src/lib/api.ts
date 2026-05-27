@@ -7,6 +7,7 @@ console.log('[API] API_BASE:', API_BASE || '(same origin)');
 
 // Auth token storage key
 const AUTH_TOKEN_KEY = 'airunway_auth_token';
+const AIRUNWAY_AUTH_ERROR_HEADER = 'X-Airunway-Auth-Error';
 
 /**
  * Get the stored auth token
@@ -24,6 +25,11 @@ function getAuthToken(): string | null {
  */
 function dispatchUnauthorized(): void {
   window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+}
+
+function isAuthenticationError(response: Response): boolean {
+  return response.status === 401 &&
+    response.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)?.toLowerCase() === 'true';
 }
 
 // ============================================================================
@@ -231,8 +237,9 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
   console.log('[API] Response status:', response.status, 'for', url);
 
   if (!response.ok) {
-    // Handle 401 Unauthorized - dispatch event to trigger logout
-    if (response.status === 401) {
+    // Handle Airunway auth failures - dispatch event to trigger logout.
+    // Upstream/model 401s are application errors and should not log out the user.
+    if (isAuthenticationError(response)) {
       console.warn('[API] Unauthorized - dispatching auth:unauthorized event');
       dispatchUnauthorized();
     }
@@ -266,6 +273,21 @@ export const modelsApi = {
 // ============================================================================
 // Deployments API
 // ============================================================================
+
+export interface ChatMessage {
+  role: string;
+  content: unknown;
+}
+
+export interface ChatCompletionRequest {
+  messages: ChatMessage[];
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+  top_p?: number;
+  [key: string]: unknown;
+}
 
 export const deploymentsApi = {
   list: (namespace?: string, options?: { limit?: number; offset?: number }) => {
@@ -329,6 +351,32 @@ export const deploymentsApi = {
     return request<PodLogsResponse>(
       `/deployments/${encodeURIComponent(name)}/logs${query ? `?${query}` : ''}`
     );
+  },
+
+  chat: async (name: string, payload: ChatCompletionRequest, namespace?: string, options?: { signal?: AbortSignal }): Promise<Response> => {
+    const url = namespace
+      ? `${API_BASE}/api/deployments/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/chat`
+      : `${API_BASE}/api/deployments/${encodeURIComponent(name)}/chat`;
+
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    const token = getAuthToken();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: options?.signal,
+    });
+
+    if (isAuthenticationError(response)) {
+      console.warn('[API] Unauthorized chat response - dispatching auth:unauthorized event');
+      dispatchUnauthorized();
+    }
+
+    return response;
   },
 
   getManifest: (name: string, namespace?: string) =>

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -66,15 +68,19 @@ type KaitoProviderReconciler struct {
 	Scheme           *runtime.Scheme
 	Transformer      *Transformer
 	StatusTranslator *StatusTranslator
+	DirectClient     client.Client
+	Recorder         record.EventRecorder
 }
 
 // NewKaitoProviderReconciler creates a new KAITO provider reconciler
-func NewKaitoProviderReconciler(client client.Client, scheme *runtime.Scheme) *KaitoProviderReconciler {
+func NewKaitoProviderReconciler(c client.Client, scheme *runtime.Scheme, direct client.Client, recorder record.EventRecorder) *KaitoProviderReconciler {
 	return &KaitoProviderReconciler{
-		Client:           client,
+		Client:           c,
 		Scheme:           scheme,
 		Transformer:      NewTransformer(),
 		StatusTranslator: NewStatusTranslator(),
+		DirectClient:     direct,
+		Recorder:         recorder,
 	}
 }
 
@@ -131,6 +137,20 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderCompatible, metav1.ConditionTrue, "CompatibilityVerified", "Configuration compatible with KAITO")
+
+	// Upstream health probe — refuse-fast before transform if the real KAITO
+	// workspace controller is not running.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 10*time.Second)
+	health := probeUpstreamController(probeCtx, r.DirectClient)
+	cancelProbe()
+	if !health.Healthy {
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, health.Reason, health.Message)
+		r.Recorder.Event(&md, corev1.EventTypeWarning, health.Reason, health.Message)
+		if err := r.Status().Update(ctx, &md); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+	}
 
 	// Transform ModelDeployment to KAITO Workspace
 	resources, err := r.Transformer.Transform(ctx, &md)
