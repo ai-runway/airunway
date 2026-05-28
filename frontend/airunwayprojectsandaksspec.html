@@ -1,0 +1,812 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Runway — Projects + AKS Overlay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Spectral:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper:        #f3ece1;     /* warm ivory */
+    --paper-deep:   #ebe2d3;
+    --paper-edge:   #ddd1bd;
+    --ink:          #1a1814;     /* near-black, warm */
+    --ink-soft:     #4a443b;
+    --ink-faint:    #8a8174;
+    --rule:         #c8bda8;
+    --accent:       #b94a2c;     /* terracotta */
+    --accent-deep:  #862e16;
+    --accent-soft:  #f0d7c9;
+    --gold:         #a07a2c;
+    --green:        #4a6b3a;
+    --code-bg:      #e8dfce;
+    --maxw:         72rem;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 17px/1.6 "Spectral", Georgia, serif;
+    font-feature-settings: "kern", "liga", "onum";
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* paper grain */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 100;
+    background-image:
+      radial-gradient(rgba(40,30,20,0.06) 1px, transparent 1px),
+      radial-gradient(rgba(40,30,20,0.04) 1px, transparent 1px);
+    background-size: 3px 3px, 7px 7px;
+    background-position: 0 0, 1px 1px;
+    mix-blend-mode: multiply;
+    opacity: 0.7;
+  }
+
+  /* Layout */
+  .frame { display: grid; grid-template-columns: 18rem minmax(0, 1fr); max-width: var(--maxw); margin: 0 auto; }
+  nav.toc {
+    position: sticky; top: 0; align-self: start;
+    height: 100vh; overflow-y: auto;
+    padding: 4rem 2rem 3rem 2.5rem;
+    border-right: 1px solid var(--rule);
+  }
+  main { padding: 4rem 3rem 8rem; min-width: 0; }
+
+  /* TOC */
+  .toc-eyebrow {
+    font: 500 11px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--accent-deep); margin: 0 0 1.5rem;
+  }
+  .toc-list { list-style: none; padding: 0; margin: 0; counter-reset: tocnum; }
+  .toc-list li { counter-increment: tocnum; margin: 0; }
+  .toc-list a {
+    display: grid; grid-template-columns: 2rem 1fr;
+    gap: 0.5rem; align-items: baseline;
+    padding: 0.4rem 0;
+    color: var(--ink-soft); text-decoration: none;
+    font: 400 14px/1.35 "Spectral", serif;
+    border-top: 1px solid transparent;
+    transition: color .2s, border-color .2s;
+  }
+  .toc-list a::before {
+    content: counter(tocnum, decimal-leading-zero);
+    font: 500 11px/1.4 "JetBrains Mono", monospace;
+    color: var(--ink-faint);
+    letter-spacing: 0.05em;
+  }
+  .toc-list a:hover { color: var(--accent); }
+  .toc-list a:hover::before { color: var(--accent); }
+  .toc-tldr a {
+    grid-template-columns: 1fr;
+    font: 500 13px/1.35 "JetBrains Mono", monospace;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--accent-deep);
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 0.75rem;
+  }
+
+  /* Masthead */
+  .masthead {
+    border-bottom: 3px double var(--ink);
+    padding-bottom: 1.5rem; margin-bottom: 2.5rem;
+  }
+  .kicker {
+    font: 500 11px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--accent-deep); margin: 0 0 1rem;
+    display: flex; gap: 1rem; align-items: center;
+  }
+  .kicker .dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; display: inline-block; }
+  h1 {
+    font: 300 clamp(2.5rem, 5vw, 4.25rem)/0.95 "Fraunces", serif;
+    font-variation-settings: "opsz" 144, "SOFT" 30;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    margin: 0 0 1rem;
+  }
+  h1 em {
+    font-style: italic;
+    font-variation-settings: "opsz" 144, "SOFT" 80;
+    color: var(--accent);
+  }
+  .byline {
+    display: flex; flex-wrap: wrap; gap: 1.25rem;
+    font: 400 13px/1.4 "JetBrains Mono", monospace;
+    color: var(--ink-soft); letter-spacing: 0.02em;
+  }
+  .byline strong { color: var(--ink); font-weight: 500; }
+
+  /* TL;DR — drop cap, distinct treatment */
+  .tldr {
+    background: var(--paper-deep);
+    border-left: 6px solid var(--accent);
+    padding: 2rem 2.25rem 2rem 2rem;
+    margin: 3rem 0 4rem;
+    position: relative;
+  }
+  .tldr::before {
+    content: "TL;DR";
+    position: absolute; top: -0.7em; left: 1.5rem;
+    background: var(--paper);
+    padding: 0 0.6rem;
+    font: 500 11px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.28em; color: var(--accent-deep);
+  }
+  .tldr p { margin: 0; font-size: 18px; line-height: 1.65; color: var(--ink); }
+  .tldr p::first-letter {
+    font: 300 4.5rem/0.85 "Fraunces", serif;
+    font-variation-settings: "opsz" 144, "SOFT" 40;
+    float: left; padding: 0.3rem 0.6rem 0 0;
+    color: var(--accent);
+  }
+
+  /* Section headings */
+  h2 {
+    font: 400 2rem/1.15 "Fraunces", serif;
+    font-variation-settings: "opsz" 60, "SOFT" 20;
+    letter-spacing: -0.015em;
+    margin: 5rem 0 1.25rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--ink);
+    color: var(--ink);
+    display: flex; align-items: baseline; gap: 1rem;
+  }
+  h2 .num {
+    font: 500 13px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.1em; color: var(--accent);
+    flex: 0 0 auto;
+  }
+  h2 .pill {
+    font: 500 10px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    background: var(--ink); color: var(--paper);
+    padding: 0.35em 0.7em; border-radius: 2px;
+    margin-left: auto; flex: 0 0 auto;
+  }
+  h2 .pill.b { background: var(--accent); }
+  h3 {
+    font: 500 1.2rem/1.3 "Fraunces", serif;
+    font-variation-settings: "opsz" 36;
+    margin: 2.25rem 0 0.5rem;
+    color: var(--ink);
+  }
+  h4 {
+    font: 500 11px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--accent-deep);
+    margin: 1.75rem 0 0.5rem;
+  }
+
+  /* Body text */
+  p { margin: 0 0 1rem; max-width: 38rem; }
+  main ul, main ol { padding-left: 1.4rem; margin: 0 0 1.25rem; max-width: 38rem; }
+  main li { margin: 0.35rem 0; }
+  main li::marker { color: var(--accent); }
+  strong { color: var(--ink); font-weight: 600; }
+  em { font-style: italic; }
+  a { color: var(--accent-deep); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { color: var(--accent); }
+
+  /* Code */
+  code {
+    font: 500 0.88em/1.4 "JetBrains Mono", monospace;
+    background: var(--code-bg);
+    color: var(--ink);
+    padding: 0.05em 0.4em;
+    border-radius: 2px;
+    border-bottom: 1px solid var(--paper-edge);
+  }
+  pre {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 1.5rem 1.75rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    font: 400 13px/1.55 "JetBrains Mono", monospace;
+    margin: 1rem 0 1.5rem;
+    max-width: 42rem;
+    position: relative;
+    box-shadow: 0 1px 0 var(--ink), 6px 6px 0 var(--paper-edge);
+  }
+  pre code { background: transparent; color: inherit; padding: 0; border: 0; }
+
+  /* Tables */
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 1rem 0 1.75rem;
+    font: 400 14px/1.5 "Spectral", serif;
+    max-width: 44rem;
+  }
+  thead th {
+    text-align: left;
+    font: 500 11px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--accent-deep);
+    padding: 0.5rem 0.75rem 0.5rem 0;
+    border-bottom: 2px solid var(--ink);
+  }
+  tbody td {
+    padding: 0.75rem 0.75rem 0.75rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  tbody tr:hover td { background: var(--paper-deep); }
+
+  /* Callouts */
+  .callout {
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--accent);
+    background: var(--paper-deep);
+    padding: 1rem 1.25rem;
+    margin: 1.5rem 0;
+    max-width: 42rem;
+    font-size: 15px;
+  }
+  .callout.warn { border-left-color: var(--gold); background: #f0e6c8; }
+  .callout strong { display: inline-block; margin-right: 0.4rem; }
+
+  blockquote {
+    margin: 1.25rem 0; padding: 0 0 0 1.5rem;
+    border-left: 2px solid var(--accent);
+    font: italic 400 16px/1.55 "Spectral", serif;
+    color: var(--ink-soft);
+    max-width: 38rem;
+  }
+
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 3rem 0; max-width: 38rem; }
+
+  /* Diagram — replaces the ASCII art */
+  .layers {
+    margin: 2rem 0 2.5rem;
+    display: grid; gap: 1.25rem;
+    max-width: 48rem;
+  }
+  .layer {
+    position: relative;
+    background: var(--paper-deep);
+    border: 1px solid var(--ink);
+    padding: 1.25rem 1.5rem 1.25rem 4rem;
+    box-shadow: 4px 4px 0 var(--paper-edge);
+  }
+  .layer.b {
+    background: var(--accent-soft);
+    border-color: var(--accent-deep);
+    box-shadow: 4px 4px 0 var(--paper-edge);
+  }
+  .layer .badge {
+    position: absolute; top: -0.7rem; left: -0.7rem;
+    background: var(--ink); color: var(--paper);
+    width: 2.4rem; height: 2.4rem;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font: 600 1rem "Fraunces", serif;
+  }
+  .layer.b .badge { background: var(--accent-deep); }
+  .layer h4 { margin: 0 0 0.3rem; color: var(--accent-deep); }
+  .layer.b h4 { color: var(--accent-deep); }
+  .layer .lname { font: 500 1.1rem/1.2 "Fraunces", serif; margin: 0 0 0.6rem; }
+  .layer .lhost { font: 400 12px/1.4 "JetBrains Mono", monospace; color: var(--ink-soft); }
+  .layer ul.lfeatures { padding-left: 1.1rem; margin: 0.5rem 0 0; font-size: 14px; }
+  .layer ul.lfeatures li { margin: 0.15rem 0; }
+  .layers-arrow {
+    text-align: center;
+    font: 400 11px/1 "JetBrains Mono", monospace;
+    letter-spacing: 0.2em; color: var(--ink-faint);
+    text-transform: uppercase;
+    padding: 0.25rem 0;
+  }
+  .layers-arrow::before { content: "▼ "; color: var(--accent); }
+  .cluster-card {
+    border: 2px solid var(--ink);
+    background: var(--paper);
+    padding: 1.25rem 1.5rem;
+    background-image: repeating-linear-gradient(
+      45deg, transparent 0, transparent 8px,
+      rgba(40,30,20,0.04) 8px, rgba(40,30,20,0.04) 9px
+    );
+    max-width: 48rem;
+  }
+  .cluster-card h4 { margin: 0 0 0.5rem; }
+  .cluster-card .items {
+    font: 400 13px/1.6 "JetBrains Mono", monospace;
+    color: var(--ink-soft);
+  }
+  .cluster-card .items span { white-space: nowrap; }
+  .cluster-card .items span + span::before { content: " · "; color: var(--accent); margin: 0 0.15em; }
+
+  /* Personas — table-as-cards */
+  .personas {
+    display: grid; gap: 1.25rem; margin: 1.5rem 0 2rem;
+    grid-template-columns: 1fr;
+    max-width: 48rem;
+  }
+  .persona {
+    border: 1px solid var(--rule);
+    padding: 1.25rem 1.5rem;
+    background: var(--paper);
+    display: grid; grid-template-columns: 9rem 1fr; gap: 1.5rem;
+    align-items: start;
+  }
+  .persona .rank {
+    font: 500 11px/1.3 "JetBrains Mono", monospace;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--accent-deep);
+  }
+  .persona .name { font: 500 1.1rem/1.2 "Fraunces", serif; color: var(--ink); margin: 0.15rem 0 0; }
+  .persona .role { font-size: 14px; color: var(--ink-soft); margin: 0.5rem 0; }
+  .persona .needs { font-size: 14px; }
+  .persona.primary { border-left: 4px solid var(--accent); }
+  .persona.secondary { border-left: 4px solid var(--gold); }
+  .persona.tertiary { border-left: 4px solid var(--ink-faint); }
+
+  /* Footer */
+  footer {
+    margin-top: 6rem; padding-top: 2rem;
+    border-top: 3px double var(--ink);
+    font: 400 12px/1.5 "JetBrains Mono", monospace;
+    color: var(--ink-faint);
+    display: flex; justify-content: space-between; gap: 1rem;
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .frame { grid-template-columns: 1fr; }
+    nav.toc {
+      position: static; height: auto; padding: 2rem 1.5rem;
+      border-right: 0; border-bottom: 1px solid var(--rule);
+    }
+    main { padding: 2.5rem 1.5rem 4rem; }
+    .persona { grid-template-columns: 1fr; gap: 0.5rem; }
+  }
+  @media print {
+    body { background: white; color: black; }
+    body::before { display: none; }
+    nav.toc { display: none; }
+    .frame { grid-template-columns: 1fr; max-width: none; }
+    main { padding: 0; }
+    pre { box-shadow: none; }
+    .layer, .cluster-card, .persona, .callout { box-shadow: none; break-inside: avoid; }
+    h2 { break-after: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+
+<nav class="toc">
+  <p class="toc-eyebrow">Contents</p>
+  <ul class="toc-list toc-tldr">
+    <li><a href="#tldr">Executive summary</a></li>
+  </ul>
+  <ul class="toc-list">
+    <li><a href="#s1">Problem &amp; goals</a></li>
+    <li><a href="#s2">Personas</a></li>
+    <li><a href="#s3">Design principles</a></li>
+    <li><a href="#s4">Three layers</a></li>
+    <li><a href="#s5">Project model</a></li>
+    <li><a href="#s6">Observability — MVP</a></li>
+    <li><a href="#s7">Workload detection</a></li>
+    <li><a href="#s8">Inspektor Gadget</a></li>
+    <li><a href="#s9">AKS overlay</a></li>
+    <li><a href="#s10">Phasing</a></li>
+    <li><a href="#s11">Cross-cutting</a></li>
+    <li><a href="#s12">NFRs</a></li>
+    <li><a href="#s13">Security</a></li>
+    <li><a href="#s14">Open questions</a></li>
+    <li><a href="#s15">Risks</a></li>
+    <li><a href="#s16">Glossary</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<header class="masthead">
+  <p class="kicker"><span class="dot"></span>Specification <span class="dot"></span> Draft for stakeholder review</p>
+  <h1>AI Runway —<br><em>Projects</em> &amp; the AKS overlay</h1>
+  <div class="byline">
+    <span><strong>Date</strong> 2026-05-28</span>
+    <span><strong>Surface</strong> Headlamp plugin</span>
+    <span><strong>Repo</strong> kaito-project/airunway</span>
+  </div>
+</header>
+
+<section id="tldr" class="tldr">
+  <p>AI Runway today deploys ML models well but does not give operators an <em>application</em> view. v1 of this work adds three things to the Headlamp plugin: a <strong>Project</strong> CRD that groups the resources behind one ML app by label selector, a <strong>Project-scoped Observability tab</strong> that unifies inference-server metrics with Inspektor Gadget kernel diagnostics, and an <strong>AKS overlay</strong> that wires KAITO, Workload Identity, ACR, Gateway API, and an Azure OpenAI fallback — without taking on the Azure ARM control plane. Everything optional fails open with a call-to-action. v1 is scoped at roughly six to ten engineering weeks; v2 covers historical metrics and ARM. The IG-maintainer items in §8 are the only external blockers.</p>
+</section>
+
+<h2 id="s1"><span class="num">§ 01</span> Problem &amp; goals</h2>
+
+<h3>Problem</h3>
+<p>AI Runway today gives operators a unified <code>ModelDeployment</code> CRD across several inference providers, but a real ML application is almost never <em>one</em> ModelDeployment. It is a model <strong>plus</strong> an app pod, <strong>plus</strong> a PVC for weights or RAG indexes, <strong>plus</strong> a Service / HTTPRoute, <strong>plus</strong> secrets. Headlamp shows these as scattered resources with no grouping, no application-level health, and no AI-aware diagnostics. Two pain points follow:</p>
+<ol>
+  <li><strong>No application identity.</strong> Operators can't answer "what does the <em>Customer-Support RAG</em> app look like, and is it healthy?" without a mental join across kinds.</li>
+  <li><strong>No AI-aware observability.</strong> Inference-server metrics (TTFT, KV-cache, tokens/s) live behind raw <code>/metrics</code> endpoints; kernel-level signals (DNS to HuggingFace, OOM-kills, model-weight I/O) are not surfaced at all. Operators reach for kubectl, Grafana, and Inspektor Gadget manually.</li>
+</ol>
+
+<h3>Goals (v1)</h3>
+<ul>
+  <li><strong>Project as a first-class grouping</strong> so an operator can see one ML application end-to-end and bulk-act on it.</li>
+  <li><strong>Two-pane observability</strong> scoped to a Project: app metrics from the inference engine, kernel diagnostics from Inspektor Gadget.</li>
+  <li><strong>AKS-aware deploy glue</strong> that removes the most common Azure paper-cuts (KAITO preset, Workload Identity, ACR, HTTPRoute, AOAI fallback) without taking on the Azure ARM control plane.</li>
+</ul>
+<p>Graceful degradation across all optional dependencies is treated as a design principle, not a goal — see §3.</p>
+
+<h3>Non-goals (v1)</h3>
+<p>Replacing AI Runway's deploy wizard · generic IG browser · alerting / on-call · GitOps integration · multi-cluster Project views · Azure ARM control plane · long-term metric / gadget-result persistence.</p>
+
+<h3>Success criteria</h3>
+<ul>
+  <li>An operator can go from "no Project" to "RAG app deployed, labeled, visible in Projects list with green status, TTFT panel rendering" in under 10 minutes on a fresh AKS cluster with KAITO + IG installed.</li>
+  <li>On a cluster with <strong>none</strong> of the optional deps (no Prometheus, no IG, no KAITO, no Gateway API), every Project page still renders without errors and shows actionable CTAs.</li>
+  <li>Pulling the AKS overlay out into its own repo later is a config change, not a refactor (enforced by the import-direction rule, §4).</li>
+</ul>
+
+<h2 id="s2"><span class="num">§ 02</span> Personas</h2>
+<div class="personas">
+  <div class="persona primary">
+    <div>
+      <div class="rank">Primary</div>
+      <div class="name">Platform engineer</div>
+    </div>
+    <div>
+      <p class="role">Runs the cluster; installs AI Runway, KAITO, IG; troubleshoots when ML eng pings them.</p>
+      <p class="needs"><strong>Needs:</strong> Cluster-wide Projects view, deep diagnostics (IG), AKS glue that cuts ticket volume.</p>
+    </div>
+  </div>
+  <div class="persona secondary">
+    <div>
+      <div class="rank">Secondary</div>
+      <div class="name">ML engineer</div>
+    </div>
+    <div>
+      <p class="role">Owns one app (a Project); pushes new model versions; reads metrics.</p>
+      <p class="needs"><strong>Needs:</strong> Project URL they can bookmark; TTFT / throughput / queue depth; "is my model healthy" at a glance.</p>
+    </div>
+  </div>
+  <div class="persona tertiary">
+    <div>
+      <div class="rank">Tertiary · read-only</div>
+      <div class="name">Eng manager</div>
+    </div>
+    <div>
+      <p class="role">Wants a status overview before standup.</p>
+      <p class="needs"><strong>Needs:</strong> Projects list with Ready / Degraded chips; no need to touch IG or AKS detail.</p>
+    </div>
+  </div>
+</div>
+<p>UX detailing optimizes for the platform engineer; ML-engineer access is via shareable Project URLs (no separate role-restricted view in v1).</p>
+
+<h2 id="s3"><span class="num">§ 03</span> Key design principles</h2>
+<ol>
+  <li><strong>Two data planes, treated independently.</strong> AI-workload signal comes from two distinct sources: the <strong>application-metrics plane</strong> (TTFT, TPOT, tokens/s, KV-cache — emitted by the inference server on its Prometheus endpoint) and the <strong>kernel/eBPF plane</strong> (DNS, TCP, OOM, file-I/O — emitted by Inspektor Gadget). They have independent availability and never substitute for each other. IG cannot produce TTFT; an inference server cannot tell you why DNS to HuggingFace is slow.</li>
+  <li><strong>Inspektor Gadget is provider-neutral.</strong> IG lives in the <strong>core</strong> plugin, scoped to a Project, on any Kubernetes distribution. The AKS overlay only adds AKS-<em>flavored enrichers</em> on top (GPU-SKU fit, NCCL flagging on Azure GPU pools).</li>
+  <li><strong>Project is a CRD with label-selector membership</strong> — not namespace-as-Project. The CRD gives the UI a real object to watch, supports multiple-Projects-per-namespace, and leaves room for status aggregation and (later) ownerRef-style cascades.</li>
+  <li><strong>Graceful degradation is a hard requirement.</strong> Every optional dependency (IG, Prometheus, KAITO, Gateway API, AKS itself) is detected; missing = inline CTA; never a crash.</li>
+</ol>
+
+<h2 id="s4"><span class="num">§ 04</span> Three layers</h2>
+<div class="layers">
+  <div class="layer">
+    <div class="badge">A</div>
+    <h4>Core plugin · provider-neutral</h4>
+    <p class="lname">airunway (runs everywhere Headlamp does)</p>
+    <ul class="lfeatures">
+      <li><strong>Existing:</strong> Deployments, Models, Runtimes (RO), Gateway, Settings</li>
+      <li><strong>New:</strong> Projects — list, detail, create wizard, "Add to project"</li>
+      <li><strong>New:</strong> Project → Observability tab (app-metrics panel + IG diagnostics panel)</li>
+    </ul>
+  </div>
+  <div class="layer b">
+    <div class="badge">B</div>
+    <h4>AKS overlay · loads only on AKS</h4>
+    <p class="lname">airunway-aks (gated by node label)</p>
+    <ul class="lfeatures">
+      <li>Augments core views via <code>registerDetailsViewSection</code> etc.</li>
+      <li>Azure tab on ModelDeployment; AKS deploy-wizard step</li>
+      <li>KAITO <code>(SKU, model) → preset</code> table · WI / ACR / Gateway glue</li>
+      <li>AKS-flavored IG enrichers (GPU-SKU fit, NCCL silent-replica)</li>
+    </ul>
+  </div>
+  <div class="layers-arrow">Headlamp K8s proxy &mdash; the only data path</div>
+  <div class="cluster-card">
+    <h4>Kubernetes cluster</h4>
+    <div class="items">
+      <span>Project CRD + controller</span><span>ModelDeployments</span><span>inference-server /metrics</span><span>Inspektor Gadget (optional)</span><span>KAITO / KubeRay / …</span>
+    </div>
+  </div>
+</div>
+<p><strong>Import direction:</strong> B → A only, never A → B. Core never learns about Azure. Splitting B out later stays a config change, not a refactor.</p>
+<p><strong>Controller</strong> (<code>controller/project/</code>, lives in the airunway repo): one <code>controller-runtime</code> reconciler that watches <code>Project</code>, lists resources matching its selector, writes <code>status.resourceCounts</code> + aggregated <code>status.conditions</code>. v1: no ownerRefs, no cascade delete, no finalizer, no quota.</p>
+
+<h2 id="s5"><span class="num">§ 05</span> Project model <span class="pill">Layer A</span></h2>
+<h3>CRD &mdash; <code>airunway.ai/v1alpha1</code>, minimal</h3>
+<pre><code>apiVersion: airunway.ai/v1alpha1
+kind: Project
+metadata: { name: my-rag-app, namespace: default }
+spec:
+  displayName: "Customer Support RAG"
+  description: "Internal RAG over support docs"
+  selector:
+    matchLabels: { airunway.ai/project: my-rag-app }
+status:
+  resourceCounts: { modelDeployments: 1, deployments: 2, services: 3, pvcs: 1 }
+  conditions: []   # aggregated readiness across labeled resources</code></pre>
+<p>Membership = label <code>airunway.ai/project=&lt;name&gt;</code>. The CRD gives the UI a real object to watch and room to grow.</p>
+
+<h3>Scope rules</h3>
+<ul>
+  <li><strong>Namespaced.</strong> A Project is namespaced and its selector matches <em>namespaced</em> resources in <strong>its own namespace</strong> only. Cross-namespace membership is explicitly out of v1.</li>
+  <li><strong>Cluster-scoped resources excluded.</strong> ClusterRoles, CRDs, Nodes etc. are intentionally not Project members in v1. If a Project needs "context" from a cluster-scoped resource — e.g., the GatewayClass it routes through — it's surfaced as a <em>reference</em>, not membership.</li>
+  <li><strong>Selector collisions.</strong> Two Projects in the same namespace may select the same resource. v1 behavior: <strong>allowed</strong>. The detail page shows an "Also in: N other Projects" hint. A validating webhook is <em>not</em> added in v1 — overlap is a legitimate use case (a shared embedding model serving two RAG apps).</li>
+  <li><strong>Label tampering.</strong> Any user with patch rights on a resource can add or remove the <code>airunway.ai/project</code> label. v1 treats this as an RBAC question for the cluster admin; the plugin does not enforce Project-scoped ACLs. See <a href="#s13">§13 Security</a>.</li>
+</ul>
+
+<h3>UI (core plugin)</h3>
+<ul>
+  <li><strong>Projects list</strong> — sidebar entry; status chips (Ready / Degraded / Empty).</li>
+  <li><strong>Project detail</strong> — resources grouped by kind (ModelDeployments, Deployments, Services, PVCs, Secrets, HTTPRoutes), quick actions, plus the <strong>Observability tab</strong> (§6).</li>
+  <li><strong>Create wizard</strong> — three TS-defined templates: <em>Chat / single-model</em>, <em>RAG app</em> (ModelDeployment + PVC + app-pod placeholder), <em>Empty</em> (creates the <code>Project</code> CR alone, no resources — users grow it later via "Add to project"). Templates live in TS, not in-cluster.</li>
+  <li><strong>"Add to project"</strong> affordance on existing ModelDeployment / Deployment detail pages — patches the label. <strong>This is the primary day-2 path</strong>; the wizard is the greenfield path.</li>
+</ul>
+
+<h4>Not in v1</h4>
+<p>ownerRef cascade delete · Project-scoped RBAC/quota UI · in-cluster template storage · multi-cluster Project views · resource move across namespaces · Project rename (label rewrite is invasive; pushed to v1.1).</p>
+
+<h2 id="s6"><span class="num">§ 06</span> Observability — the MVP <span class="pill">Layer A</span></h2>
+<p>Lives as a <strong>tab on Project detail</strong> — always <em>of</em> a Project. Two independent panels, two data planes.</p>
+
+<h3>Data-source priority (per plane, fail soft)</h3>
+<table>
+  <thead><tr><th>Plane</th><th>Source order</th><th>Transport</th><th>If unavailable</th></tr></thead>
+  <tbody>
+    <tr><td><strong>App metrics</strong></td><td>(1) AI Runway backend → (2) inference-server <code>/metrics</code> via Headlamp proxy → (3) Prometheus via Headlamp proxy</td><td>All reads go through Headlamp's K8s API proxy. No in-browser scrape (avoids CORS, avoids per-engine TLS pain).</td><td>Panel shows inline hint, page still renders</td></tr>
+    <tr><td><strong>Kernel/eBPF</strong></td><td>Inspektor Gadget (on-demand)</td><td>Trace CRD via Headlamp proxy</td><td>"Install IG" CTA, rest works</td></tr>
+    <tr><td><strong>K8s-native</strong></td><td>Always (pod status, restarts, Events, container resources)</td><td>Headlamp K8s client</td><td>n/a</td></tr>
+  </tbody>
+</table>
+<div class="callout"><strong>Principle.</strong> A missing optional source is a UI state, not a crash. Detection fails open → assume not-installed → show CTA.</div>
+
+<h3>Panel 1 — App metrics (inference server)</h3>
+<p>Per-ModelDeployment, sourced from the serving engine's own Prometheus output. Provider-specific schemas already standardized in AI Runway's existing <code>MetricsPanel</code> / <code>useMetrics</code>:</p>
+<ul>
+  <li><strong>Latency:</strong> TTFT (p50/p95/p99), TPOT / inter-token, end-to-end.</li>
+  <li><strong>Throughput:</strong> tokens/s, requests/s.</li>
+  <li><strong>Saturation:</strong> queue depth / pending, KV-cache utilization, error rate.</li>
+  <li>Time-series sparklines (extends current <code>MetricsPanel</code>, which is mostly point-in-time today).</li>
+</ul>
+<blockquote>Engine coverage note. vLLM and Ray Serve expose these natively; TRT-LLM and SGLang vary. The panel renders whatever the engine emits and labels unknowns "not reported by this engine" rather than showing zeros.</blockquote>
+
+<h3>Panel 2 — Diagnostics (Inspektor Gadget)</h3>
+<p>On-demand, scoped to the Project's pods. See §8 for the IG client.</p>
+
+<h3>Overview strip (K8s-native, always on)</h3>
+<pre><code>Pods: 6 (5 running, 1 pending) · Restarts(1h): 0 · OOMs(24h): 1 ·
+GPU pods: 4 · Recent events: 3</code></pre>
+
+<h4>Not in v1</h4>
+<p>Grafana embedding · alerting / thresholds / on-call · cost rollups · historical storage of gadget results · long-term metric retention (read live; persistence is a v2 question).</p>
+
+<h2 id="s7"><span class="num">§ 07</span> AI-workload detection</h2>
+<p>Detection drives engine-specific metric schemas and per-kind icons in the Project view. It is <strong>independent of Project membership</strong> — a Pod is detected as "vLLM" purely from its image/env; that detection does <em>not</em> add it to any Project. Membership requires the <code>airunway.ai/project=&lt;name&gt;</code> label, always.</p>
+<p>Detect by image + env + label, extensible via ConfigMap:</p>
+<table>
+  <thead><tr><th>Framework</th><th>Signal</th></tr></thead>
+  <tbody>
+    <tr><td>vLLM</td><td>image <code>*vllm*</code> or env <code>VLLM_*</code></td></tr>
+    <tr><td>Triton</td><td>image <code>*tritonserver*</code></td></tr>
+    <tr><td>SGLang</td><td>image <code>*sglang*</code></td></tr>
+    <tr><td>TorchServe</td><td>image <code>*torchserve*</code></td></tr>
+    <tr><td>Ray Serve / KubeRay</td><td>RayService / RayCluster CRs</td></tr>
+    <tr><td>KServe</td><td>label <code>serving.kserve.io/inferenceservice</code></td></tr>
+    <tr><td>ONNX Runtime</td><td>image <code>*onnxruntime-server*</code></td></tr>
+    <tr><td>Ollama</td><td>image <code>*ollama*</code></td></tr>
+    <tr><td>Generic GPU (fallback)</td><td><code>nvidia.com/gpu</code> request &gt; 0</td></tr>
+  </tbody>
+</table>
+
+<h2 id="s8"><span class="num">§ 08</span> Inspektor Gadget integration <span class="pill">Layer A</span></h2>
+<p>Items flagged <strong>[IG-CONFIRM]</strong> below are assumptions that still need verification against the current IG catalog and roadmap before we commit UI copy.</p>
+
+<h3>Design</h3>
+<ul>
+  <li><strong>Surface:</strong> prefer the <code>Trace</code> CRD (create → watch → delete) wrapped in <code>useGadgetTrace(spec)</code> that cleans up on unmount. Goes through Headlamp's K8s proxy, no extra endpoint or auth. Keep the gadget-manager HTTP API as fallback.</li>
+  <li><strong>Dynamic discovery + curated subset.</strong> On mount, query IG for available gadgets + param schemas (no hardcoded list). Surface a "Recommended for AI workloads" group (~8) with the full catalog under "All gadgets". Curated list in <code>ig-recommended.json</code>, overridable in settings.</li>
+  <li><strong>Scoping:</strong> every run auto-fills namespace = Project; user may narrow by pod label / container, never widen. Per-user rate limit to avoid DOSing the <code>gadget</code> DaemonSet.</li>
+  <li><strong>Run model:</strong> on-demand only, user-picked duration (15s / 30s / 60s / 5min). No always-on streams in v1.</li>
+  <li><strong>Rendering (<code>GadgetRunner.tsx</code>):</strong> generic table from the gadget's column schema; optional <em>enrichers</em> for curated gadgets (e.g. <code>trace_dns</code> groups by host + flags <code>huggingface.co</code>, <code>*.azurecr.io</code>, <code>openai.azure.com</code>; network gadgets annotate pod/container per PID). Absent enricher = raw table. Export JSON / CSV.</li>
+  <li><strong>Results:</strong> last ~5 per Project in Headlamp plugin-storage; ephemeral, documented as such. No server-side persistence.</li>
+  <li><strong>Permissions:</strong> IG needs cluster privileges; plugin never elevates. If the user's token can't reach IG, show a clear permission message (see <a href="#s13">§13 Security</a> for PII handling).</li>
+</ul>
+
+<h3>Open questions to verify against the IG catalog</h3>
+<ol>
+  <li><strong>[IG-CONFIRM] Surface choice.</strong> Trace CRD vs gadget-manager HTTP API — confirm CRD is the supported path going forward.</li>
+  <li><strong>[IG-CONFIRM] GPU coverage.</strong> IG is eBPF-based; GPU <em>utilization %</em> is conventionally DCGM-exporter → Prometheus, not eBPF. We do not want to assert gadgets like <code>profile_cuda</code> / <code>top_gpu</code> / <code>top_cuda_memory</code> exist without confirmation. Which GPU signals can IG actually produce today, and which must come from DCGM?</li>
+  <li><strong>[IG-CONFIRM] Curated catalog.</strong> Confirm real names for the candidate set: <code>trace_dns</code>, <code>trace_tcp</code>, <code>top_tcp</code>, <code>trace_oomkill</code>, <code>trace_open</code> / <code>trace_fsslower</code> (model-weight load), <code>top_file</code>, plus GPU gadget(s) iff they exist.</li>
+  <li><strong>[IG-CONFIRM] Version floor.</strong> Minimum IG release containing all gadgets used; we pin in detection and CTA on mismatch.</li>
+</ol>
+
+<h2 id="s9"><span class="num">§ 09</span> AKS overlay <span class="pill b">Layer B</span></h2>
+<p>Loads only on AKS. Gate: node label <code>kubernetes.azure.com/cluster</code>. When absent, none of this code runs — core stays clean for non-AKS users.</p>
+
+<h3>Detection → <code>useAksContext()</code> (all fail open)</h3>
+<table>
+  <thead><tr><th>Signal</th><th>Source</th><th>Used for</th></tr></thead>
+  <tbody>
+    <tr><td>Is AKS</td><td><code>kubernetes.azure.com/cluster</code></td><td>activate overlay</td></tr>
+    <tr><td>GPU pools</td><td><code>agentpool</code> + <code>accelerator=nvidia</code> + SKU label</td><td>KAITO preset / warn</td></tr>
+    <tr><td>GPU SKU (H100/A100/V100/T4)</td><td><code>node.kubernetes.io/instance-type</code></td><td>preset, model-fit</td></tr>
+    <tr><td>KAITO installed</td><td><code>kaito.sh</code> CRDs</td><td>Workspace shortcuts</td></tr>
+    <tr><td>Workload Identity</td><td>OIDC issuer + <code>azure.workload.identity/use</code></td><td>one-click SA wiring</td></tr>
+    <tr><td>ACR attached</td><td>pull-secret / kubelet identity patterns</td><td>image-pull config</td></tr>
+    <tr><td>Gateway API</td><td><code>gateway.networking.k8s.io</code> CRDs</td><td>HTTPRoute template</td></tr>
+    <tr><td>IG installed</td><td>IG CRDs</td><td>enable AKS IG enrichers</td></tr>
+  </tbody>
+</table>
+
+<h3>Deploy glue — in-cluster writes only</h3>
+<p>No Azure ARM calls in v1. Adds an "Azure" step to the deploy wizard + "Azure" tab on ModelDeployment:</p>
+<ol>
+  <li>KAITO preset for detected SKU — <code>(SKU, model-family) → preset</code> table in TS. <strong>Initial table needs a pass against the KAITO catalog</strong>; shipping set TBD (<a href="#s14">§14</a>).</li>
+  <li>Model-fit estimate (model size vs GPU mem; R/Y/G).</li>
+  <li>ServiceAccount with <code>azure.workload.identity/client-id</code> (user supplies client ID) + patch <code>spec.serviceAccountName</code>.</li>
+  <li>ACR image-ref validation + inline "configure pull secret".</li>
+  <li>One-click HTTPRoute via detected Gateway class (default AGIC's).</li>
+  <li>Azure OpenAI fallback <code>Secret</code> + <code>ConfigMap</code> (OpenAI-compatible shape).</li>
+</ol>
+
+<h3>Where ARM is needed → copy-paste, not API calls</h3>
+<p>Node pool creation, ACR attach, Workload-Identity enablement, AOAI provisioning — all require Azure ARM access we are explicitly deferring to v2. UX surface in v1:</p>
+<ul>
+  <li>A <strong>right-side drawer</strong> opens when an Azure-out-of-band step is needed.</li>
+  <li>Each step renders as: 1-line description, a code block with the exact <code>az</code> command pre-filled with detected values (subscription, resource group, cluster name), a <strong>Copy</strong> button, and an <strong>"Open in Azure Portal"</strong> deep link as a secondary action.</li>
+  <li>The drawer is dismissible and re-openable; nothing in cluster state depends on the user having actually run the command — the next detection pass picks up the new state.</li>
+</ul>
+
+<h3>Partial-failure UX (no auto-rollback)</h3>
+<p>Multi-step wizards (Deploy, Add Azure glue) can leave the cluster with some resources created and some not. v1 policy:</p>
+<ul>
+  <li>Each step is a separate K8s write with its own success/failure pill in the wizard summary.</li>
+  <li>A failure surfaces an inline error + <strong>Retry this step</strong> button.</li>
+  <li>A <strong>Clean up partial resources</strong> action is offered at the wizard level — it lists what <em>would</em> be deleted (created in this session, tracked client-side) and requires explicit confirmation. Resources the wizard found pre-existing are never deleted.</li>
+  <li>No automatic / hidden rollback. Stakeholders should expect "Wizard failed at step 4" to leave steps 1–3 in place until the user chooses.</li>
+</ul>
+
+<h3>AKS-flavored IG enrichers</h3>
+<p>GPU-SKU-aware fit overlay on GPU diagnostics; NCCL inter-pod traffic view that flags silent replicas in multi-replica deployments. These <em>decorate</em> the core IG panel; they don't replace it.</p>
+
+<h2 id="s10"><span class="num">§ 10</span> Phasing</h2>
+<p>T-shirt sizes are engineering-effort estimates from current code state, not calendar commitments. <strong>S</strong> ≈ days, <strong>M</strong> ≈ 1–2 weeks, <strong>L</strong> ≈ 3+ weeks (per engineer).</p>
+<table>
+  <thead><tr><th>Phase</th><th>Size</th><th>Scope</th></tr></thead>
+  <tbody>
+    <tr><td><strong>v1.0</strong></td><td>L</td><td>Project CRD + controller (status aggregation); Projects list/detail/wizard + "Add to project"; <strong>Observability tab — app-metrics + IG diagnostics</strong> (MVP); framework detection; AKS overlay: <code>useAksContext</code>, Azure tab, KAITO preset step, WI SA / ACR / HTTPRoute / AOAI-fallback glue, AKS IG enrichers; graceful-degradation CTAs everywhere.</td></tr>
+    <tr><td><strong>v1.1</strong></td><td>M</td><td>Project rename; cascade-delete finalizer; more curated gadgets + enrichers from feedback; more KAITO presets; AMD GPU in IG panel; automated AKS E2E in CI.</td></tr>
+    <tr><td><strong>v2.0</strong></td><td>L</td><td>Azure ARM control plane (separate auth design); Prometheus / Azure Monitor historical metrics; gadget-result persistence; cross-Project ops view; vector-DB / training-shaped Projects.</td></tr>
+    <tr><td><strong>Not planned</strong></td><td>—</td><td>Replacing AI Runway's deploy wizard; generic IG browser; alerting; GitOps integration.</td></tr>
+  </tbody>
+</table>
+
+<h3>Suggested build order</h3>
+<table>
+  <thead><tr><th>#</th><th>Step</th><th>Size</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Project CRD + controller (unblocks UI)</td><td>M</td></tr>
+    <tr><td>2</td><td>Projects list / detail / wizard + "Add to project" in core</td><td>M</td></tr>
+    <tr><td>3</td><td>Observability tab — app-metrics first (reuses existing <code>useMetrics</code>), then IG panel</td><td>M</td></tr>
+    <tr><td>4</td><td>AKS overlay scaffold + <code>useAksContext</code> + Azure tab placeholder</td><td>S</td></tr>
+    <tr><td>5</td><td>KAITO preset step; WI / ACR / HTTPRoute / AOAI glue</td><td>M</td></tr>
+    <tr><td>6</td><td>AKS IG enrichers; polish; docs; E2E checklist</td><td>S</td></tr>
+  </tbody>
+</table>
+
+<h2 id="s11"><span class="num">§ 11</span> Cross-cutting: data flow, errors, testing</h2>
+<ul>
+  <li><strong>One data path:</strong> Headlamp's K8s API client. Project CRD reads, IG Trace writes, ModelDeployment writes, detection probes — all standard K8s calls. App-metrics is the one non-K8s read, <strong>also routed through the Headlamp K8s proxy</strong> (via Service / Pod port-forward semantics) to avoid CORS and to inherit the user's token. No new plugin-owned backend.</li>
+  <li><strong>Caching:</strong> detection + context in React context (<code>useRunwayContext</code>, <code>useAksContext</code>), invalidated on cluster switch.</li>
+  <li><strong>Errors:</strong> missing dependency = inline CTA, never a throw; detection fails open; K8s writes are per-resource (wizards surface partial-failure + "retry failed step", no auto-rollback — see §9); IG trace failures non-fatal.</li>
+  <li><strong>Testing:</strong> unit (vitest/RTL) is the bulk — detection, KAITO table, CRD transforms, <code>ig-client</code> with mocked IG, hook lifecycles; component tests per major view against fixtures using Headlamp's harness; controller via controller-runtime envtest; IG stubbed via fake Trace CRD in envtest, real IG verified manually until AKS E2E lands (v1.1). Gate: <code>bun run lint &amp;&amp; bun run tsc &amp;&amp; bun run test</code>.</li>
+</ul>
+
+<h2 id="s12"><span class="num">§ 12</span> Non-functional requirements</h2>
+<table>
+  <thead><tr><th>Area</th><th>Target</th></tr></thead>
+  <tbody>
+    <tr><td>Headlamp version</td><td>≥ current LTS at v1.0 ship date; pinned in plugin manifest. Breaking-API drift treated as a release blocker.</td></tr>
+    <tr><td>Kubernetes version</td><td>≥ 1.27 (matches AI Runway controller floor).</td></tr>
+    <tr><td>Browser support</td><td>Latest 2 versions of Chrome, Edge, Firefox, Safari.</td></tr>
+    <tr><td>Plugin bundle size</td><td>Core plugin <strong>≤ 1.5 MB</strong> gzipped; AKS overlay <strong>≤ 750 KB</strong> gzipped. CI fails on regression.</td></tr>
+    <tr><td>Project-detail TTI</td><td><strong>≤ 2.5 s</strong> on a cluster with 50 Projects / 500 labeled resources, warm Headlamp session (measured against fixtures in CI).</td></tr>
+    <tr><td>Observability tab first-paint</td><td><strong>≤ 1.5 s</strong> to render the K8s-native overview strip; app-metrics and IG panels stream in independently.</td></tr>
+    <tr><td>Detection latency</td><td>All <code>useAksContext</code> / <code>useRunwayContext</code> probes complete in <strong>≤ 1 s</strong> or fail open.</td></tr>
+    <tr><td>Accessibility</td><td>Keyboard-navigable; respects Headlamp's existing a11y baseline. No new keyboard traps.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="s13"><span class="num">§ 13</span> Security</h2>
+<ul>
+  <li><strong>RBAC for Projects.</strong> The plugin issues all calls with the end-user's token; it never elevates. Creating, listing, or modifying a <code>Project</code> CR requires standard K8s RBAC on <code>projects.airunway.ai</code> in the target namespace. Cluster admins are responsible for granting this — the plugin offers no per-Project ACL of its own in v1.</li>
+  <li><strong>Label tampering.</strong> Any user with <code>patch</code> on a resource can add or remove the <code>airunway.ai/project</code> label, moving it in or out of a Project. This is the same trust model as any K8s label-based grouping (Services, NetworkPolicies). v1 does not validate or webhook-enforce membership — cluster admins who care should restrict <code>patch</code> on the label key via RBAC or an OPA / Kyverno policy. Documented, not prevented.</li>
+  <li><strong>Selector overlap is allowed</strong> (§5); UI surfaces it so users notice if a resource is unexpectedly in multiple Projects.</li>
+  <li><strong>IG privileges.</strong> IG itself runs privileged on every node; the plugin inherits no extra privilege. If the user's token cannot create <code>Trace</code> CRs, the Diagnostics panel shows a permission CTA rather than failing silently.</li>
+  <li><strong>PII in IG output.</strong> Kernel-level traces can leak sensitive strings: DNS names (<code>*.openai.azure.com</code>, internal hostnames), file paths (model identifiers, user-data mounts), syscall arguments. Plugin policy:
+    <ul>
+      <li>IG output is rendered <strong>as-is</strong> in the table. Nothing is auto-uploaded anywhere; the last-5 ephemeral cache lives in Headlamp plugin-storage (browser-local), not the cluster. JSON/CSV export is explicit and user-initiated.</li>
+      <li>The Diagnostics panel header carries a one-line PII notice the first time it's opened per session.</li>
+    </ul>
+  </li>
+  <li><strong>Untrusted input.</strong> Project <code>displayName</code> / <code>description</code>, user-supplied client IDs, and gadget output are all rendered as text (React default-escapes); no <code>dangerouslySetInnerHTML</code>. Backend Zod validation enforced on every route per project security rules.</li>
+  <li><strong>Secrets.</strong> The AOAI fallback step writes a <code>Secret</code>; the plugin never logs the value, never sends it to telemetry, and clears form fields on navigation.</li>
+</ul>
+
+<h2 id="s14"><span class="num">§ 14</span> Open questions</h2>
+<p>These need decisions from named owners before or during v1 implementation.</p>
+<ol>
+  <li><strong>[IG-CONFIRM] IG surface, GPU coverage, curated catalog, version floor.</strong> See §8 sub-bullets.</li>
+  <li><strong>App-metrics fallback.</strong> Can we rely on the AI Runway backend being present, or must direct <code>/metrics</code> (via Headlamp proxy) be a first-class path? Affects whether observability works backend-less.</li>
+  <li><strong>KAITO preset table.</strong> Which <code>(SKU, model-family)</code> pairs ship in v1? Needs a pass with the KAITO catalog owner.</li>
+  <li><strong>Sidebar placement.</strong> Projects as a new top-level group, or nested under the existing "AIRunway" group?</li>
+  <li><strong>Naming.</strong> Core Project work needs no special name; AKS overlay working name <code>airunway-aks</code> — final name TBD.</li>
+</ol>
+
+<h2 id="s15"><span class="num">§ 15</span> Risks</h2>
+<table>
+  <thead><tr><th>Risk</th><th>Likelihood</th><th>Impact</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>IG gadget catalog doesn't include the GPU signals assumed in the curated set</td><td>Medium</td><td>Medium — Diagnostics panel feels thin on GPU</td><td>Confirm with IG maintainer (<a href="#s8">§8</a>) before committing UI copy; fall back to DCGM-via-Prometheus + clear "GPU = via DCGM" label</td></tr>
+    <tr><td>KAITO presets churn between releases</td><td>Medium</td><td>Low — wrong preset surfaced</td><td>Keep preset table in TS, version it against KAITO release; CTA "report stale preset"</td></tr>
+    <tr><td>Inference-engine metric schemas drift (vLLM rename, SGLang adds/removes) over a 12-month horizon</td><td>High</td><td>Low — panel labels go stale</td><td>Engine-coverage matrix in tests; renders "not reported by this engine" gracefully</td></tr>
+    <tr><td>Headlamp plugin API breaks between releases</td><td>Low–Medium</td><td>High — plugin doesn't load</td><td>Pin tested Headlamp version range; CI runs plugin against Headlamp-main weekly</td></tr>
+    <tr><td>Selector overlap confuses users in practice</td><td>Medium</td><td>Low</td><td>"Also in: N Projects" hint in UI; revisit at v1.1 if support load is high</td></tr>
+    <tr><td>AKS detection false positives on non-AKS clusters using the same node label out of habit</td><td>Low</td><td>Medium — overlay activates wrongly</td><td>Detection requires <em>both</em> the cluster-wide label and at least one Azure-specific CRD/identity signal before activating</td></tr>
+    <tr><td>Wizard partial-failure cleanup is misunderstood as auto-rollback</td><td>Medium</td><td>Medium — orphaned resources</td><td>UI is explicit: "no automatic rollback, use Clean up partial resources to remove what this wizard created"</td></tr>
+    <tr><td>ARM-deferred steps (copy-paste <code>az</code>) feel like a regression vs. fully automated tooling stakeholders may have seen elsewhere</td><td>Medium</td><td>Low</td><td>Frame as deliberate v1 scope cut in stakeholder review; v2 owns the ARM control plane with proper auth design</td></tr>
+  </tbody>
+</table>
+
+<h2 id="s16"><span class="num">§ 16</span> Glossary</h2>
+<table>
+  <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><strong>ACR</strong></td><td>Azure Container Registry — Azure's image registry; attached to AKS for image pulls</td></tr>
+    <tr><td><strong>AGIC</strong></td><td>Application Gateway Ingress Controller — Azure's Gateway API / Ingress implementation</td></tr>
+    <tr><td><strong>AKS</strong></td><td>Azure Kubernetes Service — Microsoft's managed Kubernetes offering</td></tr>
+    <tr><td><strong>AOAI</strong></td><td>Azure OpenAI — Azure-hosted OpenAI-compatible model endpoints</td></tr>
+    <tr><td><strong>CTA</strong></td><td>Call-to-action — a button or link prompting the user to take a next step (e.g., "Install IG")</td></tr>
+    <tr><td><strong>DCGM</strong></td><td>NVIDIA Data Center GPU Manager — exporter that produces GPU utilization, memory, temperature metrics for Prometheus</td></tr>
+    <tr><td><strong>eBPF</strong></td><td>extended Berkeley Packet Filter — Linux kernel mechanism for safely running sandboxed programs in kernel space; the basis for Inspektor Gadget</td></tr>
+    <tr><td><strong>Gateway API</strong></td><td>Kubernetes networking API (successor to Ingress) — <code>gateway.networking.k8s.io</code></td></tr>
+    <tr><td><strong>IG / Inspektor Gadget</strong></td><td>Collection of eBPF-based tools for inspecting and debugging Kubernetes workloads</td></tr>
+    <tr><td><strong>KAITO</strong></td><td>Kubernetes AI Toolchain Operator — Azure-originated operator for deploying ML models; the "Workspace" CR is its deployment object</td></tr>
+    <tr><td><strong>KV-cache</strong></td><td>Key/Value cache in transformer inference — memory used to avoid recomputing attention over prior tokens; saturation kills throughput</td></tr>
+    <tr><td><strong>NCCL</strong></td><td>NVIDIA Collective Communications Library — used for inter-GPU / inter-pod tensor exchange in distributed inference; silent failures cause "silent replicas"</td></tr>
+    <tr><td><strong>OIDC</strong></td><td>OpenID Connect — identity-token standard; needed for Workload Identity</td></tr>
+    <tr><td><strong>PII</strong></td><td>Personally Identifiable Information</td></tr>
+    <tr><td><strong>RAG</strong></td><td>Retrieval-Augmented Generation — LLM pattern that fetches documents and feeds them to the model as context</td></tr>
+    <tr><td><strong>R/Y/G</strong></td><td>Red / Yellow / Green status indicator</td></tr>
+    <tr><td><strong>SKU</strong></td><td>Stock-Keeping Unit — Azure's name for VM/instance types (e.g., <code>Standard_NC24ads_A100_v4</code>)</td></tr>
+    <tr><td><strong>TPOT</strong></td><td>Time Per Output Token — average latency between successive generated tokens; a key streaming-perf metric</td></tr>
+    <tr><td><strong>TTFT</strong></td><td>Time To First Token — latency from request submission to the first generated token reaching the client; a key UX metric</td></tr>
+    <tr><td><strong>TRT-LLM</strong></td><td>NVIDIA TensorRT-LLM — high-perf inference engine for NVIDIA GPUs</td></tr>
+    <tr><td><strong>vLLM</strong></td><td>High-throughput LLM inference engine with PagedAttention; the most common engine in AI Runway today</td></tr>
+    <tr><td><strong>WI</strong></td><td>Workload Identity — AKS feature that lets pods authenticate to Azure without long-lived secrets, via an OIDC-issued ServiceAccount token</td></tr>
+  </tbody>
+</table>
+
+<footer>
+  <span>AI Runway · Projects + AKS overlay specification</span>
+  <span>kaito-project / airunway</span>
+</footer>
+
+</main>
+</div>
+</body>
+</html>
