@@ -20,10 +20,7 @@ Azure-specific facts come from K8s labels, CR status, and Portal
 deep-links. Everything optional fails open with a call-to-action.
 v1 is scoped at ~6–10 engineer-weeks (one engineer working
 sequentially; calendar depends on staffing). A real topology view of
-each Project is a v1.0 stretch goal. No external blockers: the
-Inspektor Gadget surface, GPU coverage, and curated catalog are
-validated against the IG repo (§8); the exact IG version-floor tag is
-filled in at v1.0 ship.
+each Project is a v1.0 stretch goal.
 
 ---
 
