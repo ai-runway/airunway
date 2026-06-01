@@ -1395,5 +1395,26 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
 		})
+
+		It("Should accept CPU-only vllm on dynamo when mocker annotation is set", func() {
+			obj.Annotations = map[string]string{"airunway.ai/dynamo-test-backend": "mocker"}
+			obj.Spec.Model.ID = "Qwen/Qwen3-0.6B"
+			obj.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+			obj.Spec.Resources = &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 0}}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should still reject CPU-only vllm on dynamo when mocker annotation has a different value", func() {
+			obj.Annotations = map[string]string{"airunway.ai/dynamo-test-backend": "real"}
+			obj.Spec.Model.ID = "Qwen/Qwen3-0.6B"
+			obj.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+			obj.Spec.Resources = &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 0}}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("requires GPU"))
+		})
 	})
 })

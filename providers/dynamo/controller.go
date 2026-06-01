@@ -262,6 +262,22 @@ func (r *DynamoProviderReconciler) validateCompatibility(md *airunwayv1alpha1.Mo
 		return fmt.Errorf("Dynamo does not support llamacpp engine")
 	}
 
+	// Mocker mode (test-only): the python3 -m dynamo.mocker backend simulates
+	// serving without GPUs, so the GPU requirement is waived. It only supports
+	// the vLLM engine, and disaggregated mode still needs prefill+decode scaling
+	// blocks so the transformer can build both workers.
+	if isMockerMode(md) {
+		if md.ResolvedEngineType() != airunwayv1alpha1.EngineTypeVLLM {
+			return fmt.Errorf("Dynamo mocker mode only supports the vllm engine")
+		}
+		if md.Spec.Serving != nil && md.Spec.Serving.Mode == airunwayv1alpha1.ServingModeDisaggregated {
+			if md.Spec.Scaling == nil || md.Spec.Scaling.Prefill == nil || md.Spec.Scaling.Decode == nil {
+				return fmt.Errorf("Dynamo mocker disaggregated mode requires spec.scaling.prefill and spec.scaling.decode")
+			}
+		}
+		return nil
+	}
+
 	// Dynamo requires GPU
 	hasGPU := false
 	if md.Spec.Resources != nil && md.Spec.Resources.GPU != nil && md.Spec.Resources.GPU.Count > 0 {

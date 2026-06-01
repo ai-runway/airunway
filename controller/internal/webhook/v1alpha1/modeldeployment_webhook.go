@@ -291,7 +291,19 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 	// admission; falls back to the uncached APIReader only when the cache
 	// reports NotFound, to absorb the race where a brand-new
 	// InferenceProviderConfig hasn't yet propagated to informers.
-	if spec.Provider != nil && spec.Provider.Name != "" && spec.Engine.Type != "" && v.Reader != nil {
+	//
+	// Mocker mode escape hatch: a ModelDeployment annotated with
+	// airunway.ai/dynamo-test-backend=mocker targeting the dynamo provider runs
+	// the GPU-less python3 -m dynamo.mocker backend, so the provider's GPU
+	// capability check must not reject it at admission. This is a test-only path
+	// (the dynamo provider re-validates compatibility during reconciliation).
+	// The annotation key is kept as a literal here to avoid importing the
+	// provider module from the controller webhook (see
+	// providers/dynamo/mocker.go AnnotationDynamoTestBackend / DynamoTestBackendMocker).
+	isDynamoMocker := obj.Annotations["airunway.ai/dynamo-test-backend"] == "mocker" &&
+		spec.Provider != nil && spec.Provider.Name == "dynamo"
+
+	if !isDynamoMocker && spec.Provider != nil && spec.Provider.Name != "" && spec.Engine.Type != "" && v.Reader != nil {
 		var providerConfig airunwayv1alpha1.InferenceProviderConfig
 		err := v.Reader.Get(ctx, client.ObjectKey{Name: spec.Provider.Name}, &providerConfig)
 		if apierrors.IsNotFound(err) && v.APIReader != nil {

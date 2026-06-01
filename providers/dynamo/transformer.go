@@ -213,6 +213,13 @@ func (t *Transformer) buildServices(md *airunwayv1alpha1.ModelDeployment, overri
 
 	gatewayEnabled := md.Spec.Gateway == nil || md.Spec.Gateway.Enabled == nil || *md.Spec.Gateway.Enabled
 
+	// Mocker mode always uses the standalone Frontend path. It exercises the
+	// Dynamo Frontend → mocker worker slice without EPP/GAIE complexity, so the
+	// gateway/EPP branch is never taken regardless of spec.gateway.enabled.
+	if isMockerMode(md) {
+		gatewayEnabled = false
+	}
+
 	if gatewayEnabled {
 		// GAIE path: Gateway → EPP → worker frontendSidecar. No standalone
 		// Frontend — each worker's sidecar handles requests locally.
@@ -272,6 +279,13 @@ func (t *Transformer) buildFrontendService(md *airunwayv1alpha1.ModelDeployment,
 
 	cpu := "2"
 	memory := "4Gi"
+	// Mocker mode targets GPU-less CI nodes that are often small. The Frontend
+	// is a lightweight router, so default to modest requests (overridable) to
+	// leave headroom for the mocker worker on the same node.
+	if isMockerMode(md) {
+		cpu = "100m"
+		memory = "256Mi"
+	}
 	if overrides.Frontend != nil && overrides.Frontend.Resources != nil {
 		if overrides.Frontend.Resources.CPU != "" {
 			cpu = overrides.Frontend.Resources.CPU
@@ -496,6 +510,16 @@ func (t *Transformer) buildAggregatedWorker(md *airunwayv1alpha1.ModelDeployment
 		return nil, err
 	}
 
+	command := t.engineCommand(md.ResolvedEngineType())
+
+	// Mocker mode: swap the real engine for python3 -m dynamo.mocker and drop
+	// all GPU/CPU resource requests so the worker schedules on CPU-only nodes.
+	if isMockerMode(md) {
+		command = mockerCommand()
+		args = buildMockerArgs(md)
+		resources = emptyResources()
+	}
+
 	worker := map[string]interface{}{
 		"componentType": ComponentTypeWorker,
 		"replicas":      replicas,
@@ -503,7 +527,7 @@ func (t *Transformer) buildAggregatedWorker(md *airunwayv1alpha1.ModelDeployment
 		"extraPodSpec": map[string]interface{}{
 			"mainContainer": map[string]interface{}{
 				"image":   image,
-				"command": toInterfaceSlice(t.engineCommand(md.ResolvedEngineType())),
+				"command": toInterfaceSlice(command),
 				"args":    toInterfaceSlice(args),
 			},
 		},
@@ -584,6 +608,17 @@ func (t *Transformer) buildPrefillWorker(md *airunwayv1alpha1.ModelDeployment, i
 		args = append(args, "--kv-transfer-config", VLLMKVTransferConfig)
 	}
 
+	command := t.engineCommand(md.ResolvedEngineType())
+
+	// Mocker mode: swap the real engine for python3 -m dynamo.mocker and drop
+	// GPU resource requests. The mocker keeps --disaggregation-mode but does
+	// NOT use --kv-transfer-config (that NIXL flag is real-vLLM-only).
+	if isMockerMode(md) {
+		command = mockerCommand()
+		args = append(buildMockerArgs(md), "--disaggregation-mode", SubComponentTypePrefill)
+		resources = emptyResources()
+	}
+
 	worker := map[string]interface{}{
 		"componentType":    ComponentTypeWorker,
 		"subComponentType": SubComponentTypePrefill,
@@ -592,7 +627,7 @@ func (t *Transformer) buildPrefillWorker(md *airunwayv1alpha1.ModelDeployment, i
 		"extraPodSpec": map[string]interface{}{
 			"mainContainer": map[string]interface{}{
 				"image":   image,
-				"command": toInterfaceSlice(t.engineCommand(md.ResolvedEngineType())),
+				"command": toInterfaceSlice(command),
 				"args":    toInterfaceSlice(args),
 			},
 		},
@@ -649,6 +684,17 @@ func (t *Transformer) buildDecodeWorker(md *airunwayv1alpha1.ModelDeployment, im
 		args = append(args, "--kv-transfer-config", VLLMKVTransferConfig)
 	}
 
+	command := t.engineCommand(md.ResolvedEngineType())
+
+	// Mocker mode: swap the real engine for python3 -m dynamo.mocker and drop
+	// GPU resource requests. The mocker keeps --disaggregation-mode but does
+	// NOT use --kv-transfer-config (that NIXL flag is real-vLLM-only).
+	if isMockerMode(md) {
+		command = mockerCommand()
+		args = append(buildMockerArgs(md), "--disaggregation-mode", SubComponentTypeDecode)
+		resources = emptyResources()
+	}
+
 	worker := map[string]interface{}{
 		"componentType":    ComponentTypeWorker,
 		"subComponentType": SubComponentTypeDecode,
@@ -657,7 +703,7 @@ func (t *Transformer) buildDecodeWorker(md *airunwayv1alpha1.ModelDeployment, im
 		"extraPodSpec": map[string]interface{}{
 			"mainContainer": map[string]interface{}{
 				"image":   image,
-				"command": toInterfaceSlice(t.engineCommand(md.ResolvedEngineType())),
+				"command": toInterfaceSlice(command),
 				"args":    toInterfaceSlice(args),
 			},
 		},
@@ -852,6 +898,12 @@ func (t *Transformer) getImage(md *airunwayv1alpha1.ModelDeployment) string {
 	// Use custom image if specified
 	if md.Spec.Image != "" {
 		return md.Spec.Image
+	}
+
+	// Mocker mode runs python3 -m dynamo.mocker, which lives in the
+	// dynamo-planner image rather than the per-engine runtime images.
+	if isMockerMode(md) {
+		return defaultMockerImage
 	}
 
 	// Use default image for engine type
