@@ -373,11 +373,8 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 	// the GPU-less python3 -m dynamo.mocker backend, so the GPU compatibility and
 	// disaggregated gpu.count checks below must not reject it. This mirrors the
 	// admission webhook (see modeldeployment_webhook.go) so the two cannot drift.
-	// The annotation key is kept as a literal to avoid importing the dynamo
-	// provider module into the controller (see providers/dynamo/mocker.go
-	// AnnotationDynamoTestBackend / DynamoTestBackendMocker). Mocker is vLLM-only.
-	isDynamoMocker := md.Annotations["airunway.ai/dynamo-test-backend"] == "mocker" &&
-		spec.Provider != nil && spec.Provider.Name == "dynamo"
+	// Mocker is vLLM-only.
+	isDynamoMocker := isDynamoMockerMode(md)
 	if isDynamoMocker && engineType != airunwayv1alpha1.EngineTypeVLLM {
 		return fmt.Errorf("the dynamo mocker test backend only supports the vllm engine")
 	}
