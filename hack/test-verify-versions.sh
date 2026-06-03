@@ -19,12 +19,14 @@ cd "${REPO_ROOT}"
 GO_MOD="controller/go.mod"
 DYNAMO_CONFIG="providers/dynamo/config.go"
 GATEWAY_DETECTION="controller/internal/gateway/detection.go"
+KAITO_CONFIG="providers/kaito/config.go"
 VERSIONS_TS="shared/types/versions.generated.ts"
 
 BACKUPS=(
     "${GO_MOD}.bak"
     "${DYNAMO_CONFIG}.bak"
     "${GATEWAY_DETECTION}.bak"
+    "${KAITO_CONFIG}.bak"
     "${VERSIONS_TS}.bak"
 )
 
@@ -68,6 +70,16 @@ echo "== Mutating ${GATEWAY_DETECTION} =="
 sed -i.bak -E 's|^var DefaultGAIEVersion = "[^"]*"$|var DefaultGAIEVersion = "v0.0.0-bogus"|' "${GATEWAY_DETECTION}"
 expect_fail "${GATEWAY_DETECTION}"
 mv -f "${GATEWAY_DETECTION}.bak" "${GATEWAY_DETECTION}"
+
+echo "== Mutating ${KAITO_CONFIG} (struct Version field) =="
+sed -i.bak -E 's|(Version:[[:space:]]+)"[^"]*"|\1"0.0.0-bogus"|' "${KAITO_CONFIG}"
+expect_fail "${KAITO_CONFIG} struct Version"
+mv -f "${KAITO_CONFIG}.bak" "${KAITO_CONFIG}"
+
+echo "== Mutating ${KAITO_CONFIG} (install Command --version arg) =="
+sed -i.bak -E 's|(--version )[^ ]+( )|\10.0.0-bogus\2|' "${KAITO_CONFIG}"
+expect_fail "${KAITO_CONFIG} install Command --version"
+mv -f "${KAITO_CONFIG}.bak" "${KAITO_CONFIG}"
 
 echo "== Mutating ${VERSIONS_TS} =="
 # Now that verify-versions diffs a temp regen against the working-tree

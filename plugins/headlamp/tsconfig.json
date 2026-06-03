@@ -20,9 +20,8 @@
     "declaration": false,
     "declarationMap": false,
     "outDir": "./dist",
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"],
+      "@/*": ["./src/*"],
       "@airunway/shared": ["../../shared/types/index.ts"],
       "@airunway/shared/api": ["../../shared/api/index.ts"]
     }

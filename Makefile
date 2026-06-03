@@ -1,6 +1,6 @@
 .PHONY: install dev dev-frontend dev-backend build compile lint test clean help providers-test verify-versions test-verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
-.PHONY: model-downloader-docker-build
+.PHONY: model-downloader-docker-build setup-gateway cleanup-gateway
 
 # Controller image
 CONTROLLER_IMG ?= ghcr.io/kaito-project/airunway/controller:latest
@@ -58,6 +58,10 @@ help:
 	@echo ""
 	@echo "Provider Targets:"
 	@echo "  providers-test         Run all provider tests"
+	@echo ""
+	@echo "Cluster Setup Targets:"
+	@echo "  setup-gateway          Install Gateway API CRDs, Istio, BBR, and the inference Gateway"
+	@echo "  cleanup-gateway        Remove the inference Gateway and BBR (CRDs/Istio left intact)"
 	@echo ""
 	@echo "Image Build Variables:"
 	@echo "  PLATFORM=<platform>    Target platform for image builds (default: linux/amd64)"
@@ -200,6 +204,57 @@ model-downloader-docker-build:
 	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) -f images/model-downloader/Dockerfile -t $(MODEL_DOWNLOADER_IMG) images/model-downloader
 	@echo "✅ Model downloader image built: $(MODEL_DOWNLOADER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
+# ==================== Cluster Setup Targets ====================
+
+# Provider-agnostic inference-gateway bootstrap: installs Gateway API CRDs,
+# Istio (with the Gateway API Inference Extension enabled), the Body-Based
+# Router, and an `inference-gateway` Gateway resource. Required before
+# deploying any provider that routes through the inference gateway. Versions
+# are pinned in versions.env (GATEWAY_API_VERSION, ISTIO_VERSION, GAIE_VERSION).
+GATEWAY_NAMESPACE ?= default
+GATEWAY_NAME ?= inference-gateway
+GATEWAY_API_URL := https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
+GATEWAY_MANIFEST := hack/inference-gateway.yaml
+BBR_CHART := oci://registry.k8s.io/gateway-api-inference-extension/charts/body-based-routing
+GAIE_MANIFEST_URL := https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$(GAIE_VERSION)/manifests.yaml
+
+setup-gateway: verify-versions
+	@command -v istioctl >/dev/null 2>&1 || { echo "❌ istioctl not found on PATH. Install Istio $(ISTIO_VERSION): https://istio.io/latest/docs/setup/getting-started/"; exit 1; }
+	@echo "Installing Gateway API CRDs $(GATEWAY_API_VERSION)..."
+	kubectl apply -f $(GATEWAY_API_URL)
+	@echo "Installing Gateway API Inference Extension (GAIE) CRDs $(GAIE_VERSION)..."
+	kubectl apply -f $(GAIE_MANIFEST_URL)
+	@echo "Installing Istio $(ISTIO_VERSION) (inference extension enabled)..."
+	istioctl install --skip-confirmation \
+		--set profile=minimal \
+		--set tag=$(ISTIO_VERSION) \
+		--set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true
+	@echo "Installing Body-Based Router (BBR) $(GAIE_VERSION) into namespace $(GATEWAY_NAMESPACE)..."
+	helm upgrade -i body-based-router \
+		--namespace $(GATEWAY_NAMESPACE) --create-namespace \
+		--set provider.name=istio \
+		--version "$(GAIE_VERSION)" \
+		--wait \
+		$(BBR_CHART)
+	@echo "Creating Gateway resource $(GATEWAY_NAME) in namespace $(GATEWAY_NAMESPACE)..."
+	@command -v envsubst >/dev/null 2>&1 || { echo "❌ envsubst not found on PATH (provided by gettext)."; exit 1; }
+	GATEWAY_NAME=$(GATEWAY_NAME) GATEWAY_NAMESPACE=$(GATEWAY_NAMESPACE) \
+		envsubst < $(GATEWAY_MANIFEST) | kubectl apply -f -
+	@echo "✅ Inference gateway ready (Istio $(ISTIO_VERSION), gateway/$(GATEWAY_NAME))"
+
+# Tear down the inference Gateway and BBR. Gateway API CRDs and Istio are left
+# intact because they may be shared with other workloads.
+cleanup-gateway:
+	@command -v envsubst >/dev/null 2>&1 || { echo "❌ envsubst not found on PATH (provided by gettext)."; exit 1; }
+	@GATEWAY_NAME=$(GATEWAY_NAME) GATEWAY_NAMESPACE=$(GATEWAY_NAMESPACE) \
+		envsubst < $(GATEWAY_MANIFEST) | kubectl delete -f - --ignore-not-found
+	@helm uninstall body-based-router --namespace $(GATEWAY_NAMESPACE) --ignore-not-found || helm uninstall body-based-router --namespace $(GATEWAY_NAMESPACE) || true
+	@echo "⚠️ Gateway API CRDs, GAIE CRDs, and Istio left intact (may be shared). Remove manually if needed:"
+	@echo "    kubectl delete -f \"$(GATEWAY_API_URL)\" --ignore-not-found"
+	@echo "    kubectl delete -f \"$(GAIE_MANIFEST_URL)\" --ignore-not-found"
+	@echo "    istioctl uninstall --purge -y"
+	@echo "✅ Inference gateway and BBR removed"
+
 # ==================== Version Drift Guard ====================
 
 # Verify all version references are in sync with versions.env.
@@ -210,6 +265,7 @@ model-downloader-docker-build:
 # regexes, preventing e.g. "1.5.0" from also matching "1X5Y0".
 GAIE_VERSION_RE := $(subst .,\.,$(GAIE_VERSION))
 DYNAMO_VERSION_RE := $(subst .,\.,$(DYNAMO_VERSION))
+KAITO_VERSION_RE := $(subst .,\.,$(KAITO_VERSION))
 
 verify-versions:
 	@# 1. controller/go.mod must pin GAIE_VERSION
@@ -221,7 +277,13 @@ verify-versions:
 	@# 3. controller/internal/gateway/detection.go fallback literal must match GAIE_VERSION
 	@grep -qE '^var DefaultGAIEVersion = "$(GAIE_VERSION_RE)"$$' controller/internal/gateway/detection.go || \
 	  { echo "❌ controller/internal/gateway/detection.go DefaultGAIEVersion fallback != $(GAIE_VERSION) (from versions.env)"; exit 1; }
-	@# 4. generated TS must be in sync with versions.env.
+	@# 4. providers/kaito/config.go chart version literal must match KAITO_VERSION
+	@grep -qE 'Version:[[:space:]]+"$(KAITO_VERSION_RE)"' providers/kaito/config.go || \
+	  { echo "❌ providers/kaito/config.go chart Version != $(KAITO_VERSION) (from versions.env)"; exit 1; }
+	@# 5. providers/kaito/config.go install Command --version arg must match KAITO_VERSION
+	@grep -qE -- '--version $(KAITO_VERSION_RE) ' providers/kaito/config.go || \
+	  { echo "❌ providers/kaito/config.go install Command --version != $(KAITO_VERSION) (from versions.env)"; exit 1; }
+	@# 6. generated TS must be in sync with versions.env.
 	@#    Generate to a temp file and diff against the working-tree copy so
 	@#    that synced uncommitted edits pass (the local-dev case) while
 	@#    stale committed files still fail (the CI case — CI's working
@@ -239,7 +301,7 @@ verify-versions:
 	    echo "❌ shared/types/versions.generated.ts is stale — run 'cd shared && bun run generate-versions' and commit the result"; \
 	    exit 1; \
 	  }
-	@echo "✅ versions in sync (GAIE_VERSION=$(GAIE_VERSION), DYNAMO_VERSION=$(DYNAMO_VERSION))"
+	@echo "✅ versions in sync (GAIE_VERSION=$(GAIE_VERSION), DYNAMO_VERSION=$(DYNAMO_VERSION), KAITO_VERSION=$(KAITO_VERSION))"
 
 # Test the verify-versions guard itself by deliberately breaking each
 # input it inspects and asserting the target exits non-zero.

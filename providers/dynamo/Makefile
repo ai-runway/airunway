@@ -70,13 +70,14 @@ setup-dynamo: verify-versions
 		curl -fsSL "$(DYNAMO_PRE_DEPLOY_URL)" -o "$$TMPSCRIPT" && \
 		chmod +x "$$TMPSCRIPT" && \
 		bash "$$TMPSCRIPT"
-	@echo "Pre-deployment checks passed. Installing GAIE components..."
-	@kubectl apply -f $(GAIE_MANIFEST_URL)
+	@echo "Pre-deployment checks passed. Setting up the inference gateway (Gateway API CRDs, GAIE CRDs, Istio, BBR, Gateway)..."
+	@$(MAKE) -C ../.. setup-gateway
 	@echo "Installing Dynamo platform v$(DYNAMO_VERSION)..."
 	@helm upgrade -i dynamo-platform "$(DYNAMO_CHART_URL)" \
 			--namespace $(DYNAMO_NAMESPACE) \
 			--create-namespace \
-			--set "dynamo-operator.controllerManager.manager.image.tag=$(DYNAMO_VERSION)"
+			--set "dynamo-operator.controllerManager.manager.image.tag=$(DYNAMO_VERSION)" \
+			--wait
 	@echo "✅ Dynamo platform v$(DYNAMO_VERSION) installed in namespace $(DYNAMO_NAMESPACE)"
 
 ## Uninstall Dynamo platform from the cluster

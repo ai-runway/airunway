@@ -127,7 +127,7 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 			},
 			{
 				Title:       "Update Helm Repositories",
-				Command:     "helm repo update",
+				Command:     "helm repo update kaito",
 				Description: "Update local Helm repository cache.",
 			},
 			{

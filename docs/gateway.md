@@ -74,6 +74,16 @@ AI Runway works with any Gateway API implementation that supports the [Inference
 
 ## Setup
 
+> [!TIP]
+> **Istio shortcut:** `make setup-gateway` (from the repo root) performs the entire manual
+> **Istio** setup below in one shot — it installs the Gateway API CRDs (Step 1), the Gateway
+> API Inference Extension (GAIE) CRDs (Step 2), Istio with the inference extension enabled
+> (Step 3), the `inference-gateway` Gateway resource (Step 4), and the Body-Based Router (see
+> [Body-Based Routing](#body-based-routing-bbr)). The
+> `GATEWAY_API_VERSION`, `ISTIO_VERSION`, and `GAIE_VERSION` it uses are pinned in
+> [`/versions.env`](../versions.env), and `istioctl` must be on your PATH. For other gateway
+> implementations, follow the manual steps below.
+
 ### Step 1: Install Gateway API CRDs
 
 ```bash
