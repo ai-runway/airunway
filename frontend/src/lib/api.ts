@@ -115,6 +115,7 @@ export type {
   AutoscalerDetectionResult,
   AutoscalerStatusInfo,
   DetailedClusterCapacity,
+  GpuThroughputEstimate,
   NodePoolInfo,
   PodFailureReason,
   PodLogsOptions,
@@ -159,6 +160,7 @@ import type {
   AutoscalerDetectionResult,
   AutoscalerStatusInfo,
   DetailedClusterCapacity,
+  GpuThroughputEstimate,
   PodFailureReason,
   RuntimesStatusResponse,
   PodLogsResponse,
@@ -519,6 +521,35 @@ export const gpuOperatorApi = {
   getCapacity: () => request<ClusterGpuCapacity>('/installation/gpu-capacity'),
 
   getDetailedCapacity: () => request<DetailedClusterCapacity>('/installation/gpu-capacity/detailed'),
+
+  /** Estimate inference throughput (per-chat speed + concurrent capacity) for a model on the cluster's GPUs */
+  getThroughput: (
+    params: {
+      modelId?: string;
+      paramCount?: number;
+      contextLen?: number;
+      quantization?: 'fp8' | 'int8' | 'fp16' | 'bf16';
+      gpuModel?: string;
+      tpSize?: number;
+    },
+    hfToken?: string
+  ) => {
+    const search = new URLSearchParams();
+    if (params.modelId) search.set('modelId', params.modelId);
+    if (params.paramCount) search.set('paramCount', String(params.paramCount));
+    if (params.contextLen) search.set('contextLen', String(params.contextLen));
+    if (params.quantization) search.set('quantization', params.quantization);
+    if (params.gpuModel) search.set('gpuModel', params.gpuModel);
+    if (params.tpSize) search.set('tpSize', String(params.tpSize));
+
+    const headers: Record<string, string> = {};
+    if (hfToken) {
+      headers['X-HF-Token'] = hfToken;
+    }
+    return request<GpuThroughputEstimate>(`/installation/gpu-throughput?${search.toString()}`, {
+      headers,
+    });
+  },
 };
 
 // ============================================================================

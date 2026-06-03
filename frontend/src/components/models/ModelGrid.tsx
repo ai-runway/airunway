@@ -8,9 +8,10 @@ interface ModelGridProps {
   gpuCapacityGb?: number
   gpuCount?: number
   gpuCapacityLabel?: string
+  gpuModel?: string
 }
 
-export function ModelGrid({ models, gpuCapacityGb, gpuCount, gpuCapacityLabel }: ModelGridProps) {
+export function ModelGrid({ models, gpuCapacityGb, gpuCount, gpuCapacityLabel, gpuModel }: ModelGridProps) {
   const navigate = useNavigate()
 
   if (models.length === 0) {
@@ -42,6 +43,7 @@ export function ModelGrid({ models, gpuCapacityGb, gpuCount, gpuCapacityLabel }:
             gpuCapacityGb={gpuCapacityGb}
             gpuCount={gpuCount}
             gpuCapacityLabel={gpuCapacityLabel}
+            gpuModel={gpuModel}
           />
         </div>
       ))}

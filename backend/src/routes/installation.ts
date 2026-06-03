@@ -1,8 +1,18 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
 import { getProviderHealth } from '../services/providerHealth';
+import { getGpuInfo, normalizeGpuModel } from '../services/costEstimation';
+import { huggingFaceService } from '../services/huggingface';
+import {
+  bytesPerWeightFor,
+  estimatePerChatTokensPerSec,
+  estimateConcurrentCapacity,
+} from '../services/gpuPerformance';
+import type { GpuThroughputEstimate } from '@airunway/shared';
 import logger from '../lib/logger';
 import { aggregateRequiresCRDFromCapabilities, getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
 
@@ -15,6 +25,72 @@ interface ProviderHelmChartDetails {
   values?: Record<string, unknown>;
   preInstallMissingCrds?: boolean;
   skipCrds?: boolean;
+}
+
+/** Default context length (tokens) assumed when a model doesn't specify one. */
+const DEFAULT_CONTEXT_LEN = 4096;
+
+/** Query schema for GET /gpu-throughput. */
+const gpuThroughputQuerySchema = z.object({
+  modelId: z.string().min(1).optional(),
+  paramCount: z.coerce.number().positive().optional(),
+  contextLen: z.coerce.number().int().positive().max(1_048_576).optional(),
+  quantization: z.enum(['fp8', 'int8', 'fp16', 'bf16']).optional(),
+  gpuModel: z.string().min(1).optional(),
+  tpSize: z.coerce.number().int().positive().max(64).optional(),
+});
+
+interface GpuEstimateSelection {
+  resolvedGpuModel: string;
+  perGpuMemoryGb: number;
+  memBandwidthGBs: number;
+  capacityLabel?: string;
+  maxContiguous: number;
+}
+
+/**
+ * Pick the node pool / GPU model to base the throughput estimate on. Prefers a
+ * pool matching an explicitly-requested gpuModel, else the highest-VRAM GPU
+ * pool. Returns undefined when no pool maps to a GPU we have specs for.
+ */
+function selectGpuForEstimate(
+  capacity: Awaited<ReturnType<typeof kubernetesService.getDetailedClusterGpuCapacity>>,
+  requestedGpuModel?: string
+): GpuEstimateSelection | undefined {
+  const pools = (capacity.nodePools || []).filter((p) => p.gpuModel);
+
+  // 1. Explicit request: resolve directly from the GPU spec table.
+  if (requestedGpuModel) {
+    const info = getGpuInfo(requestedGpuModel);
+    if (info) {
+      return {
+        resolvedGpuModel: normalizeGpuModel(requestedGpuModel),
+        perGpuMemoryGb: info.memoryGb,
+        memBandwidthGBs: info.memBandwidthGBs,
+        capacityLabel: capacity.maxContiguousAvailable
+          ? `${capacity.maxContiguousAvailable}x${info.memoryGb} GB`
+          : undefined,
+        maxContiguous: capacity.maxContiguousAvailable || capacity.maxNodeGpuCapacity || 1,
+      };
+    }
+  }
+
+  // 2. Otherwise choose the pool with the most per-GPU VRAM.
+  let best: GpuEstimateSelection | undefined;
+  for (const pool of pools) {
+    const info = getGpuInfo(pool.gpuModel as string);
+    if (!info) continue;
+    if (!best || info.memoryGb > best.perGpuMemoryGb) {
+      best = {
+        resolvedGpuModel: normalizeGpuModel(pool.gpuModel as string),
+        perGpuMemoryGb: info.memoryGb,
+        memBandwidthGBs: info.memBandwidthGBs,
+        capacityLabel: `${pool.gpuCount}x${info.memoryGb} GB`,
+        maxContiguous: capacity.maxContiguousAvailable || pool.gpuCount || 1,
+      };
+    }
+  }
+  return best;
 }
 
 /**
@@ -164,6 +240,77 @@ const installation = new Hono()
   .get('/gpu-capacity/detailed', async (c) => {
     const capacity = await kubernetesService.getDetailedClusterGpuCapacity();
     return c.json(capacity);
+  })
+  .get('/gpu-throughput', zValidator('query', gpuThroughputQuerySchema), async (c) => {
+    const { modelId, paramCount, contextLen, quantization, gpuModel, tpSize } = c.req.valid('query');
+    const hfToken = c.req.header('X-HF-Token') || undefined;
+
+    // Resolve the node pool / GPU model to estimate for.
+    const capacity = await kubernetesService.getDetailedClusterGpuCapacity();
+    const selection = selectGpuForEstimate(capacity, gpuModel);
+    if (!selection) {
+      throw new HTTPException(404, {
+        message: 'No GPU node pool with known specs found in the cluster.',
+      });
+    }
+    const { resolvedGpuModel, perGpuMemoryGb, memBandwidthGBs, capacityLabel, maxContiguous } = selection;
+
+    // TP size = GPUs per replica, bounded by what a single node can host.
+    const effectiveTpSize = Math.max(1, Math.min(tpSize ?? 1, maxContiguous || tpSize || 1));
+    const bytesPerWeight = bytesPerWeightFor(quantization);
+
+    // paramCount is required to compute anything; without it return a shaped
+    // low-confidence response rather than guessing.
+    if (!paramCount || paramCount <= 0) {
+      const empty: GpuThroughputEstimate = {
+        perChatTokensPerSec: 0,
+        gpuModel: resolvedGpuModel,
+        perGpuMemoryGb,
+        memBandwidthGBs,
+        tpSize: effectiveTpSize,
+        contextLen: contextLen ?? DEFAULT_CONTEXT_LEN,
+        capacityLabel,
+        lowConfidence: true,
+      };
+      return c.json(empty);
+    }
+
+    const perChatTokensPerSec = estimatePerChatTokensPerSec({
+      paramCount,
+      bytesPerWeight,
+      memBandwidthGBs,
+    });
+
+    const effectiveContextLen = contextLen ?? DEFAULT_CONTEXT_LEN;
+
+    // Architecture details (config.json) are needed for the concurrency number;
+    // degrade gracefully to per-chat-only when unavailable.
+    const arch = modelId ? await huggingFaceService.getModelArchitecture(modelId, hfToken) : undefined;
+    const capacityResult = arch
+      ? estimateConcurrentCapacity({
+          paramCount,
+          arch,
+          perGpuMemoryGb,
+          tpSize: effectiveTpSize,
+          contextLen: effectiveContextLen,
+          bytesPerWeight,
+          perChatTokensPerSec,
+        })
+      : undefined;
+
+    const estimate: GpuThroughputEstimate = {
+      perChatTokensPerSec: Math.round(perChatTokensPerSec),
+      concurrentSequences: capacityResult?.concurrentSequences,
+      aggregateTokensPerSec: capacityResult?.aggregateTokensPerSec,
+      gpuModel: resolvedGpuModel,
+      perGpuMemoryGb,
+      memBandwidthGBs,
+      tpSize: effectiveTpSize,
+      contextLen: effectiveContextLen,
+      capacityLabel,
+      lowConfidence: !capacityResult,
+    };
+    return c.json(estimate);
   })
   .post('/gpu-operator/install', async (c) => {
     const helmStatus = await helmService.checkHelmAvailable();

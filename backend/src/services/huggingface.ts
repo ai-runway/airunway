@@ -1,5 +1,6 @@
 import logger from '../lib/logger';
-import type { HfUserInfo, HfTokenExchangeResponse, HfApiModelResult, HfModelSearchResult, HfSearchParams, HfModelSearchResponse } from '@airunway/shared';
+import { createHash } from 'node:crypto';
+import type { HfUserInfo, HfTokenExchangeResponse, HfApiModelResult, HfModelSearchResult, HfSearchParams, HfModelSearchResponse, ModelArchitecture } from '@airunway/shared';
 import { filterCompatibleModels } from './modelCompatibility';
 
 /**
@@ -15,6 +16,36 @@ const HF_TOKEN_URL = 'https://huggingface.co/oauth/token';
 const HF_WHOAMI_URL = 'https://huggingface.co/api/whoami-v2';
 const HF_MODELS_URL = 'https://huggingface.co/api/models';
 const HF_BASE_URL = 'https://huggingface.co';
+
+/**
+ * Cache for model architecture (config.json) lookups.
+ *
+ * Security: public (no-token) responses are keyed by modelId alone. Tokened
+ * responses are keyed by `modelId + ':' + sha256(token)` so one user's gated
+ * config can never be served to a caller with a different (or no) token.
+ * Only successful lookups are cached, with a short TTL since `main` can move.
+ */
+const ARCH_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const architectureCache = new Map<string, { value: ModelArchitecture; expiresAt: number }>();
+
+function architectureCacheKey(modelId: string, hfToken?: string): string {
+  if (!hfToken) {
+    return modelId;
+  }
+  const tokenHash = createHash('sha256').update(hfToken).digest('hex');
+  return `${modelId}:${tokenHash}`;
+}
+
+/** Shape of the subset of HuggingFace config.json fields we read. */
+interface HfConfigJson {
+  num_hidden_layers?: number;
+  num_attention_heads?: number;
+  num_key_value_heads?: number;
+  head_dim?: number;
+  hidden_size?: number;
+  max_position_embeddings?: number;
+  torch_dtype?: string;
+}
 
 /**
  * HuggingFace OAuth Service
@@ -261,6 +292,64 @@ class HuggingFaceService {
 
     logger.debug({ modelId, count: ggufFiles.length }, 'Found GGUF files');
     return ggufFiles;
+  }
+
+  /**
+   * Fetch transformer architecture details from a model's config.json.
+   *
+   * Used to size the KV cache when estimating concurrent serving capacity.
+   * Returns `undefined` on any failure (network, 404, gated without token,
+   * unparseable) so callers degrade gracefully to a bandwidth-only estimate.
+   *
+   * @param modelId - HuggingFace model ID (e.g. 'meta-llama/Meta-Llama-3-70B')
+   * @param hfToken - Optional HF access token for gated/private models
+   */
+  async getModelArchitecture(modelId: string, hfToken?: string): Promise<ModelArchitecture | undefined> {
+    const cacheKey = architectureCacheKey(modelId, hfToken);
+    const cached = architectureCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
+    const url = `${HF_BASE_URL}/${modelId}/resolve/main/config.json`;
+    const headers: Record<string, string> = {};
+    if (hfToken) {
+      headers['Authorization'] = `Bearer ${hfToken}`;
+    }
+
+    let config: HfConfigJson;
+    try {
+      const response = await fetch(url, { headers });
+      if (!response.ok) {
+        logger.debug({ status: response.status, modelId }, 'Failed to fetch model config.json');
+        return undefined;
+      }
+      config = (await response.json()) as HfConfigJson;
+    } catch (error) {
+      logger.debug({ error, modelId }, 'Error fetching model config.json');
+      return undefined;
+    }
+
+    // num_key_value_heads is absent on MHA models; fall back to attention heads.
+    const numKvHeads = config.num_key_value_heads ?? config.num_attention_heads;
+    // head_dim is often omitted; derive from hidden_size / num_attention_heads.
+    const headDim =
+      config.head_dim ??
+      (config.hidden_size && config.num_attention_heads
+        ? config.hidden_size / config.num_attention_heads
+        : undefined);
+
+    const arch: ModelArchitecture = {
+      numLayers: config.num_hidden_layers,
+      numKvHeads,
+      headDim,
+      maxPositionEmbeddings: config.max_position_embeddings,
+      torchDtype: config.torch_dtype,
+    };
+
+    // Cache successful lookups only.
+    architectureCache.set(cacheKey, { value: arch, expiresAt: Date.now() + ARCH_CACHE_TTL_MS });
+    return arch;
   }
 }
 

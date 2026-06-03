@@ -2,15 +2,21 @@ import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { GpuFitIndicator } from './GpuFitIndicator'
+import { ThroughputEstimate } from './ThroughputEstimate'
 import { type Model } from '@/lib/api'
 import { Cpu, HardDrive, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useGpuThroughput } from '@/hooks/useGpuOperator'
+import { useInView } from '@/hooks/useInView'
+import { buildThroughputParamsForGpu } from '@/lib/gpu-throughput-params'
 
 interface ModelCardProps {
   model: Model
   gpuCapacityGb?: number
   gpuCount?: number
   gpuCapacityLabel?: string
+  /** GPU model name (e.g. "H100-80GB") used for the throughput estimate. */
+  gpuModel?: string
 }
 
 /**
@@ -54,7 +60,7 @@ function estimateGgufRamGb(sizeStr?: string): number | undefined {
   return Math.ceil(billions * 0.6 + 2)
 }
 
-export function ModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel }: ModelCardProps) {
+export function ModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel, gpuModel }: ModelCardProps) {
   const navigate = useNavigate()
 
   const handleDeploy = () => {
@@ -65,8 +71,18 @@ export function ModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel }: 
   const estimatedGpuMemoryGb = model.estimatedGpuMemoryGb ?? parseGpuMemoryGb(model.minGpuMemory)
   const estimatedCpuRamGb = isCpuModel ? estimateGgufRamGb(model.size) : undefined
 
+  // Lazy throughput estimate: only fetch once the card scrolls into view, and
+  // skip CPU-only models (no GPU throughput to estimate).
+  const { ref: inViewRef, inView } = useInView<HTMLDivElement>()
+  const throughputParams = !isCpuModel ? buildThroughputParamsForGpu(model, gpuModel) : undefined
+  const { data: throughput, isLoading: throughputLoading } = useGpuThroughput(
+    throughputParams ?? {},
+    { enabled: inView && !!throughputParams }
+  )
+
   return (
     <div
+      ref={inViewRef}
       className={cn(
         "flex flex-col h-full group rounded-2xl p-5",
         "bg-white/[0.03] border border-white/5",
@@ -121,6 +137,10 @@ export function ModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel }: 
             <HardDrive className="h-4 w-4 shrink-0" />
             <span>{model.conversational ? 'Chat' : formatTaskLabel(model.task)}</span>
           </div>
+
+          {throughputParams && (throughputLoading || throughput) && (
+            <ThroughputEstimate estimate={throughput} isLoading={throughputLoading} />
+          )}
         </div>
 
         <div className="flex flex-wrap gap-1.5 mt-4">

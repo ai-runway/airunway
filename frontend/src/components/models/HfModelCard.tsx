@@ -2,15 +2,21 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { GpuFitIndicator } from './GpuFitIndicator';
+import { ThroughputEstimate } from './ThroughputEstimate';
 import type { HfModelSearchResult } from '@airunway/shared';
 import { Download, Heart, Lock } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useGpuThroughput } from '@/hooks/useGpuOperator';
+import { useInView } from '@/hooks/useInView';
+import { buildThroughputParamsForGpu } from '@/lib/gpu-throughput-params';
 
 interface HfModelCardProps {
   model: HfModelSearchResult;
   gpuCapacityGb?: number;
   gpuCount?: number;
   gpuCapacityLabel?: string;
+  /** GPU model name (e.g. "H100-80GB") used for the throughput estimate. */
+  gpuModel?: string;
 }
 
 /**
@@ -26,7 +32,7 @@ function formatCount(count: number): string {
   return count.toString();
 }
 
-export function HfModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel }: HfModelCardProps) {
+export function HfModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel, gpuModel }: HfModelCardProps) {
   const navigate = useNavigate();
 
   const handleDeploy = () => {
@@ -34,8 +40,20 @@ export function HfModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel }
     navigate(`/deploy/${encodeURIComponent(model.id)}?source=hf`);
   };
 
+  // Lazy throughput estimate: only fetch once the card scrolls into view.
+  const { ref: inViewRef, inView } = useInView<HTMLDivElement>();
+  const throughputParams = buildThroughputParamsForGpu(
+    { id: model.id, parameterCount: model.parameterCount },
+    gpuModel
+  );
+  const { data: throughput, isLoading: throughputLoading } = useGpuThroughput(
+    throughputParams ?? {},
+    { enabled: inView && !!throughputParams }
+  );
+
   return (
     <div
+      ref={inViewRef}
       className={cn(
         "flex flex-col rounded-2xl p-5 group",
         "bg-white/[0.03] border border-white/5",
@@ -82,6 +100,12 @@ export function HfModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel }
             capacityLabel={gpuCapacityLabel}
           />
         </div>
+
+        {throughputParams && (throughputLoading || throughput) && (
+          <div className="mb-3">
+            <ThroughputEstimate estimate={throughput} isLoading={throughputLoading} />
+          </div>
+        )}
 
         {/* Supported engines */}
         <div className="flex flex-wrap gap-1">

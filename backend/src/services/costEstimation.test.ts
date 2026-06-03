@@ -28,6 +28,13 @@ describe('normalizeGpuModel', () => {
     expect(normalizeGpuModel('H100')).toBe('H100-80GB');
   });
 
+  test('normalizes H200 variants', () => {
+    expect(normalizeGpuModel('NVIDIA-H200')).toBe('H200-141GB');
+    expect(normalizeGpuModel('NVIDIA-H200-141GB-HBM3e')).toBe('H200-141GB');
+    expect(normalizeGpuModel('H200')).toBe('H200-141GB');
+    expect(getGpuInfo('NVIDIA-H200')?.memBandwidthGBs).toBe(4800);
+  });
+
   test('normalizes T4 variants', () => {
     expect(normalizeGpuModel('Tesla-T4')).toBe('T4');
     expect(normalizeGpuModel('NVIDIA-Tesla-T4')).toBe('T4');

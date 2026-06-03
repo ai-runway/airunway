@@ -7,7 +7,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Loader2, ArrowLeft, Cpu, HardDrive, Layers, ExternalLink } from 'lucide-react'
 import { GpuFitIndicator } from '@/components/models/GpuFitIndicator'
+import { ThroughputEstimate } from '@/components/models/ThroughputEstimate'
 import { getGpuFitCapacityDisplay } from '@/lib/gpu-fit-capacity'
+import { buildThroughputParams } from '@/lib/gpu-throughput-params'
+import { useGpuThroughput } from '@/hooks/useGpuOperator'
 
 export function DeployPage() {
   const { modelId } = useParams<{ modelId: string }>()
@@ -25,6 +28,13 @@ export function DeployPage() {
   const { data: autoscaler } = useAutoscalerDetection()
   const { data: runtimesData, isLoading: runtimesLoading } = useRuntimesStatus()
   const gpuFitCapacity = getGpuFitCapacityDisplay(detailedCapacity)
+
+  // Estimated inference throughput for this model on the cluster's GPUs.
+  const throughputParams = model ? buildThroughputParams(model, detailedCapacity) : undefined
+  const { data: throughput, isLoading: throughputLoading } = useGpuThroughput(
+    throughputParams ?? {},
+    { enabled: !!throughputParams }
+  )
 
   // Wait for both model and runtimes to load before showing the form
   // This ensures the runtime selector is visible when the form renders
@@ -123,6 +133,10 @@ export function DeployPage() {
             <HardDrive className="h-4 w-4" />
             <span>{model.conversational ? 'Chat' : model.task === 'image-text-to-text' ? 'Multimodal' : 'Text Generation'}</span>
           </div>
+
+          {throughputParams && (throughputLoading || throughput) && (
+            <ThroughputEstimate estimate={throughput} isLoading={throughputLoading} />
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2 mt-4">
