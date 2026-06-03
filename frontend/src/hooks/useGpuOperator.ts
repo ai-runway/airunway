@@ -38,12 +38,18 @@ export interface ThroughputParams {
  */
 export function useGpuThroughput(params: ThroughputParams, options?: { enabled?: boolean }) {
   const hfToken = getHfAccessToken()
+  // Discriminate the cache by auth state (never the token itself) so that
+  // switching between logged-in and logged-out recomputes the estimate: a gated
+  // model yields a high-confidence result with a token but a low-confidence one
+  // without, and the two must not share a cache entry.
+  const authState = hfToken ? 'auth' : 'anon'
   const enabled =
     (options?.enabled ?? true) && !!params.gpuModel && !!params.paramCount
 
   return useQuery<GpuThroughputEstimate>({
     queryKey: [
       'gpu-throughput',
+      authState,
       params.modelId,
       params.gpuModel,
       params.paramCount,
