@@ -1,0 +1,26 @@
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen3-0-6b-disagg
+  namespace: default
+spec:
+  model:
+    id: Qwen/Qwen3-0.6B
+    source: huggingface
+  provider:
+    name: dynamo
+  engine:
+    type: vllm
+    contextLength: 4096
+    trustRemoteCode: false
+  serving:
+    mode: disaggregated
+  scaling:
+    prefill:
+      replicas: 1
+      gpu:
+        count: 1
+    decode:
+      replicas: 1
+      gpu:
+        count: 1

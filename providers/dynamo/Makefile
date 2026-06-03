@@ -14,7 +14,7 @@ export
 # applies when bypassing this Makefile (e.g. `go run`, `go test`).
 LDFLAGS := -X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=$(DYNAMO_VERSION)
 
-.PHONY: build vet test docker-build deploy generate-deploy-manifests setup-dynamo cleanup-dynamo test-e2e verify-versions
+.PHONY: build vet test docker-build deploy generate-deploy-manifests setup-dynamo setup-dynamo-mocker cleanup-dynamo test-e2e test-e2e-mocker verify-versions
 
 ## Verify upstream versions are in sync (delegates to root Makefile).
 verify-versions:
@@ -89,6 +89,27 @@ cleanup-dynamo:
 	@helm uninstall dynamo-platform --namespace $(DYNAMO_NAMESPACE) --ignore-not-found
 	@echo "✅ Dynamo platform uninstalled from namespace $(DYNAMO_NAMESPACE)"
 
+## Install Dynamo platform for the CPU-only mocker E2E lane (run before test-e2e-mocker).
+## Unlike setup-dynamo this skips the GPU pre-deployment check and GAIE: the mocker
+## backend (python3 -m dynamo.mocker) needs no GPUs and the standalone Frontend path
+## needs no Gateway API Inference Extension. Grove is left at its chart default (off):
+## it only orchestrates multinode PodCliqueSets, and the mocker runs single-node CPU pods.
+setup-dynamo-mocker: verify-versions
+	@echo "Installing Dynamo platform v$(DYNAMO_VERSION) for CPU-only mocker E2E..."
+	@helm upgrade -i dynamo-platform "$(DYNAMO_CHART_URL)" \
+			--namespace $(DYNAMO_NAMESPACE) \
+			--create-namespace \
+			--set "dynamo-operator.controllerManager.manager.image.tag=$(DYNAMO_VERSION)" \
+			--set "dynamo-operator.gpuDiscovery.enabled=false"
+	@echo "✅ Dynamo platform v$(DYNAMO_VERSION) (CPU/mocker) installed in namespace $(DYNAMO_NAMESPACE)"
+
 ## Run e2e tests (requires DYNAMO_INSTALLED=true and a cluster with dynamo provider deployed)
 test-e2e:
-	DYNAMO_INSTALLED=true go test -tags=e2e -v -timeout 45m ./test/e2e/
+	DYNAMO_INSTALLED=true go test -count=1 -tags=e2e -v -timeout 45m ./test/e2e/
+
+## Run the CPU-only mocker e2e tests (aggregated + disaggregated). Requires a cluster
+## with the Dynamo platform (see setup-dynamo-mocker) and the dynamo provider deployed.
+## No -run filter: the GPU lane (TestDynamoProviderE2E) self-skips without DYNAMO_INSTALLED,
+## so dropping it lets the unit-style TestInjectMockerAnnotation run here too.
+test-e2e-mocker:
+	DYNAMO_MOCKER=true go test -count=1 -tags=e2e -v -timeout 30m ./test/e2e/

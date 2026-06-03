@@ -1,0 +1,92 @@
+name: E2E Dynamo Mocker Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-dynamo-mocker:
+    runs-on: ubuntu-latest-16-cores
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.25"
+          cache-dependency-path: providers/dynamo/go.sum
+
+      - name: Setup Bun
+        # Required by the Makefile's verify-versions target (TS version-sync check),
+        # which setup-dynamo-mocker depends on via the root Makefile.
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Setup Kind
+        run: |
+          go install sigs.k8s.io/kind@latest
+          kind create cluster --name airunway-e2e --wait 120s
+
+      - name: Install Dynamo platform (CPU/mocker)
+        run: |
+          # CPU-only install: no GPU pre-deployment check, no GAIE. The mocker
+          # backend runs python3 -m dynamo.mocker and needs no GPUs.
+          make -C providers/dynamo setup-dynamo-mocker
+          kubectl wait --for=condition=Available deployment -n dynamo-system --all --timeout=300s
+
+      - name: Build and deploy controller
+        run: |
+          make controller-docker-build CONTROLLER_IMG=airunway-controller:e2e
+          kind load docker-image airunway-controller:e2e --name airunway-e2e
+          make controller-deploy CONTROLLER_IMG=airunway-controller:e2e
+          kubectl wait --for=condition=Available deployment -n airunway-system -l control-plane=controller-manager --timeout=120s
+
+      - name: Build and deploy Dynamo provider
+        run: |
+          make -C providers/dynamo docker-build IMG=dynamo-provider:e2e
+          kind load docker-image dynamo-provider:e2e --name airunway-e2e
+          make -C providers/dynamo deploy IMG=dynamo-provider:e2e
+          kubectl wait --for=condition=Available deployment -n airunway-system -l control-plane=dynamo-provider --timeout=120s
+
+      - name: Wait for provider registration
+        run: |
+          kubectl wait --for=jsonpath='{.status.ready}'=true inferenceproviderconfig/dynamo --timeout=120s
+
+      - name: Run mocker E2E (aggregated + disaggregated)
+        run: |
+          make -C providers/dynamo test-e2e-mocker
+
+      - name: Collect debug info
+        if: failure()
+        run: |
+          echo "=== ModelDeployments ==="
+          kubectl get modeldeployments -A -o yaml
+          echo "=== DynamoGraphDeployments ==="
+          kubectl get dynamographdeployments.nvidia.com -A -o yaml
+          echo "=== InferenceProviderConfigs ==="
+          kubectl get inferenceproviderconfigs -o yaml
+          echo "=== Controller Logs ==="
+          kubectl logs -n airunway-system -l control-plane=controller-manager --tail=200
+          echo "=== Dynamo Provider Logs ==="
+          kubectl logs -n airunway-system -l control-plane=dynamo-provider --tail=200
+          echo "=== Dynamo Operator Logs ==="
+          kubectl logs -n dynamo-system --all-containers --tail=200 --prefix
+          echo "=== Events ==="
+          kubectl get events -A --sort-by=.lastTimestamp
+          echo "=== Pods ==="
+          kubectl get pods -A
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kind delete cluster --name airunway-e2e

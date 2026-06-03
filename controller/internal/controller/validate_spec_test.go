@@ -127,6 +127,73 @@ func TestValidateSpec(t *testing.T) {
 			providerConfigs: allProviders(),
 		},
 		{
+			name: "valid: CPU-only aggregated vllm on dynamo with mocker annotation",
+			md: airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"airunway.ai/dynamo-test-backend": "mocker"},
+				},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model:    airunwayv1alpha1.ModelSpec{ID: "Qwen/Qwen3-0.6B", Source: airunwayv1alpha1.ModelSourceHuggingFace},
+					Engine:   airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeVLLM},
+					Provider: &airunwayv1alpha1.ProviderSpec{Name: "dynamo"},
+					// No resources.gpu: the GPU-less mocker backend waives it.
+				},
+			},
+			providerConfigs: allProviders(),
+		},
+		{
+			name: "valid: CPU-only disaggregated vllm on dynamo with mocker annotation",
+			md: airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"airunway.ai/dynamo-test-backend": "mocker"},
+				},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model:    airunwayv1alpha1.ModelSpec{ID: "Qwen/Qwen3-0.6B", Source: airunwayv1alpha1.ModelSourceHuggingFace},
+					Engine:   airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeVLLM},
+					Provider: &airunwayv1alpha1.ProviderSpec{Name: "dynamo"},
+					Serving:  &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated},
+					// prefill/decode blocks present but no gpu.count.
+					Scaling: &airunwayv1alpha1.ScalingSpec{
+						Prefill: &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1},
+						Decode:  &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1},
+					},
+				},
+			},
+			providerConfigs: allProviders(),
+		},
+		{
+			name: "invalid: non-vllm engine on dynamo even with mocker annotation",
+			md: airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"airunway.ai/dynamo-test-backend": "mocker"},
+				},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model:    airunwayv1alpha1.ModelSpec{ID: "Qwen/Qwen3-0.6B", Source: airunwayv1alpha1.ModelSourceHuggingFace},
+					Engine:   airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeSGLang},
+					Provider: &airunwayv1alpha1.ProviderSpec{Name: "dynamo"},
+				},
+			},
+			providerConfigs: allProviders(),
+			wantErr:         "only supports the vllm engine",
+		},
+		{
+			name: "invalid: CPU-only disaggregated vllm on dynamo WITHOUT mocker annotation",
+			md: airunwayv1alpha1.ModelDeployment{
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model:    airunwayv1alpha1.ModelSpec{ID: "Qwen/Qwen3-0.6B", Source: airunwayv1alpha1.ModelSourceHuggingFace},
+					Engine:   airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeVLLM},
+					Provider: &airunwayv1alpha1.ProviderSpec{Name: "dynamo"},
+					Serving:  &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated},
+					Scaling: &airunwayv1alpha1.ScalingSpec{
+						Prefill: &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1},
+						Decode:  &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1},
+					},
+				},
+			},
+			providerConfigs: allProviders(),
+			wantErr:         "scaling.prefill.gpu.count > 0",
+		},
+		{
 			name: "valid: llamacpp CPU-only on kaito",
 			md: airunwayv1alpha1.ModelDeployment{
 				Spec: airunwayv1alpha1.ModelDeploymentSpec{

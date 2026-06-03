@@ -56,6 +56,18 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return nil
 	}
 
+	// Skip for the Dynamo mocker test backend. Mocker mode deploys a standalone
+	// Frontend and intentionally does not create a provider-managed
+	// InferencePool/EPP, so engaging gateway reconciliation here would wait
+	// forever on a pool that never appears (NotFound retries / a misleading
+	// GatewayReady=False status) on any cluster that does have the GAIE CRDs
+	// installed. This keeps the controller consistent with the dynamo
+	// transformer, which also forces the non-gateway path in mocker mode.
+	if isDynamoMockerMode(md) {
+		logger.V(1).Info("Skipping gateway reconciliation for Dynamo mocker test backend", "name", md.Name)
+		return nil
+	}
+
 	// Skip if gateway CRDs are not available
 	if !r.GatewayDetector.IsAvailable(ctx) {
 		// Warn if user explicitly enabled gateway but CRDs are missing
@@ -849,6 +861,26 @@ func resolvedProviderName(md *airunwayv1alpha1.ModelDeployment) string {
 		return md.Status.Provider.Name
 	}
 	return ""
+}
+
+// dynamoMockerAnnotation / dynamoMockerValue select the Dynamo provider's
+// internal, test-only mocker backend. The key is kept as a literal here (rather
+// than importing providers/dynamo) so the controller has no build dependency on
+// an out-of-tree provider module — see providers/dynamo/mocker.go
+// (AnnotationDynamoTestBackend / DynamoTestBackendMocker).
+const (
+	dynamoMockerAnnotation = "airunway.ai/dynamo-test-backend"
+	dynamoMockerValue      = "mocker"
+)
+
+// isDynamoMockerMode reports whether the ModelDeployment opts into the Dynamo
+// mocker test backend on the dynamo provider. Mocker mode runs the GPU-less
+// python3 -m dynamo.mocker behind a standalone Frontend and intentionally does
+// not create an InferencePool/EPP, so the controller must skip the GPU-oriented
+// validation and gateway/GAIE reconciliation it would otherwise apply.
+func isDynamoMockerMode(md *airunwayv1alpha1.ModelDeployment) bool {
+	return md.Annotations[dynamoMockerAnnotation] == dynamoMockerValue &&
+		md.Spec.Provider != nil && md.Spec.Provider.Name == "dynamo"
 }
 
 // resolveServicePort looks up the first HTTP port on the named service.
