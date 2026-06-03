@@ -1,0 +1,39 @@
+# PodMonitor for llm-d inference pods
+#
+# llm-d deploys standard Kubernetes Deployments running vLLM on port 8000.
+# In disaggregated mode, separate prefill and decode Deployments are created,
+# each exposing vLLM metrics on the same port.
+#
+# Pod labels set by the llm-d transformer:
+#   - airunway.ai/deployment=<name>
+#   - app=<name>
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: llm-d
+  namespace: default
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: airunway
+spec:
+  selector:
+    matchExpressions:
+      - key: airunway.ai/deployment
+        operator: Exists
+      - key: nvidia.com/dynamo-component
+        operator: DoesNotExist
+      - key: kaito.sh/workspace
+        operator: DoesNotExist
+      - key: ray.io/node-type
+        operator: DoesNotExist
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - action: replace
+          targetLabel: provider
+          replacement: llm-d
+  namespaceSelector:
+    any: true

@@ -23,11 +23,11 @@ rules:
       - services
     verbs: ["get", "create", "delete"]
 
-  # Core API - Service proxy (proxyServiceGet via /api/v1/.../services/.../proxy/)
+  # Core API - Service proxy for metrics and in-browser model chat (GET /models, POST /chat/completions)
   - apiGroups: [""]
     resources:
       - services/proxy
-    verbs: ["get"]
+    verbs: ["get", "create"]
 
   # Core API - Secrets (read, create, replace for hf-token-secret; no list/watch/patch)
   - apiGroups: [""]

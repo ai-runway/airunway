@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
@@ -42,6 +44,8 @@ import (
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 	"github.com/kaito-project/airunway/controller/internal/gateway"
+	airmetrics "github.com/kaito-project/airunway/controller/internal/metrics"
+	"github.com/kaito-project/airunway/controller/internal/validation"
 )
 
 // ModelDeploymentReconciler reconciles a ModelDeployment object
@@ -58,12 +62,61 @@ type ModelDeploymentReconciler struct {
 	// ProviderResolver looks up gateway capabilities from InferenceProviderConfig CRs.
 	// When nil, the reconciler treats all providers as having no gateway capabilities.
 	ProviderResolver gateway.ProviderCapabilityResolver
+
+	// phaseCache tracks the last observed phase per ModelDeployment for detecting transitions.
+	phaseCacheMu sync.RWMutex
+	phaseCache   map[k8stypes.NamespacedName]phaseEntry
 }
+
+// phaseEntry holds per-deployment metrics state that the K8s API cannot
+// provide: previous phase, wall-clock timestamps, one-shot guards, and
+// aggregate gauge data. Volatile on restart; transitions are skipped
+// until each deployment reconciles again.
+type phaseEntry struct {
+	// Phase is the last observed deployment phase.
+	Phase airunwayv1alpha1.DeploymentPhase
+	// Provider is the provider name for this deployment, used to aggregate metrics.
+	Provider string
+	// Replicas holds the last observed replica counts (desired, ready, available).
+	Replicas [3]int32
+	// DeployingTimestamp records when the Deploying phase was first observed.
+	// Used to compute provision duration (Deploying→Running wall-clock time).
+	DeployingTimestamp time.Time
+	// RunningMetricsRecorded tracks whether one-time Running metrics (lead time,
+	// provision duration) have already been recorded for this deployment lifecycle.
+	RunningMetricsRecorded bool
+	// MetricsInitialized tracks whether DORA metric label combinations have been
+	// pre-initialized for this deployment's provider. This ensures Prometheus sees
+	// zero-valued counters/histograms before any real observations, so that
+	// increase() correctly reports the first event.
+	MetricsInitialized bool
+}
+
+// celEnvOnce lazily initializes a shared CEL environment for evaluating selection rules.
+// The environment is safe to share across goroutines since it only declares the "spec" variable.
+var (
+	celEnvOnce sync.Once
+	celEnvInst *cel.Env
+	celEnvErr  error
+)
+
+func getCELEnv() (*cel.Env, error) {
+	celEnvOnce.Do(func() {
+		celEnvInst, celEnvErr = cel.NewEnv(
+			cel.Variable("spec", cel.DynType),
+		)
+	})
+	return celEnvInst, celEnvErr
+}
+
+const (
+	ExplicitProviderSelectionReason = "explicit provider selection"
+)
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
@@ -86,19 +139,43 @@ type ModelDeploymentReconciler struct {
 //
 // Provider controllers (out-of-tree) watch for ModelDeployments where status.provider.name
 // matches their name and handle the actual resource creation.
-func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	reconcileStart := time.Now()
 	logger := log.FromContext(ctx)
 
-	// Fetch the ModelDeployment
 	var md airunwayv1alpha1.ModelDeployment
+
+	// Record reconciliation duration when a provider is known.
+	defer func() {
+		if md.Status.Provider != nil {
+			airmetrics.ReconciliationDurationSeconds.WithLabelValues(md.Status.Provider.Name).Observe(time.Since(reconcileStart).Seconds())
+		}
+	}()
+
+	// Fetch the ModelDeployment
 	if err := r.Get(ctx, req.NamespacedName, &md); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			// MD was deleted — check if the namespace should be removed from
-			// the Gateway's allowedRoutes.
+			// MD was deleted — clean up phase cache, gauges, and gateway routes.
+			r.cleanupMetrics(req.NamespacedName)
 			r.cleanupGatewayAllowedRoutesForNamespace(ctx, req.Namespace)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// Capture previous phase entry for transition detection.
+	r.phaseCacheMu.RLock()
+	previousEntry := r.phaseCache[req.NamespacedName]
+	r.phaseCacheMu.RUnlock()
+
+	// Record metrics when reconciliation returns without error. This includes
+	// successful status patches and early-return paths (deletion, pause) where
+	// the in-memory state still reflects the API. On error, we skip metrics
+	// because the retry will re-reconcile from the old state.
+	defer func() {
+		if retErr == nil {
+			r.recordMetrics(&md, previousEntry)
+		}
+	}()
 
 	// Save a deep copy as the patch base so we only send changed status fields.
 	// This avoids clobbering status fields set by out-of-tree provider controllers.
@@ -111,6 +188,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !md.DeletionTimestamp.IsZero() {
 		if err := r.cleanupGatewayResources(ctx, &md); err != nil {
 			logger.Error(err, "Failed to clean up gateway resources on deletion")
+			r.recordReconcileError(&md, "gateway")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -131,51 +209,86 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
 	}
 
-	// Step 1: Select engine if needed (before validation, since validation needs engine type)
+	// Step 1: List all InferenceProviderConfigs once for use across validation and selection.
+	// This is loaded regardless of EnableProviderSelector because validateSpec needs
+	// provider capabilities to determine whether an engine supports CPU-only inference.
+	var providerConfigs []airunwayv1alpha1.InferenceProviderConfig
+	{
+		var providerConfigList airunwayv1alpha1.InferenceProviderConfigList
+		if err := r.List(ctx, &providerConfigList); err != nil {
+			// If InferenceProviderConfig CRD is not installed, proceed with an empty list.
+			// This allows the controller to run without any providers registered.
+			if !isNoMatchError(err) {
+				logger.Error(err, "Failed to list provider configs")
+				return ctrl.Result{}, err
+			}
+		} else {
+			providerConfigs = providerConfigList.Items
+		}
+	}
+
+	// Step 2: Resolve the serving mode once for downstream use. Unlike engine,
+	// serving mode is always derivable from spec (defaulting to Aggregated) so
+	// it can be resolved before engine selection.
+	resolvedServingMode := md.ResolvedServingMode()
+
+	// Step 3: Select engine if needed (before validation, since validation needs engine type)
 	if r.EnableProviderSelector {
-		if err := r.selectEngine(ctx, &md); err != nil {
+		if err := r.selectEngine(ctx, &md, providerConfigs, resolvedServingMode); err != nil {
 			logger.Error(err, "Engine selection failed", "name", md.Name)
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionFalse, "SelectionFailed", err.Error())
 			md.Status.Message = fmt.Sprintf("Engine selection failed: %s", err.Error())
+			r.recordReconcileError(&md, "engine_selection")
 			return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
 		}
 	}
 
-	// Step 2: Inject resolved engine into in-memory spec for CEL evaluation.
-	// This is NOT persisted — only status is patched. It ensures provider selection
-	// CEL rules (e.g., "spec.engine.type == 'vllm'") see the resolved engine type.
-	if md.Spec.Engine.Type == "" && md.Status.Engine != nil {
-		md.Spec.Engine.Type = md.Status.Engine.Type
-	}
+	// Step 4: Resolve the engine type once for downstream use (validation, CEL
+	// evaluation, provider selection). We pass it through explicitly rather than
+	// mutating md.Spec to avoid any risk of corrupting the shared informer
+	// cache's backing data.
+	resolvedEngineType := md.ResolvedEngineType()
 
-	// Step 4: Validate the spec (uses resolved engine type)
-	if err := r.validateSpec(ctx, &md); err != nil {
+	// Step 5: Validate the spec (uses resolved engine type and serving mode)
+	if err := r.validateSpec(ctx, &md, providerConfigs, resolvedEngineType, resolvedServingMode); err != nil {
 		logger.Error(err, "Validation failed", "name", md.Name)
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeValidated, metav1.ConditionFalse, "ValidationFailed", err.Error())
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 		md.Status.Message = fmt.Sprintf("Validation failed: %s", err.Error())
+		r.recordReconcileError(&md, "validation")
 		return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeValidated, metav1.ConditionTrue, "ValidationPassed", "Schema validation passed")
 
-	// Step 5: Run provider selection if needed
+	// Validation passed, so the engine recorded in status is provider-compatible.
+	// Flip EngineSelected=True now (selectEngine deliberately defers this).
+	if md.Status.Engine != nil && md.Status.Engine.Type != "" {
+		if md.Spec.Engine.Type != "" {
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionTrue, "ExplicitSelection", "Engine explicitly specified in spec")
+		} else {
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionTrue, "AutoSelected", fmt.Sprintf("Engine %s auto-selected from provider capabilities", md.Status.Engine.Type))
+		}
+	}
+
+	// Step 6: Run provider selection if needed
 	if r.EnableProviderSelector {
-		if err := r.selectProvider(ctx, &md); err != nil {
+		if err := r.selectProvider(ctx, &md, providerConfigs, resolvedEngineType, resolvedServingMode); err != nil {
 			logger.Error(err, "Provider selection failed", "name", md.Name)
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionFalse, "SelectionFailed", err.Error())
 			md.Status.Message = fmt.Sprintf("Provider selection failed: %s", err.Error())
+			r.recordReconcileError(&md, "provider_selection")
 			return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
 		}
 	}
 
-	// Step 6: Update status
+	// Step 7: Update status
 	// If no provider is selected yet, stay in Pending
 	if md.Status.Provider == nil || md.Status.Provider.Name == "" {
 		if md.Spec.Provider != nil && md.Spec.Provider.Name != "" {
 			// User explicitly specified a provider
 			md.Status.Provider = &airunwayv1alpha1.ProviderStatus{
 				Name:           md.Spec.Provider.Name,
-				SelectedReason: "explicit provider selection",
+				SelectedReason: ExplicitProviderSelectionReason,
 			}
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionTrue, "ExplicitSelection", "Provider explicitly specified in spec")
 		} else if !r.EnableProviderSelector {
@@ -198,16 +311,18 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// - status.endpoint
 	// - ProviderCompatible, ResourceCreated, Ready conditions
 
-	// Step 7: Reconcile gateway resources (InferencePool + HTTPRoute) when deployment is running
+	// Step 8: Reconcile gateway resources (InferencePool + HTTPRoute) when deployment is running
 	if md.Status.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
 		if md.Spec.Gateway != nil && md.Spec.Gateway.Enabled != nil && !*md.Spec.Gateway.Enabled {
 			// Gateway explicitly disabled — clean up any existing resources
 			if err := r.cleanupGatewayResources(ctx, &md); err != nil {
 				logger.Error(err, "Failed to clean up gateway resources")
+				r.recordReconcileError(&md, "gateway")
 			}
 		} else {
 			if err := r.reconcileGateway(ctx, &md); err != nil {
 				logger.Error(err, "Gateway reconciliation failed", "name", md.Name)
+				r.recordReconcileError(&md, "gateway")
 				// If the error suggests CRDs were removed, refresh the detection cache
 				if isNoMatchError(err) && r.GatewayDetector != nil {
 					logger.Info("Gateway CRDs may have been removed, refreshing detection cache")
@@ -239,7 +354,7 @@ func isNoMatchError(err error) bool {
 }
 
 // validateSpec performs validation on the ModelDeployment spec
-func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, providerConfigs []airunwayv1alpha1.InferenceProviderConfig, engineType airunwayv1alpha1.EngineType, servingMode airunwayv1alpha1.ServingMode) error {
 	spec := &md.Spec
 
 	// Validate model.id is required for huggingface source
@@ -249,29 +364,38 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 		}
 	}
 
-	// Resolve engine type (from spec or auto-selected in status)
-	engineType := md.ResolvedEngineType()
 	if engineType == "" {
 		return fmt.Errorf("engine.type must be specified or auto-selected from provider capabilities")
 	}
 
-	// Validate GPU requirements for certain engines
+	// Validate provider/engine/serving-mode/GPU-CPU compatibility via the
+	// shared helper so the webhook and reconciler cannot drift.
 	gpuCount := int32(0)
 	if spec.Resources != nil && spec.Resources.GPU != nil {
 		gpuCount = spec.Resources.GPU.Count
 	}
-
-	switch engineType {
-	case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang, airunwayv1alpha1.EngineTypeTRTLLM:
-		// These engines require GPU (unless in disaggregated mode with component-level GPUs)
-		servingMode := airunwayv1alpha1.ServingModeAggregated
-		if spec.Serving != nil && spec.Serving.Mode != "" {
-			servingMode = spec.Serving.Mode
+	providerName := ""
+	var namedConfig *airunwayv1alpha1.InferenceProviderConfig
+	if spec.Provider != nil {
+		providerName = spec.Provider.Name
+		for i := range providerConfigs {
+			if providerConfigs[i].Name == providerName {
+				namedConfig = &providerConfigs[i]
+				break
+			}
 		}
-
-		if servingMode == airunwayv1alpha1.ServingModeAggregated && gpuCount == 0 {
-			return fmt.Errorf("%s engine requires GPU (set resources.gpu.count > 0)", engineType)
-		}
+	}
+	if ces := validation.CheckProviderCompatibility(
+		providerName,
+		namedConfig,
+		providerConfigs,
+		engineType,
+		servingMode,
+		gpuCount,
+	); len(ces) > 0 {
+		// Return the first error to preserve the reconciler's existing
+		// single-error contract.
+		return fmt.Errorf("%s", ces[0].Message)
 	}
 
 	// Validate disaggregated mode configuration
@@ -300,17 +424,22 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 	return nil
 }
 
+// engineSupportsCPU was inlined into validation.CheckProviderCompatibility.
+
 // selectEngine auto-selects the engine type from provider capabilities if not specified
-func (r *ModelDeploymentReconciler) selectEngine(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+func (r *ModelDeploymentReconciler) selectEngine(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, providerConfigs []airunwayv1alpha1.InferenceProviderConfig, servingMode airunwayv1alpha1.ServingMode) error {
 	logger := log.FromContext(ctx)
 
-	// If engine type is explicitly specified, just record it in status
+	// If engine type is explicitly specified, just record it in status.
+	// The EngineSelected=True condition is intentionally NOT set here — it is
+	// only flipped True after downstream provider-compatibility validation
+	// passes (see Reconcile), so the condition reflects "selected AND usable"
+	// rather than "selected but possibly incompatible".
 	if md.Spec.Engine.Type != "" {
 		md.Status.Engine = &airunwayv1alpha1.EngineStatus{
 			Type:           md.Spec.Engine.Type,
 			SelectedReason: "explicit engine selection",
 		}
-		r.setCondition(md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionTrue, "ExplicitSelection", "Engine explicitly specified in spec")
 		return nil
 	}
 
@@ -319,24 +448,11 @@ func (r *ModelDeploymentReconciler) selectEngine(ctx context.Context, md *airunw
 		return nil
 	}
 
-	// List all InferenceProviderConfigs
-	var providerConfigs airunwayv1alpha1.InferenceProviderConfigList
-	if err := r.List(ctx, &providerConfigs); err != nil {
-		return fmt.Errorf("failed to list provider configs: %w", err)
-	}
-
-	if len(providerConfigs.Items) == 0 {
+	if len(providerConfigs) == 0 {
 		return fmt.Errorf("no providers registered (InferenceProviderConfig resources not found)")
 	}
 
-	// Collect supported engines from ready providers, filtering by compatibility
-	// GPU-requiring engines cannot run on CPU-only deployments
-	gpuRequiringEngines := map[airunwayv1alpha1.EngineType]bool{
-		airunwayv1alpha1.EngineTypeVLLM:   true,
-		airunwayv1alpha1.EngineTypeSGLang: true,
-		airunwayv1alpha1.EngineTypeTRTLLM: true,
-	}
-
+	// Collect supported engines from ready providers, filtering by per-engine compatibility
 	// Determine deployment characteristics
 	hasGPU := false
 	if md.Spec.Resources != nil && md.Spec.Resources.GPU != nil && md.Spec.Resources.GPU.Count > 0 {
@@ -346,53 +462,43 @@ func (r *ModelDeploymentReconciler) selectEngine(ctx context.Context, md *airunw
 		hasGPU = true
 	}
 
-	servingMode := airunwayv1alpha1.ServingModeAggregated
-	if md.Spec.Serving != nil && md.Spec.Serving.Mode != "" {
-		servingMode = md.Spec.Serving.Mode
-	}
+	availableEngines := make(map[airunwayv1alpha1.EngineType]string)    // engine -> provider name
+	advertisedEngines := make(map[string][]airunwayv1alpha1.EngineType) // provider name -> engines advertised
 
-	availableEngines := make(map[airunwayv1alpha1.EngineType]string) // engine -> provider name
-
-	for _, pc := range providerConfigs.Items {
+	for _, pc := range providerConfigs {
 		if !pc.Status.Ready || pc.Spec.Capabilities == nil {
 			continue
 		}
 
 		caps := pc.Spec.Capabilities
+		advertisedEngines[pc.Name] = caps.EngineNames()
 
-		// Filter by GPU/CPU compatibility
-		if hasGPU && !caps.GPUSupport {
-			continue
-		}
-		if !hasGPU && !caps.CPUSupport {
-			continue
-		}
-
-		// Filter by serving mode compatibility
-		servingModeSupported := false
-		for _, sm := range caps.ServingModes {
-			if sm == servingMode {
-				servingModeSupported = true
-				break
-			}
-		}
-		if !servingModeSupported {
-			continue
-		}
-
-		for _, engine := range caps.Engines {
-			// Skip GPU-requiring engines for CPU-only deployments
-			if !hasGPU && gpuRequiringEngines[engine] {
+		for _, engineCap := range caps.Engines {
+			// Filter by GPU/CPU compatibility at the engine level
+			if hasGPU && !engineCap.GPUSupport {
 				continue
 			}
-			if _, exists := availableEngines[engine]; !exists {
-				availableEngines[engine] = pc.Name
+			if !hasGPU && !engineCap.CPUSupport {
+				continue
+			}
+
+			// Filter by serving mode compatibility at the engine level
+			if !engineCap.SupportsServingMode(servingMode) {
+				continue
+			}
+
+			if _, exists := availableEngines[engineCap.Name]; !exists {
+				availableEngines[engineCap.Name] = pc.Name
 			}
 		}
 	}
 
 	if len(availableEngines) == 0 {
-		return fmt.Errorf("no engines available from registered providers")
+		logger.Info("No engines available after filtering",
+			"hasGPU", hasGPU,
+			"servingMode", servingMode,
+			"advertisedByProvider", advertisedEngines)
+		return fmt.Errorf("no engines available from registered providers (hasGPU=%v, servingMode=%s, advertised=%v)", hasGPU, servingMode, advertisedEngines)
 	}
 
 	// Select the highest-preference engine that is available
@@ -409,26 +515,21 @@ func (r *ModelDeploymentReconciler) selectEngine(ctx context.Context, md *airunw
 				Type:           engine,
 				SelectedReason: fmt.Sprintf("auto-selected from provider %s capabilities", providerName),
 			}
-			r.setCondition(md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionTrue, "AutoSelected", fmt.Sprintf("Engine %s auto-selected from provider %s", engine, providerName))
+			// EngineSelected=True is set in Reconcile after provider-compatibility
+			// validation passes; see comment on the explicit-selection branch above.
 			return nil
 		}
 	}
 
-	// Fallback: pick any available engine (shouldn't happen if preference list is complete)
-	for engine, providerName := range availableEngines {
-		md.Status.Engine = &airunwayv1alpha1.EngineStatus{
-			Type:           engine,
-			SelectedReason: fmt.Sprintf("auto-selected from provider %s capabilities", providerName),
-		}
-		r.setCondition(md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionTrue, "AutoSelected", fmt.Sprintf("Engine %s auto-selected from provider %s", engine, providerName))
-		return nil
-	}
-
-	return fmt.Errorf("no compatible engine found from available providers")
+	// Unreachable in practice: enginePreference enumerates every EngineType
+	// constant and availableEngines is keyed by that same set, so the loop
+	// above always returns when len(availableEngines) > 0. Surface a clear
+	// error if a future EngineType is added without updating enginePreference.
+	return fmt.Errorf("no engine in preference list matches available engines %v (enginePreference may be missing a newly added EngineType)", availableEngines)
 }
 
 // selectProvider runs the provider selection algorithm
-func (r *ModelDeploymentReconciler) selectProvider(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+func (r *ModelDeploymentReconciler) selectProvider(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, providerConfigs []airunwayv1alpha1.InferenceProviderConfig, resolvedEngineType airunwayv1alpha1.EngineType, resolvedServingMode airunwayv1alpha1.ServingMode) error {
 	logger := log.FromContext(ctx)
 
 	// Skip if provider is already selected (either in spec or status)
@@ -439,19 +540,13 @@ func (r *ModelDeploymentReconciler) selectProvider(ctx context.Context, md *airu
 		return nil // Provider already selected
 	}
 
-	// List all InferenceProviderConfigs
-	var providerConfigs airunwayv1alpha1.InferenceProviderConfigList
-	if err := r.List(ctx, &providerConfigs); err != nil {
-		return fmt.Errorf("failed to list provider configs: %w", err)
-	}
-
-	if len(providerConfigs.Items) == 0 {
+	if len(providerConfigs) == 0 {
 		return fmt.Errorf("no providers registered (InferenceProviderConfig resources not found)")
 	}
 
 	// Filter to ready providers
 	var readyProviders []airunwayv1alpha1.InferenceProviderConfig
-	for _, pc := range providerConfigs.Items {
+	for _, pc := range providerConfigs {
 		if pc.Status.Ready {
 			readyProviders = append(readyProviders, pc)
 		}
@@ -462,7 +557,7 @@ func (r *ModelDeploymentReconciler) selectProvider(ctx context.Context, md *airu
 	}
 
 	// Run selection algorithm
-	selectedProvider, reason, err := r.runSelectionAlgorithm(md, readyProviders)
+	selectedProvider, reason, err := r.runSelectionAlgorithm(md, readyProviders, resolvedEngineType, resolvedServingMode)
 	if err != nil {
 		return fmt.Errorf("provider selection failed: %w", err)
 	}
@@ -482,9 +577,8 @@ func (r *ModelDeploymentReconciler) selectProvider(ctx context.Context, md *airu
 }
 
 // runSelectionAlgorithm implements the provider selection algorithm
-func (r *ModelDeploymentReconciler) runSelectionAlgorithm(md *airunwayv1alpha1.ModelDeployment, providers []airunwayv1alpha1.InferenceProviderConfig) (string, string, error) {
+func (r *ModelDeploymentReconciler) runSelectionAlgorithm(md *airunwayv1alpha1.ModelDeployment, providers []airunwayv1alpha1.InferenceProviderConfig, engineType airunwayv1alpha1.EngineType, servingMode airunwayv1alpha1.ServingMode) (string, string, error) {
 	spec := &md.Spec
-	engineType := md.ResolvedEngineType()
 
 	// Determine GPU requirements
 	hasGPU := false
@@ -495,10 +589,23 @@ func (r *ModelDeploymentReconciler) runSelectionAlgorithm(md *airunwayv1alpha1.M
 		hasGPU = true
 	}
 
-	// Convert spec to map for CEL evaluation
+	// Convert spec to map for CEL evaluation.
 	specMap, err := specToMap(spec)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to convert spec for CEL evaluation: %w", err)
+	}
+
+	// Overlay the resolved engine type so CEL rules like `spec.engine.type == 'vllm'`
+	// see the auto-selected engine even though md.Spec was never mutated.
+	if engineType != "" {
+		engineMap, _ := specMap["engine"].(map[string]any)
+		if engineMap == nil {
+			engineMap = map[string]any{}
+			specMap["engine"] = engineMap
+		}
+		if t, _ := engineMap["type"].(string); t == "" {
+			engineMap["type"] = string(engineType)
+		}
 	}
 
 	// Build candidate list with scores
@@ -515,39 +622,22 @@ func (r *ModelDeploymentReconciler) runSelectionAlgorithm(md *airunwayv1alpha1.M
 			continue
 		}
 
-		// Check engine support
-		engineSupported := false
-		for _, e := range caps.Engines {
-			if e == engineType {
-				engineSupported = true
-				break
-			}
-		}
-		if !engineSupported {
+		// Check engine support and get per-engine capabilities
+		engineCap := caps.GetEngineCapability(engineType)
+		if engineCap == nil {
 			continue
 		}
 
-		// Check GPU/CPU support
-		if hasGPU && !caps.GPUSupport {
+		// Check GPU/CPU support for this specific engine
+		if hasGPU && !engineCap.GPUSupport {
 			continue
 		}
-		if !hasGPU && !caps.CPUSupport {
+		if !hasGPU && !engineCap.CPUSupport {
 			continue
 		}
 
-		// Check serving mode support
-		servingMode := airunwayv1alpha1.ServingModeAggregated
-		if spec.Serving != nil && spec.Serving.Mode != "" {
-			servingMode = spec.Serving.Mode
-		}
-		servingModeSupported := false
-		for _, sm := range caps.ServingModes {
-			if sm == servingMode {
-				servingModeSupported = true
-				break
-			}
-		}
-		if !servingModeSupported {
+		// Check serving mode support for this specific engine
+		if !engineCap.SupportsServingMode(servingMode) {
 			continue
 		}
 
@@ -587,7 +677,13 @@ func (r *ModelDeploymentReconciler) runSelectionAlgorithm(md *airunwayv1alpha1.M
 	return best.name, best.reason, nil
 }
 
-// setCondition updates a condition on the ModelDeployment
+// setCondition updates a condition on the ModelDeployment.
+//
+// LastTransitionTime is passed as metav1.Now() here, but
+// meta.SetStatusCondition only adopts that timestamp when the condition's
+// Status actually changes; on no-op updates (same Status) it preserves the
+// previously stored LastTransitionTime. So this helper does not clobber the
+// transition timestamp on repeated reconciles of an unchanged status.
 func (r *ModelDeploymentReconciler) setCondition(md *airunwayv1alpha1.ModelDeployment, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	condition := metav1.Condition{
 		Type:               conditionType,
@@ -598,6 +694,172 @@ func (r *ModelDeploymentReconciler) setCondition(md *airunwayv1alpha1.ModelDeplo
 		ObservedGeneration: md.Generation,
 	}
 	meta.SetStatusCondition(&md.Status.Conditions, condition)
+}
+
+// recordMetrics updates all Prometheus metrics for the current ModelDeployment state.
+func (r *ModelDeploymentReconciler) recordMetrics(md *airunwayv1alpha1.ModelDeployment, previous phaseEntry) {
+	// Lazy-init the phase cache so recordMetrics is safe even if SetupWithManager was not called
+	// (e.g. in unit tests that invoke Reconcile directly).
+	r.phaseCacheMu.Lock()
+	if r.phaseCache == nil {
+		r.phaseCache = make(map[k8stypes.NamespacedName]phaseEntry)
+	}
+	r.phaseCacheMu.Unlock()
+
+	providerName := ""
+	if md.Status.Provider != nil {
+		providerName = md.Status.Provider.Name
+	}
+	currentPhase := md.Status.Phase
+	key := k8stypes.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+
+	// Known phases used to zero-initialize all label combinations for this provider.
+	phases := []string{"Pending", "Deploying", "Running", "Failed", "Terminating"}
+
+	// Build the updated phase entry. Start from the previous entry to preserve timestamps.
+	entry := previous
+
+	// Update replica counts and provider in the entry for aggregate computation
+	if md.Status.Replicas != nil {
+		entry.Replicas = [3]int32{md.Status.Replicas.Desired, md.Status.Replicas.Ready, md.Status.Replicas.Available}
+	} else {
+		entry.Replicas = [3]int32{}
+	}
+	entry.Provider = providerName
+
+	// Zero-initialize all known label combinations so that increase() and
+	// rate() work correctly from the first scrape.
+	if providerName != "" && !previous.MetricsInitialized {
+		airmetrics.ReadyDurationSeconds.WithLabelValues(providerName)
+		airmetrics.ProvisionDurationSeconds.WithLabelValues(providerName)
+		airmetrics.ReconciliationDurationSeconds.WithLabelValues(providerName)
+		for _, errType := range []string{"validation", "engine_selection", "provider_selection", "gateway"} {
+			airmetrics.ReconciliationErrorsTotal.WithLabelValues(providerName, errType)
+		}
+		for _, reason := range []string{"manual", "auto"} {
+			airmetrics.ProviderSelection.WithLabelValues(providerName, reason)
+		}
+		for _, from := range phases {
+			for _, to := range phases {
+				if from != to {
+					airmetrics.PhaseTransitionsTotal.WithLabelValues(providerName, from, to)
+				}
+			}
+		}
+		entry.MetricsInitialized = true
+	}
+
+	// Record provider selection counter.
+	// When the previous provider is empty and a new provider is assigned, it indicates a selection event occured,
+	// either auto or manual. We use the presence of the ExplicitProviderSelectionReason reason to distinguish between them.
+	if previous.Provider == "" && providerName != "" {
+		reason := "auto"
+		if md.Status.Provider != nil && md.Status.Provider.SelectedReason == ExplicitProviderSelectionReason {
+			reason = "manual"
+		}
+		airmetrics.ProviderSelection.WithLabelValues(providerName, reason).Inc()
+	}
+
+	// Record phase transition counter.
+	// When previous.Phase is empty (first reconciliation or after controller restart),
+	// we skip recording a transition to avoid a spurious "" -> X event.
+	if previous.Phase != "" && currentPhase != previous.Phase {
+		// Skip recording transitions that involve deployments without providers.
+		if providerName != "" {
+			airmetrics.PhaseTransitionsTotal.WithLabelValues(
+				providerName, string(previous.Phase), string(currentPhase),
+			).Inc()
+		}
+	}
+
+	// Track when the Deploying phase starts. This gives us a reliable wall-clock
+	// anchor for provision duration, immune to condition-timestamp flapping
+	// (e.g. ResourceCreated being toggled by conflict retries).
+	if currentPhase == airunwayv1alpha1.DeploymentPhaseDeploying && previous.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+		entry.DeployingTimestamp = time.Now()
+	}
+
+	// Record one-time Running metrics only when we observe an actual phase
+	// transition into Running. This avoids duplicate/inflated lead-time samples
+	// after controller restarts, where the in-memory cache is empty and the
+	// previous phase is unknown.
+	transitionedToRunning := currentPhase == airunwayv1alpha1.DeploymentPhaseRunning &&
+		previous.Phase != "" &&
+		previous.Phase != airunwayv1alpha1.DeploymentPhaseRunning
+	if transitionedToRunning && !previous.RunningMetricsRecorded {
+		// Skip recording if provider is not known.
+		if providerName != "" {
+			// Lead time: wall-clock time from CR creation to first observed transition
+			// into Running.
+			leadTime := time.Since(md.CreationTimestamp.Time).Seconds()
+			airmetrics.ReadyDurationSeconds.WithLabelValues(providerName).Observe(leadTime)
+
+			// Provision duration: wall-clock time from Deploying to Running.
+			// Only recorded when we observed the Deploying phase start (i.e. the
+			// controller was running when the deployment first entered Deploying).
+			if !entry.DeployingTimestamp.IsZero() {
+				provisionDuration := time.Since(entry.DeployingTimestamp).Seconds()
+				airmetrics.ProvisionDurationSeconds.WithLabelValues(providerName).Observe(provisionDuration)
+			}
+
+			entry.RunningMetricsRecorded = true
+		}
+	}
+
+	// Reset RunningMetricsRecorded when leaving Running (allows re-recording if
+	// deployment cycles back through Deploying→Running, e.g. after a rollback).
+	if currentPhase != airunwayv1alpha1.DeploymentPhaseRunning {
+		entry.RunningMetricsRecorded = false
+	}
+
+	// Update the phase cache and apply gauge deltas (decrement old, increment new).
+	entry.Phase = currentPhase
+	r.phaseCacheMu.Lock()
+	decrementPhaseEntryGauges(previous)
+	incrementPhaseEntryGauges(entry)
+	r.phaseCache[key] = entry
+	r.phaseCacheMu.Unlock()
+}
+
+// decrementPhaseEntryGauges subtracts a phaseEntry's contributions from the aggregate gauges.
+func decrementPhaseEntryGauges(e phaseEntry) {
+	replicaStates := []string{"desired", "ready", "available"}
+	if e.Phase != "" {
+		airmetrics.DeploymentStatus.WithLabelValues(e.Provider, string(e.Phase)).Dec()
+	}
+	for i, s := range replicaStates {
+		airmetrics.DeploymentReplicas.WithLabelValues(e.Provider, s).Sub(float64(e.Replicas[i]))
+	}
+}
+
+// incrementPhaseEntryGauges adds a phaseEntry's contributions to the aggregate gauges.
+func incrementPhaseEntryGauges(e phaseEntry) {
+	replicaStates := []string{"desired", "ready", "available"}
+	if e.Phase != "" {
+		airmetrics.DeploymentStatus.WithLabelValues(e.Provider, string(e.Phase)).Inc()
+	}
+	for i, s := range replicaStates {
+		airmetrics.DeploymentReplicas.WithLabelValues(e.Provider, s).Add(float64(e.Replicas[i]))
+	}
+}
+
+// cleanupMetrics decrements aggregate gauges and removes the phase cache entry for a deleted ModelDeployment.
+func (r *ModelDeploymentReconciler) cleanupMetrics(key k8stypes.NamespacedName) {
+	r.phaseCacheMu.Lock()
+	if old, ok := r.phaseCache[key]; ok {
+		decrementPhaseEntryGauges(old)
+		delete(r.phaseCache, key)
+	}
+	r.phaseCacheMu.Unlock()
+}
+
+// recordReconcileError records a reconciliation error metric.
+// Skipped when no provider is assigned to avoid empty-label series.
+func (r *ModelDeploymentReconciler) recordReconcileError(md *airunwayv1alpha1.ModelDeployment, errorType string) {
+	if md.Status.Provider == nil {
+		return
+	}
+	airmetrics.ReconciliationErrorsTotal.WithLabelValues(md.Status.Provider.Name, errorType).Inc()
 }
 
 func providerConfigChangePredicate() predicate.Predicate {
@@ -673,6 +935,8 @@ func (r *ModelDeploymentReconciler) mapProviderConfigToModelDeployments(ctx cont
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.phaseCache = make(map[k8stypes.NamespacedName]phaseEntry)
+
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.ModelDeployment{}).
 		Watches(
@@ -709,9 +973,7 @@ func specToMap(spec *airunwayv1alpha1.ModelDeploymentSpec) (map[string]any, erro
 
 // evaluateCEL evaluates a CEL expression against the spec map
 func evaluateCEL(expression string, specMap map[string]any) (bool, error) {
-	env, err := cel.NewEnv(
-		cel.Variable("spec", cel.DynType),
-	)
+	env, err := getCELEnv()
 	if err != nil {
 		return false, fmt.Errorf("failed to create CEL environment: %w", err)
 	}

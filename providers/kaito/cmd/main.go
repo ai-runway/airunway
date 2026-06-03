@@ -28,6 +28,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -108,15 +109,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		setupLog.Error(err, "unable to build direct client for upstream probe")
+		os.Exit(1)
+	}
+
 	// Set up the KAITO provider reconciler
-	reconciler := kaito.NewKaitoProviderReconciler(mgr.GetClient(), mgr.GetScheme())
+	reconciler := kaito.NewKaitoProviderReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		directClient,
+		mgr.GetEventRecorderFor("kaito-provider"),
+	)
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "KaitoProvider")
 		os.Exit(1)
 	}
 
 	// Set up the ProviderConfigManager for self-registration and heartbeat
-	configManager := kaito.NewProviderConfigManager(mgr.GetClient())
+	configManager := kaito.NewProviderConfigManager(mgr.GetClient(), directClient)
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		setupLog.Info("registering KAITO provider config")
 		if err := configManager.Register(ctx); err != nil {

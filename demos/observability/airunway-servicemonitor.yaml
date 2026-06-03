@@ -1,0 +1,27 @@
+# ServiceMonitor for the AI Runway controller metrics endpoint.
+# The controller serves metrics on port 8443 over HTTPS.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: controller
+    control-plane: controller-manager
+    release: prometheus
+  name: airunway-controller-manager-metrics-monitor
+  namespace: airunway-system
+spec:
+  endpoints:
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      path: /metrics
+      port: metrics
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+  namespaceSelector:
+    any: true
+  scrapeClassicHistograms: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: airunway
+      control-plane: controller-manager

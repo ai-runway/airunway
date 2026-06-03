@@ -18,10 +18,12 @@
     }
   },
   "scripts": {
+    "generate-versions": "bun run scripts/generate-versions.ts",
+    "prebuild": "bun run generate-versions",
     "build": "tsc",
     "watch": "tsc --watch"
   },
   "devDependencies": {
-    "typescript": "^5.3.3"
+    "typescript": "^6.0.3"
   }
 }

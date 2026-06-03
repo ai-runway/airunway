@@ -1,6 +1,7 @@
 # CRD Reference
 
 ## ModelDeployment
+
 Unified API for deploying ML models.
 
 ```yaml
@@ -63,6 +64,7 @@ Each entry is a `StorageVolume`. Maximum 8 volumes per deployment.
 | `accessMode` | string | no | PVC access mode for controller-created PVCs. One of `ReadWriteOnce`, `ReadWriteMany`, `ReadOnlyMany`, `ReadWriteOncePod`. Default: `ReadWriteMany`. Only used when `size` is set. |
 
 ## InferenceProviderConfig
+
 Cluster-scoped resource for provider registration. Each provider controller self-registers its `InferenceProviderConfig` at startup, declaring capabilities and selection rules in `spec`, and installation/documentation metadata in `metadata.annotations`:
 
 ```yaml
@@ -82,7 +84,7 @@ metadata:
         "helmCharts": [
           {
             "name": "dynamo-platform",
-            "chart": "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.2.tgz",
+            "chart": "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.1.1.tgz",
             "namespace": "dynamo-system",
             "createNamespace": true,
             "values": { "global.grove.install": true }
@@ -91,20 +93,36 @@ metadata:
         "steps": [
           {
             "title": "Install Dynamo Platform",
-            "command": "helm upgrade --install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.2.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
+            "command": "helm upgrade --install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.1.1.tgz --namespace dynamo-system --create-namespace --set-json global.grove.install=true",
             "description": "Install the Dynamo platform operator with bundled Grove and CRDs"
           }
         ]
       }
 spec:
   capabilities:
-    engines: [vllm, sglang, trtllm]
-    servingModes: [aggregated, disaggregated]
-    gpuSupport: true
-    cpuSupport: false
-    gateway:                                         # Optional: provider gateway capabilities
-      inferencePoolNamePattern: "{namespace}-{name}-pool"  # Pool naming pattern ({name}, {namespace} accepted)
-      inferencePoolNamespace: "dynamo-system"         # Namespace for provider's InferencePool
+    engines:
+      - name: vllm
+        servingModes: [aggregated, disaggregated]
+        gpuSupport: true
+        requiresCRD: true                            # Optional; nil is treated as true for backward compatibility
+        gateway:                                     # Optional: per-engine gateway capabilities
+          managesInferencePool: true                 # Provider creates and owns the InferencePool/EPP
+          inferencePoolNamePattern: "{name}-pool"    # Pool naming pattern ({name}, {namespace} accepted)
+          inferencePoolNamespace: "{namespace}"      # Namespace for provider's InferencePool
+      - name: sglang
+        servingModes: [aggregated, disaggregated]
+        gpuSupport: true
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
+      - name: trtllm
+        servingModes: [aggregated]
+        gpuSupport: true
+        gateway:
+          managesInferencePool: true
+          inferencePoolNamePattern: "{name}-pool"
+          inferencePoolNamespace: "{namespace}"
   selectionRules:
     - condition: "spec.serving.mode == 'disaggregated'"
       priority: 100

@@ -47,6 +47,7 @@ logger.info(
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 type CorsOriginOption = NonNullable<Parameters<typeof cors>[0]>['origin'];
+const AIRUNWAY_AUTH_ERROR_HEADER = 'X-Airunway-Auth-Error';
 
 // Default cross-origin policy for browser-based UIs that talk to this backend.
 // Same-origin clients (the embedded production frontend) don't go through CORS.
@@ -108,6 +109,7 @@ app.use(
   '*',
   cors({
     origin: CORS_ORIGIN === undefined ? defaultCorsOrigin : parseCorsOrigin(CORS_ORIGIN),
+    exposeHeaders: [AIRUNWAY_AUTH_ERROR_HEADER],
   })
 );
 
@@ -157,6 +159,7 @@ app.use('/api/*', async (c, next) => {
   // Extract bearer token
   const authHeader = c.req.header('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    c.header(AIRUNWAY_AUTH_ERROR_HEADER, 'true');
     return c.json(
       { error: { message: 'Authentication required', statusCode: 401 } },
       401
@@ -170,6 +173,7 @@ app.use('/api/*', async (c, next) => {
 
   if (!result.valid) {
     logger.warn({ error: result.error }, 'Token validation failed');
+    c.header(AIRUNWAY_AUTH_ERROR_HEADER, 'true');
     return c.json(
       { error: { message: result.error || 'Invalid token', statusCode: 401 } },
       401

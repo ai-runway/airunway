@@ -2,8 +2,9 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
+import { getProviderHealth } from '../services/providerHealth';
 import logger from '../lib/logger';
-import { getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
+import { aggregateRequiresCRDFromCapabilities, getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
 
 interface ProviderHelmChartDetails {
   name: string;
@@ -51,7 +52,7 @@ function extractProviderDetails(config: any) {
     name: displayName,
     description: installation.description || '',
     defaultNamespace: installation.defaultNamespace || 'default',
-    requiresCRD: providerRequiresRuntimeCRD(name, capabilities.requiresCRD, annotatedDisplayName),
+    requiresCRD: providerRequiresRuntimeCRD(name, aggregateRequiresCRDFromCapabilities(capabilities), annotatedDisplayName),
     crdConfig: {
       apiGroup: capabilities.engines?.length ? '' : '',
     },
@@ -110,15 +111,36 @@ function isInstallerPermissionError(output?: string): boolean {
   return /\bforbidden\b|cannot (?:create|update|patch|delete|get|list|watch)|is forbidden|attempting to grant RBAC permissions not currently held|requires.*(?:permission|privilege)/i.test(output);
 }
 
-function installationFailureStatus(output?: string): 403 | 500 {
-  return isInstallerPermissionError(output) ? 403 : 500;
+function isHelmOwnershipError(output?: string): boolean {
+  if (!output) return false;
+  return /invalid ownership metadata|cannot be imported into the current release|missing key "app\.kubernetes\.io\/managed-by"|missing key "meta\.helm\.sh\/release-name"/i.test(output);
+}
+
+function extractOwnershipConflictResource(output: string): string | null {
+  // Helm formats: `CustomResourceDefinition "name" in namespace "ns" exists ...`
+  const match = output.match(/(\w[\w-]*)\s+"([^"]+)"\s+in namespace\s+"([^"]*)"\s+exists/i);
+  if (!match) return null;
+  const [, kind, name, ns] = match;
+  return ns ? `${kind} "${name}" in namespace "${ns}"` : `${kind} "${name}"`;
+}
+
+function installationFailureStatus(output?: string): 403 | 409 | 500 {
+  if (isInstallerPermissionError(output)) return 403;
+  if (isHelmOwnershipError(output)) return 409;
+  return 500;
 }
 
 function installationFailureMessage(prefix: string, output?: string): string {
   const detail = output?.trim() || 'Unknown error';
-  return isInstallerPermissionError(detail)
-    ? `${prefix}: ${INSTALLER_PERMISSION_GUIDANCE} Details: ${detail}`
-    : `${prefix}: ${detail}`;
+  if (isInstallerPermissionError(detail)) {
+    return `${prefix}: ${INSTALLER_PERMISSION_GUIDANCE} Details: ${detail}`;
+  }
+  if (isHelmOwnershipError(detail)) {
+    const resource = extractOwnershipConflictResource(detail);
+    const subject = resource ?? 'a required cluster resource';
+    return `${prefix}: Cannot install because ${subject} already exists on the cluster and is owned by another tool. Uninstall the conflicting tool, or use the manual installation commands shown below.`;
+  }
+  return `${prefix}: ${detail}`;
 }
 
 const installation = new Hono()
@@ -212,18 +234,28 @@ const installation = new Hono()
       provider.name,
       provider.requiresCRD,
     );
+    // Layer the shim's heartbeat-aware health view on top of the live
+    // installation check. Prefer the shim's message whenever it has an
+    // actionable signal — either a stale heartbeat OR a fresh UpstreamReady
+    // condition reporting unhealthy (the refuse-fast path). Structural fields
+    // (installed/operatorRunning) stay sourced from installationStatus since
+    // that reflects what's actually in the cluster regardless of shim state.
+    const health = getProviderHealth(providerId, config);
+    const baseMessage = hasInstallMetadata || provider.requiresCRD === false
+      ? installationStatus.message
+      : `No installation metadata found for provider ${providerId}`;
+    const useShimMessage = health.stale || (!health.healthy && health.hasShimSignal);
+    const message = useShimMessage ? health.message : baseMessage;
 
     return c.json({
       providerId: provider.id,
       providerName: provider.name,
       installed: installationStatus.installed,
       crdFound: installationStatus.crdFound,
-      operatorRunning: installationStatus.operatorRunning,
+      operatorRunning: installationStatus.operatorRunning ?? false,
       requiresCRD: installationStatus.requiresCRD ?? provider.requiresCRD,
       version: status.version,
-      message: hasInstallMetadata || provider.requiresCRD === false
-        ? installationStatus.message
-        : `No installation metadata found for provider ${providerId}`,
+      message,
       installable,
       installationSteps: provider.installationSteps,
       helmCommands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],

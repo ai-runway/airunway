@@ -4,10 +4,16 @@ import (
 	"context"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 )
 
 func TestGetProviderConfigSpec(t *testing.T) {
@@ -25,20 +31,38 @@ func TestGetProviderConfigSpec(t *testing.T) {
 		t.Fatalf("expected %d engines, got %d", len(expectedEngines), len(spec.Capabilities.Engines))
 	}
 	for i, e := range expectedEngines {
-		if spec.Capabilities.Engines[i] != e {
-			t.Errorf("engine[%d]: expected %s, got %s", i, e, spec.Capabilities.Engines[i])
+		if spec.Capabilities.Engines[i].Name != e {
+			t.Errorf("engine[%d]: expected %s, got %s", i, e, spec.Capabilities.Engines[i].Name)
 		}
 	}
 
-	if len(spec.Capabilities.ServingModes) != 1 || spec.Capabilities.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
-		t.Errorf("expected only aggregated serving mode")
+	// Verify per-engine capabilities
+	vllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeVLLM)
+	if vllmCap == nil {
+		t.Fatal("expected vllm engine capability")
+	}
+	if !vllmCap.GPUSupport {
+		t.Error("expected vllm GPU support to be true")
+	}
+	if vllmCap.CPUSupport {
+		t.Error("expected vllm CPU support to be false")
+	}
+	if len(vllmCap.ServingModes) != 1 || vllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
+		t.Errorf("expected vllm to support only aggregated serving mode")
 	}
 
-	if !spec.Capabilities.CPUSupport {
-		t.Error("expected CPU support to be true")
+	llamaCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeLlamaCpp)
+	if llamaCap == nil {
+		t.Fatal("expected llamacpp engine capability")
 	}
-	if !spec.Capabilities.GPUSupport {
-		t.Error("expected GPU support to be true")
+	if !llamaCap.GPUSupport {
+		t.Error("expected llamacpp GPU support to be true")
+	}
+	if !llamaCap.CPUSupport {
+		t.Error("expected llamacpp CPU support to be true")
+	}
+	if len(llamaCap.ServingModes) != 1 || llamaCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
+		t.Errorf("expected llamacpp to support only aggregated serving mode")
 	}
 
 	if len(spec.SelectionRules) != 2 {
@@ -72,7 +96,7 @@ func TestGetInstallationInfo(t *testing.T) {
 }
 
 func TestNewProviderConfigManager(t *testing.T) {
-	mgr := NewProviderConfigManager(nil)
+	mgr := NewProviderConfigManager(nil, nil)
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
 	}
@@ -90,9 +114,10 @@ func TestProviderConstants(t *testing.T) {
 func TestRegisterNew(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(scheme)
+	_ = clientgoscheme.AddToScheme(scheme)
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&airunwayv1alpha1.InferenceProviderConfig{}).Build()
-	mgr := NewProviderConfigManager(c)
+	c := newFakeClientWithWorkspace(scheme)
+	mgr := NewProviderConfigManager(c, c)
 
 	err := mgr.Register(context.Background())
 	if err != nil {
@@ -103,32 +128,16 @@ func TestRegisterNew(t *testing.T) {
 func TestRegisterExisting(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(scheme)
+	_ = clientgoscheme.AddToScheme(scheme)
 
 	existing := &airunwayv1alpha1.InferenceProviderConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
-	mgr := NewProviderConfigManager(c)
+	c := newFakeClientWithWorkspace(scheme, existing)
+	mgr := NewProviderConfigManager(c, c)
 
 	err := mgr.Register(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestUpdateStatus(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = airunwayv1alpha1.AddToScheme(scheme)
-
-	existing := &airunwayv1alpha1.InferenceProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
-	mgr := NewProviderConfigManager(c)
-
-	err := mgr.UpdateStatus(context.Background(), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +152,7 @@ func TestUnregister(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
-	mgr := NewProviderConfigManager(c)
+	mgr := NewProviderConfigManager(c, c)
 
 	err := mgr.Unregister(context.Background())
 	if err != nil {
@@ -160,7 +169,7 @@ func TestStartHeartbeat(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
-	mgr := NewProviderConfigManager(c)
+	mgr := NewProviderConfigManager(c, c)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	mgr.StartHeartbeat(ctx)
@@ -168,15 +177,97 @@ func TestStartHeartbeat(t *testing.T) {
 	cancel()
 }
 
-func TestUpdateStatusNotFound(t *testing.T) {
+func TestUpdateStatusFromProbe_HealthyPath(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(scheme)
+	_ = clientgoscheme.AddToScheme(scheme)
 
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	mgr := NewProviderConfigManager(c)
-
-	err := mgr.UpdateStatus(context.Background(), true)
-	if err == nil {
-		t.Fatal("expected error when config not found")
+	config := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
 	}
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kaito-workspace",
+			Namespace: "kaito-workspace",
+			Labels:    map[string]string{"app.kubernetes.io/name": "workspace"},
+		},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
+	}
+
+	c := newFakeClientWithWorkspace(scheme, config, deploy)
+	mgr := NewProviderConfigManager(c, c)
+	if err := mgr.UpdateStatusFromProbe(context.Background()); err != nil {
+		t.Fatalf("UpdateStatusFromProbe: %v", err)
+	}
+
+	got := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: ProviderConfigName}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Status.Ready {
+		t.Error("expected Ready=true")
+	}
+	cond := findCondition(got.Status.Conditions, "UpstreamReady")
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonUpstreamHealthy {
+		t.Errorf("unexpected UpstreamReady condition: %+v", cond)
+	}
+}
+
+func TestMarkUnregistered(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	config := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+		Status:     airunwayv1alpha1.InferenceProviderConfigStatus{Ready: true},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	mgr := NewProviderConfigManager(c, c)
+	if err := mgr.MarkUnregistered(context.Background()); err != nil {
+		t.Fatalf("MarkUnregistered: %v", err)
+	}
+
+	got := &airunwayv1alpha1.InferenceProviderConfig{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: ProviderConfigName}, got)
+	if got.Status.Ready {
+		t.Error("expected Ready=false")
+	}
+	cond := findCondition(got.Status.Conditions, "UpstreamReady")
+	if cond == nil || cond.Reason != ReasonUnregistered {
+		t.Errorf("unexpected UpstreamReady condition: %+v", cond)
+	}
+}
+
+func findCondition(conds []metav1.Condition, t string) *metav1.Condition {
+	for i := range conds {
+		if conds[i].Type == t {
+			return &conds[i]
+		}
+	}
+	return nil
+}
+
+// newFakeClientWithWorkspace builds a fake client with the Workspace GVK registered
+// so simpleMapper (from upstream_health_test.go) recognises it during probe calls.
+func newFakeClientWithWorkspace(scheme *runtime.Scheme, objs ...client.Object) client.Client {
+	// Register workspace GVK so the simpleMapper finds it
+	gvk := schema.GroupVersionKind{Group: "kaito.sh", Version: "v1beta1", Kind: "Workspace"}
+	scheme.AddKnownTypeWithName(gvk, &metav1.PartialObjectMetadata{})
+	gvkList := schema.GroupVersionKind{Group: "kaito.sh", Version: "v1beta1", Kind: "WorkspaceList"}
+	scheme.AddKnownTypeWithName(gvkList, &metav1.PartialObjectMetadataList{})
+	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Group: "kaito.sh", Version: "v1beta1"})
+
+	mapper := &simpleMapper{scheme: scheme}
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRESTMapper(mapper).
+		WithObjects(objs...).
+		WithStatusSubresource(&airunwayv1alpha1.InferenceProviderConfig{}).
+		Build()
 }

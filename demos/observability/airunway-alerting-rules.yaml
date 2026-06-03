@@ -1,0 +1,92 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: airunway-alerting-rules
+  namespace: airunway-system
+  labels:
+    release: prometheus
+spec:
+  groups:
+    # Symptom-based alerts: page on user-facing impact.
+    - name: airunway-symptoms
+      rules:
+        - alert: AirunwayReconciliationErrorRateHigh
+          expr: |
+            (
+              sum(rate(airunway_reconciliation_errors_total[10m]))
+              / clamp_min(sum(rate(airunway_reconciliation_duration_seconds_count[10m])), 1e-9)
+            ) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "AI Runway reconciliation error rate above 10%"
+            description: >-
+              More than 10% of reconciliations are failing over the last 10 minutes.
+              ModelDeployments may not be progressing. Check the Reconciliation
+              Performance section in the AI Runway dashboard.
+            dashboard: "/d/airunway-platform-overview/ai-runway-platform-overview?viewPanel=12"
+
+        - alert: AirunwayReconciliationLatencyHigh
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(airunway_reconciliation_duration_seconds_bucket[10m]))
+            ) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "AI Runway reconciliation p95 latency above 10 seconds"
+            description: >-
+              The 95th percentile reconciliation duration has exceeded 10 seconds
+              for more than 5 minutes. This delays all ModelDeployment state changes.
+            dashboard: "/d/airunway-platform-overview/ai-runway-platform-overview?viewPanel=10"
+
+        - alert: AirunwayDeploymentStuck
+          expr: |
+            sum by (phase) (airunway_deployment_status{phase=~"Pending|Deploying"}) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "ModelDeployments stuck in {{ $labels.phase }} phase"
+            description: >-
+              One or more ModelDeployments have been in the {{ $labels.phase }}
+              phase for over an hour. Check provider logs and the Deployment
+              Status section in the AI Runway dashboard.
+            dashboard: "/d/airunway-platform-overview/ai-runway-platform-overview?viewPanel=18"
+
+    # Cause-based alerts: feed into ticket queues, not pagers.
+    - name: airunway-causes
+      rules:
+        - alert: AirunwayProviderReconciliationErrors
+          expr: |
+            sum by (provider, error_type) (
+              rate(airunway_reconciliation_errors_total[10m])
+            ) > 0.01
+          for: 10m
+          labels:
+            severity: info
+          annotations:
+            summary: "Sustained {{ $labels.error_type }} errors for provider {{ $labels.provider }}"
+            description: >-
+              Provider {{ $labels.provider }} has been producing
+              {{ $labels.error_type }} errors for more than 10 minutes.
+              This is informational and may resolve on its own.
+
+        - alert: AirunwayChangeFailureRateHigh
+          expr: |
+            (
+              sum(rate(airunway_deployment_phase_transitions_total{to_phase="Failed"}[1h]))
+              / clamp_min(sum(rate(airunway_deployment_phase_transitions_total{to_phase="Deploying"}[1h])), 1e-9)
+            ) > 0.25
+          for: 15m
+          labels:
+            severity: info
+          annotations:
+            summary: "AI Runway change failure rate above 25%"
+            description: >-
+              More than 25% of deployments are transitioning to Failed over
+              the last hour. Review the DORA Metrics section in the AI Runway
+              dashboard for trends.
+            dashboard: "/d/airunway-platform-overview/ai-runway-platform-overview?viewPanel=15"

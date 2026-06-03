@@ -166,13 +166,16 @@ export const mockInferenceProviderConfig = {
   },
   spec: {
     capabilities: {
-      engines: ['vllm', 'llamacpp'],
-      servingModes: ['aggregated'],
+      engines: [
+        { name: 'vllm', servingModes: ['aggregated'], gpuSupport: true, cpuSupport: false },
+        { name: 'llamacpp', servingModes: ['aggregated'], gpuSupport: true, cpuSupport: true },
+      ],
     },
   },
   status: {
     ready: true,
     version: '0.10.0',
+    lastHeartbeat: new Date().toISOString(),
   },
 };
 
@@ -323,5 +326,46 @@ export const mockInferenceProviderConfigNotReady = {
   status: {
     ready: false,
     // No version — provider is not yet installed/ready
+  },
+};
+
+// ============================================================================
+// Provider health fixtures (issue #179)
+// ============================================================================
+
+const freshHeartbeat = new Date(Date.now() - 30_000).toISOString();
+const staleHeartbeat = new Date(Date.now() - 5 * 60_000).toISOString();
+
+export const mockKaitoCRNewShimHealthy = {
+  ...mockInferenceProviderConfig,
+  status: {
+    ready: true,
+    version: 'kaito-provider:v0.1.0',
+    lastHeartbeat: freshHeartbeat,
+    conditions: [
+      { type: 'UpstreamReady', status: 'True', reason: 'UpstreamHealthy', message: 'KAITO workspace controller kaito-workspace/kaito-workspace is ready' },
+    ],
+  },
+};
+
+export const mockKaitoCROldShim = {
+  ...mockInferenceProviderConfig,
+  status: {
+    ready: true,
+    version: 'kaito-provider:v0.0.9',
+    lastHeartbeat: freshHeartbeat,
+    conditions: [],
+  },
+};
+
+export const mockKaitoCRStale = {
+  ...mockInferenceProviderConfig,
+  status: {
+    ready: true,
+    version: 'kaito-provider:v0.1.0',
+    lastHeartbeat: staleHeartbeat,
+    conditions: [
+      { type: 'UpstreamReady', status: 'True', reason: 'UpstreamHealthy', message: 'ok' },
+    ],
   },
 };

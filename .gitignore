@@ -43,6 +43,9 @@ tmp/
 temp/
 *.tmp
 
+# Bun incremental build artifacts
+*.bun-build
+
 # TypeScript cache
 *.tsbuildinfo
 

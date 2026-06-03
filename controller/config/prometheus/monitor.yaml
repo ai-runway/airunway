@@ -6,12 +6,13 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: controller
     app.kubernetes.io/managed-by: kustomize
+    release: prometheus
   name: controller-manager-metrics-monitor
   namespace: system
 spec:
   endpoints:
     - path: /metrics
-      port: https # Ensure this is the name of the port that exposes HTTPS metrics
+      port: metrics # Ensure this is the name of the port that exposes HTTPS metrics
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
@@ -21,7 +22,10 @@ spec:
         # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
         # which securely references the certificate from the 'metrics-server-cert' secret.
         insecureSkipVerify: true
+  namespaceSelector:
+    any: true
   selector:
     matchLabels:
       control-plane: controller-manager
-      app.kubernetes.io/name: controller
+      app.kubernetes.io/name: airunway
+  scrapeClassicHistograms: true

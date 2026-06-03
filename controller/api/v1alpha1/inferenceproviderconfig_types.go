@@ -29,38 +29,66 @@ const (
 	AnnotationDocumentation = "airunway.ai/documentation"
 )
 
-// ProviderCapabilities defines what a provider supports
-type ProviderCapabilities struct {
-	// engines is the list of supported inference engines
-	// +optional
-	Engines []EngineType `json:"engines,omitempty"`
+// EngineCapability defines per-engine capability metadata
+type EngineCapability struct {
+	// name is the inference engine type
+	// +kubebuilder:validation:Required
+	Name EngineType `json:"name"`
 
-	// servingModes is the list of supported serving modes
+	// servingModes is the list of serving modes this engine supports
 	// +optional
 	ServingModes []ServingMode `json:"servingModes,omitempty"`
 
-	// cpuSupport indicates if the provider supports CPU-only inference
-	// +optional
-	CPUSupport bool `json:"cpuSupport,omitempty"`
-
-	// gpuSupport indicates if the provider supports GPU inference
+	// gpuSupport indicates if this engine supports GPU inference
 	// +optional
 	GPUSupport bool `json:"gpuSupport,omitempty"`
 
-	// requiresCRD indicates if this provider needs an upstream CRD/operator installation.
+	// cpuSupport indicates if this engine supports CPU-only inference
+	// +optional
+	CPUSupport bool `json:"cpuSupport,omitempty"`
+
+	// requiresCRD indicates if this engine needs an upstream CRD/operator installation.
 	// When omitted, clients should treat this as true for backward compatibility.
 	// +optional
 	RequiresCRD *bool `json:"requiresCRD,omitempty"`
 
-	// gateway defines the provider's gateway-related capabilities.
+	// gateway defines this engine's gateway-related capabilities.
 	// +optional
 	Gateway *GatewayCapabilities `json:"gateway,omitempty"`
 }
 
-// GatewayCapabilities defines gateway-related capabilities for a specific provider.
+// ProviderCapabilities defines what a provider supports.
+//
+// NOTE: the legacy-schema migration in
+// controller/internal/controller/migration.go unconditionally strips the
+// top-level keys listed in `legacyFlatKeys` (servingModes, gpuSupport,
+// cpuSupport, requiresCRD, gateway) from spec.capabilities. When adding a
+// new top-level field here, avoid those JSON tag names — or update the
+// migration to preserve the new field — otherwise it will be silently
+// dropped at controller startup.
+type ProviderCapabilities struct {
+	// engines is the list of supported inference engines with per-engine capabilities
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Engines []EngineCapability `json:"engines,omitempty"`
+}
+
+// GatewayCapabilities defines gateway-related capabilities for a specific engine.
 type GatewayCapabilities struct {
+	// managesInferencePool indicates that the provider's operator creates and
+	// owns the GAIE InferencePool (and EPP) for ModelDeployments using this
+	// engine. When true, the airunway controller will not create an
+	// InferencePool itself: it waits for the provider-managed one to appear
+	// and uses it as the HTTPRoute backend. When false (the default), the
+	// controller creates and manages the InferencePool/EPP, even if other
+	// fields on this struct (e.g. ignoresServedName) are set.
+	// +optional
+	ManagesInferencePool bool `json:"managesInferencePool,omitempty"`
+
 	// inferencePoolNamePattern is the naming pattern for provider-created pools.
-	// Supports {name} and {namespace} placeholders.
+	// Supports {name} and {namespace} placeholders. Only consulted when
+	// managesInferencePool is true.
 	// +optional
 	InferencePoolNamePattern string `json:"inferencePoolNamePattern,omitempty"`
 
@@ -70,6 +98,88 @@ type GatewayCapabilities struct {
 	// controller creates a ReferenceGrant for cross-namespace HTTPRoute routing.
 	// +optional
 	InferencePoolNamespace string `json:"inferencePoolNamespace,omitempty"`
+
+	// ignoresServedName indicates that gateway routing for this provider+engine
+	// pair does not honor spec.model.servedName, so the controller should fall
+	// back to auto-discovery / spec.model.id when computing the route model
+	// name. Set this when the provider's serving mode for this engine does not
+	// expose the OpenAI-style served name (e.g. KAITO's llama.cpp deployment).
+	// +optional
+	IgnoresServedName bool `json:"ignoresServedName,omitempty"`
+}
+
+// HasEngine returns true if the provider supports the given engine type
+func (c *ProviderCapabilities) HasEngine(engine EngineType) bool {
+	return c.GetEngineCapability(engine) != nil
+}
+
+// GetEngineCapability returns the capability for the given engine type, or nil if not found
+func (c *ProviderCapabilities) GetEngineCapability(engine EngineType) *EngineCapability {
+	if c == nil {
+		return nil
+	}
+	for i := range c.Engines {
+		if c.Engines[i].Name == engine {
+			return &c.Engines[i]
+		}
+	}
+	return nil
+}
+
+// SupportsServingMode returns true if this engine supports the specified serving mode.
+func (e *EngineCapability) SupportsServingMode(mode ServingMode) bool {
+	if e == nil {
+		return false
+	}
+	for _, sm := range e.ServingModes {
+		if sm == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsGPU returns true if this engine supports GPU inference.
+func (e *EngineCapability) SupportsGPU() bool {
+	if e == nil {
+		return false
+	}
+	return e.GPUSupport
+}
+
+// SupportsCPU returns true if this engine supports CPU-only inference.
+func (e *EngineCapability) SupportsCPU() bool {
+	if e == nil {
+		return false
+	}
+	return e.CPUSupport
+}
+
+// SupportsServingMode returns true if the given engine supports the specified serving mode
+func (c *ProviderCapabilities) SupportsServingMode(engine EngineType, mode ServingMode) bool {
+	return c.GetEngineCapability(engine).SupportsServingMode(mode)
+}
+
+// SupportsGPU returns true if the given engine supports GPU inference
+func (c *ProviderCapabilities) SupportsGPU(engine EngineType) bool {
+	return c.GetEngineCapability(engine).SupportsGPU()
+}
+
+// SupportsCPU returns true if the given engine supports CPU-only inference
+func (c *ProviderCapabilities) SupportsCPU(engine EngineType) bool {
+	return c.GetEngineCapability(engine).SupportsCPU()
+}
+
+// EngineNames returns a list of all engine types supported by this provider
+func (c *ProviderCapabilities) EngineNames() []EngineType {
+	if c == nil {
+		return nil
+	}
+	names := make([]EngineType, len(c.Engines))
+	for i, e := range c.Engines {
+		names[i] = e.Name
+	}
+	return names
 }
 
 // HelmRepo defines a Helm repository needed for installation

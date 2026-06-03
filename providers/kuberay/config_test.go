@@ -22,19 +22,20 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(spec.Capabilities.Engines) != 1 {
 		t.Fatalf("expected 1 engine, got %d", len(spec.Capabilities.Engines))
 	}
-	if spec.Capabilities.Engines[0] != airunwayv1alpha1.EngineTypeVLLM {
-		t.Errorf("expected vllm engine, got %s", spec.Capabilities.Engines[0])
-	}
 
-	if len(spec.Capabilities.ServingModes) != 2 {
-		t.Fatalf("expected 2 serving modes, got %d", len(spec.Capabilities.ServingModes))
+	// Verify per-engine capabilities
+	vllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeVLLM)
+	if vllmCap == nil {
+		t.Fatal("expected vllm engine capability")
 	}
-
-	if spec.Capabilities.CPUSupport {
-		t.Error("expected CPU support to be false")
+	if !vllmCap.GPUSupport {
+		t.Error("expected vllm GPU support to be true")
 	}
-	if !spec.Capabilities.GPUSupport {
-		t.Error("expected GPU support to be true")
+	if vllmCap.CPUSupport {
+		t.Error("expected vllm CPU support to be false")
+	}
+	if len(vllmCap.ServingModes) != 2 {
+		t.Fatalf("expected vllm to support 2 serving modes, got %d", len(vllmCap.ServingModes))
 	}
 
 	if len(spec.SelectionRules) != 1 {

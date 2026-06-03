@@ -70,15 +70,16 @@ func NewProviderConfigManager(c client.Client, discoveryClients ...discovery.Dis
 func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
-			Engines: []airunwayv1alpha1.EngineType{
-				airunwayv1alpha1.EngineTypeVLLM,
+			Engines: []airunwayv1alpha1.EngineCapability{
+				{
+					Name: airunwayv1alpha1.EngineTypeVLLM,
+					ServingModes: []airunwayv1alpha1.ServingMode{
+						airunwayv1alpha1.ServingModeAggregated,
+						airunwayv1alpha1.ServingModeDisaggregated,
+					},
+					GPUSupport: true,
+				},
 			},
-			ServingModes: []airunwayv1alpha1.ServingMode{
-				airunwayv1alpha1.ServingModeAggregated,
-				airunwayv1alpha1.ServingModeDisaggregated,
-			},
-			CPUSupport: false,
-			GPUSupport: true,
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{
 			{

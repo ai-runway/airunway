@@ -1,0 +1,43 @@
+# PodMonitor for KubeRay inference pods
+#
+# KubeRay deploys a RayService with head and worker pods. vLLM runs on the
+# worker nodes and exposes metrics via the Ray metrics port (8080). The head
+# pod exports Ray system metrics on the same port but does not serve vLLM
+# metrics.
+#
+# When running inside Ray Serve, vLLM metrics use a "ray_vllm_" prefix
+# instead of the standalone "vllm:" prefix. The metricRelabelings below
+# normalize "ray_vllm_" to "vllm:" so dashboard queries work across all
+# providers without prefix-specific logic.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kuberay-worker
+  namespace: kuberay-system
+  labels:
+    release: prometheus
+    app.kubernetes.io/part-of: airunway
+spec:
+  selector:
+    matchExpressions:
+      - key: airunway.ai/model-deployment
+        operator: Exists
+      - key: ray.io/node-type
+        operator: In
+        values: ["worker"]
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - action: replace
+          targetLabel: provider
+          replacement: kuberay
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: "ray_vllm_(.*)"
+          targetLabel: __name__
+          replacement: "vllm:$1"
+  namespaceSelector:
+    any: true

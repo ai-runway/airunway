@@ -1,5 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import app, { parseCorsOrigin } from './hono-app';
+import { kubernetesService } from './services/kubernetes';
+import { configService } from './services/config';
+import { authService } from './services/auth';
+import { mockServiceMethod } from './test/helpers';
+import { mockDeployment } from './test/fixtures';
 import { HTTPException } from 'hono/http-exception';
 
 // Helper to add timeout to async operations for K8s-dependent tests
@@ -12,6 +17,47 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 // Shorter timeout for tests that depend on K8s (which may not be available)
 const K8S_TEST_TIMEOUT = 2000;
+const AIRUNWAY_AUTH_ERROR_HEADER = 'X-Airunway-Auth-Error';
+
+function expectChatProxyCall(capturedArgs: unknown[] | undefined, expectedArgs: unknown[]): void {
+  expect(capturedArgs?.slice(0, 5)).toEqual(expectedArgs);
+  expect(capturedArgs?.[5]).toEqual({});
+  const chatProxyOptions = capturedArgs?.[6] as { signal?: unknown } | undefined;
+  expect(chatProxyOptions?.signal).toBeInstanceOf(AbortSignal);
+}
+
+function expectSseHeaders(res: Response): void {
+  expect(res.headers.get('Content-Type')).toContain('text/event-stream');
+  expect(res.headers.get('Cache-Control')).toBe('no-cache, no-transform');
+  expect(res.headers.get('Content-Encoding')).toBe('identity');
+}
+
+function createChunkedErrorStream(chunks: string[]): {
+  stream: ReadableStream<Uint8Array>;
+  wasCancelled: () => boolean;
+} {
+  const encoder = new TextEncoder();
+  let nextChunk = 0;
+  let cancelCalled = false;
+
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (nextChunk < chunks.length) {
+          controller.enqueue(encoder.encode(chunks[nextChunk]!));
+          nextChunk += 1;
+          return;
+        }
+
+        controller.close();
+      },
+      cancel() {
+        cancelCalled = true;
+      },
+    }),
+    wasCancelled: () => cancelCalled,
+  };
+}
 
 app.get('/__test/http-exception/internal', () => {
   throw new HTTPException(500, { message: 'database password is secret' });
@@ -107,6 +153,13 @@ describe('Hono Routes', () => {
   });
 
   describe('Settings Routes', () => {
+    const restores: Array<() => void> = [];
+
+    afterEach(() => {
+      restores.forEach((restore) => restore());
+      restores.length = 0;
+    });
+
     test('GET /api/settings returns settings', async () => {
       const res = await app.request('/api/settings');
       expect(res.status).toBe(200);
@@ -121,9 +174,61 @@ describe('Hono Routes', () => {
       expect(data.auth).toBeDefined();
       expect(typeof data.auth.enabled).toBe('boolean');
     });
+
+    test('PUT /api/settings marks missing token auth failures as Airunway auth errors', async () => {
+      restores.push(
+        mockServiceMethod(authService, 'isAuthEnabled', () => true),
+      );
+
+      const res = await app.request('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaultNamespace: 'default' }),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)).toBe('true');
+      const data = await res.json();
+      expect(data.error.message).toBe('Authentication required');
+      expect(data.error.statusCode).toBe(401);
+    });
+
+    test('PUT /api/settings marks invalid token auth failures as Airunway auth errors', async () => {
+      restores.push(
+        mockServiceMethod(authService, 'isAuthEnabled', () => true),
+      );
+      restores.push(
+        mockServiceMethod(authService, 'validateToken', async () => ({
+          valid: false,
+          error: 'Token expired',
+        })),
+      );
+
+      const res = await app.request('/api/settings', {
+        method: 'PUT',
+        headers: {
+          'Authorization': 'Bearer invalid-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ defaultNamespace: 'default' }),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)).toBe('true');
+      const data = await res.json();
+      expect(data.error.message).toBe('Token expired');
+      expect(data.error.statusCode).toBe(401);
+    });
   });
 
   describe('Deployments Routes', () => {
+    const restores: Array<() => void> = [];
+
+    afterEach(() => {
+      restores.forEach((restore) => restore());
+      restores.length = 0;
+    });
+
     test('GET /api/deployments returns deployment list with pagination', async () => {
       try {
         const res = await withTimeout(app.request('/api/deployments'), K8S_TEST_TIMEOUT);
@@ -145,6 +250,1008 @@ describe('Hono Routes', () => {
         }
         throw error;
       }
+    });
+
+    test('POST /api/deployments/:name/chat streams proxied chat completions', async () => {
+      let capturedModelLookupArgs: unknown[] | undefined;
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\ndata: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServiceGet', async (...args: unknown[]) => {
+          capturedModelLookupArgs = args;
+          return JSON.stringify({ data: [{ id: 'served-from-models-endpoint' }] });
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expectSseHeaders(res);
+      expect(await res.text()).toBe(upstreamSse);
+
+      expect(capturedModelLookupArgs?.slice(0, 4)).toEqual([
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/models',
+      ]);
+      const modelLookupOptions = capturedModelLookupArgs?.[4] as { accept?: string; signal?: unknown } | undefined;
+      expect(modelLookupOptions?.accept).toBe('application/json');
+      expect(modelLookupOptions?.signal).toBeInstanceOf(AbortSignal);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'served-from-models-endpoint',
+          stream: true,
+        },
+      ]);
+    });
+
+    test('POST /api/deployments/:name/chat propagates authenticated user token to Kubernetes lookups and proxies', async () => {
+      let capturedValidateTokenArgs: unknown[] | undefined;
+      let capturedDeploymentArgs: unknown[] | undefined;
+      let capturedModelLookupArgs: unknown[] | undefined;
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(authService, 'isAuthEnabled', () => true),
+      );
+      restores.push(
+        mockServiceMethod(authService, 'validateToken', async (...args: unknown[]) => {
+          capturedValidateTokenArgs = args;
+          return {
+            valid: true,
+            user: {
+              username: 'test-user',
+              uid: 'test-uid',
+              groups: ['developers'],
+            },
+          };
+        }),
+      );
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async (...args: unknown[]) => {
+          capturedDeploymentArgs = args;
+          return {
+            ...mockDeployment,
+            phase: 'Running',
+            provider: 'dynamo',
+            replicas: { desired: 1, ready: 1, available: 1 },
+            frontendService: 'test-deploy-frontend:8080',
+          } as never;
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServiceGet', async (...args: unknown[]) => {
+          capturedModelLookupArgs = args;
+          return JSON.stringify({ data: [{ id: 'served-from-authenticated-models-endpoint' }] });
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer user-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expect(capturedValidateTokenArgs).toEqual(['user-token']);
+      expect(capturedDeploymentArgs).toEqual(['test-deploy', 'default', 'user-token']);
+      expect(capturedModelLookupArgs?.slice(0, 4)).toEqual([
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/models',
+      ]);
+      const modelLookupOptions = capturedModelLookupArgs?.[4] as {
+        accept?: string;
+        signal?: unknown;
+        userToken?: string;
+      } | undefined;
+      expect(modelLookupOptions?.accept).toBe('application/json');
+      expect(modelLookupOptions?.signal).toBeInstanceOf(AbortSignal);
+      expect(modelLookupOptions?.userToken).toBe('user-token');
+      expect(capturedChatProxyArgs?.slice(0, 5)).toEqual([
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'served-from-authenticated-models-endpoint',
+          stream: true,
+        },
+      ]);
+      expect(capturedChatProxyArgs?.[5]).toEqual({});
+      const chatProxyOptions = capturedChatProxyArgs?.[6] as {
+        signal?: unknown;
+        userToken?: string;
+      } | undefined;
+      expect(chatProxyOptions?.signal).toBeInstanceOf(AbortSignal);
+      expect(chatProxyOptions?.userToken).toBe('user-token');
+    });
+
+    test('POST /api/deployments/:namespace/:name/chat streams proxied chat completions', async () => {
+      let capturedDeploymentArgs: unknown[] | undefined;
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async (...args: unknown[]) => {
+          capturedDeploymentArgs = args;
+          return {
+            ...mockDeployment,
+            phase: 'Running',
+            provider: 'dynamo',
+            replicas: { desired: 1, ready: 1, available: 1 },
+            frontendService: 'test-deploy-frontend:8080',
+            servedModelName: 'deployment-served-model',
+          } as never;
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/custom-ns/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expect(capturedDeploymentArgs).toEqual(['test-deploy', 'custom-ns', undefined]);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'custom-ns',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'deployment-served-model',
+          stream: true,
+        },
+      ]);
+    });
+
+    test('POST /api/deployments/:name/chat direct path ignores gateway.modelName (HTTPRoute alias)', async () => {
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      // Deployment exposes a gateway alias ('served-from-gateway') AND a real
+      // served model name. The direct service-proxy path must use the served
+      // model name; the gateway alias would 404 against the frontend service.
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          gateway: { endpoint: 'https://gateway.example.com', modelName: 'served-from-gateway' },
+          servedModelName: 'deployment-served-model',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'deployment-served-model',
+          stream: true,
+        },
+      ]);
+    });
+
+
+    test('POST /api/deployments/:name/chat gateway fallback ignores request model', async () => {
+      let capturedDirectProxyArgs: unknown[] | undefined;
+      let capturedGatewayBody: Record<string, unknown> | undefined;
+      let capturedGatewayHeader: string | null = null;
+      let capturedGatewaySignal: AbortSignal | null | undefined;
+      const gatewaySse = 'data: {"choices":[{"delta":{"content":"Hello from gateway"}}]}\n\ndata: [DONE]\n\n';
+      const originalFetch = globalThis.fetch;
+
+      restores.push(() => {
+        globalThis.fetch = originalFetch;
+      });
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedGatewayBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        capturedGatewayHeader = new Headers(init?.headers).get('X-Gateway-Model-Name');
+        capturedGatewaySignal = init?.signal;
+        return new Response(gatewaySse, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }) as typeof fetch;
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          gateway: { endpoint: 'https://gateway.example.com', modelName: 'gateway-configured-model' },
+          servedModelName: 'deployment-served-model',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedDirectProxyArgs = args;
+          return new Response(JSON.stringify({
+            reason: 'NotFound',
+            details: { kind: 'services' },
+          }), { status: 404 });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'user-requested-model',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expectSseHeaders(res);
+      expect(await res.text()).toBe(gatewaySse);
+      expectChatProxyCall(capturedDirectProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'user-requested-model',
+          stream: true,
+        },
+      ]);
+      expect(capturedGatewayBody).toEqual({
+        messages: [{ role: 'user', content: 'Hello' }],
+        model: 'gateway-configured-model',
+        stream: true,
+      });
+      expect(capturedGatewayHeader).toBe('gateway-configured-model');
+      expect(capturedGatewaySignal).toBeInstanceOf(AbortSignal);
+    });
+
+    test('POST /api/deployments/:name/chat skips KAITO llama.cpp servedModelName and discovers model', async () => {
+      let capturedModelLookupArgs: unknown[] | undefined;
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'kaito',
+          engine: 'llamacpp',
+          modelId: 'deployment-model-id',
+          servedModelName: 'incorrect-served-model-name',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServiceGet', async (...args: unknown[]) => {
+          capturedModelLookupArgs = args;
+          return JSON.stringify({ data: [{ id: 'discovered-llamacpp-model' }] });
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expect(capturedModelLookupArgs?.slice(0, 4)).toEqual([
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/models',
+      ]);
+      const modelLookupOptions = capturedModelLookupArgs?.[4] as { accept?: string; signal?: unknown } | undefined;
+      expect(modelLookupOptions?.accept).toBe('application/json');
+      expect(modelLookupOptions?.signal).toBeInstanceOf(AbortSignal);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'discovered-llamacpp-model',
+          stream: true,
+        },
+      ]);
+    });
+
+    test('POST /api/deployments/:name/chat aborts KAITO llama.cpp model discovery when the client aborts', async () => {
+      let capturedModelLookupSignal: AbortSignal | undefined;
+      let capturedChatProxyArgs: unknown[] | undefined;
+      let resolveModelLookupStarted!: () => void;
+      let resolveModelLookupAborted!: () => void;
+      const modelLookupStarted = new Promise<void>((resolve) => {
+        resolveModelLookupStarted = resolve;
+      });
+      const modelLookupAborted = new Promise<void>((resolve) => {
+        resolveModelLookupAborted = resolve;
+      });
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'kaito',
+          engine: 'llamacpp',
+          modelId: 'deployment-model-id',
+          servedModelName: 'incorrect-served-model-name',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServiceGet', async (...args: unknown[]) => {
+          const modelLookupOptions = args[4] as { signal?: AbortSignal } | undefined;
+          capturedModelLookupSignal = modelLookupOptions?.signal;
+          resolveModelLookupStarted();
+
+          return new Promise<string>((_resolve, reject) => {
+            const signal = modelLookupOptions?.signal;
+            if (!signal) {
+              reject(new Error('missing model discovery signal'));
+              return;
+            }
+
+            const rejectAsAborted = () => {
+              resolveModelLookupAborted();
+              reject(new Error('aborted'));
+            };
+
+            if (signal.aborted) {
+              rejectAsAborted();
+              return;
+            }
+
+            signal.addEventListener('abort', rejectAsAborted, { once: true });
+          });
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const clientController = new AbortController();
+      const requestPromise = app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: clientController.signal,
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      await modelLookupStarted;
+      expect(capturedModelLookupSignal).toBeInstanceOf(AbortSignal);
+      expect(capturedModelLookupSignal?.aborted).toBe(false);
+
+      clientController.abort();
+      await modelLookupAborted;
+
+      const res = await requestPromise;
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expect(capturedModelLookupSignal?.aborted).toBe(true);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'deployment-model-id',
+          stream: true,
+        },
+      ]);
+      const chatProxyOptions = capturedChatProxyArgs?.[6] as { signal?: AbortSignal } | undefined;
+      expect(chatProxyOptions?.signal?.aborted).toBe(true);
+    });
+
+    test('POST /api/deployments/:name/chat skips KAITO llama.cpp servedModelName and falls back to modelId', async () => {
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'kaito',
+          engine: 'llamacpp',
+          modelId: 'deployment-model-id',
+          servedModelName: 'incorrect-served-model-name',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServiceGet', async () => {
+          throw new Error('model discovery failed');
+        }),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(upstreamSse);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'test-deploy-frontend',
+        'default',
+        8080,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'deployment-model-id',
+          stream: true,
+        },
+      ]);
+    });
+
+    test('POST /api/deployments/:name/chat defaults legacy frontend services to port 8000', async () => {
+      let capturedChatProxyArgs: unknown[] | undefined;
+      const upstreamSse = 'data: [DONE]\n\n';
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'legacy-frontend',
+          servedModelName: 'served-from-status',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async (...args: unknown[]) => {
+          capturedChatProxyArgs = args;
+          return new Response(upstreamSse, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expectChatProxyCall(capturedChatProxyArgs, [
+        'legacy-frontend',
+        'default',
+        8000,
+        'v1/chat/completions',
+        {
+          messages: [{ role: 'user', content: 'Hello' }],
+          model: 'served-from-status',
+          stream: true,
+        },
+      ]);
+    });
+
+    test('POST /api/deployments/:name/chat falls back to the gateway when the internal model endpoint is missing', async () => {
+      let capturedGatewayUrl: string | undefined;
+      let capturedGatewayBody: unknown;
+      let capturedGatewayHeaders: Headers;
+      let capturedGatewaySignal: AbortSignal | null | undefined;
+      const originalFetch = globalThis.fetch;
+      const missingServiceDetails = JSON.stringify({
+        kind: 'Status',
+        apiVersion: 'v1',
+        status: 'Failure',
+        message: 'services \"test-deploy-frontend\" not found',
+        reason: 'NotFound',
+        details: { name: 'test-deploy-frontend', kind: 'services' },
+        code: 404,
+      });
+      const gatewaySse = 'data: {"choices":[{"delta":{"content":"Hello from gateway"}}]}\n\ndata: [DONE]\n\n';
+
+      restores.push(() => {
+        globalThis.fetch = originalFetch;
+      });
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedGatewayUrl = input.toString();
+        capturedGatewayBody = init?.body ? JSON.parse(init.body.toString()) : undefined;
+        capturedGatewayHeaders = new Headers(init?.headers);
+        capturedGatewaySignal = init?.signal;
+        return new Response(gatewaySse, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }) as typeof fetch;
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          gateway: { endpoint: '20.92.155.15', modelName: 'served-from-gateway' },
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async () => (
+          new Response(missingServiceDetails, {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expectSseHeaders(res);
+      expect(await res.text()).toBe(gatewaySse);
+      expect(capturedGatewayUrl).toBe('http://20.92.155.15/v1/chat/completions');
+      expect(capturedGatewayHeaders!.get('X-Gateway-Model-Name')).toBe('served-from-gateway');
+      expect(capturedGatewaySignal).toBeInstanceOf(AbortSignal);
+      expect(capturedGatewayBody).toEqual({
+        messages: [{ role: 'user', content: 'Hello' }],
+        model: 'served-from-gateway',
+        stream: true,
+      });
+    });
+
+    test('POST /api/deployments/:name/chat preserves OpenAI-compatible gateway error messages', async () => {
+      const originalFetch = globalThis.fetch;
+      const missingServiceDetails = JSON.stringify({
+        kind: 'Status',
+        apiVersion: 'v1',
+        status: 'Failure',
+        message: 'services \"test-deploy-frontend\" not found',
+        reason: 'NotFound',
+        details: { name: 'test-deploy-frontend', kind: 'services' },
+        code: 404,
+      });
+      const gatewayError = JSON.stringify({
+        error: {
+          message: 'Model served-from-gateway is not loaded by this endpoint.',
+          type: 'invalid_request_error',
+        },
+      });
+
+      restores.push(() => {
+        globalThis.fetch = originalFetch;
+      });
+      globalThis.fetch = (async () => (
+        new Response(gatewayError, {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )) as typeof fetch;
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          gateway: { endpoint: '20.92.155.15', modelName: 'served-from-gateway' },
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async () => (
+          new Response(missingServiceDetails, {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error.message).toBe('Model served-from-gateway is not loaded by this endpoint.');
+      expect(data.error.details).toBe(gatewayError);
+    });
+
+    test('POST /api/deployments/:name/chat truncates and cancels large gateway error bodies', async () => {
+      const originalFetch = globalThis.fetch;
+      const missingServiceDetails = JSON.stringify({
+        kind: 'Status',
+        apiVersion: 'v1',
+        status: 'Failure',
+        message: 'services "test-deploy-frontend" not found',
+        reason: 'NotFound',
+        details: { name: 'test-deploy-frontend', kind: 'services' },
+        code: 404,
+      });
+      const gatewayError = createChunkedErrorStream([
+        'A'.repeat(400),
+        'B'.repeat(400),
+        'C'.repeat(400),
+        'D'.repeat(400),
+      ]);
+
+      restores.push(() => {
+        globalThis.fetch = originalFetch;
+      });
+      globalThis.fetch = (async () => (
+        new Response(gatewayError.stream, {
+          status: 502,
+          headers: { 'Content-Type': 'text/plain' },
+        })
+      )) as typeof fetch;
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          gateway: { endpoint: '20.92.155.15', modelName: 'served-from-gateway' },
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async () => (
+          new Response(missingServiceDetails, {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(502);
+      const data = await res.json();
+      expect(data.error.details.length).toBe(1000);
+      expect(data.error.details.endsWith('…')).toBe(true);
+      expect(data.error.details.includes('D')).toBe(false);
+      expect(gatewayError.wasCancelled()).toBe(true);
+    });
+
+    test('POST /api/deployments/:name/chat preserves upstream 401s without marking them as Airunway auth errors', async () => {
+      const upstreamError = JSON.stringify({
+        error: {
+          message: 'Invalid upstream API key',
+          type: 'authentication_error',
+        },
+      });
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          servedModelName: 'served-from-status',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async () => (
+          new Response(upstreamError, {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)).toBeNull();
+      const data = await res.json();
+      expect(data.error.message).toBe('Invalid upstream API key');
+      expect(data.error.statusCode).toBe(401);
+      expect(data.error.details).toBe(upstreamError);
+    });
+
+    test('POST /api/deployments/:name/chat truncates and cancels large upstream error bodies', async () => {
+      const upstreamError = createChunkedErrorStream([
+        'A'.repeat(400),
+        'B'.repeat(400),
+        'C'.repeat(400),
+        'D'.repeat(400),
+      ]);
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          servedModelName: 'served-from-status',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async () => (
+          new Response(upstreamError.stream, {
+            status: 500,
+            headers: { 'Content-Type': 'text/plain' },
+          })
+        )),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.error.details.length).toBe(1000);
+      expect(data.error.details.endsWith('…')).toBe(true);
+      expect(data.error.details.includes('D')).toBe(false);
+      expect(upstreamError.wasCancelled()).toBe(true);
+    });
+
+    test('POST /api/deployments/:name/chat returns a readable message when the model endpoint is missing', async () => {
+      const upstreamDetails = JSON.stringify({
+        kind: 'Status',
+        apiVersion: 'v1',
+        status: 'Failure',
+        message: 'services \"test-deploy-frontend\" not found',
+        reason: 'NotFound',
+        details: { name: 'test-deploy-frontend', kind: 'services' },
+        code: 404,
+      });
+
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Running',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 1, available: 1 },
+          frontendService: 'test-deploy-frontend:8080',
+          servedModelName: 'served-from-status',
+        } as never)),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'proxyServicePostStream', async () => (
+          new Response(upstreamDetails, {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(404);
+      const data = await res.json();
+      expect(data.error.message).toBe(
+        "The model endpoint for 'test-deploy' is not available yet. The deployment may still be starting, or its endpoint may have changed. Try again in a moment or check the logs."
+      );
+      expect(data.error.details).toBe(upstreamDetails);
+    });
+
+    test('POST /api/deployments/:name/chat rejects deployments that are not running', async () => {
+      restores.push(
+        mockServiceMethod(configService, 'getDefaultNamespace', async () => 'default'),
+      );
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDeployment', async () => ({
+          ...mockDeployment,
+          phase: 'Pending',
+          provider: 'dynamo',
+          replicas: { desired: 1, ready: 0, available: 0 },
+          frontendService: 'test-deploy-frontend:8080',
+        } as never)),
+      );
+
+      const res = await app.request('/api/deployments/test-deploy/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.error.message).toContain("Deployment 'test-deploy' is not running");
     });
   });
 
@@ -240,6 +1347,7 @@ describe('Hono Routes', () => {
       // Models endpoint should require auth
       const res = await app.request('/api/models');
       expect(res.status).toBe(401);
+      expect(res.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)).toBe('true');
       const data = await res.json();
       expect(data.error.message).toBe('Authentication required');
     });
@@ -247,12 +1355,22 @@ describe('Hono Routes', () => {
     test('invalid bearer token returns 401', async () => {
       process.env.AUTH_ENABLED = 'true';
 
-      const res = await app.request('/api/models', {
-        headers: {
-          'Authorization': 'Bearer invalid-token',
-        },
-      });
-      expect(res.status).toBe(401);
+      const restoreValidate = mockServiceMethod(authService, 'validateToken', async () => ({
+        valid: false,
+        error: 'Invalid token',
+      }));
+
+      try {
+        const res = await app.request('/api/models', {
+          headers: {
+            'Authorization': 'Bearer invalid-token',
+          },
+        });
+        expect(res.status).toBe(401);
+        expect(res.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)).toBe('true');
+      } finally {
+        restoreValidate();
+      }
     });
 
     test('health-like paths do not bypass auth when AUTH_ENABLED=true', async () => {

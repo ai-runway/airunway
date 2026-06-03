@@ -108,12 +108,12 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	// Use provider managed inference pool if it exists,
 	// otherwise use the default inference pool.
 	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities, gwConfig); ok && err == nil {
-		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", md.Spec.Provider.Name)
+		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", resolvedProviderName(md))
 
 		// Resolve the InferencePool name for the provider.
 		// The provider-managed pool will be configured to be named with the model deployment name and namespace.
-		poolName = resolveProviderInferencePoolName(gatewayCapabilities.InferencePoolNamePattern, md.Name, md.Namespace)
-		poolNamespace = resolveProviderInferencePoolName(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace)
+		poolName = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamePattern, md.Name, md.Namespace, md.Name)
+		poolNamespace = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace, md.Namespace)
 
 		// Use provider-managed InferencePool
 		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace, gwConfig.GetBBRNamespace())
@@ -132,8 +132,8 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return err
 	}
 
-	if gatewayCapabilities != nil {
-		logger.Info("Skipping EPP creation, provider manages EPP", "provider", md.Spec.Provider.Name)
+	if gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool {
+		logger.Info("Skipping EPP creation, provider manages EPP", "provider", resolvedProviderName(md))
 	} else { // Use default EPP
 		// Create or update EPP (EndPoint Picker) for the InferencePool
 		if err := r.reconcileEPP(ctx, md); err != nil {
@@ -355,12 +355,13 @@ func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx co
 	return eppName, nil
 }
 
-// resolveProviderInferencePoolName applies the provider's naming pattern to produce the
-// concrete InferencePool name for a given ModelDeployment. If the provider has
-// no pattern configured, it falls back to the ModelDeployment name.
-func resolveProviderInferencePoolName(pattern, mdName, mdNamespace string) string {
+// resolveProviderPoolField applies the provider's naming pattern to produce a
+// concrete InferencePool name or namespace for a given ModelDeployment.
+// When pattern is empty, the supplied fallback is used — callers pass
+// md.Name for the pool name and md.Namespace for the pool namespace.
+func resolveProviderPoolField(pattern, mdName, mdNamespace, fallback string) string {
 	if pattern == "" {
-		return mdName
+		return fallback
 	}
 	result := strings.ReplaceAll(pattern, "{name}", mdName)
 	result = strings.ReplaceAll(result, "{namespace}", mdNamespace)
@@ -624,6 +625,11 @@ func int64Ptr(i int64) *int64 { return &i }
 func strPtr(s string) *string { return &s }
 
 // resolveProviderGatewayCapabilities retrieves provider gateway capabilities from InferenceProviderConfig.
+//
+// A nil *GatewayCapabilities with a nil error means the provider was resolved
+// successfully but declares no gateway capabilities for the engine (the common
+// case for providers that do not manage their own InferencePool/EPP). A
+// non-nil error means the provider name could not be determined.
 func (r *ModelDeploymentReconciler) resolveProviderGatewayCapabilities(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) (*airunwayv1alpha1.GatewayCapabilities, error) {
 	var providerName string
 	if md.Spec.Provider != nil {
@@ -634,12 +640,11 @@ func (r *ModelDeploymentReconciler) resolveProviderGatewayCapabilities(ctx conte
 		return nil, fmt.Errorf("provider name not specified in ModelDeployment %s/%s", md.Namespace, md.Name)
 	}
 
-	gatewayCapabilities := r.ProviderResolver.GetGatewayCapabilities(ctx, providerName)
-	if gatewayCapabilities == nil {
-		return nil, fmt.Errorf("failed to resolve provider capabilities for ModelDeployment %s/%s", md.Namespace, md.Name)
-	}
-
-	return gatewayCapabilities, nil
+	// GetGatewayCapabilities returns nil when the provider declares no gateway
+	// capabilities for this engine; that is a legitimate "no-op" state, not an
+	// error. Callers should treat a nil result as "provider does not manage
+	// the gateway pool/EPP" and proceed accordingly.
+	return r.ProviderResolver.GetGatewayCapabilities(ctx, providerName, md.ResolvedEngineType()), nil
 }
 
 // httpRouteBackendTarget describes where an HTTPRoute should forward traffic
@@ -793,7 +798,7 @@ func (r *ModelDeploymentReconciler) resolveModelName(ctx context.Context, md *ai
 	if md.Spec.Gateway != nil && md.Spec.Gateway.ModelName != "" {
 		return md.Spec.Gateway.ModelName
 	}
-	if shouldUseServedNameForGateway(md) {
+	if r.shouldUseServedNameForGateway(ctx, md) {
 		return md.Spec.Model.ServedName
 	}
 
@@ -816,13 +821,21 @@ func (r *ModelDeploymentReconciler) resolveModelName(ctx context.Context, md *ai
 	return md.Spec.Model.ID
 }
 
-func shouldUseServedNameForGateway(md *airunwayv1alpha1.ModelDeployment) bool {
+func (r *ModelDeploymentReconciler) shouldUseServedNameForGateway(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) bool {
 	if md.Spec.Model.ServedName == "" {
 		return false
 	}
 
-	if md.ResolvedEngineType() == airunwayv1alpha1.EngineTypeLlamaCpp && resolvedProviderName(md) == "kaito" {
-		return false
+	// Consult the provider's per-engine gateway capabilities to honor an
+	// explicit opt-out. This replaces the previous hardcoded llamacpp+kaito
+	// carve-out: providers now declare ignoresServedName themselves.
+	if r.ProviderResolver != nil {
+		providerName := resolvedProviderName(md)
+		if providerName != "" {
+			if caps := r.ProviderResolver.GetGatewayCapabilities(ctx, providerName, md.ResolvedEngineType()); caps != nil && caps.IgnoresServedName {
+				return false
+			}
+		}
 	}
 
 	return true
@@ -1067,13 +1080,15 @@ func namespaceSelectorFromSet(namespaces map[string]bool) *metav1.LabelSelector 
 func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Resolve provider gateway capabilities
+	// Resolve provider gateway capabilities. A nil result with nil error means
+	// the provider simply does not declare gateway capabilities — that is the
+	// common case and must NOT log an error every reconcile.
 	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
 	var err error
 	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
-		logger.Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+		logger.V(1).Info("Could not resolve provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
 	}
-	providerManagedPool := gatewayCapabilities != nil
+	providerManagedPool := gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool
 
 	eppName := md.Name + "-epp"
 
@@ -1162,7 +1177,7 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities, gwConfig *gateway.GatewayConfig) (bool, error) {
 	logger := log.FromContext(ctx)
 
-	if gatewayCapabilitities != nil {
+	if gatewayCapabilitities != nil && gatewayCapabilitities.ManagesInferencePool {
 		// Provider manages the pool.
 		return true, nil
 	}

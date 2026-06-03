@@ -1,6 +1,5 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
-import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { configService } from '../services/config';
 import { authService } from '../services/auth';
@@ -9,6 +8,8 @@ import logger from '../lib/logger';
 const updateSettingsSchema = z.object({
   defaultNamespace: z.string().optional(),
 });
+
+const AIRUNWAY_AUTH_ERROR_HEADER = 'X-Airunway-Auth-Error';
 
 const settings = new Hono()
   .get('/', async (c) => {
@@ -26,13 +27,28 @@ const settings = new Hono()
     // Settings PUT requires authentication when auth is enabled
     if (authService.isAuthEnabled()) {
       const authHeader = c.req.header('Authorization');
+
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        throw new HTTPException(401, { message: 'Authentication required' });
+        c.header(AIRUNWAY_AUTH_ERROR_HEADER, 'true');
+        return c.json(
+          { error: { message: 'Authentication required', statusCode: 401 } },
+          401,
+        );
       }
+
       const token = authHeader.slice(7);
       const result = await authService.validateToken(token);
       if (!result.valid) {
-        throw new HTTPException(401, { message: result.error || 'Invalid token' });
+        c.header(AIRUNWAY_AUTH_ERROR_HEADER, 'true');
+        return c.json(
+          {
+            error: {
+              message: result.error || 'Invalid token',
+              statusCode: 401,
+            },
+          },
+          401,
+        );
       }
     }
 

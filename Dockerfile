@@ -11,6 +11,11 @@ ARG GIT_COMMIT=unknown
 
 WORKDIR /app
 
+# make is required by the verify-versions prebuild hook in package.json
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends make \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy package files for dependency installation
 COPY package.json bun.lock* ./
 COPY backend/package.json backend/

@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { getProviderDisplayName, providerRequiresRuntimeCRD } from './providers';
+import {
+  aggregateRequiresCRDFromCapabilities,
+  getProviderDisplayName,
+  providerRequiresRuntimeCRD,
+} from './providers';
 
 describe('provider metadata helpers', () => {
   test('uses known display names for CRD-less providers', () => {
@@ -44,5 +48,64 @@ describe('provider metadata helpers', () => {
     expect(providerRequiresRuntimeCRD('dynamo')).toBe(true);
     expect(providerRequiresRuntimeCRD('kaito')).toBe(true);
     expect(providerRequiresRuntimeCRD('kuberay')).toBe(true);
+  });
+});
+
+describe('aggregateRequiresCRDFromCapabilities', () => {
+  test('returns undefined when engines is missing or empty', () => {
+    expect(aggregateRequiresCRDFromCapabilities(undefined)).toBeUndefined();
+    expect(aggregateRequiresCRDFromCapabilities({})).toBeUndefined();
+    expect(aggregateRequiresCRDFromCapabilities({ engines: [] })).toBeUndefined();
+  });
+
+  test('returns false only when every engine explicitly opts out', () => {
+    expect(
+      aggregateRequiresCRDFromCapabilities({
+        engines: [
+          { name: 'vllm', requiresCRD: false },
+          { name: 'sglang', requiresCRD: false },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  test('returns true if any engine explicitly requires a CRD', () => {
+    expect(
+      aggregateRequiresCRDFromCapabilities({
+        engines: [
+          { name: 'vllm', requiresCRD: false },
+          { name: 'trtllm', requiresCRD: true },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  test('returns undefined when engines omit requiresCRD entirely', () => {
+    expect(
+      aggregateRequiresCRDFromCapabilities({
+        engines: [{ name: 'vllm' }, { name: 'llamacpp' }],
+      }),
+    ).toBeUndefined();
+  });
+
+  test('returns undefined when only some engines opt out and others omit the flag', () => {
+    // Omitted means "treat as true" per the Go API doc, so we cannot collapse
+    // to false — defer to the canonical fallback in providerRequiresRuntimeCRD.
+    expect(
+      aggregateRequiresCRDFromCapabilities({
+        engines: [{ name: 'vllm', requiresCRD: false }, { name: 'sglang' }],
+      }),
+    ).toBeUndefined();
+  });
+
+  test('ignores legacy top-level requiresCRD on capabilities', () => {
+    // The controller migration strips this, but a stray client value should
+    // not influence the per-engine aggregation.
+    expect(
+      aggregateRequiresCRDFromCapabilities({
+        requiresCRD: true,
+        engines: [{ name: 'vllm', requiresCRD: false }],
+      }),
+    ).toBe(false);
   });
 });

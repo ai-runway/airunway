@@ -337,6 +337,90 @@ describe('KubernetesService - pod logs', () => {
   });
 });
 
+describe('KubernetesService - service proxy', () => {
+  test('uses caller token kubeconfig for proxied GET and streaming POST requests', async () => {
+    const service = kubernetesService as any;
+    const originalKubeConfig = service.kc;
+    const originalCreateUserKubeConfig = service.createUserKubeConfig;
+    const originalFetch = globalThis.fetch;
+    const createUserKubeConfigCalls: string[] = [];
+    const fetchCalls: Array<{ url: string; init: RequestInit & { userToken?: string } }> = [];
+
+    const fakeKubeConfig = (authHeader: string) => ({
+      getCurrentCluster: () => ({ server: 'https://cluster.example', skipTLSVerify: false }),
+      applyToRequest: async (requestOptions: any) => {
+        requestOptions.headers = {
+          ...(requestOptions.headers ?? {}),
+          Authorization: authHeader,
+        };
+      },
+      applyToHTTPSOptions: () => undefined,
+    });
+
+    service.kc = fakeKubeConfig('Bearer shared-service-account-token');
+    service.createUserKubeConfig = (userToken: string) => {
+      createUserKubeConfigCalls.push(userToken);
+      return fakeKubeConfig(`Bearer ${userToken}`);
+    };
+    globalThis.fetch = (async (input: any, init?: any) => {
+      fetchCalls.push({ url: String(input), init });
+      return new Response(fetchCalls.length === 1 ? 'models' : 'stream', {
+        status: 200,
+        statusText: 'OK',
+      });
+    }) as typeof fetch;
+
+    try {
+      const getBody = await kubernetesService.proxyServiceGet(
+        'model-svc',
+        'tenant-ns',
+        8000,
+        'v1/models',
+        { accept: 'application/json', userToken: 'user-token' },
+      );
+      const postResponse = await kubernetesService.proxyServicePostStream(
+        'model-svc',
+        'tenant-ns',
+        8000,
+        'v1/chat/completions',
+        { messages: [{ role: 'user', content: 'Hello' }] },
+        { 'X-Trace-Id': 'trace-1' },
+        { userToken: 'user-token' },
+      );
+
+      expect(getBody).toBe('models');
+      expect(await postResponse.text()).toBe('stream');
+      expect(createUserKubeConfigCalls).toEqual(['user-token', 'user-token']);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://cluster.example/api/v1/namespaces/tenant-ns/services/model-svc:8000/proxy/v1/models',
+        'https://cluster.example/api/v1/namespaces/tenant-ns/services/model-svc:8000/proxy/v1/chat/completions',
+      ]);
+
+      const getHeaders = new Headers(fetchCalls[0].init.headers);
+      expect(fetchCalls[0].init.method).toBe('GET');
+      expect(getHeaders.get('authorization')).toBe('Bearer user-token');
+      expect(getHeaders.get('authorization')).not.toBe('Bearer shared-service-account-token');
+      expect(getHeaders.get('accept')).toBe('application/json');
+      expect(fetchCalls[0].init.userToken).toBeUndefined();
+
+      const postHeaders = new Headers(fetchCalls[1].init.headers);
+      expect(fetchCalls[1].init.method).toBe('POST');
+      expect(postHeaders.get('authorization')).toBe('Bearer user-token');
+      expect(postHeaders.get('accept')).toBe('text/event-stream');
+      expect(postHeaders.get('content-type')).toBe('application/json');
+      expect(postHeaders.get('x-trace-id')).toBe('trace-1');
+      expect(fetchCalls[1].init.body).toBe(JSON.stringify({
+        messages: [{ role: 'user', content: 'Hello' }],
+      }));
+      expect(fetchCalls[1].init.userToken).toBeUndefined();
+    } finally {
+      service.kc = originalKubeConfig;
+      service.createUserKubeConfig = originalCreateUserKubeConfig;
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe('KubernetesService - Type Definitions', () => {
   describe('ClusterGpuCapacity', () => {
     test('creates valid capacity with GPU nodes', () => {

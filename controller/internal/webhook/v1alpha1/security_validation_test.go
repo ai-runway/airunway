@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -295,7 +296,7 @@ func TestResourceCeilings_GPUCount(t *testing.T) {
 			},
 		},
 	}
-	errs := v.validateSpec(md)
+	_, errs := v.validateSpec(context.Background(), md)
 	found := false
 	for _, e := range errs {
 		if e.Field == "spec.resources.gpu.count" {
@@ -318,7 +319,7 @@ func TestResourceCeilings_GPUCountValid(t *testing.T) {
 			},
 		},
 	}
-	errs := v.validateSpec(md)
+	_, errs := v.validateSpec(context.Background(), md)
 	for _, e := range errs {
 		if e.Field == "spec.resources.gpu.count" {
 			t.Fatalf("unexpected GPU count error: %v", e)
@@ -385,6 +386,36 @@ func TestValidateOverrides_BlocksKeysInsideNestedArray(t *testing.T) {
 	}
 }
 
+// TestValidateOverrides_NoDuplicateErrorsForNestedForbiddenKey ensures that a
+// forbidden key whose value contains another forbidden key is reported once
+// (for the outer path) and not also reported for inner paths, because the
+// whole subtree is already rejected.
+func TestValidateOverrides_NoDuplicateErrorsForNestedForbiddenKey(t *testing.T) {
+	v := &ModelDeploymentCustomValidator{}
+	overrides := map[string]interface{}{
+		"securityContext": map[string]interface{}{
+			// Nested forbidden key inside an already-forbidden subtree.
+			"securityContext": map[string]interface{}{
+				"privileged": true,
+			},
+			"hostNetwork": true,
+		},
+	}
+	raw, _ := json.Marshal(overrides)
+	spec := &airunwayv1alpha1.ModelDeploymentSpec{
+		Provider: &airunwayv1alpha1.ProviderSpec{
+			Overrides: &runtime.RawExtension{Raw: raw},
+		},
+	}
+	errs := v.validateOverrides(spec, field.NewPath("spec"))
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly one error for the outer securityContext, got %d: %v", len(errs), errs)
+	}
+	if got := errs[0].Field; got != "spec.provider.overrides.securityContext" {
+		t.Fatalf("expected error on outer securityContext path, got %q", got)
+	}
+}
+
 func TestResourceCeilings_AggregatedReplicas(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
 	md := &airunwayv1alpha1.ModelDeployment{
@@ -393,7 +424,7 @@ func TestResourceCeilings_AggregatedReplicas(t *testing.T) {
 			Scaling: &airunwayv1alpha1.ScalingSpec{Replicas: MaxReplicas + 1},
 		},
 	}
-	errs := v.validateSpec(md)
+	_, errs := v.validateSpec(context.Background(), md)
 	found := false
 	for _, e := range errs {
 		if e.Field == "spec.scaling.replicas" {
@@ -415,7 +446,7 @@ func TestResourceCeilings_PrefillMemory(t *testing.T) {
 			},
 		},
 	}
-	errs := v.validateSpec(md)
+	_, errs := v.validateSpec(context.Background(), md)
 	found := false
 	for _, e := range errs {
 		if e.Field == "spec.scaling.prefill.memory" {
@@ -437,7 +468,7 @@ func TestResourceCeilings_DecodeMemory(t *testing.T) {
 			},
 		},
 	}
-	errs := v.validateSpec(md)
+	_, errs := v.validateSpec(context.Background(), md)
 	found := false
 	for _, e := range errs {
 		if e.Field == "spec.scaling.decode.memory" {
