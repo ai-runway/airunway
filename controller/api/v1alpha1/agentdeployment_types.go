@@ -152,10 +152,12 @@ type ExternalAPIBinding struct {
 type SecretKeyRef struct {
 	// name of the Secret in the AgentDeployment's namespace.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// key inside the Secret to read.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Key string `json:"key"`
 }
 
@@ -183,6 +185,17 @@ type ModelBinding struct {
 // framework providers ship recommended defaults in their
 // AgentProviderConfig catalog entries; users can override here per
 // AgentDeployment.
+//
+// Two SecurityContext shapes are exposed because Kubernetes splits
+// security settings between the pod and the container:
+//   - PodSecurityContext (securityContext) controls pod-scoped fields
+//     such as runAsNonRoot, runAsUser, fsGroup, and seccompProfile.
+//   - SecurityContext (containerSecurityContext) controls
+//     container-scoped fields such as readOnlyRootFilesystem,
+//     allowPrivilegeEscalation, and capabilities.
+//
+// Frameworks such as OpenClaw need readOnlyRootFilesystem=false (a
+// container-scoped field), so both shapes must be representable.
 type AgentSecuritySpec struct {
 	// podSecurityStandard names the Kubernetes Pod Security Standard the
 	// rendered pod should comply with. Providers translate this into
@@ -197,6 +210,16 @@ type AgentSecuritySpec struct {
 	// field-by-field.
 	// +optional
 	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+
+	// containerSecurityContext is a container-level SecurityContext
+	// override applied to the agent's primary container. Use this for
+	// settings that live on the container (e.g. readOnlyRootFilesystem,
+	// allowPrivilegeEscalation, capabilities) which cannot be expressed
+	// via the pod-level securityContext. Provider defaults (from the
+	// AgentProviderConfig catalog entry) are used when this is unset;
+	// non-nil fields here override the provider defaults field-by-field.
+	// +optional
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
 
 // AgentResourceSpec describes compute resources requested for the agent.
@@ -449,7 +472,7 @@ type AgentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   AgentDeploymentSpec   `json:"spec,omitempty"`
+	Spec   AgentDeploymentSpec   `json:"spec"`
 	Status AgentDeploymentStatus `json:"status,omitempty"`
 }
 

@@ -59,5 +59,11 @@ spec:
       cpu: "200m"
       memory: "256Mi"
   # OpenClaw writes to its working directory, so the catalog's
-  # recommendedSecurity already sets readOnlyRootFilesystem=false.
-  # Override here only when the deployment needs to differ from the recipe.
+  # recommendedSecurity sets containerSecurityContext.readOnlyRootFilesystem=false.
+  # Override here only when the deployment needs to differ from the recipe;
+  # for example, to mount an emptyDir at the writable path and re-enable a
+  # read-only root FS:
+  #
+  # security:
+  #   containerSecurityContext:
+  #     readOnlyRootFilesystem: true

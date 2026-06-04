@@ -38,6 +38,14 @@ spec:
           runAsUser: 1000
           seccompProfile:
             type: RuntimeDefault
+        containerSecurityContext:
+          # Container-level field: writable root FS is required for
+          # OpenClaw's session state. Privilege escalation stays off.
+          readOnlyRootFilesystem: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
 ---
 # CRD-native agent framework: Kagent.
 # Demonstrates a framework whose provider renders the AgentDeployment
@@ -76,3 +84,9 @@ spec:
           runAsNonRoot: true
           seccompProfile:
             type: RuntimeDefault
+        containerSecurityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
