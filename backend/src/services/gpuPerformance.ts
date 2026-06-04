@@ -38,7 +38,7 @@ export const DECODE_HEADROOM_GIB = 5;
 /** Quantization → bytes per weight. */
 export type Quantization = 'fp8' | 'int8' | 'fp16' | 'bf16';
 
-export function bytesPerWeightFor(quantization?: string): number {
+export function bytesPerWeightFor(quantization?: Quantization): number {
   switch ((quantization || '').toLowerCase()) {
     case 'fp8':
     case 'int8':
@@ -62,7 +62,7 @@ export type KvCacheDtype = 'fp8' | 'int8' | 'fp16' | 'bf16';
  * is NOT tied to weight quantization — callers must pass the KV dtype explicitly
  * to opt into a 1-byte KV cache.
  */
-export function bytesPerKvFor(dtype?: string): number {
+export function bytesPerKvFor(dtype?: KvCacheDtype): number {
   switch ((dtype || '').toLowerCase()) {
     case 'fp8':
     case 'int8':
