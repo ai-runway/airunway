@@ -234,9 +234,12 @@ function setDynamoParallelismEngineArgs(
  * Merge or strip the FP8 precision engine args (`quantization`,
  * `kv-cache-dtype`) without clobbering other args. Sets a key to `fp8` when the
  * corresponding precision is FP8 and the engine supports the flag; otherwise
- * removes it (FP16/BF16 is the engine default and needs no flag).
+ * removes ONLY a value this control owns (`fp8`). A user-provided non-fp8 value
+ * (e.g. `awq`/`gptq` typed into the advanced engine-args editor) is preserved,
+ * since FP16/BF16 is merely the engine default and shouldn't override an
+ * explicit user choice.
  */
-function setFp8PrecisionEngineArgs(
+export function setFp8PrecisionEngineArgs(
   engineArgs: Record<string, unknown> | undefined,
   opts: { weightFp8: boolean; kvFp8: boolean }
 ): Record<string, unknown> | undefined {
@@ -244,13 +247,15 @@ function setFp8PrecisionEngineArgs(
 
   if (opts.weightFp8) {
     nextEngineArgs[QUANTIZATION_ARG] = 'fp8';
-  } else {
+  } else if (nextEngineArgs[QUANTIZATION_ARG] === 'fp8') {
+    // Only strip the value WE set. A user-provided non-fp8 quantization
+    // (e.g. awq, gptq) from the advanced engine-args editor is preserved.
     delete nextEngineArgs[QUANTIZATION_ARG];
   }
 
   if (opts.kvFp8) {
     nextEngineArgs[KV_CACHE_DTYPE_ARG] = 'fp8';
-  } else {
+  } else if (nextEngineArgs[KV_CACHE_DTYPE_ARG] === 'fp8') {
     delete nextEngineArgs[KV_CACHE_DTYPE_ARG];
   }
 

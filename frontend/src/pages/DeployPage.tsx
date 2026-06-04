@@ -100,6 +100,15 @@ export function DeployPage() {
     ? `FP8 is only supported on H100/H200 GPUs. This cluster's GPU${throughput?.gpuModel ? ` (${throughput.gpuModel})` : ''} can't run FP8 — choose FP16 / BF16 to deploy.`
     : undefined
 
+  // FP8 selected but we couldn't confirm GPU support: the estimate has settled
+  // (not in-flight) yet carries no fp8Supported signal — e.g. it errored or
+  // 404'd (no GPU pool with known specs). We don't block (the hardware may
+  // support FP8 even if we lack specs), but we warn so an unsupported flag isn't
+  // sent silently. Mutually exclusive with fp8Blocked (false → blocked;
+  // undefined → unknown; true → fine).
+  const fp8CapabilityUnknown =
+    fp8Selected && !throughputLoading && throughput?.fp8Supported === undefined
+
   // Wait for both model and runtimes to load before showing the form
   // This ensures the runtime selector is visible when the form renders
   if (modelLoading || runtimesLoading) {
@@ -275,6 +284,12 @@ export function DeployPage() {
           {fp8Blocked && (
             <p className="mt-2 text-xs text-destructive">
               {fp8BlockReason}
+            </p>
+          )}
+          {fp8CapabilityUnknown && (
+            <p className="mt-2 text-xs text-yellow-500/90">
+              We couldn’t verify FP8 support for this cluster’s GPUs. FP8 will still be applied —
+              if the hardware doesn’t support it, the model may fail to start. Choose FP16 / BF16 if unsure.
             </p>
           )}
         </div>

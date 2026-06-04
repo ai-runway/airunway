@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DetailedClusterCapacity, Model, RuntimeStatus } from '@/lib/api'
-import { DeploymentForm } from './DeploymentForm'
+import { DeploymentForm, setFp8PrecisionEngineArgs } from './DeploymentForm'
 
 const mutateAsync = vi.fn()
 const toast = vi.fn()
@@ -321,5 +321,65 @@ describe('DeploymentForm', () => {
       expect(toggle).toHaveAttribute('aria-checked', 'true')
       expect(latestManifestConfig()?.gatewayEnabled).toBe(true)
     })
+  })
+})
+
+describe('setFp8PrecisionEngineArgs', () => {
+  it('preserves a user-set non-fp8 quantization when weight precision is not FP8', () => {
+    // Regression: the precision dropdowns must not clobber an awq/gptq value the
+    // user typed into the advanced engine-args editor.
+    const result = setFp8PrecisionEngineArgs(
+      { quantization: 'awq' },
+      { weightFp8: false, kvFp8: false }
+    )
+    expect(result).toEqual({ quantization: 'awq' })
+  })
+
+  it('strips a quantization value it owns (fp8) when weight precision is not FP8', () => {
+    const result = setFp8PrecisionEngineArgs(
+      { quantization: 'fp8' },
+      { weightFp8: false, kvFp8: false }
+    )
+    expect(result).toBeUndefined()
+  })
+
+  it('sets quantization to fp8 when weight precision is FP8, overriding a prior awq', () => {
+    const result = setFp8PrecisionEngineArgs(
+      { quantization: 'awq' },
+      { weightFp8: true, kvFp8: false }
+    )
+    expect(result).toEqual({ quantization: 'fp8' })
+  })
+
+  it('preserves a user-set non-fp8 kv-cache-dtype when KV precision is not FP8', () => {
+    const result = setFp8PrecisionEngineArgs(
+      { 'kv-cache-dtype': 'int8' },
+      { weightFp8: false, kvFp8: false }
+    )
+    expect(result).toEqual({ 'kv-cache-dtype': 'int8' })
+  })
+
+  it('strips a kv-cache-dtype value it owns (fp8) when KV precision is not FP8', () => {
+    const result = setFp8PrecisionEngineArgs(
+      { 'kv-cache-dtype': 'fp8' },
+      { weightFp8: false, kvFp8: false }
+    )
+    expect(result).toBeUndefined()
+  })
+
+  it('sets kv-cache-dtype to fp8 when KV precision is FP8, overriding a prior int8', () => {
+    const result = setFp8PrecisionEngineArgs(
+      { 'kv-cache-dtype': 'int8' },
+      { weightFp8: false, kvFp8: true }
+    )
+    expect(result).toEqual({ 'kv-cache-dtype': 'fp8' })
+  })
+
+  it('leaves unrelated engine args untouched', () => {
+    const result = setFp8PrecisionEngineArgs(
+      { 'max-model-len': '8192', quantization: 'gptq' },
+      { weightFp8: false, kvFp8: false }
+    )
+    expect(result).toEqual({ 'max-model-len': '8192', quantization: 'gptq' })
   })
 })
