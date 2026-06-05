@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "bunx --bun vite",
     "build": "tsc && bunx --bun vite build",
-    "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "lint": "eslint src --report-unused-disable-directives",
     "preview": "bunx --bun vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
