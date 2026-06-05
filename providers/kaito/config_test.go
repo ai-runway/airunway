@@ -51,6 +51,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(vllmCap.ServingModes) != 1 || vllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected vllm to support only aggregated serving mode")
 	}
+	if len(vllmCap.APIFormats) != 1 || vllmCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected vllm to support openai-chat API format")
+	}
 
 	llamaCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeLlamaCpp)
 	if llamaCap == nil {
@@ -64,6 +67,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	}
 	if len(llamaCap.ServingModes) != 1 || llamaCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected llamacpp to support only aggregated serving mode")
+	}
+	if len(llamaCap.APIFormats) != 1 || llamaCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected llamacpp to support openai-chat API format")
 	}
 
 	if len(spec.SelectionRules) != 2 {

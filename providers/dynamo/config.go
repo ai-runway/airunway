@@ -105,32 +105,43 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
 			Engines: []airunwayv1alpha1.EngineCapability{
-				{
-					Name: airunwayv1alpha1.EngineTypeVLLM,
-					ServingModes: []airunwayv1alpha1.ServingMode{
-						airunwayv1alpha1.ServingModeAggregated,
-						airunwayv1alpha1.ServingModeDisaggregated,
-					},
-					GPUSupport: true,
-					Gateway:    dynamoGatewayCapabilities(),
+			{
+				Name: airunwayv1alpha1.EngineTypeVLLM,
+				ServingModes: []airunwayv1alpha1.ServingMode{
+					airunwayv1alpha1.ServingModeAggregated,
+					airunwayv1alpha1.ServingModeDisaggregated,
 				},
-				{
-					Name: airunwayv1alpha1.EngineTypeSGLang,
-					ServingModes: []airunwayv1alpha1.ServingMode{
-						airunwayv1alpha1.ServingModeAggregated,
-						airunwayv1alpha1.ServingModeDisaggregated,
-					},
-					GPUSupport: true,
-					Gateway:    dynamoGatewayCapabilities(),
+				APIFormats: []airunwayv1alpha1.APIFormat{
+					airunwayv1alpha1.APIFormatOpenAIChat,
+					airunwayv1alpha1.APIFormatAnthropicMessages,
 				},
-				{
-					Name: airunwayv1alpha1.EngineTypeTRTLLM,
-					ServingModes: []airunwayv1alpha1.ServingMode{
-						airunwayv1alpha1.ServingModeAggregated,
-					},
-					GPUSupport: true,
-					Gateway:    dynamoGatewayCapabilities(),
+				GPUSupport: true,
+				Gateway:    dynamoGatewayCapabilities(),
+			},
+			{
+				Name: airunwayv1alpha1.EngineTypeSGLang,
+				ServingModes: []airunwayv1alpha1.ServingMode{
+					airunwayv1alpha1.ServingModeAggregated,
+					airunwayv1alpha1.ServingModeDisaggregated,
 				},
+				APIFormats: []airunwayv1alpha1.APIFormat{
+					airunwayv1alpha1.APIFormatOpenAIChat,
+					airunwayv1alpha1.APIFormatAnthropicMessages,
+				},
+				GPUSupport: true,
+				Gateway:    dynamoGatewayCapabilities(),
+			},
+			{
+				Name: airunwayv1alpha1.EngineTypeTRTLLM,
+				ServingModes: []airunwayv1alpha1.ServingMode{
+					airunwayv1alpha1.ServingModeAggregated,
+				},
+				APIFormats: []airunwayv1alpha1.APIFormat{
+					airunwayv1alpha1.APIFormatOpenAIChat,
+				},
+				GPUSupport: true,
+				Gateway:    dynamoGatewayCapabilities(),
+			},
 			},
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{

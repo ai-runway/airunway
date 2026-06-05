@@ -65,20 +65,26 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
 			Engines: []airunwayv1alpha1.EngineCapability{
-				{
-					Name: airunwayv1alpha1.EngineTypeVLLM,
-					ServingModes: []airunwayv1alpha1.ServingMode{
-						airunwayv1alpha1.ServingModeAggregated,
-					},
-					GPUSupport: true,
+			{
+				Name: airunwayv1alpha1.EngineTypeVLLM,
+				ServingModes: []airunwayv1alpha1.ServingMode{
+					airunwayv1alpha1.ServingModeAggregated,
 				},
-				{
-					Name: airunwayv1alpha1.EngineTypeLlamaCpp,
-					ServingModes: []airunwayv1alpha1.ServingMode{
-						airunwayv1alpha1.ServingModeAggregated,
-					},
-					GPUSupport: true,
-					CPUSupport: true,
+				APIFormats: []airunwayv1alpha1.APIFormat{
+					airunwayv1alpha1.APIFormatOpenAIChat,
+				},
+				GPUSupport: true,
+			},
+			{
+				Name: airunwayv1alpha1.EngineTypeLlamaCpp,
+				ServingModes: []airunwayv1alpha1.ServingMode{
+					airunwayv1alpha1.ServingModeAggregated,
+				},
+				APIFormats: []airunwayv1alpha1.APIFormat{
+					airunwayv1alpha1.APIFormatOpenAIChat,
+				},
+				GPUSupport: true,
+				CPUSupport: true,
 					// KAITO's llama.cpp deployment does not expose an
 					// OpenAI-style served-name endpoint, so gateway routing
 					// must fall back to spec.model.id rather than honoring

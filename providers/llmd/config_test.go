@@ -36,6 +36,11 @@ func TestGetProviderConfigSpec(t *testing.T) {
 		t.Error("expected vllm CPU support to be false")
 	}
 
+	// API formats (per-engine)
+	if len(vllmCap.APIFormats) != 1 || vllmCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected vllm to support openai-chat API format")
+	}
+
 	// Serving modes (per-engine)
 	hasAggregated := false
 	hasDisaggregated := false

@@ -71,14 +71,17 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 	return airunwayv1alpha1.InferenceProviderConfigSpec{
 		Capabilities: &airunwayv1alpha1.ProviderCapabilities{
 			Engines: []airunwayv1alpha1.EngineCapability{
-				{
-					Name: airunwayv1alpha1.EngineTypeVLLM,
-					ServingModes: []airunwayv1alpha1.ServingMode{
-						airunwayv1alpha1.ServingModeAggregated,
-						airunwayv1alpha1.ServingModeDisaggregated,
-					},
-					GPUSupport: true,
+			{
+				Name: airunwayv1alpha1.EngineTypeVLLM,
+				ServingModes: []airunwayv1alpha1.ServingMode{
+					airunwayv1alpha1.ServingModeAggregated,
+					airunwayv1alpha1.ServingModeDisaggregated,
 				},
+				APIFormats: []airunwayv1alpha1.APIFormat{
+					airunwayv1alpha1.APIFormatOpenAIChat,
+				},
+				GPUSupport: true,
+			},
 			},
 		},
 		SelectionRules: []airunwayv1alpha1.SelectionRule{

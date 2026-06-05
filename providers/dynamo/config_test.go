@@ -44,6 +44,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(vllmCap.ServingModes) != 2 {
 		t.Fatalf("expected vllm to support 2 serving modes, got %d", len(vllmCap.ServingModes))
 	}
+	if len(vllmCap.APIFormats) != 2 {
+		t.Fatalf("expected vllm to support 2 API formats, got %d", len(vllmCap.APIFormats))
+	}
 
 	sglangCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeSGLang)
 	if sglangCap == nil {
@@ -55,6 +58,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(sglangCap.ServingModes) != 2 {
 		t.Fatalf("expected sglang to support 2 serving modes, got %d", len(sglangCap.ServingModes))
 	}
+	if len(sglangCap.APIFormats) != 2 {
+		t.Fatalf("expected sglang to support 2 API formats, got %d", len(sglangCap.APIFormats))
+	}
 
 	trtllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeTRTLLM)
 	if trtllmCap == nil {
@@ -65,6 +71,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	}
 	if len(trtllmCap.ServingModes) != 1 || trtllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected trtllm to support only aggregated serving mode")
+	}
+	if len(trtllmCap.APIFormats) != 1 || trtllmCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected trtllm to support only openai-chat API format")
 	}
 
 	if len(spec.SelectionRules) != 4 {

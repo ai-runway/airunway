@@ -56,6 +56,20 @@ const (
 	ServingModeDisaggregated ServingMode = "disaggregated"
 )
 
+// APIFormat defines the API format supported by an inference engine.
+// Each format corresponds to a specific vendor's API contract.
+// +kubebuilder:validation:Enum=openai-chat;openai-responses;anthropic-messages
+type APIFormat string
+
+const (
+	// APIFormatOpenAIChat is the OpenAI Chat Completions API (POST /v1/chat/completions)
+	APIFormatOpenAIChat APIFormat = "openai-chat"
+	// APIFormatOpenAIResponses is the OpenAI Responses API (POST /v1/responses)
+	APIFormatOpenAIResponses APIFormat = "openai-responses"
+	// APIFormatAnthropicMessages is the Anthropic Messages API (POST /v1/messages)
+	APIFormatAnthropicMessages APIFormat = "anthropic-messages"
+)
+
 // DeploymentPhase defines the phase of the deployment
 // +kubebuilder:validation:Enum=Pending;Deploying;Running;Failed;Terminating
 type DeploymentPhase string
@@ -477,6 +491,10 @@ type GatewayStatus struct {
 	// gatewayNamespace is the namespace of the Gateway resource used for routing.
 	// +optional
 	GatewayNamespace string `json:"gatewayNamespace,omitempty"`
+	// apiFormats is the list of API formats supported by this deployment's engine.
+	// Populated from the engine's capabilities in InferenceProviderConfig.
+	// +optional
+	APIFormats []APIFormat `json:"apiFormats,omitempty"`
 }
 
 // ImageStatus contains information about resolved and verified images.
