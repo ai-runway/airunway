@@ -33,8 +33,12 @@ bun run serve    # serve the production build locally on :3000
 
 ## Deployment
 
-`.github/workflows/deploy-docs.yml` publishes `build/` to the `gh-pages`
-branch on every push to `main`. Forks build but do not deploy.
+`.github/workflows/deploy-docs.yml` builds the site and publishes it via the
+GitHub Actions Pages flow (`actions/upload-pages-artifact` →
+`actions/deploy-pages`). The site is deployed on every push to `main` on the
+canonical `kaito-project/airunway` repo. Pull requests and forks build the
+site to verify it compiles, but only the canonical repo deploys.
 
-The first-time GitHub Pages setup (Settings → Pages → Source = `gh-pages`
-branch, `/` folder) has to be done by a repository admin.
+First-time setup (needs a repository admin): **Settings → Pages → Build and
+deployment → Source = "GitHub Actions"**. No `gh-pages` branch is involved —
+the artifact is served directly from the workflow.

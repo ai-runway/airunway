@@ -1,7 +1,7 @@
 // @ts-check
 // AI Runway docs sidebar.
 //
-// Source of truth for the documentation table is /AGENTS.md; keep this in sync
+// Source of truth for the documentation table is /agents.md; keep this in sync
 // when adding new docs files to /docs.
 
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
