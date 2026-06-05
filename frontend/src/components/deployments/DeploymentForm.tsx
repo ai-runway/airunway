@@ -96,6 +96,16 @@ interface DeploymentFormProps {
   fp8Blocked?: boolean
   /** Human-readable reason shown when fp8Blocked is true. */
   fp8BlockReason?: string
+  /**
+   * True when the throughput estimate determined (with high confidence) that the
+   * model does not fit on the cluster's GPU at the estimated topology. Surfaced
+   * as a non-blocking warning near the Deploy button — it does NOT disable
+   * deploying, since the user may select more GPUs per replica than the estimate
+   * assumed.
+   */
+  doesNotFit?: boolean
+  /** Human-readable reason shown when doesNotFit is true. */
+  doesNotFitReason?: string
 }
 
 // Subset of Engine type for traditional GPU inference engines (excludes llamacpp which is KAITO-only)
@@ -262,7 +272,7 @@ export function setFp8PrecisionEngineArgs(
   return Object.keys(nextEngineArgs).length > 0 ? nextEngineArgs : undefined;
 }
 
-export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, weightQuant = 'fp16', kvCacheDtype = 'fp16', fp8Blocked = false, fp8BlockReason }: DeploymentFormProps) {
+export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, weightQuant = 'fp16', kvCacheDtype = 'fp16', fp8Blocked = false, fp8BlockReason, doesNotFit = false, doesNotFitReason }: DeploymentFormProps) {
   const navigate = useNavigate()
   const { toast } = useToast()
   const createDeployment = useCreateDeployment()
@@ -2000,6 +2010,15 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       {fp8Blocked && (
         <p className="text-sm text-destructive text-center">
           {fp8BlockReason || 'FP8 is only supported on H100/H200 GPUs. Choose FP16/BF16 to deploy.'}
+        </p>
+      )}
+      {/* Non-blocking "does not fit" warning. Deploy stays enabled: the estimate
+          assumes a fixed GPUs-per-replica, but the user may select more here, so
+          we caution rather than block. Hidden when fp8Blocked already explains a
+          blocking reason. */}
+      {doesNotFit && !fp8Blocked && (
+        <p className="text-sm text-yellow-500/90 text-center">
+          {doesNotFitReason || "This model is estimated not to fit on this cluster's GPUs at the selected precision. Try more GPUs per replica, a smaller model, or FP8 precision."}
         </p>
       )}
     </form>

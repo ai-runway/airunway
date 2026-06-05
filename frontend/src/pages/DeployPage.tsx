@@ -109,6 +109,16 @@ export function DeployPage() {
   const fp8CapabilityUnknown =
     fp8Selected && !throughputLoading && throughput?.fp8Supported === undefined
 
+  // High-confidence "model does not fit": the backend had real architecture
+  // details and the KV budget left no room for even one sequence on the
+  // estimate's assumed topology. We surface a non-blocking warning (the user may
+  // still pick more GPUs-per-replica in the form than the estimate assumed, which
+  // can make it fit) rather than disabling Deploy outright.
+  const doesNotFit = !!throughput?.doesNotFit && !throughput?.lowConfidence
+  const doesNotFitReason = doesNotFit
+    ? `This model is estimated not to fit on this cluster's GPU${throughput?.gpuModel ? ` (${throughput.gpuModel})` : ''} at ${throughput?.tpSize ?? 1} GPU${(throughput?.tpSize ?? 1) > 1 ? 's' : ''} per replica — the model weights plus reserved memory leave no room for the conversation cache. Increasing GPUs per replica below, choosing a smaller model, or using FP8 precision may help.`
+    : undefined
+
   // Wait for both model and runtimes to load before showing the form
   // This ensures the runtime selector is visible when the form renders
   if (modelLoading || runtimesLoading) {
@@ -306,6 +316,8 @@ export function DeployPage() {
           kvCacheDtype={kvCacheDtype}
           fp8Blocked={fp8Blocked}
           fp8BlockReason={fp8BlockReason}
+          doesNotFit={doesNotFit}
+          doesNotFitReason={doesNotFitReason}
         />
       </div>
     </div>

@@ -5,7 +5,9 @@ import {
   deriveTpSizeToFitWeights,
   estimatePerChatTokensPerSec,
   estimateConcurrentCapacity,
+  tpDecodeEfficiency,
   TP_DECODE_EFFICIENCY,
+  TP_DECODE_EFFICIENCY_LARGE,
 } from './gpuPerformance';
 import { resolveModelParamCount } from '@airunway/shared';
 import { gpuSupportsFp8 } from './costEstimation';
@@ -251,6 +253,36 @@ describe('estimatePerChatTokensPerSec', () => {
       tpSize: 1,
     });
     expect(explicit).toBe(omitted);
+  });
+
+  test('tpDecodeEfficiency steps down with TP group size', () => {
+    // TP1: no cross-GPU all-reduce on the decode path.
+    expect(tpDecodeEfficiency(1)).toBe(1);
+    // TP2–4: single NVLink-domain mid tier.
+    expect(tpDecodeEfficiency(2)).toBe(TP_DECODE_EFFICIENCY);
+    expect(tpDecodeEfficiency(4)).toBe(TP_DECODE_EFFICIENCY);
+    // TP>4: crosses domains / nodes → larger haircut.
+    expect(tpDecodeEfficiency(8)).toBe(TP_DECODE_EFFICIENCY_LARGE);
+    expect(tpDecodeEfficiency(16)).toBe(TP_DECODE_EFFICIENCY_LARGE);
+    // Lower tier is the optimistic bound.
+    expect(TP_DECODE_EFFICIENCY).toBeGreaterThan(TP_DECODE_EFFICIENCY_LARGE);
+  });
+
+  test('large TP groups (>4) use the reduced decode efficiency tier', () => {
+    const single = estimatePerChatTokensPerSec({
+      paramCount: 70e9,
+      bytesPerWeight: 2,
+      memBandwidthGBs: 3350,
+      tpSize: 1,
+    });
+    const octa = estimatePerChatTokensPerSec({
+      paramCount: 70e9,
+      bytesPerWeight: 2,
+      memBandwidthGBs: 3350,
+      tpSize: 8,
+    });
+    // TP8 scales by 8 × TP_DECODE_EFFICIENCY_LARGE, not the mid-tier 0.85.
+    expect(octa / single).toBeCloseTo(8 * TP_DECODE_EFFICIENCY_LARGE, 5);
   });
 });
 

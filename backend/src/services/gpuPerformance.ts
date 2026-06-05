@@ -28,15 +28,45 @@ export const MEM_BW_EFFICIENCY = 0.8;
  * Tensor-parallel decode scaling efficiency. Under TP the weights are sharded
  * across `tpSize` GPUs whose HBM bandwidth aggregates, so single-stream decode
  * speeds up ~`tpSize×` — minus a per-GPU haircut for all-reduce / interconnect
- * overhead. Aggregate effective bandwidth ≈ `tpSize × perGpuBW × this`.
+ * overhead. Aggregate effective bandwidth ≈ `tpSize × perGpuBW × efficiency`.
  *
- * Caveat: this is a flat factor, independent of `tpSize` and interconnect. Real
- * single-stream TP decode is latency/communication bound, so the per-GPU haircut
- * grows with larger TP groups (and is worse across PCIe / multi-node than NVLink).
- * 0.85 is therefore optimistic for big TP groups; treat it as a rough upper bound,
- * consistent with the estimator's overall heuristic, disclaimer-backed nature.
+ * Real single-stream TP decode is latency/communication bound, so the per-GPU
+ * haircut grows with larger TP groups (and is worse across PCIe / multi-node
+ * than NVLink). We therefore step the factor down with group size rather than
+ * applying a single flat value (see `tpDecodeEfficiency`): small groups stay on
+ * one NVLink domain, while big groups cross domains / nodes and lose more to
+ * communication. These remain coarse heuristics, consistent with the
+ * estimator's overall disclaimer-backed nature.
+ *
+ * `TP_DECODE_EFFICIENCY` is the mid-tier value (TP 2–4, a typical single NVLink
+ * domain). Larger groups use `TP_DECODE_EFFICIENCY_LARGE`.
  */
 export const TP_DECODE_EFFICIENCY = 0.85;
+
+/**
+ * Decode efficiency for large TP groups (more than 4 GPUs per replica). Beyond a
+ * typical 4-GPU NVLink domain the all-reduce traffic increasingly crosses slower
+ * links (multi-domain NVSwitch, PCIe, or multi-node fabric), so the realised
+ * per-GPU bandwidth fraction drops further. 0.75 is a deliberately rough
+ * step-down for the TP≥8 regime.
+ */
+export const TP_DECODE_EFFICIENCY_LARGE = 0.75;
+
+/**
+ * Per-GPU decode efficiency fraction for a given tensor-parallel size. Stepped
+ * by group size to approximate the growing communication haircut:
+ *   - TP 1     → 1.0  (no cross-GPU all-reduce on the decode path)
+ *   - TP 2–4   → TP_DECODE_EFFICIENCY (0.85; typically one NVLink domain)
+ *   - TP > 4   → TP_DECODE_EFFICIENCY_LARGE (0.75; crosses domains / nodes)
+ *
+ * The cutover at 4 mirrors common 4-GPU NVLink partitioning; the values are
+ * heuristic upper bounds, not measured constants.
+ */
+export function tpDecodeEfficiency(tpSize: number): number {
+  if (tpSize <= 1) return 1;
+  if (tpSize <= 4) return TP_DECODE_EFFICIENCY;
+  return TP_DECODE_EFFICIENCY_LARGE;
+}
 
 /** Per-GPU activation + workspace reserve (GiB) held back from the KV budget. */
 export const DECODE_HEADROOM_GIB = 5;
@@ -87,7 +117,7 @@ export interface PerChatInput {
   /**
    * Tensor-parallel size (GPUs per replica). Defaults to 1. With TP > 1 the
    * weights shard across `tpSize` GPUs whose HBM bandwidth aggregates, so the
-   * effective decode bandwidth scales by `tpSize × TP_DECODE_EFFICIENCY`.
+   * effective decode bandwidth scales by `tpSize × tpDecodeEfficiency(tpSize)`.
    */
   tpSize?: number;
   efficiency?: number;
@@ -98,8 +128,8 @@ export interface PerChatInput {
  * streaming the full set of model weights from HBM, so speed ≈ bandwidth /
  * model_bytes. Under tensor parallelism the weights shard across `tpSize` GPUs
  * whose HBM bandwidth aggregates, so single-stream decode scales ~`tpSize×`
- * (minus TP_DECODE_EFFICIENCY for interconnect overhead); tpSize=1 reduces to
- * the exact single-GPU figure.
+ * (minus the per-group `tpDecodeEfficiency` haircut for interconnect overhead);
+ * tpSize=1 reduces to the exact single-GPU figure.
  *
  * Note the one decimal/binary boundary: memory bandwidth is decimal GB/s
  * (vendor spec) and model bytes are decimal (paramCount × bytesPerWeight), so
@@ -115,7 +145,8 @@ export function estimatePerChatTokensPerSec(input: PerChatInput): number {
   } = input;
   const modelBytesDecimal = paramCount * bytesPerWeight; // decimal bytes
   // TP aggregates per-GPU bandwidth; tpSize=1 keeps the exact single-GPU number.
-  const tpScale = tpSize > 1 ? tpSize * TP_DECODE_EFFICIENCY : 1;
+  // The per-GPU efficiency steps down with group size (see tpDecodeEfficiency).
+  const tpScale = tpSize > 1 ? tpSize * tpDecodeEfficiency(tpSize) : 1;
   const bandwidthBytesPerSec = memBandwidthGBs * 1e9 * tpScale; // decimal GB/s -> bytes/s
   if (modelBytesDecimal <= 0) return 0;
   return (bandwidthBytesPerSec / modelBytesDecimal) * efficiency;
