@@ -118,13 +118,13 @@ class RegistryService {
   private async getDeployment(): Promise<k8s.V1Deployment | null> {
     try {
       const response = await withRetry(
-        () => this.appsV1Api.readNamespacedDeployment(
-          REGISTRY_CONFIG.name,
-          REGISTRY_CONFIG.namespace
-        ),
+        () => this.appsV1Api.readNamespacedDeployment({
+          name: REGISTRY_CONFIG.name,
+          namespace: REGISTRY_CONFIG.namespace,
+        }),
         { operationName: 'getRegistryDeployment', maxRetries: 1 }
       );
-      return response.body;
+      return response;
     } catch (error: any) {
       const statusCode = error?.statusCode || error?.response?.statusCode;
       if (statusCode === 404) {
@@ -140,13 +140,13 @@ class RegistryService {
   private async getService(): Promise<k8s.V1Service | null> {
     try {
       const response = await withRetry(
-        () => this.coreV1Api.readNamespacedService(
-          REGISTRY_CONFIG.name,
-          REGISTRY_CONFIG.namespace
-        ),
+        () => this.coreV1Api.readNamespacedService({
+          name: REGISTRY_CONFIG.name,
+          namespace: REGISTRY_CONFIG.namespace,
+        }),
         { operationName: 'getRegistryService', maxRetries: 1 }
       );
-      return response.body;
+      return response;
     } catch (error: any) {
       const statusCode = error?.statusCode || error?.response?.statusCode;
       if (statusCode === 404) {
@@ -161,17 +161,19 @@ class RegistryService {
    */
   private async ensureNamespace(): Promise<void> {
     try {
-      await this.coreV1Api.readNamespace(REGISTRY_CONFIG.namespace);
+      await this.coreV1Api.readNamespace({ name: REGISTRY_CONFIG.namespace });
       logger.debug({ namespace: REGISTRY_CONFIG.namespace }, 'Namespace already exists');
     } catch (error: any) {
       const statusCode = error?.statusCode || error?.response?.statusCode;
       if (statusCode === 404) {
         logger.info({ namespace: REGISTRY_CONFIG.namespace }, 'Creating namespace');
         await this.coreV1Api.createNamespace({
-          metadata: {
-            name: REGISTRY_CONFIG.namespace,
-            labels: {
-              'app.kubernetes.io/managed-by': 'airunway',
+          body: {
+            metadata: {
+              name: REGISTRY_CONFIG.namespace,
+              labels: {
+                'app.kubernetes.io/managed-by': 'airunway',
+              },
             },
           },
         });
@@ -273,10 +275,10 @@ class RegistryService {
     };
 
     await withRetry(
-      () => this.appsV1Api.createNamespacedDeployment(
-        REGISTRY_CONFIG.namespace,
-        deployment
-      ),
+      () => this.appsV1Api.createNamespacedDeployment({
+        namespace: REGISTRY_CONFIG.namespace,
+        body: deployment,
+      }),
       { operationName: 'createRegistryDeployment' }
     );
 
@@ -317,10 +319,10 @@ class RegistryService {
     };
 
     await withRetry(
-      () => this.coreV1Api.createNamespacedService(
-        REGISTRY_CONFIG.namespace,
-        service
-      ),
+      () => this.coreV1Api.createNamespacedService({
+        namespace: REGISTRY_CONFIG.namespace,
+        body: service,
+      }),
       { operationName: 'createRegistryService' }
     );
 
@@ -403,10 +405,10 @@ class RegistryService {
 
     try {
       // Delete deployment
-      await this.appsV1Api.deleteNamespacedDeployment(
-        REGISTRY_CONFIG.name,
-        REGISTRY_CONFIG.namespace
-      );
+      await this.appsV1Api.deleteNamespacedDeployment({
+        name: REGISTRY_CONFIG.name,
+        namespace: REGISTRY_CONFIG.namespace,
+      });
     } catch (error: any) {
       const statusCode = error?.statusCode || error?.response?.statusCode;
       if (statusCode !== 404) {
@@ -416,10 +418,10 @@ class RegistryService {
 
     try {
       // Delete service
-      await this.coreV1Api.deleteNamespacedService(
-        REGISTRY_CONFIG.name,
-        REGISTRY_CONFIG.namespace
-      );
+      await this.coreV1Api.deleteNamespacedService({
+        name: REGISTRY_CONFIG.name,
+        namespace: REGISTRY_CONFIG.namespace,
+      });
     } catch (error: any) {
       const statusCode = error?.statusCode || error?.response?.statusCode;
       if (statusCode !== 404) {

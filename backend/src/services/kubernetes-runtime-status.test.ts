@@ -17,7 +17,7 @@ describe('KubernetesService - Runtime Status', () => {
   function mockProviderConfigs(items: any[]) {
     const service = kubernetesService as any;
     const original = service.customObjectsApi.listClusterCustomObject;
-    service.customObjectsApi.listClusterCustomObject = async () => ({ body: { items } });
+    service.customObjectsApi.listClusterCustomObject = async () => ({ items });
     restores.push(() => {
       service.customObjectsApi.listClusterCustomObject = original;
     });
@@ -36,14 +36,14 @@ describe('KubernetesService - Runtime Status', () => {
     const service = kubernetesService as any;
     const originalNamespaced = service.coreV1Api.listNamespacedPod;
     const originalAllNamespaces = service.coreV1Api.listPodForAllNamespaces;
-    service.coreV1Api.listNamespacedPod = async (...args: any[]) => {
-      expect(args[0]).toBe(namespace);
-      const requestedSelector = args[5];
-      return { body: { items: requestedSelector === selector ? items : items.filter((pod) => podMatchesSelector(pod, requestedSelector)) } };
+    service.coreV1Api.listNamespacedPod = async (arg: any) => {
+      expect(arg.namespace).toBe(namespace);
+      const requestedSelector = arg.labelSelector;
+      return { items: requestedSelector === selector ? items : items.filter((pod) => podMatchesSelector(pod, requestedSelector)) };
     };
-    service.coreV1Api.listPodForAllNamespaces = async (...args: any[]) => {
-      const requestedSelector = args[3];
-      return { body: { items: allNamespaceItems.filter((pod) => podMatchesSelector(pod, requestedSelector)) } };
+    service.coreV1Api.listPodForAllNamespaces = async (arg: any) => {
+      const requestedSelector = arg?.labelSelector;
+      return { items: allNamespaceItems.filter((pod) => podMatchesSelector(pod, requestedSelector)) };
     };
     restores.push(() => {
       service.coreV1Api.listNamespacedPod = originalNamespaced;

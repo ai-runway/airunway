@@ -59,16 +59,15 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
     const readCalls: string[] = [];
 
     service.apiExtensionsApi = {
-      readCustomResourceDefinition: async (crdName: string) => {
+      readCustomResourceDefinition: async (arg: any) => {
+        const crdName = arg.name as string;
         readCalls.push(crdName);
 
         if (crdName === 'gateways.gateway.networking.k8s.io') {
           return {
-            body: {
-              metadata: {
-                annotations: {
-                  'gateway.networking.k8s.io/bundle-version': 'v1.2.1',
-                },
+            metadata: {
+              annotations: {
+                'gateway.networking.k8s.io/bundle-version': 'v1.2.1',
               },
             },
           };
@@ -76,11 +75,9 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 
         if (crdName === 'inferencepools.inference.networking.k8s.io') {
           return {
-            body: {
-              metadata: {
-                annotations: {
-                  'inference.networking.k8s.io/bundle-version': 'v1.5.0',
-                },
+            metadata: {
+              annotations: {
+                'inference.networking.k8s.io/bundle-version': 'v1.5.0',
               },
             },
           };
@@ -129,44 +126,42 @@ describe('KubernetesService - deployment pod lookup', () => {
     });
 
     service.coreV1Api = {
-      listNamespacedPod: async (...args: unknown[]) => {
-        const labelSelector = args[5] as string;
+      listNamespacedPod: async (arg: any) => {
+        const labelSelector = arg.labelSelector as string;
         selectors.push(labelSelector);
 
         if (labelSelector === 'app.kubernetes.io/instance=demo') {
-          return { body: { items: [pod('demo-router'), pod('demo-shared')] } };
+          return { items: [pod('demo-router'), pod('demo-shared')] };
         }
 
         if (labelSelector === 'airunway.ai/deployment=demo') {
-          return { body: { items: [pod('demo-shared'), pod('demo-worker')] } };
+          return { items: [pod('demo-shared'), pod('demo-worker')] };
         }
 
         if (labelSelector === 'airunway.ai/model-deployment=demo') {
-          return { body: { items: [pod('demo-ray-template')] } };
+          return { items: [pod('demo-ray-template')] };
         }
 
         if (labelSelector === 'nvidia.com/dynamo-graph-deployment-name=demo') {
-          return { body: { items: [pod('demo-epp'), pod('demo-vllmworker')] } };
+          return { items: [pod('demo-epp'), pod('demo-vllmworker')] };
         }
 
         if (labelSelector === 'app=demo') {
-          return { body: { items: [pod('unrelated-app-pod')] } };
+          return { items: [pod('unrelated-app-pod')] };
         }
 
         if (labelSelector === 'ray.io/cluster') {
           return {
-            body: {
-              items: [
-                pod('demo-ray-head', { 'ray.io/cluster': 'demo-raycluster' }),
-                pod('demo2-ray-head', { 'ray.io/cluster': 'demo2-raycluster' }),
-                pod('demo-extra-ray-head', { 'ray.io/cluster': 'demo-extra-raycluster' }),
-                pod('other-ray-head', { 'ray.io/cluster': 'other-raycluster' }),
-              ],
-            },
+            items: [
+              pod('demo-ray-head', { 'ray.io/cluster': 'demo-raycluster' }),
+              pod('demo2-ray-head', { 'ray.io/cluster': 'demo2-raycluster' }),
+              pod('demo-extra-ray-head', { 'ray.io/cluster': 'demo-extra-raycluster' }),
+              pod('other-ray-head', { 'ray.io/cluster': 'other-raycluster' }),
+            ],
           };
         }
 
-        return { body: { items: [] } };
+        return { items: [] };
       },
     };
 
@@ -212,15 +207,15 @@ describe('KubernetesService - deployment pod lookup', () => {
     });
 
     service.coreV1Api = {
-      listNamespacedPod: async (...args: unknown[]) => {
-        const labelSelector = args[5] as string;
+      listNamespacedPod: async (arg: any) => {
+        const labelSelector = arg.labelSelector as string;
         selectors.push(labelSelector);
 
         if (labelSelector === 'app=legacy-demo') {
-          return { body: { items: [pod('legacy-demo-pod')] } };
+          return { items: [pod('legacy-demo-pod')] };
         }
 
-        return { body: { items: [] } };
+        return { items: [] };
       },
     };
 
@@ -251,33 +246,31 @@ describe('KubernetesService - pod logs', () => {
     let requestedContainer: string | undefined;
 
     service.coreV1Api = {
-      listNamespacedPod: async (namespace: string, _pretty?: string, _allowWatchBookmarks?: boolean, _continue?: string, fieldSelector?: string) => {
-        expect(namespace).toBe('default');
-        expect(fieldSelector).toBe('metadata.name=demo-worker');
+      listNamespacedPod: async (arg: any) => {
+        expect(arg.namespace).toBe('default');
+        expect(arg.fieldSelector).toBe('metadata.name=demo-worker');
         return {
-          body: {
-            items: [
-              {
-                spec: {
-                  containers: [
-                    { name: 'frontend' },
-                    { name: 'main' },
-                  ],
-                },
-                status: {
-                  containerStatuses: [
-                    { name: 'frontend', ready: true, restartCount: 0, state: { running: {} } },
-                    { name: 'main', ready: true, restartCount: 0, state: { running: {} } },
-                  ],
-                },
+          items: [
+            {
+              spec: {
+                containers: [
+                  { name: 'frontend' },
+                  { name: 'main' },
+                ],
               },
-            ],
-          },
+              status: {
+                containerStatuses: [
+                  { name: 'frontend', ready: true, restartCount: 0, state: { running: {} } },
+                  { name: 'main', ready: true, restartCount: 0, state: { running: {} } },
+                ],
+              },
+            },
+          ],
         };
       },
-      readNamespacedPodLog: async (...args: unknown[]) => {
-        requestedContainer = args[2] as string | undefined;
-        return { body: 'worker logs' };
+      readNamespacedPodLog: async (arg: any) => {
+        requestedContainer = arg.container as string | undefined;
+        return 'worker logs';
       },
     };
 
@@ -297,32 +290,30 @@ describe('KubernetesService - pod logs', () => {
     let requestedContainer: string | undefined;
 
     service.coreV1Api = {
-      listNamespacedPod: async (_namespace: string, _pretty?: string, _allowWatchBookmarks?: boolean, _continue?: string, fieldSelector?: string) => {
-        expect(fieldSelector).toBe('metadata.name=demo-model');
+      listNamespacedPod: async (arg: any) => {
+        expect(arg.fieldSelector).toBe('metadata.name=demo-model');
         return {
-          body: {
-            items: [
-              {
-                spec: {
-                  containers: [
-                    { name: 'istio-proxy' },
-                    { name: 'vllm' },
-                  ],
-                },
-                status: {
-                  containerStatuses: [
-                    { name: 'istio-proxy', ready: true, restartCount: 0, state: { running: {} } },
-                    { name: 'vllm', ready: false, restartCount: 3, state: { waiting: { reason: 'CrashLoopBackOff' } } },
-                  ],
-                },
+          items: [
+            {
+              spec: {
+                containers: [
+                  { name: 'istio-proxy' },
+                  { name: 'vllm' },
+                ],
               },
-            ],
-          },
+              status: {
+                containerStatuses: [
+                  { name: 'istio-proxy', ready: true, restartCount: 0, state: { running: {} } },
+                  { name: 'vllm', ready: false, restartCount: 3, state: { waiting: { reason: 'CrashLoopBackOff' } } },
+                ],
+              },
+            },
+          ],
         };
       },
-      readNamespacedPodLog: async (...args: unknown[]) => {
-        requestedContainer = args[2] as string | undefined;
-        return { body: 'model logs' };
+      readNamespacedPodLog: async (arg: any) => {
+        requestedContainer = arg.container as string | undefined;
+        return 'model logs';
       },
     };
 
@@ -348,13 +339,16 @@ describe('KubernetesService - service proxy', () => {
 
     const fakeKubeConfig = (authHeader: string) => ({
       getCurrentCluster: () => ({ server: 'https://cluster.example', skipTLSVerify: false }),
-      applyToRequest: async (requestOptions: any) => {
-        requestOptions.headers = {
-          ...(requestOptions.headers ?? {}),
-          Authorization: authHeader,
+      applyToFetchOptions: async (requestOptions: any) => {
+        return {
+          ...requestOptions,
+          headers: {
+            ...(requestOptions?.headers ?? {}),
+            Authorization: authHeader,
+          },
         };
       },
-      applyToHTTPSOptions: () => undefined,
+      applyToHTTPSOptions: async () => undefined,
     });
 
     service.kc = fakeKubeConfig('Bearer shared-service-account-token');

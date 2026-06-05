@@ -368,6 +368,17 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 		return fmt.Errorf("engine.type must be specified or auto-selected from provider capabilities")
 	}
 
+	// Mocker mode escape hatch: a ModelDeployment annotated with
+	// airunway.ai/dynamo-test-backend=mocker targeting the dynamo provider runs
+	// the GPU-less python3 -m dynamo.mocker backend, so the GPU compatibility and
+	// disaggregated gpu.count checks below must not reject it. This mirrors the
+	// admission webhook (see modeldeployment_webhook.go) so the two cannot drift.
+	// Mocker is vLLM-only.
+	isDynamoMocker := isDynamoMockerMode(md)
+	if isDynamoMocker && engineType != airunwayv1alpha1.EngineTypeVLLM {
+		return fmt.Errorf("the dynamo mocker test backend only supports the vllm engine")
+	}
+
 	// Validate provider/engine/serving-mode/GPU-CPU compatibility via the
 	// shared helper so the webhook and reconciler cannot drift.
 	gpuCount := int32(0)
@@ -385,17 +396,19 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 			}
 		}
 	}
-	if ces := validation.CheckProviderCompatibility(
-		providerName,
-		namedConfig,
-		providerConfigs,
-		engineType,
-		servingMode,
-		gpuCount,
-	); len(ces) > 0 {
-		// Return the first error to preserve the reconciler's existing
-		// single-error contract.
-		return fmt.Errorf("%s", ces[0].Message)
+	if !isDynamoMocker {
+		if ces := validation.CheckProviderCompatibility(
+			providerName,
+			namedConfig,
+			providerConfigs,
+			engineType,
+			servingMode,
+			gpuCount,
+		); len(ces) > 0 {
+			// Return the first error to preserve the reconciler's existing
+			// single-error contract.
+			return fmt.Errorf("%s", ces[0].Message)
+		}
 	}
 
 	// Validate disaggregated mode configuration
@@ -410,14 +423,19 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 			return fmt.Errorf("disaggregated mode requires scaling.prefill and scaling.decode")
 		}
 
-		// Prefill must have GPU
-		if spec.Scaling.Prefill.GPU == nil || spec.Scaling.Prefill.GPU.Count == 0 {
-			return fmt.Errorf("disaggregated mode requires scaling.prefill.gpu.count > 0")
-		}
+		// The GPU-less mocker backend waives the per-component gpu.count
+		// requirement, but the prefill/decode blocks themselves are still
+		// required (above) so the dynamo transformer can build both workers.
+		if !isDynamoMocker {
+			// Prefill must have GPU
+			if spec.Scaling.Prefill.GPU == nil || spec.Scaling.Prefill.GPU.Count == 0 {
+				return fmt.Errorf("disaggregated mode requires scaling.prefill.gpu.count > 0")
+			}
 
-		// Decode must have GPU
-		if spec.Scaling.Decode.GPU == nil || spec.Scaling.Decode.GPU.Count == 0 {
-			return fmt.Errorf("disaggregated mode requires scaling.decode.gpu.count > 0")
+			// Decode must have GPU
+			if spec.Scaling.Decode.GPU == nil || spec.Scaling.Decode.GPU.Count == 0 {
+				return fmt.Errorf("disaggregated mode requires scaling.decode.gpu.count > 0")
+			}
 		}
 	}
 

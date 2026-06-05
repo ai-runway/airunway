@@ -39,7 +39,7 @@ class SecretsService {
    */
   private async ensureNamespace(namespace: string): Promise<boolean> {
     try {
-      await this.coreV1Api.readNamespace(namespace);
+      await this.coreV1Api.readNamespace({ name: namespace });
       return true;
     } catch (error: any) {
       const statusCode = error?.statusCode || error?.response?.statusCode;
@@ -47,10 +47,12 @@ class SecretsService {
         // Namespace doesn't exist, create it
         try {
           await this.coreV1Api.createNamespace({
-            apiVersion: 'v1',
-            kind: 'Namespace',
-            metadata: {
-              name: namespace,
+            body: {
+              apiVersion: 'v1',
+              kind: 'Namespace',
+              metadata: {
+                name: namespace,
+              },
             },
           });
           logger.info({ namespace }, 'Created namespace for HF secret');
@@ -91,11 +93,11 @@ class SecretsService {
 
     try {
       // Try to read existing secret
-      await this.coreV1Api.readNamespacedSecret(HF_SECRET_NAME, namespace);
-      
+      await this.coreV1Api.readNamespacedSecret({ name: HF_SECRET_NAME, namespace });
+
       // Secret exists, update it
       await withRetry(
-        () => this.coreV1Api.replaceNamespacedSecret(HF_SECRET_NAME, namespace, secretManifest),
+        () => this.coreV1Api.replaceNamespacedSecret({ name: HF_SECRET_NAME, namespace, body: secretManifest }),
         { operationName: `updateSecret:${namespace}`, maxRetries: 2 }
       );
       logger.info({ namespace, secretName: HF_SECRET_NAME }, 'Updated HuggingFace secret');
@@ -107,7 +109,7 @@ class SecretsService {
         // Secret doesn't exist, create it
         try {
           await withRetry(
-            () => this.coreV1Api.createNamespacedSecret(namespace, secretManifest),
+            () => this.coreV1Api.createNamespacedSecret({ namespace, body: secretManifest }),
             { operationName: `createSecret:${namespace}`, maxRetries: 2 }
           );
           logger.info({ namespace, secretName: HF_SECRET_NAME }, 'Created HuggingFace secret');
@@ -133,7 +135,7 @@ class SecretsService {
   ): Promise<{ success: boolean; error?: string }> {
     try {
       await withRetry(
-        () => this.coreV1Api.deleteNamespacedSecret(HF_SECRET_NAME, namespace),
+        () => this.coreV1Api.deleteNamespacedSecret({ name: HF_SECRET_NAME, namespace }),
         { operationName: `deleteSecret:${namespace}`, maxRetries: 2 }
       );
       logger.info({ namespace, secretName: HF_SECRET_NAME }, 'Deleted HuggingFace secret');
@@ -157,7 +159,7 @@ class SecretsService {
    */
   private async checkSecretInNamespace(namespace: string): Promise<boolean> {
     try {
-      await this.coreV1Api.readNamespacedSecret(HF_SECRET_NAME, namespace);
+      await this.coreV1Api.readNamespacedSecret({ name: HF_SECRET_NAME, namespace });
       return true;
     } catch {
       return false;
@@ -212,8 +214,8 @@ class SecretsService {
       // Try to get the token from the first existing secret to validate it
       if (exists && !token) {
         try {
-          const secret = await this.coreV1Api.readNamespacedSecret(HF_SECRET_NAME, namespace);
-          const tokenData = secret.body.data?.[HF_TOKEN_KEY];
+          const secret = await this.coreV1Api.readNamespacedSecret({ name: HF_SECRET_NAME, namespace });
+          const tokenData = secret.data?.[HF_TOKEN_KEY];
           if (tokenData) {
             token = Buffer.from(tokenData, 'base64').toString('utf-8');
           }

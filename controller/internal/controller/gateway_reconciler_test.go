@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -265,6 +266,41 @@ func TestGateway_HTTPRouteCreation(t *testing.T) {
 	}
 	if route.OwnerReferences[0].Name != "test-model" {
 		t.Errorf("expected owner ref name %q, got %q", "test-model", route.OwnerReferences[0].Name)
+	}
+}
+
+func TestGateway_DynamoMockerSkipsCreation(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	// Gateway is left at its default (enabled) and the GAIE CRDs are available,
+	// so only the mocker annotation should keep the controller off the gateway
+	// path. The dynamo standalone-Frontend mocker DGD never creates a
+	// provider-managed InferencePool, so engaging gateway would loop on NotFound.
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+	md.Annotations = map[string]string{"airunway.ai/dynamo-test-backend": "mocker"}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md)
+	ctx := context.Background()
+
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("reconcileGateway failed: %v", err)
+	}
+
+	// No InferencePool should be created.
+	var pool inferencev1.InferencePool
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model", Namespace: "default"}, &pool); err == nil {
+		t.Error("expected InferencePool to NOT be created in dynamo mocker mode")
+	}
+
+	// No HTTPRoute should be created.
+	var route gatewayv1.HTTPRoute
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model", Namespace: "default"}, &route); err == nil {
+		t.Error("expected HTTPRoute to NOT be created in dynamo mocker mode")
+	}
+
+	// And no GatewayReady condition should have been set (neither true nor false).
+	if c := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeGatewayReady); c != nil {
+		t.Errorf("expected no GatewayReady condition in mocker mode, got %q/%q", c.Status, c.Reason)
 	}
 }
 

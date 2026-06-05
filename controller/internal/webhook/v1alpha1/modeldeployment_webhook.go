@@ -291,7 +291,32 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 	// admission; falls back to the uncached APIReader only when the cache
 	// reports NotFound, to absorb the race where a brand-new
 	// InferenceProviderConfig hasn't yet propagated to informers.
-	if spec.Provider != nil && spec.Provider.Name != "" && spec.Engine.Type != "" && v.Reader != nil {
+	//
+	// Mocker mode escape hatch: a ModelDeployment annotated with
+	// airunway.ai/dynamo-test-backend=mocker targeting the dynamo provider runs
+	// the GPU-less python3 -m dynamo.mocker backend, so the provider's GPU
+	// capability check must not reject it at admission. This is a test-only path
+	// (the dynamo provider re-validates compatibility during reconciliation).
+	// The annotation key is kept as a literal here to avoid importing the
+	// provider module from the controller webhook (see
+	// providers/dynamo/mocker.go AnnotationDynamoTestBackend / DynamoTestBackendMocker).
+	isDynamoMocker := obj.Annotations["airunway.ai/dynamo-test-backend"] == "mocker" &&
+		spec.Provider != nil && spec.Provider.Name == "dynamo"
+
+	// The Dynamo mocker backend only simulates the vLLM engine. Enforce the
+	// vLLM-only constraint at admission so a non-vllm engine + mocker annotation
+	// is rejected here rather than admitted and failing later during provider
+	// reconciliation (the dynamo provider re-validates this too). An empty engine
+	// type is allowed — the provider defaults it to vllm.
+	if isDynamoMocker && spec.Engine.Type != "" && spec.Engine.Type != airunwayv1alpha1.EngineTypeVLLM {
+		allErrs = append(allErrs, field.Invalid(
+			specPath.Child("engine", "type"),
+			spec.Engine.Type,
+			"the dynamo mocker test backend only supports the vllm engine",
+		))
+	}
+
+	if !isDynamoMocker && spec.Provider != nil && spec.Provider.Name != "" && spec.Engine.Type != "" && v.Reader != nil {
 		var providerConfig airunwayv1alpha1.InferenceProviderConfig
 		err := v.Reader.Get(ctx, client.ObjectKey{Name: spec.Provider.Name}, &providerConfig)
 		if apierrors.IsNotFound(err) && v.APIReader != nil {
@@ -383,7 +408,11 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 					specPath.Child("scaling", "prefill"),
 					"disaggregated mode requires scaling.prefill",
 				))
-			} else {
+			} else if !isDynamoMocker {
+				// Mocker mode runs the GPU-less python3 -m dynamo.mocker backend,
+				// so a CPU-only disaggregated mocker deployment legitimately omits
+				// scaling.prefill.gpu.count. The prefill block itself is still
+				// required (above) so the dynamo transformer can build the worker.
 				if spec.Scaling.Prefill.GPU == nil || spec.Scaling.Prefill.GPU.Count == 0 {
 					allErrs = append(allErrs, field.Required(
 						specPath.Child("scaling", "prefill", "gpu", "count"),
@@ -397,7 +426,9 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 					specPath.Child("scaling", "decode"),
 					"disaggregated mode requires scaling.decode",
 				))
-			} else {
+			} else if !isDynamoMocker {
+				// See the prefill note above: mocker mode waives the GPU-count
+				// requirement while still requiring the decode block.
 				if spec.Scaling.Decode.GPU == nil || spec.Scaling.Decode.GPU.Count == 0 {
 					allErrs = append(allErrs, field.Required(
 						specPath.Child("scaling", "decode", "gpu", "count"),

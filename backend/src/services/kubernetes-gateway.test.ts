@@ -17,18 +17,18 @@ describe('kubernetesService.getGatewayStatus', () => {
   // The customObjectsApi is private; reach in just for tests so we can stub
   // listClusterCustomObject without spinning up a real Kubernetes API server.
   const svc = kubernetesService as unknown as {
-    customObjectsApi: { listClusterCustomObject: (...args: unknown[]) => Promise<{ body: unknown }> };
+    customObjectsApi: { listClusterCustomObject: (arg: any) => Promise<unknown> };
   };
 
   function mockListGateways(items: unknown[] | Error) {
     const original = svc.customObjectsApi.listClusterCustomObject;
-    svc.customObjectsApi.listClusterCustomObject = async (...args: unknown[]) => {
-      const [group, , plural] = args;
+    svc.customObjectsApi.listClusterCustomObject = async (arg: any) => {
+      const { group, plural } = arg;
       if (group === 'gateway.networking.k8s.io' && plural === 'gateways') {
         if (items instanceof Error) throw items;
-        return { body: { items } };
+        return { items };
       }
-      return { body: { items: [] } };
+      return { items: [] };
     };
     restores.push(() => {
       svc.customObjectsApi.listClusterCustomObject = original;

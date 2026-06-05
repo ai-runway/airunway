@@ -33,7 +33,7 @@ aiconfigurator.post('/analyze', async (c) => {
 
   const validation = analyzeSchema.safeParse(body);
   if (!validation.success) {
-    const errors = validation.error.errors.map(e => `${e.path.join('.')}: ${e.message}`);
+    const errors = validation.error.issues.map(e => `${e.path.join('.')}: ${e.message}`);
     logger.warn({ errors }, 'AI Configurator analyze validation failed');
     return c.json(
       { error: { message: 'Invalid request', errors, statusCode: 400 } },

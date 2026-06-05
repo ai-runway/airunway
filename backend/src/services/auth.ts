@@ -75,8 +75,8 @@ class AuthService {
         },
       };
 
-      const response = await this.authApi.createTokenReview(tokenReview);
-      const status = response.body.status;
+      const response = await this.authApi.createTokenReview({ body: tokenReview });
+      const status = response.status;
 
       if (status?.authenticated) {
         return {

@@ -21,12 +21,12 @@
     "test:coverage": "bun test --coverage"
   },
   "dependencies": {
-    "@hono/zod-validator": "^0.7.6",
-    "@kubernetes/client-node": "^0.21.0",
+    "@hono/zod-validator": "^0.8.0",
+    "@kubernetes/client-node": "^1.0.0",
     "hono": "^4.10.7",
     "js-yaml": "^4.1.1",
     "pino": "^10.1.0",
-    "zod": "^3.25.76",
+    "zod": "^4.0.0",
     "@airunway/shared": "workspace:*"
   },
   "devDependencies": {

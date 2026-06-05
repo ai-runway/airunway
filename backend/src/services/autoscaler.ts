@@ -28,11 +28,11 @@ class AutoscalerService {
         { operationName: 'isAKSCluster', maxRetries: 1 }
       );
 
-      if (nodesResponse.body.items.length === 0) {
+      if (nodesResponse.items.length === 0) {
         return false;
       }
 
-      const node = nodesResponse.body.items[0];
+      const node = nodesResponse.items[0];
       const labels = node.metadata?.labels || {};
       const providerID = node.spec?.providerID || '';
 
@@ -65,7 +65,7 @@ class AutoscalerService {
       // Count unique node pools (agentpools) that have autoscaling enabled
       const autoscalingNodePools = new Set<string>();
 
-      for (const node of nodesResponse.body.items) {
+      for (const node of nodesResponse.items) {
         const labels = node.metadata?.labels || {};
 
         // AKS labels autoscaler-enabled nodes with this label
@@ -127,23 +127,19 @@ class AutoscalerService {
 
       // Fallback: Look for cluster-autoscaler deployment
       const deploymentsResponse = await withRetry(
-        () => this.appsV1Api.listNamespacedDeployment(
-          'kube-system',
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          'app=cluster-autoscaler'
-        ),
+        () => this.appsV1Api.listNamespacedDeployment({
+          namespace: 'kube-system',
+          labelSelector: 'app=cluster-autoscaler',
+        }),
         { operationName: 'detectClusterAutoscalerDeployment', maxRetries: 1 }
       );
 
-      const deployments = deploymentsResponse.body.items;
+      const deployments = deploymentsResponse.items;
 
       if (deployments.length === 0) {
         // Try without label selector
-        const allDeployments = await this.appsV1Api.listNamespacedDeployment('kube-system');
-        const caDeployment = allDeployments.body.items.find(
+        const allDeployments = await this.appsV1Api.listNamespacedDeployment({ namespace: 'kube-system' });
+        const caDeployment = allDeployments.items.find(
           d => d.metadata?.name?.includes('cluster-autoscaler')
         );
 
@@ -181,14 +177,14 @@ class AutoscalerService {
   async getAutoscalerStatus(): Promise<AutoscalerStatusInfo | null> {
     try {
       const configMapResponse = await withRetry(
-        () => this.coreV1Api.readNamespacedConfigMap(
-          'cluster-autoscaler-status',
-          'kube-system'
-        ),
+        () => this.coreV1Api.readNamespacedConfigMap({
+          name: 'cluster-autoscaler-status',
+          namespace: 'kube-system',
+        }),
         { operationName: 'getAutoscalerStatus', maxRetries: 1 }
       );
 
-      const configMap = configMapResponse.body;
+      const configMap = configMapResponse;
       const statusData = configMap.data?.['status'] || '{}';
 
       let parsedStatus: any;

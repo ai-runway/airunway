@@ -45,17 +45,19 @@ class ConfigService {
    */
   private async ensureNamespace(): Promise<void> {
     try {
-      await this.coreV1Api.readNamespace(CONFIG_NAMESPACE);
+      await this.coreV1Api.readNamespace({ name: CONFIG_NAMESPACE });
     } catch (error: unknown) {
       const k8sError = error as { response?: { statusCode?: number } };
       if (k8sError?.response?.statusCode === 404) {
         // Create namespace
         await this.coreV1Api.createNamespace({
-          metadata: {
-            name: CONFIG_NAMESPACE,
-            labels: {
-              'app.kubernetes.io/name': 'airunway',
-              'app.kubernetes.io/managed-by': 'airunway',
+          body: {
+            metadata: {
+              name: CONFIG_NAMESPACE,
+              labels: {
+                'app.kubernetes.io/name': 'airunway',
+                'app.kubernetes.io/managed-by': 'airunway',
+              },
             },
           },
         });
@@ -77,12 +79,12 @@ class ConfigService {
     }
 
     try {
-      const response = await this.coreV1Api.readNamespacedConfigMap(
-        CONFIG_NAME,
-        CONFIG_NAMESPACE
-      );
+      const response = await this.coreV1Api.readNamespacedConfigMap({
+        name: CONFIG_NAME,
+        namespace: CONFIG_NAMESPACE,
+      });
 
-      const configData = response.body.data?.[CONFIG_KEY];
+      const configData = response.data?.[CONFIG_KEY];
       if (configData) {
         this.cachedConfig = JSON.parse(configData) as AppConfig;
         this.initialized = true;
@@ -135,19 +137,19 @@ class ConfigService {
 
       try {
         // Try to update existing ConfigMap
-        await this.coreV1Api.replaceNamespacedConfigMap(
-          CONFIG_NAME,
-          CONFIG_NAMESPACE,
-          configMapBody
-        );
+        await this.coreV1Api.replaceNamespacedConfigMap({
+          name: CONFIG_NAME,
+          namespace: CONFIG_NAMESPACE,
+          body: configMapBody,
+        });
       } catch (error: unknown) {
         const k8sError = error as { response?: { statusCode?: number } };
         if (k8sError?.response?.statusCode === 404) {
           // Create new ConfigMap
-          await this.coreV1Api.createNamespacedConfigMap(
-            CONFIG_NAMESPACE,
-            configMapBody
-          );
+          await this.coreV1Api.createNamespacedConfigMap({
+            namespace: CONFIG_NAMESPACE,
+            body: configMapBody,
+          });
         } else {
           throw error;
         }

@@ -30,7 +30,7 @@
     "@vitejs/plugin-react": "^6.0.2",
     "@vitest/coverage-v8": "^4.1.7",
     "jsdom": "^29.1.1",
-    "react-router-dom": "5",
+    "react-router-dom": "7",
     "typescript": "^6.0.3",
     "vitest": "^4.1.7"
   },
