@@ -62,8 +62,16 @@ export function encodeHfRepoPath(modelId: string): string {
  * responses are keyed by `modelId + ':' + sha256(token)` so one user's gated
  * config can never be served to a caller with a different (or no) token.
  * Only successful lookups are cached, with a short TTL since `main` can move.
+ *
+ * Bounding: entries are TTL-expired lazily on re-access, but a single fetch of
+ * many distinct modelId/token keys would otherwise keep them all resident for
+ * the full TTL. An LRU size cap (`ARCH_CACHE_MAX_ENTRIES`) bounds the map under
+ * wide-scan or adversarial traffic: the least-recently-used entry is evicted
+ * once the cap is exceeded. The Map's insertion order is the recency order —
+ * fresh hits re-insert to move themselves to the newest position.
  */
 const ARCH_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const ARCH_CACHE_MAX_ENTRIES = 500;
 const architectureCache = new Map<string, { value: ModelArchitecture; expiresAt: number }>();
 
 function architectureCacheKey(modelId: string, hfToken?: string): string {
@@ -362,6 +370,10 @@ class HuggingFaceService {
     const cached = architectureCache.get(cacheKey);
     if (cached) {
       if (cached.expiresAt > Date.now()) {
+        // Bump recency: delete + re-insert moves this key to the newest
+        // position so the LRU eviction below sheds genuinely cold entries.
+        architectureCache.delete(cacheKey);
+        architectureCache.set(cacheKey, cached);
         return cached.value;
       }
       // Drop the stale entry so the cache stays bounded by "used within TTL"
@@ -407,6 +419,14 @@ class HuggingFaceService {
 
     // Cache successful lookups only.
     architectureCache.set(cacheKey, { value: arch, expiresAt: Date.now() + ARCH_CACHE_TTL_MS });
+    // Evict the least-recently-used entry (the Map's oldest insertion) when the
+    // size cap is exceeded, bounding memory under wide-scan/adversarial traffic.
+    if (architectureCache.size > ARCH_CACHE_MAX_ENTRIES) {
+      const oldestKey = architectureCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        architectureCache.delete(oldestKey);
+      }
+    }
     return arch;
   }
 }

@@ -1208,7 +1208,7 @@ describe('Gateway Installation Routes', () => {
       );
       expect(res.status).toBe(200);
       const data = await res.json();
-      // Falls back to maxPositionEmbeddings but capped at MAX_INFERRED_CONTEXT_LEN (32768).
+      // Falls back to maxPositionEmbeddings but capped at MAX_CONTEXT_LEN (32768).
       expect(data.contextLen).toBe(32768);
     });
 
@@ -1229,6 +1229,27 @@ describe('Gateway Installation Routes', () => {
       expect(res.status).toBe(200);
       const data = await res.json();
       expect(data.contextLen).toBe(8192);
+    });
+
+    test('caps an explicit contextLen that exceeds the max', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getDetailedClusterGpuCapacity', async () => mockCapacity()),
+        mockServiceMethod(huggingFaceService, 'getModelArchitecture', async () => ({
+          numLayers: 80,
+          numKvHeads: 8,
+          headDim: 128,
+          maxPositionEmbeddings: 1_000_000,
+        })),
+      );
+
+      // A caller forwarding a model's huge advertised window (here 256K) must be
+      // clamped to MAX_CONTEXT_LEN so the concurrency estimate doesn't collapse.
+      const res = await app.request(
+        '/api/installation/gpu-throughput?gpuModel=H100-80GB&modelId=org/long-ctx&paramCount=8000000000&quantization=bf16&contextLen=262144',
+      );
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.contextLen).toBe(32768);
     });
 
     test('reports fp8Supported=true for a Hopper GPU', async () => {

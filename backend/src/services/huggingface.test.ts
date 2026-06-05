@@ -296,6 +296,40 @@ describe('HuggingFaceService', () => {
       }
     });
 
+    test('evicts the least-recently-used entry past the size cap', async () => {
+      mockFetch.mockImplementation(() =>
+        Promise.resolve(new Response(configJson, { status: 200 }))
+      );
+
+      // ARCH_CACHE_MAX_ENTRIES is 500. Fill the cache to the cap, then touch the
+      // first key so it is no longer the least-recently-used, then insert one
+      // more distinct key to trigger a single eviction.
+      const CAP = 500;
+      for (let i = 0; i < CAP; i++) {
+        await huggingFaceService.getModelArchitecture(`org/model-${i}`);
+      }
+      expect(mockFetch).toHaveBeenCalledTimes(CAP);
+
+      // Re-access model-0 (currently the oldest): served from cache (no fetch)
+      // and promoted to most-recently-used.
+      await huggingFaceService.getModelArchitecture('org/model-0');
+      expect(mockFetch).toHaveBeenCalledTimes(CAP);
+
+      // Insert a brand-new key, pushing the cache over the cap. The LRU victim is
+      // now model-1 (model-0 was just promoted), so model-1 must re-fetch while
+      // model-0 stays cached.
+      await huggingFaceService.getModelArchitecture('org/overflow');
+      expect(mockFetch).toHaveBeenCalledTimes(CAP + 1);
+
+      // model-0 was promoted → still cached (no new fetch).
+      await huggingFaceService.getModelArchitecture('org/model-0');
+      expect(mockFetch).toHaveBeenCalledTimes(CAP + 1);
+
+      // model-1 was evicted → must re-fetch.
+      await huggingFaceService.getModelArchitecture('org/model-1');
+      expect(mockFetch).toHaveBeenCalledTimes(CAP + 2);
+    });
+
     test('returns undefined on a non-ok response', async () => {
       mockFetch.mockImplementation(() =>
         Promise.resolve(new Response('not found', { status: 404 }))

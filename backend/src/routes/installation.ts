@@ -33,11 +33,13 @@ interface ProviderHelmChartDetails {
 const DEFAULT_CONTEXT_LEN = 4096;
 
 /**
- * Cap applied to a model's advertised max context length when used to size KV
- * cache. Some models advertise very large windows (128K–1M); serving rarely uses
- * the full window, and using it would collapse concurrency estimates to ~zero.
+ * Cap applied to the context length used to size KV cache. Some models advertise
+ * very large windows (128K–1M) and callers may forward that advertised value as
+ * an explicit `contextLen`; serving rarely uses the full window, and sizing KV
+ * against it would collapse concurrency estimates to ~zero. Applied to both the
+ * arch-inferred max and an explicit `contextLen` query param.
  */
-const MAX_INFERRED_CONTEXT_LEN = 32768;
+const MAX_CONTEXT_LEN = 32768;
 
 /** Query schema for GET /gpu-throughput. */
 const gpuThroughputQuerySchema = z.object({
@@ -333,7 +335,7 @@ const installation = new Hono()
         perGpuMemoryGb,
         memBandwidthGBs,
         tpSize: effectiveTpSize,
-        contextLen: contextLen ?? DEFAULT_CONTEXT_LEN,
+        contextLen: Math.min(contextLen ?? DEFAULT_CONTEXT_LEN, MAX_CONTEXT_LEN),
         kvCacheDtype: effectiveKvDtype,
         fp8Supported,
         capacityLabel,
@@ -355,13 +357,12 @@ const installation = new Hono()
 
     // Resolve the context length used for KV sizing *after* fetching arch, so
     // HuggingFace models (which carry no explicit contextLen) use their real
-    // advertised window (capped) rather than the 4K default. An explicit query
-    // param always wins; otherwise fall back to the model's max, capped.
-    const resolvedContextLen = contextLen
-      ? contextLen
-      : arch?.maxPositionEmbeddings
-        ? Math.min(arch.maxPositionEmbeddings, MAX_INFERRED_CONTEXT_LEN)
-        : DEFAULT_CONTEXT_LEN;
+    // advertised window rather than the 4K default. An explicit query param wins
+    // over the model's max; either way the value is capped at MAX_CONTEXT_LEN so
+    // a huge advertised window (which callers forward verbatim) can't collapse
+    // the concurrency estimate to ~zero.
+    const requestedContextLen = contextLen ?? arch?.maxPositionEmbeddings ?? DEFAULT_CONTEXT_LEN;
+    const resolvedContextLen = Math.min(requestedContextLen, MAX_CONTEXT_LEN);
 
     const capacityResult = arch
       ? estimateConcurrentCapacity({
