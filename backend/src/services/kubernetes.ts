@@ -31,6 +31,10 @@ const INFERENCE_EXTENSION_VERSION_ANNOTATIONS = [
 const KAITO_WORKSPACE_CRD = 'workspaces.kaito.sh';
 const KAITO_NAMESPACE = 'kaito-workspace';
 const KAITO_OPERATOR_POD_SELECTOR = 'app.kubernetes.io/name=workspace,app.kubernetes.io/instance=kaito-workspace';
+// The AKS AI-toolchain-operator add-on installs KAITO in kube-system, where the
+// operator pod is labeled app=ai-toolchain-operator instead of the upstream
+// Helm chart's app.kubernetes.io/name=workspace.
+const KAITO_AKS_ADDON_POD_SELECTOR = 'app=ai-toolchain-operator';
 const DYNAMO_CRD = 'dynamographdeployments.nvidia.com';
 const DYNAMO_NAMESPACE = 'dynamo-system';
 const DYNAMO_OPERATOR_POD_SELECTOR = 'control-plane=controller-manager,app.kubernetes.io/name=dynamo-operator,app.kubernetes.io/instance=dynamo-platform';
@@ -155,7 +159,7 @@ const RUNTIME_INSTALLATION_PROBES: Record<string, RuntimeInstallationProbe> = {
     crdName: KAITO_WORKSPACE_CRD,
     operatorNamespace: KAITO_NAMESPACE,
     operatorPodSelectors: [KAITO_OPERATOR_POD_SELECTOR],
-    fallbackPodSelectors: ['app.kubernetes.io/name=workspace'],
+    fallbackPodSelectors: ['app.kubernetes.io/name=workspace', KAITO_AKS_ADDON_POD_SELECTOR],
   },
   dynamo: {
     providerName: 'Dynamo',

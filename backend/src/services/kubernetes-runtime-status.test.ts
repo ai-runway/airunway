@@ -378,6 +378,33 @@ describe('KubernetesService - Runtime Status', () => {
     expect(status.message).toBe('KAITO workspace CRD found and KAITO operator pods are ready');
   });
 
+  test('reports KAITO as installed when the AKS AI-toolchain-operator add-on pod is running in kube-system', async () => {
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDExists', async (crdName: string) => crdName === 'workspaces.kaito.sh'),
+    );
+    // The AKS add-on runs the KAITO operator in kube-system, labeled
+    // app=ai-toolchain-operator rather than the upstream Helm chart labels, so
+    // it only surfaces through the cross-namespace fallback search.
+    mockOperatorPods('kaito-workspace', kaitoOperatorSelector, [], [
+      {
+        metadata: { namespace: 'kube-system', name: 'kaito-workspace-557dbc5ffb-smczp', labels: { app: 'ai-toolchain-operator' } },
+        status: {
+          phase: 'Running',
+          containerStatuses: [
+            { ready: true, restartCount: 0 },
+          ],
+        },
+      },
+    ]);
+
+    const status = await kubernetesService.checkKaitoInstallationStatus();
+
+    expect(status.installed).toBe(true);
+    expect(status.crdFound).toBe(true);
+    expect(status.operatorRunning).toBe(true);
+    expect(status.message).toBe('KAITO workspace CRD found and KAITO operator pods are ready in kube-system');
+  });
+
   test('reports Dynamo as installed when a ready operator pod is found', async () => {
     restores.push(
       mockServiceMethod(kubernetesService, 'checkCRDExists', async (crdName: string) => crdName === 'dynamographdeployments.nvidia.com'),

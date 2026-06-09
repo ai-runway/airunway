@@ -123,6 +123,21 @@ func newKaitoDeployment(namespace, name string, readyReplicas int32) *appsv1.Dep
 	}
 }
 
+// newAKSAddonDeployment builds a Deployment that mimics the KAITO controller
+// installed by the AKS AI-toolchain-operator add-on, which labels it
+// app.kubernetes.io/name=ai-toolchain-operator (typically in kube-system)
+// rather than the upstream Helm chart's app.kubernetes.io/name=workspace.
+func newAKSAddonDeployment(namespace, name string, readyReplicas int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{kaitoDeploymentSelectorKey: aksAddonSelectorValue},
+		},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: readyReplicas},
+	}
+}
+
 func stringContains(s, substr string) bool {
 	for i := 0; i+len(substr) <= len(s); i++ {
 		if s[i:i+len(substr)] == substr {
@@ -147,6 +162,25 @@ func TestProbe_NoController(t *testing.T) {
 
 func TestProbe_ControllerReady(t *testing.T) {
 	d := newKaitoDeployment("kaito-workspace", "kaito-workspace", 1)
+	c := probeClientBuilderWithWorkspace(t).
+		WithObjects(d).
+		Build()
+
+	got := probeUpstreamController(context.Background(), c)
+
+	if !got.Healthy {
+		t.Errorf("expected Healthy=true, got %+v", got)
+	}
+	if got.Reason != ReasonUpstreamHealthy {
+		t.Errorf("expected Reason=%s, got %s", ReasonUpstreamHealthy, got.Reason)
+	}
+}
+
+func TestProbe_ControllerReady_AKSAddon(t *testing.T) {
+	// KAITO installed via the AKS AI-toolchain-operator add-on: the controller
+	// runs in kube-system with app.kubernetes.io/name=ai-toolchain-operator.
+	// The probe must recognise it as a healthy upstream controller.
+	d := newAKSAddonDeployment("kube-system", "kaito-workspace", 1)
 	c := probeClientBuilderWithWorkspace(t).
 		WithObjects(d).
 		Build()
