@@ -32,7 +32,7 @@ jobs:
         run: bun ci
 
       - name: Verify generated versions are up to date
-        run: bun run verify-versions
+        run: make verify-versions
 
       - name: Build frontend
         run: bun run build:frontend
