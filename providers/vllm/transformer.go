@@ -30,9 +30,6 @@ import (
 )
 
 const (
-	// DefaultVLLMImage is the default container image for Direct vLLM deployments
-	DefaultVLLMImage = "vllm/vllm-openai:cu130-nightly"
-
 	// DefaultVLLMPort is the default serving port for vLLM
 	DefaultVLLMPort = int64(8000)
 
@@ -57,6 +54,23 @@ const (
 	// KVTransferConfigDecode is the vLLM KV transfer config for decode workers
 	KVTransferConfigDecode = `{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer"}`
 )
+
+// VLLMVersion is the default upstream vLLM OpenAI-compatible server image tag.
+//
+// Single source of truth: /versions.env at the repo root. The build-time value
+// is injected via:
+//
+//	-ldflags "-X github.com/kaito-project/airunway/providers/vllm.VLLMVersion=$(VLLM_VERSION)"
+//
+// (see providers/vllm/Makefile). The string literal below is a fallback for
+// `go run` / `go test` invocations that bypass the Makefile and must be kept in
+// sync with versions.env (enforced by `make verify-versions`).
+var VLLMVersion = "cu130-nightly"
+
+// DefaultVLLMImage is the default container image for Direct vLLM deployments.
+// Computed from the official repository and VLLMVersion so an ldflags override
+// of VLLMVersion flows through here without a separate injection point.
+var DefaultVLLMImage = officialVLLMImageRepository + ":" + VLLMVersion
 
 // Transformer handles transformation of ModelDeployment to vLLM Deployments and Services
 type Transformer struct{}

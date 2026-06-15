@@ -280,6 +280,7 @@ cleanup-gateway:
 GAIE_VERSION_RE := $(subst .,\.,$(GAIE_VERSION))
 DYNAMO_VERSION_RE := $(subst .,\.,$(DYNAMO_VERSION))
 KAITO_VERSION_RE := $(subst .,\.,$(KAITO_VERSION))
+VLLM_VERSION_RE := $(subst .,\.,$(VLLM_VERSION))
 
 verify-versions:
 	@# 1. controller/go.mod must pin GAIE_VERSION
@@ -297,7 +298,10 @@ verify-versions:
 	@# 5. providers/kaito/config.go install Command --version arg must match KAITO_VERSION
 	@grep -qE -- '--version $(KAITO_VERSION_RE) ' providers/kaito/config.go || \
 	  { echo "❌ providers/kaito/config.go install Command --version != $(KAITO_VERSION) (from versions.env)"; exit 1; }
-	@# 6. generated TS must be in sync with versions.env.
+	@# 6. providers/vllm/transformer.go fallback literal must match VLLM_VERSION
+	@grep -qE '^var VLLMVersion = "$(VLLM_VERSION_RE)"$$' providers/vllm/transformer.go || \
+	  { echo "❌ providers/vllm/transformer.go VLLMVersion fallback != $(VLLM_VERSION) (from versions.env)"; exit 1; }
+	@# 7. generated TS must be in sync with versions.env.
 	@#    Generate to a temp file and diff against the working-tree copy so
 	@#    that synced uncommitted edits pass (the local-dev case) while
 	@#    stale committed files still fail (the CI case — CI's working

@@ -17,7 +17,17 @@ Avoid Direct vLLM when you need provider-managed routing, autoscaling, or produc
 
 ## Install the provider shim
 
-Install the core controller first, then install the Direct vLLM provider shim:
+Install the core controller first, then install the Direct vLLM provider shim.
+
+If you have the repository checked out, use the provider `Makefile` (it sets the
+image via kustomize and tracks the default vLLM tag from `versions.env`):
+
+```bash
+make controller-deploy
+make -C providers/vllm deploy
+```
+
+Otherwise, apply the published manifests directly:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/deploy/controller.yaml
