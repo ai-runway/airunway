@@ -1,7 +1,7 @@
 import * as k8s from '@kubernetes/client-node';
 import { configService } from './config';
 import type { DeploymentStatus, PodStatus, ClusterStatus, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus } from '@airunway/shared';
-import { toModelDeploymentManifest, toDeploymentStatus } from '@airunway/shared';
+
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient } from '../lib/kubeconfig';
 import { type K8sApiError } from '../lib/k8s-errors';
@@ -44,6 +44,14 @@ import {
   type PodDiagnosticsAdapter,
 } from './podDiagnostics';
 export { toPodStatus } from './podDiagnostics';
+import {
+  createDeployment as createDeploymentWithAdapter,
+  deleteDeployment as deleteDeploymentWithAdapter,
+  getDeployment as getDeploymentWithAdapter,
+  getDeploymentManifest as getDeploymentManifestWithAdapter,
+  listDeployments as listDeploymentsWithAdapter,
+  type ModelDeploymentStoreAdapter,
+} from './modelDeploymentStore';
 
 // ModelDeployment CRD configuration
 const MODEL_DEPLOYMENT_CRD = {
@@ -217,198 +225,11 @@ class KubernetesService {
   }
 
   async listDeployments(namespace?: string, userToken?: string): Promise<DeploymentStatus[]> {
-    logger.debug({ namespace: namespace || 'all' }, 'listDeployments called');
-
-    if (namespace) {
-      return this.listDeploymentsInNamespace(namespace, userToken);
-    }
-
-    // No namespace specified — try cluster-wide list first
-    try {
-      const api = this.getCustomObjectsApi(userToken);
-      const response = await withRetry(
-        () => api.listClusterCustomObject({
-          group: MODEL_DEPLOYMENT_CRD.apiGroup,
-          version: MODEL_DEPLOYMENT_CRD.apiVersion,
-          plural: MODEL_DEPLOYMENT_CRD.plural,
-        }),
-        { operationName: 'listDeployments:allNamespaces' }
-      );
-
-      return this.convertToDeploymentStatuses(response);
-    } catch (error) {
-      const statusCode = getK8sStatusCode(error);
-
-      // If user lacks cluster-wide list permission, fall back to per-namespace listing
-      if (statusCode === 403 && userToken) {
-        logger.debug('Cluster-wide list forbidden, falling back to per-namespace listing');
-        return this.listDeploymentsAcrossAllowedNamespaces(userToken);
-      }
-
-      if (getK8sErrorMessage(error) === 'HTTP request failed' || statusCode === 404) {
-        logger.debug('ModelDeployment CRD not found');
-        return [];
-      }
-
-      logger.error({ error: getK8sErrorMessage(error) }, 'Unexpected error listing deployments');
-      return [];
-    }
-  }
-
-  /**
-   * List deployments in a single namespace using the provided credentials.
-   */
-  private async listDeploymentsInNamespace(namespace: string, userToken?: string): Promise<DeploymentStatus[]> {
-    try {
-      const api = this.getCustomObjectsApi(userToken);
-      const response = await withRetry(
-        () => api.listNamespacedCustomObject({
-          group: MODEL_DEPLOYMENT_CRD.apiGroup,
-          version: MODEL_DEPLOYMENT_CRD.apiVersion,
-          namespace,
-          plural: MODEL_DEPLOYMENT_CRD.plural,
-        }),
-        { operationName: 'listDeployments' }
-      );
-
-      return this.convertToDeploymentStatuses(response, namespace);
-    } catch (error) {
-      const statusCode = getK8sStatusCode(error);
-      if (getK8sErrorMessage(error) === 'HTTP request failed' || statusCode === 404 || statusCode === 403) {
-        logger.debug({ namespace }, 'Cannot list deployments in namespace');
-        return [];
-      }
-
-      logger.error({ error: getK8sErrorMessage(error) }, 'Unexpected error listing deployments');
-      return [];
-    }
-  }
-
-  /**
-   * Convert a K8s API list response to DeploymentStatus array.
-   */
-  private async convertToDeploymentStatuses(
-    response: unknown,
-    fallbackNamespace?: string
-  ): Promise<DeploymentStatus[]> {
-    const items = (response as { items?: ModelDeployment[] }).items || [];
-    logger.debug({ count: items.length }, 'Found ModelDeployments');
-
-    const deployments: DeploymentStatus[] = [];
-    for (const item of items) {
-      const itemNamespace = item.metadata.namespace || fallbackNamespace || 'default';
-      const pods = await this.getDeploymentPods(item.metadata.name, itemNamespace);
-      deployments.push(toDeploymentStatus(item, pods));
-    }
-
-    deployments.sort((a, b) => {
-      const dateA = new Date(a.createdAt).getTime();
-      const dateB = new Date(b.createdAt).getTime();
-      return dateB - dateA;
-    });
-
-    return deployments;
-  }
-
-  /**
-   * Fallback for users without cluster-wide list permission.
-   * Discovers which namespaces the user can list ModelDeployments in,
-   * then queries each one individually.
-   */
-  private async listDeploymentsAcrossAllowedNamespaces(userToken: string): Promise<DeploymentStatus[]> {
-    // List all namespaces using the service account (users may not have namespace list permission)
-    let namespaces: string[];
-    try {
-      const nsResponse = await withRetry(
-        () => this.coreV1Api.listNamespace(),
-        { operationName: 'listNamespaces:forRBACFallback', maxRetries: 1 }
-      );
-      namespaces = nsResponse.items
-        .map(ns => ns.metadata?.name)
-        .filter((name): name is string => !!name);
-    } catch (error) {
-      logger.error({ error }, 'Failed to list namespaces for RBAC fallback');
-      return [];
-    }
-
-    // Check which namespaces the user can list ModelDeployments in
-    const userClients = this.createUserClients(userToken);
-    const authApi = userClients.authorizationV1Api;
-
-    const allowedNamespaces: string[] = [];
-    await Promise.all(
-      namespaces.map(async (ns) => {
-        try {
-          const review: k8s.V1SelfSubjectAccessReview = {
-            apiVersion: 'authorization.k8s.io/v1',
-            kind: 'SelfSubjectAccessReview',
-            spec: {
-              resourceAttributes: {
-                namespace: ns,
-                verb: 'list',
-                group: MODEL_DEPLOYMENT_CRD.apiGroup,
-                resource: MODEL_DEPLOYMENT_CRD.plural,
-              },
-            },
-          };
-
-          const result = await authApi.createSelfSubjectAccessReview({ body: review });
-          if (result.status?.allowed) {
-            allowedNamespaces.push(ns);
-          }
-        } catch (error) {
-          logger.debug({ namespace: ns, error }, 'SelfSubjectAccessReview failed for namespace');
-        }
-      })
-    );
-
-    logger.debug({ allowedNamespaces }, 'User has access to namespaces');
-
-    if (allowedNamespaces.length === 0) {
-      return [];
-    }
-
-    // List deployments in each allowed namespace
-    const results = await Promise.all(
-      allowedNamespaces.map(ns => this.listDeploymentsInNamespace(ns, userToken))
-    );
-
-    const allDeployments = results.flat();
-    allDeployments.sort((a, b) => {
-      const dateA = new Date(a.createdAt).getTime();
-      const dateB = new Date(b.createdAt).getTime();
-      return dateB - dateA;
-    });
-
-    return allDeployments;
+    return listDeploymentsWithAdapter(this.createModelDeploymentStoreAdapter(), namespace, userToken);
   }
 
   async getDeployment(name: string, namespace: string, userToken?: string): Promise<DeploymentStatus | null> {
-    try {
-      const api = this.getCustomObjectsApi(userToken);
-      const response = await withRetry(
-        () => api.getNamespacedCustomObject({
-          group: MODEL_DEPLOYMENT_CRD.apiGroup,
-          version: MODEL_DEPLOYMENT_CRD.apiVersion,
-          namespace,
-          plural: MODEL_DEPLOYMENT_CRD.plural,
-          name,
-        }),
-        { operationName: 'getDeployment' }
-      );
-
-      const md = response as ModelDeployment;
-      const pods = await this.getDeploymentPods(name, namespace);
-      return toDeploymentStatus(md, pods);
-    } catch (error) {
-      const statusCode = getK8sStatusCode(error);
-      if (statusCode === 404) {
-        logger.debug({ name, namespace }, 'ModelDeployment not found');
-        return null;
-      }
-      logger.error({ error, name, namespace }, 'Error getting deployment');
-      return null;
-    }
+    return getDeploymentWithAdapter(this.createModelDeploymentStoreAdapter(), name, namespace, userToken);
   }
 
   /**
@@ -416,74 +237,121 @@ class KubernetesService {
    * Returns the full CR object as stored in Kubernetes
    */
   async getDeploymentManifest(name: string, namespace: string, userToken?: string): Promise<Record<string, unknown> | null> {
-    try {
-      const api = this.getCustomObjectsApi(userToken);
-      const response = await withRetry(
-        () => api.getNamespacedCustomObject({
-          group: MODEL_DEPLOYMENT_CRD.apiGroup,
-          version: MODEL_DEPLOYMENT_CRD.apiVersion,
-          namespace,
-          plural: MODEL_DEPLOYMENT_CRD.plural,
-          name,
-        }),
-        { operationName: 'getDeploymentManifest' }
-      );
-
-      return response as Record<string, unknown>;
-    } catch (error) {
-      const statusCode = getK8sStatusCode(error);
-      if (statusCode === 404) {
-        logger.debug({ name, namespace }, 'ModelDeployment manifest not found');
-        return null;
-      }
-      logger.error({ error, name, namespace }, 'Error getting deployment manifest');
-      return null;
-    }
+    return getDeploymentManifestWithAdapter(this.createModelDeploymentStoreAdapter(), name, namespace, userToken);
   }
 
   async createDeployment(config: DeploymentConfig, userToken?: string): Promise<void> {
-    // Generate ModelDeployment manifest from config
-    const manifest = toModelDeploymentManifest(config) as unknown as Record<string, unknown>;
-
-    logger.info({ name: config.name, namespace: config.namespace }, 'Creating ModelDeployment');
-
-    const api = this.getCustomObjectsApi(userToken);
-    await withRetry(
-      () => api.createNamespacedCustomObject({
-        group: MODEL_DEPLOYMENT_CRD.apiGroup,
-        version: MODEL_DEPLOYMENT_CRD.apiVersion,
-        namespace: config.namespace,
-        plural: MODEL_DEPLOYMENT_CRD.plural,
-        body: manifest,
-      }),
-      { operationName: 'createDeployment' }
-    );
-
-    logger.info({ name: config.name, namespace: config.namespace }, 'ModelDeployment created');
+    return createDeploymentWithAdapter(this.createModelDeploymentStoreAdapter(), config, userToken);
   }
 
   async deleteDeployment(name: string, namespace: string, userToken?: string): Promise<void> {
-    // First, check if deployment exists
-    const deployment = await this.getDeployment(name, namespace, userToken);
-    if (!deployment) {
-      throw new Error(`Deployment '${name}' not found in namespace '${namespace}'`);
-    }
+    return deleteDeploymentWithAdapter(this.createModelDeploymentStoreAdapter(), name, namespace, userToken);
+  }
 
-    logger.info({ name, namespace }, 'Deleting ModelDeployment');
-
-    const api = this.getCustomObjectsApi(userToken);
-    await withRetry(
-      () => api.deleteNamespacedCustomObject({
-        group: MODEL_DEPLOYMENT_CRD.apiGroup,
-        version: MODEL_DEPLOYMENT_CRD.apiVersion,
-        namespace,
-        plural: MODEL_DEPLOYMENT_CRD.plural,
-        name,
-      }),
-      { operationName: 'deleteDeployment' }
-    );
-
-    logger.info({ name, namespace }, 'ModelDeployment deleted');
+  private createModelDeploymentStoreAdapter(): ModelDeploymentStoreAdapter {
+    return {
+      listClusterModelDeployments: async (userToken) => {
+        const api = this.getCustomObjectsApi(userToken);
+        return withRetry(
+          () => api.listClusterCustomObject({
+            group: MODEL_DEPLOYMENT_CRD.apiGroup,
+            version: MODEL_DEPLOYMENT_CRD.apiVersion,
+            plural: MODEL_DEPLOYMENT_CRD.plural,
+          }),
+          { operationName: 'listDeployments:allNamespaces' }
+        );
+      },
+      listNamespacedModelDeployments: async (namespace, userToken) => {
+        const api = this.getCustomObjectsApi(userToken);
+        return withRetry(
+          () => api.listNamespacedCustomObject({
+            group: MODEL_DEPLOYMENT_CRD.apiGroup,
+            version: MODEL_DEPLOYMENT_CRD.apiVersion,
+            namespace,
+            plural: MODEL_DEPLOYMENT_CRD.plural,
+          }),
+          { operationName: 'listDeployments' }
+        );
+      },
+      getModelDeployment: async (name, namespace, userToken) => {
+        const api = this.getCustomObjectsApi(userToken);
+        return withRetry(
+          () => api.getNamespacedCustomObject({
+            group: MODEL_DEPLOYMENT_CRD.apiGroup,
+            version: MODEL_DEPLOYMENT_CRD.apiVersion,
+            namespace,
+            plural: MODEL_DEPLOYMENT_CRD.plural,
+            name,
+          }),
+          { operationName: 'getDeployment' }
+        );
+      },
+      createModelDeployment: async (namespace, manifest, userToken) => {
+        const api = this.getCustomObjectsApi(userToken);
+        await withRetry(
+          () => api.createNamespacedCustomObject({
+            group: MODEL_DEPLOYMENT_CRD.apiGroup,
+            version: MODEL_DEPLOYMENT_CRD.apiVersion,
+            namespace,
+            plural: MODEL_DEPLOYMENT_CRD.plural,
+            body: manifest,
+          }),
+          { operationName: 'createDeployment' }
+        );
+      },
+      deleteModelDeployment: async (name, namespace, userToken) => {
+        const api = this.getCustomObjectsApi(userToken);
+        await withRetry(
+          () => api.deleteNamespacedCustomObject({
+            group: MODEL_DEPLOYMENT_CRD.apiGroup,
+            version: MODEL_DEPLOYMENT_CRD.apiVersion,
+            namespace,
+            plural: MODEL_DEPLOYMENT_CRD.plural,
+            name,
+          }),
+          { operationName: 'deleteDeployment' }
+        );
+      },
+      listNamespaces: async () => {
+        const nsResponse = await withRetry(
+          () => this.coreV1Api.listNamespace(),
+          { operationName: 'listNamespaces:forRBACFallback', maxRetries: 1 }
+        );
+        return nsResponse.items
+          .map(ns => ns.metadata?.name)
+          .filter((name): name is string => !!name);
+      },
+      canListModelDeployments: async (namespace, userToken) => {
+        const { authorizationV1Api } = this.createUserClients(userToken);
+        const review: k8s.V1SelfSubjectAccessReview = {
+          apiVersion: 'authorization.k8s.io/v1',
+          kind: 'SelfSubjectAccessReview',
+          spec: {
+            resourceAttributes: {
+              namespace,
+              verb: 'list',
+              group: MODEL_DEPLOYMENT_CRD.apiGroup,
+              resource: MODEL_DEPLOYMENT_CRD.plural,
+            },
+          },
+        };
+        const result = await authorizationV1Api.createSelfSubjectAccessReview({ body: review });
+        return result.status?.allowed === true;
+      },
+      getDeploymentPods: (name, namespace) => this.getDeploymentPods(name, namespace),
+      getDeploymentStatus: (name, namespace, userToken) => this.getDeployment(name, namespace, userToken),
+      logDebug: (contextOrMessage, message) => {
+        if (typeof contextOrMessage === 'string') {
+          logger.debug(contextOrMessage);
+        } else {
+          logger.debug(contextOrMessage, message);
+        }
+      },
+      logInfo: (context, message) => logger.info(context, message),
+      logError: (context, message) => logger.error(context, message),
+      getK8sStatusCode,
+      getK8sErrorMessage,
+    };
   }
 
   async getDeploymentPods(name: string, namespace: string): Promise<PodStatus[]> {
