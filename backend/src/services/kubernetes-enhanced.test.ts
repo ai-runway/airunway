@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import type { ClusterGpuCapacity } from './kubernetes';
-import type { DetailedClusterCapacity, NodePoolInfo, PodFailureReason } from '@airunway/shared';
+import type { NodePoolInfo, PodFailureReason } from '@airunway/shared';
 
 describe('KubernetesService - Enhanced Capacity', () => {
   describe('getClusterGpuCapacity enhancements', () => {

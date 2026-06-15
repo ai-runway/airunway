@@ -6,7 +6,9 @@ import './index.css'
 
 // Playwright e2e tests set this flag via page.addInitScript() to disable
 // React Query retries and stale time, so error/404 states appear immediately.
-const isE2E = typeof window !== 'undefined' && (window as any).__E2E_TEST__ === true
+const isE2E =
+  typeof window !== 'undefined' &&
+  (window as Window & { __E2E_TEST__?: boolean }).__E2E_TEST__ === true
 
 const queryClient = new QueryClient({
   defaultOptions: {

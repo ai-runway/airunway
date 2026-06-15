@@ -1,6 +1,6 @@
 import logger from '../lib/logger';
 import { createHash } from 'node:crypto';
-import type { HfUserInfo, HfTokenExchangeResponse, HfApiModelResult, HfModelSearchResult, HfSearchParams, HfModelSearchResponse, ModelArchitecture } from '@airunway/shared';
+import type { HfUserInfo, HfTokenExchangeResponse, HfApiModelResult, HfSearchParams, HfModelSearchResponse, ModelArchitecture } from '@airunway/shared';
 import { filterCompatibleModels } from './modelCompatibility';
 
 /**

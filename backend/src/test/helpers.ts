@@ -11,7 +11,7 @@
  *   // ... run test ...
  *   restore();
  */
-export function mockServiceMethod<S extends Record<string, any>, K extends keyof S>(
+export function mockServiceMethod<S extends Record<string, unknown>, K extends keyof S>(
   service: S,
   method: K,
   implementation: S[K],

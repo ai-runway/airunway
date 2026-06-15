@@ -1,8 +1,9 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach } from 'bun:test';
 import app, { parseCorsOrigin } from './hono-app';
 import { kubernetesService } from './services/kubernetes';
 import { configService } from './services/config';
 import { authService } from './services/auth';
+import { helmService } from './services/helm';
 import { mockServiceMethod } from './test/helpers';
 import { mockDeployment } from './test/fixtures';
 import { HTTPException } from 'hono/http-exception';
@@ -1288,10 +1289,21 @@ describe('Hono Routes', () => {
 
   describe('Installation Routes', () => {
     test('GET /api/installation/helm/status returns helm status', async () => {
-      const res = await app.request('/api/installation/helm/status');
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.available).toBeDefined();
+      // Mock the helm CLI probe so the test never spawns the real `helm`
+      // binary, which hangs on CI runners where helm is absent. Mirrors the
+      // pattern used throughout installation.test.ts.
+      const restore = mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({
+        available: true,
+        version: 'v3.14.0',
+      }));
+      try {
+        const res = await app.request('/api/installation/helm/status');
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.available).toBeDefined();
+      } finally {
+        restore();
+      }
     });
   });
 

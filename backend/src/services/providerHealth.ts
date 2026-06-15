@@ -12,6 +12,22 @@ export type ProviderHealth = {
   lastHeartbeat?: string;
 };
 
+/** A single status condition reported on the provider CR. */
+type ProviderCondition = {
+  type?: string;
+  reason?: string;
+  message?: string;
+};
+
+/** The minimal InferenceProviderConfig shape this module reads. */
+type ProviderConfigLike = {
+  status?: {
+    conditions?: ProviderCondition[];
+    lastHeartbeat?: string;
+    ready?: boolean;
+  };
+} | null | undefined;
+
 const DEFAULT_STALENESS_THRESHOLD_MS = 180_000;
 
 function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
@@ -31,10 +47,10 @@ const STALENESS_THRESHOLD_MS = parsePositiveIntEnv(
  * this function does no Kubernetes API calls of its own — this keeps
  * getRuntimesStatus's per-provider work bounded to a single CR read.
  */
-export function getProviderHealth(providerId: string, config: any): ProviderHealth {
+export function getProviderHealth(providerId: string, config: ProviderConfigLike): ProviderHealth {
   const status = config?.status ?? {};
-  const conditions: Array<any> = status.conditions ?? [];
-  const upstreamReady = conditions.find((c: any) => c.type === 'UpstreamReady');
+  const conditions: ProviderCondition[] = status.conditions ?? [];
+  const upstreamReady = conditions.find((c) => c.type === 'UpstreamReady');
   const hasShimSignal = !!upstreamReady;
   const lastHeartbeat: string | undefined = status.lastHeartbeat;
   const ready: boolean = status.ready === true;

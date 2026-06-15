@@ -4,6 +4,7 @@ import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
 import { huggingFaceService } from '../services/huggingface';
+import type { HelmChart } from '../services/helm';
 import { mockServiceMethod } from '../test/helpers';
 import {
   mockInferenceProviderConfig,
@@ -684,13 +685,13 @@ describe('Installation Provider Routes', () => {
     });
 
     test('returns 200 on successful install', async () => {
-      let installCharts: any[] = [];
+      let installCharts: HelmChart[] = [];
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'installProvider', async (_repos, charts) => {
-          installCharts = charts as any[];
+          installCharts = charts;
           return {
             success: true,
             results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
@@ -711,14 +712,14 @@ describe('Installation Provider Routes', () => {
     });
 
     test('uses CRD-safe chart install behavior for Dynamo', async () => {
-      let installCharts: any[] = [];
+      let installCharts: HelmChart[] = [];
       const dynamoConfig = createDynamoProviderConfig();
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => dynamoConfig),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'installProvider', async (_repos, charts) => {
-          installCharts = charts as any[];
+          installCharts = charts;
           return {
             success: true,
             results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
@@ -738,14 +739,14 @@ describe('Installation Provider Routes', () => {
     });
 
     test('keeps standard chart install behavior for non-KAITO non-Dynamo providers', async () => {
-      let installCharts: any[] = [];
+      let installCharts: HelmChart[] = [];
       const kuberayConfig = createKubeRayProviderConfig();
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => kuberayConfig),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'installProvider', async (_repos, charts) => {
-          installCharts = charts as any[];
+          installCharts = charts;
           return {
             success: true,
             results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],

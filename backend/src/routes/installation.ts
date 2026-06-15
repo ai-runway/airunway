@@ -137,14 +137,41 @@ function selectGpuForEstimate(
   return best;
 }
 
+/** Minimal shape of an InferenceProviderConfig CRD object that these helpers read. */
+interface ProviderConfigResource {
+  metadata?: {
+    name?: string;
+    annotations?: Record<string, string>;
+  };
+  spec?: {
+    capabilities?: { engines?: unknown[] } & Record<string, unknown>;
+  };
+}
+
+/** Shape of the parsed `airunway.ai/installation` annotation (all fields optional). */
+interface InstallationAnnotation {
+  description?: string;
+  defaultNamespace?: string;
+  helmRepos?: Array<{ name?: string; url?: string }>;
+  helmCharts?: Array<{
+    name?: string;
+    chart?: string;
+    version?: string;
+    namespace?: string;
+    createNamespace?: boolean;
+    values?: unknown;
+  }>;
+  steps?: Array<{ title?: string; command?: string; description?: string }>;
+}
+
 /**
  * Parse the installation annotation (JSON) from an InferenceProviderConfig CRD object.
  */
-function parseInstallationAnnotation(config: any): any {
+function parseInstallationAnnotation(config: ProviderConfigResource): InstallationAnnotation {
   const raw = config.metadata?.annotations?.['airunway.ai/installation'];
   if (!raw) return {};
   try {
-    return JSON.parse(raw);
+    return JSON.parse(raw) as InstallationAnnotation;
   } catch (error) {
     logger.warn({
       provider: config.metadata?.name,
@@ -159,7 +186,7 @@ function parseInstallationAnnotation(config: any): any {
  * Installation and documentation metadata are read from metadata.annotations,
  * not from spec (which only contains controller-reconciled fields).
  */
-function extractProviderDetails(config: any) {
+function extractProviderDetails(config: ProviderConfigResource) {
   const name = config.metadata?.name || 'unknown';
   const annotations = config.metadata?.annotations;
   const displayName = getProviderDisplayName(name, annotations);
@@ -178,11 +205,13 @@ function extractProviderDetails(config: any) {
       // can't derive it here; emit an empty string to satisfy the CRDConfig type.
       apiGroup: '',
     },
-    helmRepos: (installation.helmRepos || []).map((r: any) => ({
-      name: r.name,
-      url: r.url,
-    })),
-    helmCharts: (installation.helmCharts || []).map((c: any): ProviderHelmChartDetails => {
+    helmRepos: (installation.helmRepos || [])
+      .filter((r): r is { name: string; url: string } => !!r.name && !!r.url)
+      .map((r) => ({
+        name: r.name,
+        url: r.url,
+      })),
+    helmCharts: (installation.helmCharts || []).map((c): ProviderHelmChartDetails => {
       const values = c.values && typeof c.values === 'object' && !Array.isArray(c.values)
         ? c.values as Record<string, unknown>
         : undefined;
@@ -191,15 +220,15 @@ function extractProviderDetails(config: any) {
       }
 
       return {
-        name: c.name,
-        chart: c.chart,
+        name: c.name || '',
+        chart: c.chart || '',
         version: c.version,
-        namespace: c.namespace,
+        namespace: c.namespace || '',
         createNamespace: c.createNamespace,
         values,
       };
     }),
-    installationSteps: (installation.steps || []).map((s: any) => ({
+    installationSteps: (installation.steps || []).map((s) => ({
       title: s.title,
       command: s.command,
       description: s.description,
@@ -639,7 +668,6 @@ const installation = new Hono()
       throw new HTTPException(404, { message: `Provider not found: ${providerId}` });
     }
 
-    const crdConfig = config.spec?.capabilities || {};
     logger.info({ providerId }, `Removing CRDs for ${providerId}`);
 
     // The CRD name is typically plural.apiGroup — but since we don't store that in

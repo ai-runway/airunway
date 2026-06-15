@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect } from 'bun:test';
 import { aiConfiguratorService } from './aiconfigurator';
 
 describe('AIConfiguratorService', () => {

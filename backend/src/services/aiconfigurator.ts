@@ -336,7 +336,7 @@ class AIConfiguratorService {
   /**
    * Extract a user-friendly error message from stderr/stdout
    */
-  private extractErrorMessage(stderr: string, stdout: string): string {
+  private extractErrorMessage(stderr: string, _stdout: string): string {
     // Look for HuggingFace auth errors first (gated models)
     if (stderr.includes('401: Unauthorized') || stderr.includes('gated model')) {
       return 'This is a gated model. Please authenticate with HuggingFace first (huggingface-cli login) or use a non-gated model.';

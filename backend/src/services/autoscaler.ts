@@ -2,8 +2,30 @@ import * as k8s from '@kubernetes/client-node';
 import type { AutoscalerDetectionResult, AutoscalerStatusInfo } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient } from '../lib/kubeconfig';
+import { getK8sErrorStatusCode } from '../lib/k8s-errors';
 import logger from '../lib/logger';
 import * as yaml from 'js-yaml';
+
+/**
+ * Subset of the cluster-autoscaler status ConfigMap (YAML) that we read.
+ * The upstream format is loosely specified, so every field is optional.
+ */
+interface ClusterAutoscalerStatus {
+  time?: string;
+  autoscalerStatus?: string;
+  clusterWide?: {
+    health?: { status?: string };
+  };
+  nodeGroups?: Array<{
+    name?: string;
+    health?: {
+      minSize?: number;
+      maxSize?: number;
+      cloudProviderTarget?: number;
+      nodeCounts?: { registered?: { total?: number } };
+    };
+  }>;
+}
 
 class AutoscalerService {
   private kc: k8s.KubeConfig;
@@ -162,8 +184,8 @@ class AutoscalerService {
         healthy,
         nodeGroupCount: 0, // ConfigMap not available, can't determine node group count
       };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode !== 404 && statusCode !== 403) {
         logger.error({ error }, 'Error detecting cluster-autoscaler');
       }
@@ -187,10 +209,10 @@ class AutoscalerService {
       const configMap = configMapResponse;
       const statusData = configMap.data?.['status'] || '{}';
 
-      let parsedStatus: any;
+      let parsedStatus: ClusterAutoscalerStatus;
       try {
         // Parse YAML format (cluster-autoscaler uses YAML in the ConfigMap)
-        parsedStatus = yaml.load(statusData);
+        parsedStatus = (yaml.load(statusData) as ClusterAutoscalerStatus) ?? {};
       } catch (error) {
         logger.warn({ error }, 'Failed to parse cluster-autoscaler-status ConfigMap');
         return null;
@@ -201,7 +223,7 @@ class AutoscalerService {
       if (Array.isArray(parsedStatus.nodeGroups)) {
         for (const group of parsedStatus.nodeGroups) {
           nodeGroups.push({
-            name: group.name,
+            name: group.name || 'unknown',
             minSize: group.health?.minSize || 0,
             maxSize: group.health?.maxSize || 0,
             currentSize: group.health?.cloudProviderTarget || group.health?.nodeCounts?.registered?.total || 0,
@@ -217,8 +239,8 @@ class AutoscalerService {
         lastUpdateTime,
         nodeGroups,
       };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode !== 404 && statusCode !== 403) {
         logger.error({ error }, 'Error getting autoscaler status');
       }

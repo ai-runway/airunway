@@ -122,7 +122,7 @@ const oauth = new Hono()
   // call POST /huggingface/token itself. That exposed the verifier to the
   // browser. Use POST /huggingface/token-with-state instead — the verifier
   // never leaves the server. This handler now always returns 410 Gone.
-  .get('/huggingface/verifier/:state', (c) => {
+  .get('/huggingface/verifier/:state', () => {
     // This endpoint is deprecated — use POST /huggingface/token-with-state instead
     throw new HTTPException(410, {
       message: 'This endpoint has been removed for security. Use POST /huggingface/token-with-state instead.',

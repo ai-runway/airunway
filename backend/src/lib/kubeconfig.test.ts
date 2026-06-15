@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import * as k8s from '@kubernetes/client-node';
-import { kubeConfigToBunTls, BunTlsHttpLibrary, makeApiClient } from './kubeconfig';
+import type * as https from 'node:https';
+import { kubeConfigToBunTls, BunTlsHttpLibrary, makeApiClient, type BunTlsOptions } from './kubeconfig';
 
 /**
  * Regression guards for the Bun TLS shim (`kubeConfigToBunTls`,
@@ -47,8 +48,8 @@ function makeKubeConfig(opts: KcOpts = {}): k8s.KubeConfig {
   }
 
   kc.loadFromOptions({
-    clusters: [cluster as any],
-    users: [user as any],
+    clusters: [cluster as unknown as k8s.Cluster],
+    users: [user as unknown as k8s.User],
     contexts: [{ name: 'test-ctx', cluster: 'test-cluster', user: 'test-user' }],
     currentContext: 'test-ctx',
   });
@@ -102,7 +103,7 @@ describe('kubeConfigToBunTls', () => {
 
 describe('BunTlsHttpLibrary.send', () => {
   const realFetch = globalThis.fetch;
-  let calls: Array<{ url: string; options: any }>;
+  let calls: Array<{ url: string; options: RequestInit & { tls?: BunTlsOptions } }>;
 
   beforeEach(() => {
     calls = [];
@@ -112,7 +113,7 @@ describe('BunTlsHttpLibrary.send', () => {
   });
 
   function stubFetch(status = 200, body = '{"ok":true}') {
-    globalThis.fetch = (async (url: any, options: any) => {
+    globalThis.fetch = (async (url: RequestInfo | URL, options: RequestInit & { tls?: BunTlsOptions }) => {
       calls.push({ url: String(url), options });
       return new Response(body, { status, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
@@ -168,7 +169,7 @@ describe('BunTlsHttpLibrary.send', () => {
     const kc = makeKubeConfig({ withClientCert: true });
     let applyCount = 0;
     const orig = kc.applyToHTTPSOptions.bind(kc);
-    kc.applyToHTTPSOptions = (async (opts: any) => {
+    kc.applyToHTTPSOptions = (async (opts: https.RequestOptions) => {
       applyCount += 1;
       return orig(opts);
     }) as typeof kc.applyToHTTPSOptions;

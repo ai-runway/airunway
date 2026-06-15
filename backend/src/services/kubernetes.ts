@@ -1,9 +1,11 @@
 import * as k8s from '@kubernetes/client-node';
+import type * as https from 'node:https';
 import { configService } from './config';
 import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus } from '@airunway/shared';
 import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
-import { loadKubeConfig, makeApiClient, kubeConfigToBunTls } from '../lib/kubeconfig';
+import { loadKubeConfig, makeApiClient, kubeConfigToBunTls, type BunTlsOptions } from '../lib/kubeconfig';
+import { type K8sApiError } from '../lib/k8s-errors';
 import logger from '../lib/logger';
 import { aggregateRequiresCRDFromCapabilities, getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
 
@@ -108,8 +110,11 @@ export interface PersistentVolumeClaimInfo {
  * both shapes across versions (`response.body` and the resource object itself).
  */
 export function extractCRDVersionFromAnnotations(crdOrResponse: unknown, annotationKeys: string[]): string | undefined {
-  const crd = (crdOrResponse as any)?.body || crdOrResponse;
-  const annotations = (crd as any)?.metadata?.annotations || {};
+  const maybeWrapped = crdOrResponse as { body?: unknown } | undefined;
+  const crd = (maybeWrapped?.body ?? crdOrResponse) as
+    | { metadata?: { annotations?: Record<string, unknown> } }
+    | undefined;
+  const annotations = crd?.metadata?.annotations || {};
 
   for (const key of annotationKeys) {
     const version = annotations[key];
@@ -133,6 +138,27 @@ export interface InstallationStatus {
   message?: string;
 }
 
+/**
+ * Minimal shape of an InferenceProviderConfig custom resource as returned by
+ * the Kubernetes custom-objects API. Only the fields this service reads are
+ * modeled; everything is optional because the API returns untyped objects.
+ */
+export interface InferenceProviderConfigResource {
+  metadata?: {
+    name?: string;
+    annotations?: Record<string, string>;
+  };
+  spec?: {
+    capabilities?: { engines?: unknown[] } & Record<string, unknown>;
+  };
+  status?: {
+    version?: string;
+    ready?: boolean;
+    lastHeartbeat?: string;
+    conditions?: Array<{ type?: string; reason?: string; message?: string }>;
+  } & Record<string, unknown>;
+}
+
 interface RuntimeInstallationProbe {
   providerName: string;
   crdDisplayName?: string;
@@ -151,12 +177,20 @@ interface OperatorPodProbeResult {
   error?: string;
 }
 
-function getK8sStatusCode(error: any): number | undefined {
-  return error?.statusCode || error?.response?.statusCode;
+function getK8sStatusCode(error: unknown): number | undefined {
+  const e = error as K8sApiError | undefined;
+  return e?.statusCode || e?.response?.statusCode;
 }
 
-function getK8sErrorMessage(error: any): string {
-  return error?.body?.message || error?.response?.body?.message || error?.message || String(error);
+function getK8sErrorMessage(error: unknown): string {
+  const e = error as
+    | {
+        body?: { message?: string };
+        response?: { body?: { message?: string } };
+        message?: string;
+      }
+    | undefined;
+  return e?.body?.message || e?.response?.body?.message || e?.message || String(error);
 }
 
 const RUNTIME_INSTALLATION_PROBES: Record<string, RuntimeInstallationProbe> = {
@@ -325,8 +359,8 @@ class KubernetesService {
       );
 
       return this.convertToDeploymentStatuses(response);
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
 
       // If user lacks cluster-wide list permission, fall back to per-namespace listing
       if (statusCode === 403 && userToken) {
@@ -334,12 +368,12 @@ class KubernetesService {
         return this.listDeploymentsAcrossAllowedNamespaces(userToken);
       }
 
-      if (error?.message === 'HTTP request failed' || statusCode === 404) {
+      if (getK8sErrorMessage(error) === 'HTTP request failed' || statusCode === 404) {
         logger.debug('ModelDeployment CRD not found');
         return [];
       }
 
-      logger.error({ error: error?.message || error }, 'Unexpected error listing deployments');
+      logger.error({ error: getK8sErrorMessage(error) }, 'Unexpected error listing deployments');
       return [];
     }
   }
@@ -361,14 +395,14 @@ class KubernetesService {
       );
 
       return this.convertToDeploymentStatuses(response, namespace);
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
-      if (error?.message === 'HTTP request failed' || statusCode === 404 || statusCode === 403) {
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
+      if (getK8sErrorMessage(error) === 'HTTP request failed' || statusCode === 404 || statusCode === 403) {
         logger.debug({ namespace }, 'Cannot list deployments in namespace');
         return [];
       }
 
-      logger.error({ error: error?.message || error }, 'Unexpected error listing deployments');
+      logger.error({ error: getK8sErrorMessage(error) }, 'Unexpected error listing deployments');
       return [];
     }
   }
@@ -489,8 +523,8 @@ class KubernetesService {
       const md = response as ModelDeployment;
       const pods = await this.getDeploymentPods(name, namespace);
       return toDeploymentStatus(md, pods);
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         logger.debug({ name, namespace }, 'ModelDeployment not found');
         return null;
@@ -519,8 +553,8 @@ class KubernetesService {
       );
 
       return response as Record<string, unknown>;
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         logger.debug({ name, namespace }, 'ModelDeployment manifest not found');
         return null;
@@ -691,8 +725,8 @@ class KubernetesService {
         crdFound: true,
         message: 'ModelDeployment CRD is installed',
       };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         return {
           installed: false,
@@ -704,7 +738,7 @@ class KubernetesService {
       return {
         installed: false,
         crdFound: false,
-        message: `Error checking CRD: ${error?.message || 'Unknown error'}`,
+        message: `Error checking CRD: ${getK8sErrorMessage(error)}`,
       };
     }
   }
@@ -741,7 +775,7 @@ class KubernetesService {
         installed: true,
         version: extractCRDVersionFromAnnotations(response, annotationKeys),
       };
-    } catch (error: any) {
+    } catch (error) {
       const statusCode = getK8sStatusCode(error);
       if (statusCode !== 404) {
         logger.debug({ error: getK8sErrorMessage(error), crdName }, 'Could not read CRD status');
@@ -773,9 +807,9 @@ class KubernetesService {
           { operationName: 'listInferenceProviderConfigs', maxRetries: 1 }
         );
 
-        const items = (response as any)?.items || [];
+        const items = ((response as { items?: InferenceProviderConfigResource[] })?.items) || [];
         const runtimeEntries = await Promise.all(
-          items.map(async (item: any): Promise<RuntimeStatus> => {
+          items.map(async (item): Promise<RuntimeStatus> => {
             const name = item.metadata?.name || 'unknown';
             const status = item.status || {};
             const annotations = item.metadata?.annotations;
@@ -809,10 +843,10 @@ class KubernetesService {
           })
         );
         runtimes.push(...runtimeEntries);
-      } catch (error: any) {
-        const statusCode = error?.statusCode || error?.response?.statusCode;
+      } catch (error) {
+        const statusCode = getK8sStatusCode(error);
         if (statusCode !== 404) {
-          logger.warn({ error: error?.message || error }, 'Failed to list InferenceProviderConfigs');
+          logger.warn({ error: getK8sErrorMessage(error) }, 'Failed to list InferenceProviderConfigs');
         }
       }
     }
@@ -824,7 +858,7 @@ class KubernetesService {
    * Get a specific InferenceProviderConfig by name from the cluster.
    * Returns the full CRD object or null if not found.
    */
-  async getInferenceProviderConfig(name: string): Promise<any | null> {
+  async getInferenceProviderConfig(name: string): Promise<InferenceProviderConfigResource | null> {
     try {
       const response = await withRetry(
         () => this.customObjectsApi.getClusterCustomObject({
@@ -835,7 +869,8 @@ class KubernetesService {
         }),
         { operationName: `getInferenceProviderConfig:${name}`, maxRetries: 1 }
       );
-      return (response as any).body || response;
+      return ((response as { body?: InferenceProviderConfigResource })?.body
+        || response) as InferenceProviderConfigResource;
     } catch {
       return null;
     }
@@ -904,10 +939,10 @@ class KubernetesService {
         { operationName: 'checkGPUOperatorCRD', maxRetries: 1 }
       );
       crdFound = true;
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode !== 404) {
-        logger.error({ error: error?.message || error }, 'Error checking GPU Operator CRD');
+        logger.error({ error: getK8sErrorMessage(error) }, 'Error checking GPU Operator CRD');
       }
       crdFound = false;
     }
@@ -1087,7 +1122,7 @@ class KubernetesService {
             podName: readyPod.metadata?.name,
           };
         }
-      } catch (error: any) {
+      } catch (error) {
         const statusCode = getK8sStatusCode(error);
         if (statusCode !== 404 && !firstError) {
           firstError = getK8sErrorMessage(error);
@@ -1113,7 +1148,7 @@ class KubernetesService {
             podName: readyPod.metadata?.name,
           };
         }
-      } catch (error: any) {
+      } catch (error) {
         const statusCode = getK8sStatusCode(error);
         if (statusCode !== 404 && !firstError) {
           firstError = getK8sErrorMessage(error);
@@ -1766,16 +1801,15 @@ class KubernetesService {
 
       // Strip ANSI color codes from logs
       const logs = response || '';
-      // eslint-disable-next-line no-control-regex
       const ansiRegex = /\x1b\[[0-9;]*m/g;
       return logs.replace(ansiRegex, '');
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         throw new Error(`Pod '${podName}' not found in namespace '${namespace}'`);
       }
       logger.error({ error, podName, namespace }, 'Error getting pod logs');
-      throw new Error(`Failed to get logs for pod '${podName}': ${error?.message || 'Unknown error'}`);
+      throw new Error(`Failed to get logs for pod '${podName}': ${getK8sErrorMessage(error)}`);
     }
   }
 
@@ -1823,8 +1857,8 @@ class KubernetesService {
         { operationName: 'createService' }
       );
       logger.info({ name: `${name}-vllm`, namespace, port, targetPort }, 'Created vLLM service');
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 409) {
         // Service already exists, that's fine
         logger.debug({ name: `${name}-vllm`, namespace }, 'Service already exists');
@@ -1844,8 +1878,8 @@ class KubernetesService {
         { operationName: 'deleteService' }
       );
       logger.info({ name, namespace }, 'Deleted service');
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         // Service doesn't exist, that's fine
         logger.debug({ name, namespace }, 'Service not found (already deleted)');
@@ -1869,14 +1903,14 @@ class KubernetesService {
       );
       logger.info({ crdName }, 'CRD deleted successfully');
       return { success: true, message: `CRD ${crdName} deleted` };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         logger.debug({ crdName }, 'CRD not found (already deleted)');
         return { success: true, message: `CRD ${crdName} not found (already deleted)` };
       }
       logger.error({ error, crdName }, 'Error deleting CRD');
-      return { success: false, message: `Failed to delete CRD ${crdName}: ${error?.message || 'Unknown error'}` };
+      return { success: false, message: `Failed to delete CRD ${crdName}: ${getK8sErrorMessage(error)}` };
     }
   }
 
@@ -1898,14 +1932,14 @@ class KubernetesService {
       );
       logger.info({ name }, 'InferenceProviderConfig deleted successfully');
       return { success: true, message: `InferenceProviderConfig ${name} deleted` };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         logger.debug({ name }, 'InferenceProviderConfig not found (already deleted)');
         return { success: true, message: `InferenceProviderConfig ${name} not found (already deleted)` };
       }
       logger.error({ error, name }, 'Error deleting InferenceProviderConfig');
-      return { success: false, message: `Failed to delete InferenceProviderConfig ${name}: ${error?.message || 'Unknown error'}` };
+      return { success: false, message: `Failed to delete InferenceProviderConfig ${name}: ${getK8sErrorMessage(error)}` };
     }
   }
 
@@ -1930,14 +1964,14 @@ class KubernetesService {
       );
       logger.info({ namespace }, 'Namespace deletion initiated');
       return { success: true, message: `Namespace ${namespace} deletion initiated` };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sStatusCode(error);
       if (statusCode === 404) {
         logger.debug({ namespace }, 'Namespace not found (already deleted)');
         return { success: true, message: `Namespace ${namespace} not found (already deleted)` };
       }
       logger.error({ error, namespace }, 'Error deleting namespace');
-      return { success: false, message: `Failed to delete namespace ${namespace}: ${error?.message || 'Unknown error'}` };
+      return { success: false, message: `Failed to delete namespace ${namespace}: ${getK8sErrorMessage(error)}` };
     }
   }
 
@@ -1989,8 +2023,8 @@ class KubernetesService {
         { operationName: 'listGateways', maxRetries: 1 }
       );
       items = (response as { items?: GatewayItem[] }).items || [];
-    } catch (error: any) {
-      logger.debug({ error: error?.message }, 'Could not list Gateway resources');
+    } catch (error) {
+      logger.debug({ error: getK8sErrorMessage(error) }, 'Could not list Gateway resources');
       return { available: false };
     }
 
@@ -2046,8 +2080,8 @@ class KubernetesService {
           });
         }
       }
-    } catch (error: any) {
-      logger.debug({ error: error?.message }, 'Could not list ModelDeployments for gateway models');
+    } catch (error) {
+      logger.debug({ error: getK8sErrorMessage(error) }, 'Could not list ModelDeployments for gateway models');
     }
 
     return models;
@@ -2184,7 +2218,7 @@ class KubernetesService {
     const proxyUrl = `${cluster.server}/api/v1/namespaces/${encodeURIComponent(namespace)}/services/${encodeURIComponent(serviceName)}:${port}/proxy/${path}`;
 
     // Extract auth headers from KubeConfig
-    const authOpts = await kubeConfig.applyToFetchOptions({ headers: {} } as any);
+    const authOpts = await kubeConfig.applyToFetchOptions({ headers: {} } as https.RequestOptions);
 
     // Extract TLS material (CA, client cert/key, SNI, verification mode) via the
     // shared kubeconfig→Bun mapping, so this raw-`fetch` path and the typed-API
@@ -2196,7 +2230,7 @@ class KubernetesService {
       new Headers(requestInit.headers).forEach((value, key) => headers.set(key, value));
     }
 
-    const fetchOpts: RequestInit & { tls?: Record<string, any> } = {
+    const fetchOpts: RequestInit & { tls?: BunTlsOptions } = {
       ...requestInit,
       headers,
     };

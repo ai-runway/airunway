@@ -2,6 +2,7 @@ import * as k8s from '@kubernetes/client-node';
 import { loadKubeConfig, makeApiClient } from '../lib/kubeconfig';
 import logger from '../lib/logger';
 import { withRetry } from '../lib/retry';
+import { getK8sErrorStatusCode, type K8sApiError } from '../lib/k8s-errors';
 import type { HfSecretStatus, HfUserInfo } from '@airunway/shared';
 import { huggingFaceService } from './huggingface';
 
@@ -41,8 +42,8 @@ class SecretsService {
     try {
       await this.coreV1Api.readNamespace({ name: namespace });
       return true;
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode === 404) {
         // Namespace doesn't exist, create it
         try {
@@ -102,9 +103,9 @@ class SecretsService {
       );
       logger.info({ namespace, secretName: HF_SECRET_NAME }, 'Updated HuggingFace secret');
       return { success: true };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
-      
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
+
       if (statusCode === 404) {
         // Secret doesn't exist, create it
         try {
@@ -114,14 +115,14 @@ class SecretsService {
           );
           logger.info({ namespace, secretName: HF_SECRET_NAME }, 'Created HuggingFace secret');
           return { success: true };
-        } catch (createError: any) {
-          const errorMsg = createError?.message || 'Unknown error';
+        } catch (createError) {
+          const errorMsg = (createError as K8sApiError)?.message || 'Unknown error';
           logger.error({ error: createError, namespace }, 'Failed to create HuggingFace secret');
           return { success: false, error: errorMsg };
         }
       }
-      
-      const errorMsg = error?.message || 'Unknown error';
+
+      const errorMsg = (error as K8sApiError)?.message || 'Unknown error';
       logger.error({ error, namespace }, 'Failed to update HuggingFace secret');
       return { success: false, error: errorMsg };
     }
@@ -140,15 +141,15 @@ class SecretsService {
       );
       logger.info({ namespace, secretName: HF_SECRET_NAME }, 'Deleted HuggingFace secret');
       return { success: true };
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
-      
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
+
       if (statusCode === 404) {
         // Secret doesn't exist, consider it success
         return { success: true };
       }
-      
-      const errorMsg = error?.message || 'Unknown error';
+
+      const errorMsg = (error as K8sApiError)?.message || 'Unknown error';
       logger.error({ error, namespace }, 'Failed to delete HuggingFace secret');
       return { success: false, error: errorMsg };
     }

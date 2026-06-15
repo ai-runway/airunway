@@ -1,4 +1,4 @@
-.PHONY: install dev dev-frontend dev-backend build compile lint test clean help providers-test verify-versions test-verify-versions
+.PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend clean help providers-test verify-versions test-verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
 .PHONY: model-downloader-docker-build setup-gateway cleanup-gateway
 
@@ -41,6 +41,7 @@ help:
 	@echo "  compile-windows        Cross-compile for Windows (x64)"
 	@echo "  lint                   Run linters"
 	@echo "  test                   Run tests"
+	@echo "  test-coverage          Run tests with coverage (frontend + backend)"
 	@echo "  clean                  Remove build artifacts and node_modules"
 	@echo ""
 	@echo "Controller Targets:"
@@ -124,6 +125,18 @@ lint:
 # Testing
 test: verify-versions
 	bun run test
+
+# Testing with coverage (CI entrypoint). Coverage prints to stdout;
+# GitHub step-summary formatting lives in the workflow, not here.
+# Uses `cd <ws> && bun run test:coverage` (not `bun run --filter`) so output
+# stays unprefixed and the coverage tables render cleanly in the CI summary.
+test-coverage: verify-versions test-coverage-backend test-coverage-frontend
+
+test-coverage-backend:
+	cd backend && bun run test:coverage
+
+test-coverage-frontend:
+	cd frontend && bun run test:coverage
 
 # Clean build artifacts
 clean:

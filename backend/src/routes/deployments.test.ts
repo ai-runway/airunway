@@ -5,7 +5,7 @@ import { configService } from '../services/config';
 import { authService } from '../services/auth';
 import { metricsService } from '../services/metrics';
 import { mockServiceMethod } from '../test/helpers';
-import type { MetricsResponse } from '@airunway/shared';
+import type { MetricsResponse, DeploymentConfig } from '@airunway/shared';
 import {
   mockDeployment,
   mockDeploymentWithPendingPod,
@@ -895,7 +895,7 @@ describe('Deployment Routes', () => {
 
   describe('POST /api/deployments', () => {
     test('resolves direct KAITO GGUF deployments to the runner image', async () => {
-      let capturedConfig: any;
+      let capturedConfig: DeploymentConfig | undefined;
 
       restores.push(
         mockServiceMethod(kubernetesService, 'createDeployment', async (config) => {
@@ -940,7 +940,7 @@ describe('Deployment Routes', () => {
     });
 
     test('resolves premade KAITO deployments to the premade image', async () => {
-      let capturedConfig: any;
+      let capturedConfig: DeploymentConfig | undefined;
 
       restores.push(
         mockServiceMethod(kubernetesService, 'createDeployment', async (config) => {

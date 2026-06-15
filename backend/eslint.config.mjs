@@ -1,36 +1,33 @@
-// Flat ESLint config (ESLint v9+). Replaces the old .eslintrc + `--ext` flow,
-// which ESLint v9 removed. TypeScript is linted via the typescript-eslint
-// plugin's `flat/recommended` preset, which bundles the parser, the plugin, and
-// a non-type-checked rule set (fast, low false-positive noise).
-import tseslint from '@typescript-eslint/eslint-plugin';
-import tsparser from '@typescript-eslint/parser';
+// ESLint flat config for the backend (Bun + Hono + TypeScript).
+//
+// ESLint 9+ no longer reads `.eslintrc.*`; this flat config is the replacement.
+// The package is CommonJS (no `"type": "module"`), so this file uses the `.mjs`
+// extension to be loaded as ESM.
+import tseslint from '@typescript-eslint/eslint-plugin'
 
 export default [
-  // Only application source is linted (mirrors the previous `eslint src` scope).
-  {
-    ignores: ['dist/**', 'node_modules/**', '*.config.*', 'coverage/**'],
-  },
+  // Build artifacts, compiled binaries, and generated output are never linted.
+  { ignores: ['dist/**', 'build/**', 'coverage/**'] },
 
-  // typescript-eslint's flat/recommended turns off core rules that clash with
-  // TS (e.g. no-undef), wires up the parser, and enables the recommended rules.
+  // typescript-eslint's recommended flat config wires up the TS parser, the
+  // `@typescript-eslint` plugin, and a sensible rule set. It also turns off
+  // core rules (e.g. `no-undef`) that TypeScript already enforces, so we don't
+  // need the `globals` package for Node/Bun globals like `process` or `Bun`.
   ...tseslint.configs['flat/recommended'],
 
   {
-    files: ['src/**/*.ts'],
-    languageOptions: {
-      parser: tsparser,
-      ecmaVersion: 'latest',
-      sourceType: 'module',
-    },
+    files: ['**/*.ts'],
     rules: {
-      // Pre-existing debt: this codebase predates any ESLint config (the v8→v10
-      // bump first introduced one), so `recommended` surfaces ~120 historical
-      // violations of these two rules — none in newly-written code. Demote them
-      // to warnings so lint is green and CI-usable today, while still surfacing
-      // the backlog for incremental burndown. Promote back to "error" once the
-      // existing hits are cleared.
-      '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-unused-vars': 'warn',
+      // Allow intentionally-unused identifiers when prefixed with `_`
+      // (e.g. unused function params kept for signature/positional reasons).
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
     },
   },
-];
+]

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -426,8 +426,13 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     selectedRuntime === 'dynamo' ? config.namespace : undefined
   )
 
-  // Calculate GPU recommendation based on model characteristics
-  const gpuRecommendation = calculateGpuRecommendation(model, detailedCapacity)
+  // Calculate GPU recommendation based on model characteristics.
+  // Memoized so the object identity is stable across renders, letting effects
+  // depend on it without re-running on every render.
+  const gpuRecommendation = useMemo(
+    () => calculateGpuRecommendation(model, detailedCapacity),
+    [model, detailedCapacity]
+  )
   const currentNodeCount = getNodeCountFromOverrides(config.providerOverrides)
   const currentPipelineParallel = getNumericEngineArg(config.engineArgs, PIPELINE_PARALLEL_SIZE_ARG)
 
@@ -525,9 +530,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       }
     })
   }, [
-    gpuRecommendation.multiNode?.gpusPerNode,
-    gpuRecommendation.multiNode?.nodeCount,
-    gpuRecommendation.multiNode?.pipelineParallelSize,
+    gpuRecommendation.multiNode,
     gpuRecommendation.recommendedGpus,
     selectedRuntime,
     config.engine,
@@ -790,7 +793,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         variant: 'destructive',
       })
     }
-  }, [config, createDeployment, navigate, toast, triggerConfetti, selectedRuntime, kaitoComputeType, kaitoResourceType, selectedPremadeModel, isHuggingFaceGgufModel, isVllmModel, model.id, model.gated, ggufFile, ggufRunMode, maxModelLen, gatewayInfo?.available])
+  }, [config, createDeployment, navigate, toast, triggerConfetti, selectedRuntime, kaitoComputeType, kaitoResourceType, selectedPremadeModel, isHuggingFaceGgufModel, isVllmModel, model.id, ggufFile, ggufRunMode, maxModelLen, gatewayInfo?.available])
 
   const updateConfig = <K extends keyof DeploymentConfig>(
     key: K,

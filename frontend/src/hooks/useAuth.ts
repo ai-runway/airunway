@@ -63,7 +63,7 @@ export function useAuth(): UseAuthReturn {
         username: extractedUsername,
         error: null,
       }));
-    } catch (error) {
+    } catch {
       setState(prev => ({
         ...prev,
         error: 'Failed to save authentication token',

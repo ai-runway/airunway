@@ -10,7 +10,7 @@ import {
   getEngineArchitectures,
 } from './modelCompatibility';
 import { parseParameterCountFromName } from '@airunway/shared';
-import type { Engine, HfApiModelResult } from '@airunway/shared';
+import type { HfApiModelResult } from '@airunway/shared';
 
 describe('inferArchitectureFromModelId', () => {
   test('infers LlamaForCausalLM for llama models', () => {
@@ -275,7 +275,7 @@ describe('processHfModel', () => {
   test('handles auto-gated models', () => {
     const model: HfApiModelResult = {
       id: 'test/auto-gated',
-      gated: 'auto' as any,
+      gated: 'auto',
     };
 
     const result = processHfModel(model);
