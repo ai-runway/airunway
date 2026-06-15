@@ -1178,17 +1178,6 @@ class KubernetesService {
       };
     }
 
-    switch (providerId) {
-      case 'kaito':
-        return this.checkKaitoInstallationStatus();
-      case 'dynamo':
-        return this.checkDynamoInstallationStatus();
-      case 'kuberay':
-        return this.checkKubeRayInstallationStatus();
-      default:
-        break;
-    }
-
     const crds = normalizeHealthCrds(health);
     const operatorPods = normalizeHealthOperatorPods(health);
 
@@ -1199,6 +1188,17 @@ class KubernetesService {
         crds,
         operatorPods,
       );
+    }
+
+    switch (providerId) {
+      case 'kaito':
+        return this.checkKaitoInstallationStatus();
+      case 'dynamo':
+        return this.checkDynamoInstallationStatus();
+      case 'kuberay':
+        return this.checkKubeRayInstallationStatus();
+      default:
+        break;
     }
 
     if (statusReady) {

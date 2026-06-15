@@ -316,6 +316,12 @@ export function parseInstallationAnnotation(config: any, warnings: string[] = []
   return parseJsonAnnotation<any>(config, ANNOTATIONS.installation, warnings) || {};
 }
 
+function missingFields(fields: Record<string, unknown>): string[] {
+  return Object.entries(fields)
+    .filter(([, value]) => !value)
+    .map(([field]) => field);
+}
+
 function normalizeHelmRepos(providerId: string, raw: unknown, warnings: string[]): HelmRepo[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) {
@@ -328,7 +334,10 @@ function normalizeHelmRepos(providerId: string, raw: unknown, warnings: string[]
     const url = nonEmptyString(repo?.url);
     if (!name || !url) {
       warnings.push(`Ignoring malformed Helm repo in ${ANNOTATIONS.installation}`);
-      logger.warn({ provider: providerId, repo }, 'Ignoring malformed Helm repo in provider installation metadata');
+      logger.warn(
+        { provider: providerId, missingFields: missingFields({ name, url }), repoName: name },
+        'Ignoring malformed Helm repo in provider installation metadata',
+      );
       return [];
     }
 
@@ -350,7 +359,14 @@ function normalizeHelmCharts(providerId: string, raw: unknown, warnings: string[
 
     if (!name || !chartRef || !namespace) {
       warnings.push(`Ignoring malformed Helm chart in ${ANNOTATIONS.installation}`);
-      logger.warn({ provider: providerId, chart }, 'Ignoring malformed Helm chart in provider installation metadata');
+      logger.warn(
+        {
+          provider: providerId,
+          missingFields: missingFields({ name, chart: chartRef, namespace }),
+          chartName: name,
+        },
+        'Ignoring malformed Helm chart in provider installation metadata',
+      );
       return [];
     }
 

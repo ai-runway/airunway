@@ -231,16 +231,27 @@ describe('Installation Provider Routes', () => {
     restores.length = 0;
   });
 
+  function withoutHealthAnnotation<T extends { metadata: { annotations: Record<string, string> } }>(config: T): T {
+    const { 'airunway.ai/health': _health, ...annotationsWithoutHealth } = config.metadata.annotations;
+    return {
+      ...config,
+      metadata: {
+        ...config.metadata,
+        annotations: annotationsWithoutHealth,
+      },
+    };
+  }
+
   // ==========================================================================
   // GET /api/installation/providers/:providerId/status
   // ==========================================================================
 
   describe('GET /api/installation/providers/:providerId/status', () => {
-    test('uses live KAITO installation status instead of provider config readiness', async () => {
+    test('falls back to legacy KAITO installation status when health metadata is absent', async () => {
       let kaitoStatusChecks = 0;
 
       restores.push(
-        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => withoutHealthAnnotation(mockInferenceProviderConfig)),
         mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => {
           kaitoStatusChecks += 1;
           return {
@@ -271,16 +282,16 @@ describe('Installation Provider Routes', () => {
       expect(data.helmCommands.some((command: string) => command.includes('--skip-crds'))).toBe(true);
     });
 
-    test('uses live Dynamo installation status for non-KAITO providers', async () => {
+    test('falls back to legacy Dynamo installation status when health metadata is absent', async () => {
       let kaitoStatusChecks = 0;
       let dynamoStatusChecks = 0;
-      const nonKaitoConfig = {
+      const nonKaitoConfig = withoutHealthAnnotation({
         ...createDynamoProviderConfig(),
         status: {
           ready: false,
           version: '1.2.3',
         },
-      };
+      });
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => nonKaitoConfig),
@@ -435,7 +446,7 @@ describe('Installation Provider Routes', () => {
 
     test('surfaces shim refuse-fast message when UpstreamReady=False is fresh', async () => {
       const freshHeartbeat = new Date(Date.now() - 30_000).toISOString();
-      const configWithRefuseFast = {
+      const configWithRefuseFast = withoutHealthAnnotation({
         ...mockInferenceProviderConfig,
         status: {
           ready: false,
@@ -450,7 +461,7 @@ describe('Installation Provider Routes', () => {
             },
           ],
         },
-      };
+      });
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => configWithRefuseFast),
@@ -974,6 +985,7 @@ describe('Gateway Installation Routes', () => {
     restores.forEach((r) => r());
     restores.length = 0;
   });
+
 
   // ==========================================================================
   // GET /api/installation/gateway/status
