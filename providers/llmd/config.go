@@ -44,17 +44,18 @@ const (
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
 
-	// LLMDSchedulerImage is the llm-d Router Endpoint Picker (formerly known
-	// as the llm-d Inference Scheduler) image used as the EPP for all llm-d
-	// ModelDeployments. The image source is github.com/llm-d/llm-d-router.
-	LLMDSchedulerImage = "ghcr.io/llm-d/llm-d-router-endpoint-picker:0.0.3"
+	// LLMDSchedulerImage is the llm-d Inference Scheduler image used as the
+	// EPP for all llm-d ModelDeployments. Source:
+	// github.com/llm-d/llm-d-inference-scheduler.
+	LLMDSchedulerImage = "ghcr.io/llm-d/llm-d-inference-scheduler:v0.6.0"
 
 	// LLMDSchedulerDefaultConfig is the default EndpointPickerConfig shipped
 	// with the llm-d provider. It mirrors deploy/config/epp-config.yaml from
-	// the upstream llm-d-router repository: a heuristic prefix-cache scorer
-	// combined with a decode filter and max-score picker. It does NOT require
-	// any special vLLM flags (--kv-events-config / precise prefix cache).
-	LLMDSchedulerDefaultConfig = `apiVersion: llm-d.ai/v1alpha1
+	// llm-d-inference-scheduler: a heuristic prefix-cache scorer
+	// combined with a decode filter and max-score picker. It does NOT
+	// require any special vLLM flags (--kv-events-config / precise prefix
+	// cache).
+	LLMDSchedulerDefaultConfig = `apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: prefix-cache-scorer
