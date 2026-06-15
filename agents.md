@@ -96,6 +96,14 @@ plain GFM, not MDX. Anything in `{curly braces}` or bare `<angle-tags>` in a
 - If errors are found: Fix them before proceeding
 - Never hand back to the user with syntax or compile errors
 
+## Continuous Review
+
+For non-trivial code changes, run `$autoreview` (`.agents/skills/autoreview/SKILL.md`) before final/commit/ship and keep going until there are no accepted/actionable findings, unless the change is trivial/docs-only, equivalent manual review already happened, or the human opts out.
+
+- Treat review output as advisory: verify every finding against the real code path before changing code.
+- If review-triggered fixes change code, rerun focused tests and rerun `$autoreview`.
+- Format before review when formatting can move line locations; focused tests and review may run in parallel only after formatting is stable.
+
 ## CRD Reference
 
 ### ModelDeployment
@@ -155,6 +163,15 @@ Read these files **only when relevant** to your task:
 | [docs/csi-azure-lustre.md](docs/csi-azure-lustre.md) | Installing Azure Lustre CSI driver on AKS |
 | [docs/standards.md](docs/standards.md) | Code style questions (prefer running linters instead) |
 | [plugins/headlamp/README.md](plugins/headlamp/README.md) | Headlamp plugin development, patterns, components |
+
+## GitHub PRs & Issues
+
+Before creating or updating a GitHub PR or issue body for agent-authored work, read `$agent-transcript` (`.agents/skills/agent-transcript/SKILL.md`) if available and check for a safe local session transcript.
+
+- If a high-confidence transcript is found, ask exactly: "Include a redacted agent transcript? It helps reviewers and can make the PR easier to prioritize. I can open a local preview first."
+- Never upload raw logs. Include an `## Agent Transcript` section only after human approval and only with a sanitized, scoped transcript.
+- Drop system/developer prompts, reasoning, raw tool outputs, env, cookies, tokens, auth URLs, secrets, broad local paths, and unrelated session turns.
+- If no safe transcript exists or the human declines, continue without a transcript and do not add a placeholder section.
 
 ## Security Rules
 
