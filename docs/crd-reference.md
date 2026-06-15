@@ -131,11 +131,24 @@ status:
   version: "dynamo-provider:v0.2.0"
 ```
 
-### Annotations
+### Provider Metadata and Capabilities Annotations
+
+Providers should declare scheduling capabilities in `spec.capabilities`. They may also mirror display and discovery metadata in annotations for dashboard clients and older integrations.
 
 | Annotation | Type | Description |
 |---|---|---|
-| `airunway.ai/documentation` | string | URL to provider documentation |
+| `airunway.ai/display-name` | string | Human-friendly provider name shown in the UI. |
+| `airunway.ai/description` | string | Short provider description shown in runtime/provider lists. |
+| `airunway.ai/default-namespace` | string | Default namespace suggested by the UI for provider workloads or installation. |
+| `airunway.ai/documentation-url` | string | Canonical URL to provider documentation. |
+| `airunway.ai/documentation` | string | Backward-compatible documentation URL fallback. |
+| `airunway.ai/capabilities` | JSON string | Optional compatibility mirror of provider capabilities. New controllers should keep `spec.capabilities` authoritative. |
+| `airunway.ai/health` | JSON string | Optional CRD/operator/status probes used by the dashboard to check live provider health. |
+
+### Installation Metadata
+
+| Annotation | Type | Description |
+|---|---|---|
 | `airunway.ai/installation` | JSON string | Installation metadata (description, defaultNamespace, helmRepos, helmCharts, steps). The backend parses this JSON to show installation commands and steps in the UI. |
 
 ## See also

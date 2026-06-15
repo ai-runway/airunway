@@ -206,9 +206,13 @@ function normalizeHealthCrds(health?: ProviderHealthConfig): HealthCrdProbe[] {
     const name = crd?.name?.trim();
     if (!name) return [];
 
+    const displayName = typeof crd.displayName === 'string'
+      ? crd.displayName.trim() || undefined
+      : undefined;
+
     return [{
       name,
-      displayName: crd.displayName?.trim() || undefined,
+      displayName,
     }];
   });
 }

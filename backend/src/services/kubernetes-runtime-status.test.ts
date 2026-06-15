@@ -471,6 +471,24 @@ describe('KubernetesService - Runtime Status', () => {
     expect(status.message).toBe('Custom Provider CRD not found');
   });
 
+  test('ignores malformed health CRD display names instead of throwing', async () => {
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDExists', async () => false),
+    );
+
+    const status = await kubernetesService.checkProviderInstallationStatus(
+      'bad-health-provider',
+      { ready: false },
+      'Bad Health Provider',
+      { crds: [{ name: 'badhealth.example.com', displayName: 123 }] } as any,
+      true,
+    );
+
+    expect(status.installed).toBe(false);
+    expect(status.crdFound).toBe(false);
+    expect(status.message).toBe('badhealth.example.com not found');
+  });
+
   test('reports KAITO as not fully installed when the CRD exists but no ready operator pod is found', async () => {
     restores.push(
       mockServiceMethod(kubernetesService, 'checkCRDExists', async () => true),
