@@ -161,13 +161,11 @@ spec:
                       properties:
                         containerSecurityContext:
                           description: |-
-                            containerSecurityContext is a container-level SecurityContext
-                            override applied to the agent's primary container. Use this for
-                            settings that live on the container (e.g. readOnlyRootFilesystem,
-                            allowPrivilegeEscalation, capabilities) which cannot be expressed
-                            via the pod-level securityContext. Provider defaults (from the
-                            AgentProviderConfig catalog entry) are used when this is unset;
-                            non-nil fields here override the provider defaults field-by-field.
+                            containerSecurityContext is the container-level SecurityContext applied
+                            to the agent's primary container, for settings that live on the
+                            container (e.g. readOnlyRootFilesystem, allowPrivilegeEscalation,
+                            capabilities) which cannot be expressed via the pod-level
+                            securityContext.
                           properties:
                             allowPrivilegeEscalation:
                               description: |-
@@ -370,11 +368,9 @@ spec:
                           type: string
                         securityContext:
                           description: |-
-                            securityContext is a pod-level SecurityContext override that the
-                            provider applies to the rendered agent workload. Provider defaults
-                            (from the AgentProviderConfig catalog entry) are used when this is
-                            unset; non-nil fields here override the provider defaults
-                            field-by-field.
+                            securityContext is the pod-level SecurityContext the provider applies
+                            to the rendered agent workload (pod-scoped fields such as runAsNonRoot,
+                            fsGroup, and seccompProfile).
                           properties:
                             appArmorProfile:
                               description: |-

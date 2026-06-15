@@ -48,15 +48,6 @@ const (
 	ModelBindingModeExternalAPI ModelBindingMode = "externalAPI"
 )
 
-// PodSecurityStandard mirrors the Kubernetes Pod Security Standards.
-// +kubebuilder:validation:Enum=privileged;baseline;restricted
-type PodSecurityStandard string
-
-const (
-	PodSecurityStandardPrivileged PodSecurityStandard = "privileged"
-	PodSecurityStandardBaseline   PodSecurityStandard = "baseline"
-	PodSecurityStandardRestricted PodSecurityStandard = "restricted"
-)
 
 // AgentFrameworkRef identifies which agent framework provider should
 // reconcile this AgentDeployment. The name must match an
@@ -198,55 +189,6 @@ type ModelBinding struct {
 	// externalAPI binds to an external OpenAI-compatible endpoint.
 	// +optional
 	ExternalAPI *ExternalAPIBinding `json:"externalAPI,omitempty"`
-}
-
-// AgentSecuritySpec captures security/isolation policy for the agent.
-//
-// This is provider-owned configuration: framework providers ship a
-// known-good baseline as the recommendedSecurity of each
-// AgentProviderConfig catalog entry, and apply it when rendering the
-// agent workload. It is intentionally NOT exposed on AgentDeployment —
-// an AgentDeployment declares intent ("which agent, bound to which
-// models"), while how the agent runs (security posture, isolation) is
-// the provider's responsibility, mirroring how ModelDeployment keeps
-// pod-level runtime details out of the user-facing spec. If a concrete
-// per-deployment need emerges, this can be reintroduced later as
-// intent-level fields rather than raw pass-throughs.
-//
-// Two SecurityContext shapes are exposed because Kubernetes splits
-// security settings between the pod and the container:
-//   - PodSecurityContext (securityContext) controls pod-scoped fields
-//     such as runAsNonRoot, runAsUser, fsGroup, and seccompProfile.
-//   - SecurityContext (containerSecurityContext) controls
-//     container-scoped fields such as readOnlyRootFilesystem,
-//     allowPrivilegeEscalation, and capabilities.
-//
-// Frameworks such as OpenClaw need readOnlyRootFilesystem=false (a
-// container-scoped field), so both shapes must be representable.
-type AgentSecuritySpec struct {
-	// podSecurityStandard names the Kubernetes Pod Security Standard the
-	// rendered pod should comply with. Providers translate this into
-	// concrete defaults (e.g. dropped capabilities, no host namespaces).
-	// +optional
-	PodSecurityStandard PodSecurityStandard `json:"podSecurityStandard,omitempty"`
-
-	// securityContext is a pod-level SecurityContext override that the
-	// provider applies to the rendered agent workload. Provider defaults
-	// (from the AgentProviderConfig catalog entry) are used when this is
-	// unset; non-nil fields here override the provider defaults
-	// field-by-field.
-	// +optional
-	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
-
-	// containerSecurityContext is a container-level SecurityContext
-	// override applied to the agent's primary container. Use this for
-	// settings that live on the container (e.g. readOnlyRootFilesystem,
-	// allowPrivilegeEscalation, capabilities) which cannot be expressed
-	// via the pod-level securityContext. Provider defaults (from the
-	// AgentProviderConfig catalog entry) are used when this is unset;
-	// non-nil fields here override the provider defaults field-by-field.
-	// +optional
-	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
 
 // AgentResourceSpec describes compute resources requested for the agent.

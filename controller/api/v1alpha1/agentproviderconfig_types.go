@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -141,6 +142,56 @@ type AgentCatalogItem struct {
 	// every framework's schema.
 	// +optional
 	Template *runtime.RawExtension `json:"template,omitempty"`
+}
+
+// PodSecurityStandard mirrors the Kubernetes Pod Security Standards.
+// +kubebuilder:validation:Enum=privileged;baseline;restricted
+type PodSecurityStandard string
+
+const (
+	PodSecurityStandardPrivileged PodSecurityStandard = "privileged"
+	PodSecurityStandardBaseline   PodSecurityStandard = "baseline"
+	PodSecurityStandardRestricted PodSecurityStandard = "restricted"
+)
+
+// AgentSecuritySpec captures the security/isolation posture a framework
+// provider applies when rendering an agent workload. It is shipped as the
+// recommendedSecurity of an AgentProviderConfig catalog entry — security is
+// provider-owned rather than set per AgentDeployment, mirroring how
+// ModelDeployment keeps pod-level runtime details out of the user-facing spec.
+// If a concrete per-deployment need emerges, it can be reintroduced on the
+// deployment spec later as intent-level fields rather than raw pass-throughs.
+//
+// Two SecurityContext shapes are exposed because Kubernetes splits security
+// settings between the pod and the container:
+//   - PodSecurityContext (securityContext) controls pod-scoped fields such as
+//     runAsNonRoot, runAsUser, fsGroup, and seccompProfile.
+//   - SecurityContext (containerSecurityContext) controls container-scoped
+//     fields such as readOnlyRootFilesystem, allowPrivilegeEscalation, and
+//     capabilities.
+//
+// Frameworks such as OpenClaw need readOnlyRootFilesystem=false (a
+// container-scoped field), so both shapes must be representable.
+type AgentSecuritySpec struct {
+	// podSecurityStandard names the Kubernetes Pod Security Standard the
+	// rendered pod should comply with. Providers translate this into
+	// concrete defaults (e.g. dropped capabilities, no host namespaces).
+	// +optional
+	PodSecurityStandard PodSecurityStandard `json:"podSecurityStandard,omitempty"`
+
+	// securityContext is the pod-level SecurityContext the provider applies
+	// to the rendered agent workload (pod-scoped fields such as runAsNonRoot,
+	// fsGroup, and seccompProfile).
+	// +optional
+	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+
+	// containerSecurityContext is the container-level SecurityContext applied
+	// to the agent's primary container, for settings that live on the
+	// container (e.g. readOnlyRootFilesystem, allowPrivilegeEscalation,
+	// capabilities) which cannot be expressed via the pod-level
+	// securityContext.
+	// +optional
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
 
 // AgentProviderConfigSpec defines the registration for an agent
