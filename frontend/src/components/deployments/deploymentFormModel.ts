@@ -310,8 +310,49 @@ export function setDynamoParallelismEngineArgs(
 }
 
 
+export function applyGpuPerReplicaChangeToConfig(
+  prev: DeploymentConfig,
+  options: {
+    selectedRuntime: RuntimeId
+    gpuCount: number
+    estimatedMemoryGb?: number
+    gpuMemoryGb?: number
+  }
+): DeploymentConfig {
+  if (
+    options.selectedRuntime === 'dynamo' &&
+    prev.engine === 'vllm' &&
+    options.estimatedMemoryGb &&
+    options.gpuMemoryGb
+  ) {
+    const multiNodeResult = calculateMultiNode(
+      options.estimatedMemoryGb,
+      options.gpuMemoryGb,
+      options.gpuCount
+    )
 
+    if (multiNodeResult) {
+      return {
+        ...prev,
+        resources: { ...prev.resources, gpu: options.gpuCount },
+        providerOverrides: buildDynamoMultiNodeOverrides(multiNodeResult.nodeCount),
+        engineArgs: setDynamoParallelismEngineArgs(prev.engineArgs, multiNodeResult),
+      }
+    }
 
+    return {
+      ...prev,
+      resources: { ...prev.resources, gpu: options.gpuCount },
+      providerOverrides: undefined,
+      engineArgs: setDynamoParallelismEngineArgs(prev.engineArgs, null),
+    }
+  }
+
+  return {
+    ...prev,
+    resources: { ...prev.resources, gpu: options.gpuCount },
+  }
+}
 
 export function selectPreferredGgufFile(files: string[], currentSelection = ''): string {
   if (currentSelection || files.length === 0) {

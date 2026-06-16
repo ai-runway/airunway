@@ -11,6 +11,7 @@ import {
   calculateSelectedGpus,
   applyRuntimeChangeToConfig,
   applyDeploymentModeChangeToConfig,
+  applyGpuPerReplicaChangeToConfig,
   getAIConfigRecommendedValues,
   getAIConfiguratorAppliedToastDescription,
   getAvailableEnginesForRuntime,
@@ -180,6 +181,73 @@ describe('deploymentFormModel', () => {
     const aggregated = applyDeploymentModeChangeToConfig(disaggregated, 'aggregated')
     expect(aggregated.mode).toBe('aggregated')
     expect(aggregated.engineArgs).toEqual({ custom: 'keep' })
+  })
+
+  it('updates GPU-per-replica and recalculates Dynamo multi-node topology when applicable', () => {
+    const next = applyGpuPerReplicaChangeToConfig(baseConfig({
+      engine: 'vllm',
+      resources: { gpu: 8 },
+      providerOverrides: { spec: { services: { VllmWorker: { multinode: { nodeCount: 2 } } } } },
+      engineArgs: {
+        [TENSOR_PARALLEL_SIZE_ARG]: '8',
+        [PIPELINE_PARALLEL_SIZE_ARG]: '2',
+        custom: 'keep',
+      },
+    }), {
+      selectedRuntime: 'dynamo',
+      gpuCount: 4,
+      estimatedMemoryGb: 900,
+      gpuMemoryGb: 80,
+    })
+
+    expect(next.resources?.gpu).toBe(4)
+    expect(getNodeCountFromOverrides(next.providerOverrides)).toBe(3)
+    expect(next.engineArgs).toEqual({
+      custom: 'keep',
+      [TENSOR_PARALLEL_SIZE_ARG]: '4',
+      [PIPELINE_PARALLEL_SIZE_ARG]: '3',
+    })
+  })
+
+  it('clears Dynamo multi-node topology when GPU-per-replica no longer needs multiple nodes', () => {
+    const next = applyGpuPerReplicaChangeToConfig(baseConfig({
+      engine: 'vllm',
+      resources: { gpu: 4 },
+      providerOverrides: { spec: { services: { VllmWorker: { multinode: { nodeCount: 3 } } } } },
+      engineArgs: {
+        [TENSOR_PARALLEL_SIZE_ARG]: '4',
+        [PIPELINE_PARALLEL_SIZE_ARG]: '3',
+        custom: 'keep',
+      },
+    }), {
+      selectedRuntime: 'dynamo',
+      gpuCount: 8,
+      estimatedMemoryGb: 100,
+      gpuMemoryGb: 80,
+    })
+
+    expect(next.resources?.gpu).toBe(8)
+    expect(next.providerOverrides).toBeUndefined()
+    expect(next.engineArgs).toEqual({ custom: 'keep' })
+  })
+
+  it('updates GPU-per-replica without topology changes for non-Dynamo or non-vLLM configs', () => {
+    const next = applyGpuPerReplicaChangeToConfig(baseConfig({
+      provider: 'kuberay',
+      engine: 'vllm',
+      resources: { gpu: 1 },
+      providerOverrides: { keep: true },
+      engineArgs: { custom: 'keep' },
+    }), {
+      selectedRuntime: 'kuberay',
+      gpuCount: 2,
+      estimatedMemoryGb: 900,
+      gpuMemoryGb: 80,
+    })
+
+    expect(next.resources?.gpu).toBe(2)
+    expect(next.providerOverrides).toEqual({ keep: true })
+    expect(next.engineArgs).toEqual({ custom: 'keep' })
   })
 
   it('applies aggregated AI Configurator recommendations including Dynamo parallelism', () => {

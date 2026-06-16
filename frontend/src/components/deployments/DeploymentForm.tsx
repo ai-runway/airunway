@@ -25,7 +25,7 @@ import { DeploymentOptionsPanel } from './DeploymentOptionsPanel'
 import { RuntimeSelectionPanel } from './RuntimeSelectionPanel'
 import { DeploymentModePanel } from './DeploymentModePanel'
 import { prepareGgufImageRef } from './deploymentFormSubmit'
-import { calculateGpuRecommendation, calculateMultiNode } from '@/lib/gpu-recommendations'
+import { calculateGpuRecommendation } from '@/lib/gpu-recommendations'
 import {
   FP8_ARG_ENGINES,
   KV_CACHE_DTYPE_ARG,
@@ -35,6 +35,7 @@ import {
   TENSOR_PARALLEL_SIZE_ARG,
   applyRuntimeChangeToConfig,
   applyDeploymentModeChangeToConfig,
+  applyGpuPerReplicaChangeToConfig,
   buildDeploymentFormConfig,
   buildDynamoMultiNodeOverrides,
   applyAIConfiguratorResultToConfig,
@@ -694,32 +695,12 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         onReplicasChange={(value) => updateConfig('replicas', value)}
         onGpuPerReplicaChange={(value) => {
           setTopologyManagedByAIConfig(false)
-          const estimatedMem = gpuRecommendation.estimatedMemoryGb
-          const gpuMem = detailedCapacity?.totalMemoryGb
-
-          if (selectedRuntime === 'dynamo' && config.engine === 'vllm' && estimatedMem && gpuMem) {
-            const multiNodeResult = calculateMultiNode(estimatedMem, gpuMem, value)
-            if (multiNodeResult) {
-              setConfig(prev => ({
-                ...prev,
-                resources: { ...prev.resources, gpu: value },
-                providerOverrides: buildDynamoMultiNodeOverrides(multiNodeResult.nodeCount),
-                engineArgs: setDynamoParallelismEngineArgs(prev.engineArgs, multiNodeResult),
-              }))
-            } else {
-              setConfig(prev => ({
-                ...prev,
-                resources: { ...prev.resources, gpu: value },
-                providerOverrides: undefined,
-                engineArgs: setDynamoParallelismEngineArgs(prev.engineArgs, null),
-              }))
-            }
-          } else {
-            setConfig(prev => ({
-              ...prev,
-              resources: { ...prev.resources, gpu: value },
-            }))
-          }
+          setConfig(prev => applyGpuPerReplicaChangeToConfig(prev, {
+            selectedRuntime,
+            gpuCount: value,
+            estimatedMemoryGb: gpuRecommendation.estimatedMemoryGb,
+            gpuMemoryGb: detailedCapacity?.totalMemoryGb,
+          }))
         }}
         onRouterModeChange={(value) => updateConfig('routerMode', value)}
         onPrefillReplicasChange={(value) => updateConfig('prefillReplicas', value)}
