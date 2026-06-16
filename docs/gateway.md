@@ -264,10 +264,10 @@ spec:
 
 Some inference providers (e.g., NVIDIA Dynamo, llm-d) have native Gateway API Inference Extension support with their own InferencePool and Endpoint Picker (EPP). These providers deploy specialized EPPs with capabilities beyond the generic upstream EPP — for example, Dynamo's EPP uses **KV-cache-aware scoring** to route requests to endpoints with the highest KV cache hit probability.
 
-When a provider declares gateway capabilities in its `InferenceProviderConfig`, the controller adapts what it creates. Two extension points exist and can be used independently:
+When a provider declares gateway capabilities in its `InferenceProviderConfig`, the controller adapts what it creates. Two extension points exist:
 
 1. **Full delegation** (`managesInferencePool: true`): the provider owns both the InferencePool and the EPP. The controller skips creating either and only wires the HTTPRoute. Used by Dynamo.
-2. **EPP customization** (`endpointPicker: { image, configData }`): the controller still creates the InferencePool and EPP scaffolding, but substitutes the provider's EPP image and plugin configuration. Used by llm-d.
+2. **EPP customization** (`endpointPicker: { image, configData }`): the controller still creates the InferencePool, EPP & scaffolding, but substitutes the provider's EPP image and plugin configuration. Used by llm-d.
 
 `endpointPicker` is ignored when `managesInferencePool: true` — full delegation supersedes any EPP override.
 
@@ -304,7 +304,7 @@ The controller adapts its reconciliation based on these fields:
 
 | Field | When set | When unset / absent |
 |---|---|---|
-| `managesInferencePool: true` | Controller waits for the provider's InferencePool to exist, then uses it as the HTTPRoute backend. Skips `reconcileInferencePool()`, `reconcileEPP()`, and `labelModelPods()`. | Controller creates and owns the InferencePool and the EPP (default behavior). |
+| `managesInferencePool` | When set to `true`, controller waits for the provider's InferencePool to exist, then uses it as the HTTPRoute backend. Skips `reconcileInferencePool()`, `reconcileEPP()`, and `labelModelPods()`. | Controller creates and owns the InferencePool and the EPP (default behavior). |
 | `endpointPicker.image` / `endpointPicker.configData` | Controller still creates the InferencePool and EPP Deployment/Service, but the EPP container uses the provider's image and the EPP ConfigMap carries `configData` as `default-plugins.yaml`. | Controller deploys the generic upstream GAIE EPP image with an empty plugin config. |
 
 The HTTPRoute is **always** managed by the controller regardless of provider capabilities.

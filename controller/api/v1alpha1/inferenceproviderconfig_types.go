@@ -86,16 +86,16 @@ type ProviderCapabilities struct {
 //     accordingly. The controller does not create an InferencePool or EPP itself.
 //
 //  2. Endpoint Picker customization. When EndpointPicker is set, the controller
-//     still creates the default InferencePool and the EPP scaffolding
+//     still creates the default InferencePool and manages the EPP & scaffolding
 //     (ServiceAccount, Role, RoleBinding, ConfigMap, Deployment, Service), but
 //     substitutes the provider-supplied EPP image and plugin config. This lets a
 //     provider ship its own scheduler (e.g. the llm-d Endpoint Picker with its
 //     own scoring plugins) without re-implementing the surrounding RBAC and
 //     plumbing.
 //
-// The two extension points are independent. A provider may use either, both,
-// or neither. EndpointPicker is ignored when ManagesInferencePool is true (the
-// provider is then expected to manage the EPP itself).
+// The two extension points can be specified independently, but
+// ManagesInferencePool takes precedence: when it is true, EndpointPicker is
+// ignored (the provider is then expected to manage the EPP itself).
 type GatewayCapabilities struct {
 	// managesInferencePool indicates that the provider's operator creates and
 	// owns the GAIE InferencePool (and EPP) for ModelDeployments using this

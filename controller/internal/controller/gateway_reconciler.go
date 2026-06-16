@@ -396,6 +396,8 @@ func resolveProviderPoolField(pattern, mdName, mdNamespace, fallback string) str
 // for a ModelDeployment's InferencePool. When overrides is non-nil, its Image
 // and ConfigData take precedence over the controller's defaults.
 func (r *ModelDeploymentReconciler) reconcileEPP(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, overrides *airunwayv1alpha1.EndpointPickerCapabilities) error {
+	logger := log.FromContext(ctx)
+
 	eppName := md.Name + "-epp"
 	eppPort := r.GatewayDetector.EPPServicePort
 	if eppPort == 0 {
@@ -500,6 +502,7 @@ func (r *ModelDeploymentReconciler) reconcileEPP(ctx context.Context, md *airunw
 kind: EndpointPickerConfig
 `
 		if overrides != nil && overrides.ConfigData != "" {
+			logger.V(1).Info("Using provider overrides for EPP plugins config")
 			pluginsYAML = overrides.ConfigData
 		}
 		cm.Data = map[string]string{
@@ -962,7 +965,8 @@ func (r *ModelDeploymentReconciler) labelModelPods(ctx context.Context, md *airu
 
 	// List pods matching the service selector
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
+	if err := r.List(
+		ctx, &pods,
 		client.InNamespace(md.Namespace),
 		client.MatchingLabels(svc.Spec.Selector),
 	); err != nil {
