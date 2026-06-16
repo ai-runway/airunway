@@ -271,6 +271,19 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 		))
 	}
 
+	// Reject a launch flag set in both spec.engine.args and spec.engine.extraArgs
+	// at admission, so the conflict fails the apply/patch synchronously instead of
+	// being admitted and then surfacing asynchronously as a Failed reconcile. The
+	// provider transforms re-check this as a backstop. Provider-agnostic: the
+	// provider is frequently auto-selected and unknown at admission time.
+	if err := spec.ValidateEngineArgs(); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			specPath.Child("engine", "extraArgs"),
+			spec.Engine.ExtraArgs,
+			err.Error(),
+		))
+	}
+
 	// Validate model.id is required for huggingface source
 	if spec.Model.Source == airunwayv1alpha1.ModelSourceHuggingFace || spec.Model.Source == "" {
 		if spec.Model.ID == "" {

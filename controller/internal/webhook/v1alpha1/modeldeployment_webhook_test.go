@@ -370,6 +370,39 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(warnings).To(BeEmpty())
 		})
 
+		It("Should reject a flag set in both engine.args and engine.extraArgs on create", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Args = map[string]string{"tensor-parallel-size": "4"}
+			obj.Spec.Engine.ExtraArgs = []string{"--tensor-parallel-size=2"}
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("tensor-parallel-size"))
+			Expect(err.Error()).To(ContainSubstring("spec.engine.args"))
+			Expect(err.Error()).To(ContainSubstring("spec.engine.extraArgs"))
+		})
+
+		It("Should reject a flag set in both engine.args and engine.extraArgs on update", func() {
+			oldObj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Args = map[string]string{"tensor-parallel-size": "4"}
+			obj.Spec.Engine.ExtraArgs = []string{"--tensor-parallel-size", "2"}
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("tensor-parallel-size"))
+		})
+
+		It("Should admit disjoint engine.args and engine.extraArgs", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Args = map[string]string{"gpu-memory-utilization": "0.9"}
+			obj.Spec.Engine.ExtraArgs = []string{"--enable-chunked-prefill", "--max-num-seqs=64"}
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("Should admit a single modelCache volume", func() {
 			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
 			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
