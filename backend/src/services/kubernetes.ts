@@ -6,7 +6,13 @@ import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient } from '../lib/kubeconfig';
 import { type K8sApiError } from '../lib/k8s-errors';
 import logger from '../lib/logger';
-import { aggregateRequiresCRDFromCapabilities, getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
+import {
+  getRuntimesStatus as getRuntimesStatusWithAdapter,
+  getInferenceProviderConfig as getInferenceProviderConfigWithAdapter,
+  type InferenceProviderConfigResource,
+  type RuntimeStatusAdapter,
+} from './runtimeStatus';
+export type { InferenceProviderConfigResource } from './runtimeStatus';
 import {
   checkOperatorBackedRuntimeInstallationStatus,
   checkRuntimeProviderInstallationStatus,
@@ -118,27 +124,6 @@ function getK8sErrorMessage(error: unknown): string {
       }
     | undefined;
   return e?.body?.message || e?.response?.body?.message || e?.message || String(error);
-}
-
-/**
- * Minimal shape of an InferenceProviderConfig custom resource as returned by
- * the Kubernetes custom-objects API. Only the fields this service reads are
- * modeled; everything is optional because the API returns untyped objects.
- */
-export interface InferenceProviderConfigResource {
-  metadata?: {
-    name?: string;
-    annotations?: Record<string, string>;
-  };
-  spec?: {
-    capabilities?: { engines?: unknown[] } & Record<string, unknown>;
-  };
-  status?: {
-    version?: string;
-    ready?: boolean;
-    lastHeartbeat?: string;
-    conditions?: Array<{ type?: string; reason?: string; message?: string }>;
-  } & Record<string, unknown>;
 }
 
 class KubernetesService {
@@ -428,14 +413,21 @@ class KubernetesService {
    * Returns installation and health status for each runtime.
    */
   async getRuntimesStatus(): Promise<RuntimeStatus[]> {
-    const runtimes: RuntimeStatus[] = [];
+    return getRuntimesStatusWithAdapter(this.createRuntimeStatusAdapter());
+  }
 
-    // Check if AI Runway controller is installed by checking for the CRD
-    const crdStatus = await this.checkCRDInstallation();
+  /**
+   * Get a specific InferenceProviderConfig by name from the cluster.
+   * Returns the full CRD object or null if not found.
+   */
+  async getInferenceProviderConfig(name: string): Promise<InferenceProviderConfigResource | null> {
+    return getInferenceProviderConfigWithAdapter(this.createRuntimeStatusAdapter(), name);
+  }
 
-    // List InferenceProviderConfig resources to discover registered providers
-    if (crdStatus.installed) {
-      try {
+  private createRuntimeStatusAdapter(): RuntimeStatusAdapter {
+    return {
+      checkCRDInstallation: () => this.checkCRDInstallation(),
+      listInferenceProviderConfigs: async () => {
         const response = await withRetry(
           () => this.customObjectsApi.listClusterCustomObject({
             group: MODEL_DEPLOYMENT_CRD.apiGroup,
@@ -444,74 +436,32 @@ class KubernetesService {
           }),
           { operationName: 'listInferenceProviderConfigs', maxRetries: 1 }
         );
-
-        const items = ((response as { items?: InferenceProviderConfigResource[] })?.items) || [];
-        const runtimeEntries = await Promise.all(
-          items.map(async (item): Promise<RuntimeStatus> => {
-            const name = item.metadata?.name || 'unknown';
-            const status = item.status || {};
-            const annotations = item.metadata?.annotations;
-            const displayName = getProviderDisplayName(name, annotations);
-            const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
-            const requiresCRD = providerRequiresRuntimeCRD(name, aggregateRequiresCRDFromCapabilities(item.spec?.capabilities), annotatedDisplayName);
-            const runtimeStatus = await this.checkProviderInstallationStatus(name, status, displayName, requiresCRD);
-
-            // Layer the shim's heartbeat-aware view over the live installation
-            // check: prefer the shim's message when it carries an actionable
-            // signal (stale heartbeat, or a fresh UpstreamReady=False from the
-            // refuse-fast path) so users see the specific reason. Structural
-            // fields (installed/operatorRunning) stay sourced from the live
-            // check — they reflect what's actually in the cluster.
-            const { getProviderHealth } = await import('./providerHealth');
-            const health = getProviderHealth(name, item);
-            const useShimMessage = health.stale || (!health.healthy && health.hasShimSignal);
-            const message = useShimMessage ? health.message : runtimeStatus.message;
-
-            return {
-              id: name,
-              name: displayName,
-              installed: runtimeStatus.installed,
-              healthy: runtimeStatus.operatorRunning ?? false,
-              crdFound: runtimeStatus.crdFound ?? runtimeStatus.installed,
-              operatorRunning: runtimeStatus.operatorRunning ?? false,
-              requiresCRD: runtimeStatus.requiresCRD ?? requiresCRD,
-              version: status.version,
-              message,
-            };
-          })
-        );
-        runtimes.push(...runtimeEntries);
-      } catch (error) {
-        const statusCode = getK8sStatusCode(error);
-        if (statusCode !== 404) {
-          logger.warn({ error: getK8sErrorMessage(error) }, 'Failed to list InferenceProviderConfigs');
+        return ((response as { items?: InferenceProviderConfigResource[] })?.items) || [];
+      },
+      getInferenceProviderConfig: async (name) => {
+        try {
+          const response = await withRetry(
+            () => this.customObjectsApi.getClusterCustomObject({
+              group: MODEL_DEPLOYMENT_CRD.apiGroup,
+              version: MODEL_DEPLOYMENT_CRD.apiVersion,
+              plural: 'inferenceproviderconfigs',
+              name,
+            }),
+            { operationName: `getInferenceProviderConfig:${name}`, maxRetries: 1 }
+          );
+          return ((response as { body?: InferenceProviderConfigResource })?.body
+            || response) as InferenceProviderConfigResource;
+        } catch {
+          return null;
         }
-      }
-    }
-
-    return runtimes;
-  }
-
-  /**
-   * Get a specific InferenceProviderConfig by name from the cluster.
-   * Returns the full CRD object or null if not found.
-   */
-  async getInferenceProviderConfig(name: string): Promise<InferenceProviderConfigResource | null> {
-    try {
-      const response = await withRetry(
-        () => this.customObjectsApi.getClusterCustomObject({
-          group: MODEL_DEPLOYMENT_CRD.apiGroup,
-          version: MODEL_DEPLOYMENT_CRD.apiVersion,
-          plural: 'inferenceproviderconfigs',
-          name,
-        }),
-        { operationName: `getInferenceProviderConfig:${name}`, maxRetries: 1 }
-      );
-      return ((response as { body?: InferenceProviderConfigResource })?.body
-        || response) as InferenceProviderConfigResource;
-    } catch {
-      return null;
-    }
+      },
+      checkProviderInstallationStatus: (providerId, status, providerName, requiresCRD) => (
+        this.checkProviderInstallationStatus(providerId, status, providerName, requiresCRD)
+      ),
+      getK8sStatusCode,
+      getK8sErrorMessage,
+      logWarn: (context, message) => logger.warn(context, message),
+    };
   }
 
   /**
