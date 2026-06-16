@@ -41,9 +41,10 @@ import {
   getAIConfiguratorAppliedToastDescription,
   getAvailableEnginesForRuntime,
   getCurrentMultiNode,
-  getDefaultEngineForRuntime,
   getMaxGpusPerPod,
   getDefaultRuntimeForModel,
+  getDeploymentModelFacts,
+  createInitialDeploymentConfig,
   getNodeCountFromOverrides,
   getNumericEngineArg,
   isKaitoConfigValid,
@@ -131,16 +132,10 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   const [ggufRunMode, setGgufRunMode] = useState<GgufRunMode>('direct')
   const [maxModelLen, setMaxModelLen] = useState<number | undefined>(undefined)
 
-  // Check if this is a HuggingFace GGUF model (not a premade model)
-  // GGUF models have only llamacpp as supported engine and come from HuggingFace
-  const isHuggingFaceGgufModel = model.supportedEngines.length === 1 &&
-                                  model.supportedEngines[0] === 'llamacpp' &&
-                                  !model.id.startsWith('kaito/');
-
-  // Check if this is a vLLM-compatible model for KAITO
-  // vLLM models have 'vllm' in supported engines but NOT 'llamacpp'
-  const isVllmModel = model.supportedEngines.includes('vllm') &&
-                      !model.supportedEngines.includes('llamacpp');
+  const { isHuggingFaceGgufModel, isVllmModel } = useMemo(
+    () => getDeploymentModelFacts(model),
+    [model]
+  )
 
   // Fetch GGUF files from HuggingFace repo when it's a GGUF model and KAITO is selected
   const { data: ggufFilesData, isLoading: ggufFilesLoading } = useGgufFiles(
@@ -164,29 +159,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   const defaultRuntime = getDefaultRuntime()
 
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const [config, setConfig] = useState<DeploymentConfig>({
-    name: generateDeploymentName(model.id),
-    namespace: RUNTIME_INFO[defaultRuntime].defaultNamespace,
-    modelId: model.id,
-    engine: getDefaultEngineForRuntime(defaultRuntime, model.supportedEngines),
-    mode: 'aggregated',
-    provider: defaultRuntime,
-    routerMode: 'default',
-    replicas: 1,
-    hfTokenSecret: import.meta.env.VITE_DEFAULT_HF_SECRET || '',
-    enforceEager: true,
-    enablePrefixCaching: true,
-    trustRemoteCode: false,
-    // Disaggregated mode defaults
-    prefillReplicas: 1,
-    decodeReplicas: 1,
-    prefillGpus: 1,
-    decodeGpus: 1,
-    // GPU resources for aggregated mode
-    resources: {
-      gpu: 0, // Will be set from recommendation
-    },
-  })
+  const [config, setConfig] = useState<DeploymentConfig>(() =>
+    createInitialDeploymentConfig({ model, runtime: defaultRuntime })
+  )
 
   // Fetch PVCs for the selected namespace (for existing disk selection)
   const { data: availablePVCs } = usePVCs(

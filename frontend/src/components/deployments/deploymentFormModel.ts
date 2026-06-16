@@ -1,6 +1,7 @@
 import type { DeploymentConfig } from '@/hooks/useDeployments'
-import type { AIConfiguratorResult, Engine, KaitoResourceType } from '@/lib/api'
+import type { AIConfiguratorResult, Engine, KaitoResourceType, Model } from '@/lib/api'
 import { calculateMultiNode, type MultiNodeRecommendation } from '@/lib/gpu-recommendations'
+import { generateDeploymentName } from '@/lib/utils'
 
 // Subset of Engine type for traditional GPU inference engines (excludes llamacpp which is KAITO-only)
 export type TraditionalEngine = 'vllm' | 'sglang' | 'trtllm'
@@ -129,6 +130,59 @@ export function getDefaultEngineForRuntime(runtime: RuntimeId, modelEngines: Eng
   }
 
   return getAvailableEnginesForRuntime(runtime, modelEngines)[0] || modelEngines[0] || 'vllm'
+}
+
+export interface DeploymentModelFacts {
+  isHuggingFaceGgufModel: boolean
+  isVllmModel: boolean
+}
+
+export function getDeploymentModelFacts(model: Pick<Model, 'id' | 'supportedEngines'>): DeploymentModelFacts {
+  return {
+    // GGUF models have only llama.cpp as supported engine and come from Hugging Face.
+    isHuggingFaceGgufModel: model.supportedEngines.length === 1 &&
+      model.supportedEngines[0] === 'llamacpp' &&
+      !model.id.startsWith('kaito/'),
+    // KAITO vLLM models expose vLLM without also being llama.cpp/GGUF models.
+    isVllmModel: model.supportedEngines.includes('vllm') &&
+      !model.supportedEngines.includes('llamacpp'),
+  }
+}
+
+export interface InitialDeploymentConfigOptions {
+  model: Pick<Model, 'id' | 'supportedEngines'>
+  runtime: RuntimeId
+  hfTokenSecret?: string
+  name?: string
+}
+
+export function createInitialDeploymentConfig({
+  model,
+  runtime,
+  hfTokenSecret = import.meta.env.VITE_DEFAULT_HF_SECRET || '',
+  name = generateDeploymentName(model.id),
+}: InitialDeploymentConfigOptions): DeploymentConfig {
+  return {
+    name,
+    namespace: RUNTIME_INFO[runtime].defaultNamespace,
+    modelId: model.id,
+    engine: getDefaultEngineForRuntime(runtime, model.supportedEngines),
+    mode: 'aggregated',
+    provider: runtime,
+    routerMode: 'default',
+    replicas: 1,
+    hfTokenSecret,
+    enforceEager: true,
+    enablePrefixCaching: true,
+    trustRemoteCode: false,
+    prefillReplicas: 1,
+    decodeReplicas: 1,
+    prefillGpus: 1,
+    decodeGpus: 1,
+    resources: {
+      gpu: 0,
+    },
+  }
 }
 
 export function applyRuntimeChangeToConfig(

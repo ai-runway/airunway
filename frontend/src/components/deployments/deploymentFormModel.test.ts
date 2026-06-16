@@ -7,6 +7,7 @@ import {
   TENSOR_PARALLEL_SIZE_ARG,
   applyAIConfiguratorResultToConfig,
   buildDeploymentFormConfig,
+  createInitialDeploymentConfig,
   calculateSelectedGpus,
   applyRuntimeChangeToConfig,
   getAIConfigRecommendedValues,
@@ -16,6 +17,7 @@ import {
   getDefaultEngineForRuntime,
   getMaxGpusPerPod,
   getDefaultRuntimeForModel,
+  getDeploymentModelFacts,
   getNodeCountFromOverrides,
   isKaitoConfigValid,
   selectPreferredGgufFile,
@@ -59,6 +61,52 @@ describe('deploymentFormModel', () => {
     expect(getAvailableEnginesForRuntime('kuberay', ['vllm', 'sglang'])).toEqual(['vllm'])
     expect(getDefaultEngineForRuntime('dynamo', ['llamacpp'])).toBe('llamacpp')
     expect(getDefaultEngineForRuntime('kuberay', ['sglang', 'vllm'])).toBe('vllm')
+  })
+
+  it('classifies model facts used by runtime-specific form paths', () => {
+    expect(getDeploymentModelFacts({ id: 'unsloth/Qwen3-GGUF', supportedEngines: ['llamacpp'] })).toEqual({
+      isHuggingFaceGgufModel: true,
+      isVllmModel: false,
+    })
+    expect(getDeploymentModelFacts({ id: 'kaito/llama3.2-1b', supportedEngines: ['llamacpp'] })).toEqual({
+      isHuggingFaceGgufModel: false,
+      isVllmModel: false,
+    })
+    expect(getDeploymentModelFacts({ id: 'meta-llama/Llama-3.1-8B-Instruct', supportedEngines: ['vllm', 'sglang'] })).toEqual({
+      isHuggingFaceGgufModel: false,
+      isVllmModel: true,
+    })
+    expect(getDeploymentModelFacts({ id: 'hybrid/model', supportedEngines: ['vllm', 'llamacpp'] })).toEqual({
+      isHuggingFaceGgufModel: false,
+      isVllmModel: false,
+    })
+  })
+
+  it('creates the initial deployment config for a selected runtime', () => {
+    expect(createInitialDeploymentConfig({
+      model: { id: 'meta-llama/Llama-3.1-8B-Instruct', supportedEngines: ['vllm', 'sglang'] },
+      runtime: 'kuberay',
+      name: 'custom-name',
+      hfTokenSecret: 'hf-token-secret',
+    })).toEqual({
+      name: 'custom-name',
+      namespace: 'kuberay-system',
+      modelId: 'meta-llama/Llama-3.1-8B-Instruct',
+      engine: 'vllm',
+      mode: 'aggregated',
+      provider: 'kuberay',
+      routerMode: 'default',
+      replicas: 1,
+      hfTokenSecret: 'hf-token-secret',
+      enforceEager: true,
+      enablePrefixCaching: true,
+      trustRemoteCode: false,
+      prefillReplicas: 1,
+      decodeReplicas: 1,
+      prefillGpus: 1,
+      decodeGpus: 1,
+      resources: { gpu: 0 },
+    })
   })
 
   it('switches away from Dynamo by resetting runtime-specific fields and unsupported engines', () => {
