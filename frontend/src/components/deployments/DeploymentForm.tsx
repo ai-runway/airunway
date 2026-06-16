@@ -24,6 +24,7 @@ import { KaitoResourceTypeSelector } from './KaitoResourceTypeSelector'
 import { EngineSelectionPanel } from './EngineSelectionPanel'
 import { DeploymentOptionsPanel } from './DeploymentOptionsPanel'
 import { RuntimeSelectionPanel } from './RuntimeSelectionPanel'
+import { prepareGgufImageRef } from './deploymentFormSubmit'
 import { calculateGpuRecommendation, calculateMultiNode } from '@/lib/gpu-recommendations'
 import {
   FP8_ARG_ENGINES,
@@ -381,47 +382,18 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     e.preventDefault()
 
     try {
-      let imageRef: string | undefined
-
-      if (selectedRuntime === 'kaito' && isHuggingFaceGgufModel && ggufRunMode === 'build') {
-        // Build mode - requires Docker and building an image
-        toast({
-          title: 'Checking Build Infrastructure',
-          description: 'Verifying Docker and build tools are available...',
-        })
-
-        const infraStatus = await aikitApi.getInfrastructureStatus()
-        if (!infraStatus.ready) {
-          const errorMsg = infraStatus.error ||
-            (!infraStatus.builder.running ? 'Docker is not running. Please start Docker and try again.' :
-              !infraStatus.registry.ready ? 'Container registry is not available.' :
-             'Build infrastructure is not ready.')
-          throw new Error(errorMsg)
-        }
-
-        // Build the image first
-        toast({
-          title: 'Building Image',
-          description: `Building GGUF model image for ${model.id}. This may take a few minutes...`,
-        })
-
-        const buildResult = await aikitApi.build({
-          modelSource: 'huggingface',
-          modelId: model.id,
-          ggufFile: ggufFile,
-        })
-
-        if (!buildResult.success || !buildResult.imageRef) {
-          throw new Error(buildResult.error || 'Failed to build model image')
-        }
-
-        toast({
-          title: 'Image Built Successfully',
-          description: `Image: ${buildResult.imageRef}`,
-          variant: 'success',
-        })
-        imageRef = buildResult.imageRef
-      }
+      const imageRef = await prepareGgufImageRef({
+        selectedRuntime,
+        isHuggingFaceGgufModel,
+        ggufRunMode,
+        modelId: model.id,
+        ggufFile,
+        adapter: {
+          notify: toast,
+          getInfrastructureStatus: () => aikitApi.getInfrastructureStatus(),
+          build: (request) => aikitApi.build(request),
+        },
+      })
 
       const deployConfig = buildDeploymentFormConfig(config, {
         selectedRuntime,
