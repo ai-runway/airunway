@@ -316,6 +316,50 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("spec.engine.image"))
 		})
 
+		It("Should reject changing an explicitly-set provider.name", func() {
+			oldObj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			oldObj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+
+			obj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "vllm"}
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("provider.name is immutable"))
+		})
+
+		It("Should reject overriding an auto-selected provider recorded only in status", func() {
+			// Auto-selection writes the chosen provider to status, never to the
+			// user's spec. Overriding it via spec.provider.name must be rejected
+			// at admission, not admitted and then failed asynchronously by the
+			// controller.
+			oldObj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			oldObj.Spec.Provider = nil // user never set a provider
+			oldObj.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo"}
+
+			obj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "vllm"}
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("provider.name is immutable"))
+		})
+
+		It("Should admit an update that does not change the effective provider", func() {
+			// A plain re-apply (spec.provider.name still empty) must not be
+			// rejected just because status records an auto-selected provider —
+			// otherwise every reconcile-driven update on an auto-selected MD breaks.
+			oldObj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			oldObj.Spec.Provider = nil
+			oldObj.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo"}
+
+			obj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			obj.Spec.Provider = nil
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("Should admit matching spec.image and spec.engine.image", func() {
 			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
 			obj.Spec.Image = "same:v1"
