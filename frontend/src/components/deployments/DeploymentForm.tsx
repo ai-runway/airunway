@@ -22,6 +22,7 @@ import { CostEstimate } from './CostEstimate'
 import { StorageVolumesSection } from './StorageVolumesSection'
 import { GpuPerReplicaField } from './GpuPerReplicaField'
 import { KaitoModelConfiguration } from './KaitoModelConfiguration'
+import { KaitoResourceTypeSelector } from './KaitoResourceTypeSelector'
 import { calculateGpuRecommendation, calculateMultiNode } from '@/lib/gpu-recommendations'
 import {
   FP8_ARG_ENGINES,
@@ -887,57 +888,17 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
 
       {/* KAITO Resource Type Selection - show for KAITO runtime with vLLM models */}
       {selectedRuntime === 'kaito' && isVllmModel && (
-      <div className="glass-panel">
-        <h3 className="text-lg font-semibold flex items-center gap-2 mb-4">
-          <Box className="h-5 w-5" />
-          KAITO Resource Type
-        </h3>
-        <div>
-          <RadioGroup
+        <div className="glass-panel">
+          <h3 className="text-lg font-semibold flex items-center gap-2 mb-4">
+            <Box className="h-5 w-5" />
+            KAITO Resource Type
+          </h3>
+          <KaitoResourceTypeSelector
             value={kaitoResourceType}
-            onValueChange={(value) => setKaitoResourceType(value as KaitoResourceType)}
-            className="grid gap-3"
-          >
-            <label
-              htmlFor="resource-workspace-vllm"
-              className={cn(
-                "flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors",
-                kaitoResourceType === 'workspace'
-                  ? "border-primary bg-primary/5"
-                  : "border-border hover:border-muted-foreground/50"
-              )}
-            >
-              <RadioGroupItem value="workspace" id="resource-workspace-vllm" className="mt-1" />
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">Workspace</span>
-                  <Badge variant="secondary" className="text-xs">Stable</Badge>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Original KAITO resource type (v1beta1). Recommended for most deployments.
-                </p>
-              </div>
-            </label>
-            <label
-              htmlFor="resource-inferenceset-vllm"
-              className={cn(
-                "flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors",
-                kaitoResourceType === 'inferenceset'
-                  ? "border-primary bg-primary/5"
-                  : "border-border hover:border-muted-foreground/50"
-              )}
-            >
-              <RadioGroupItem value="inferenceset" id="resource-inferenceset-vllm" className="mt-1" />
-              <div className="flex-1">
-                <span className="font-medium">InferenceSet</span>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Newer KAITO resource type (v1alpha1). Supports flexible replica scaling.
-                </p>
-              </div>
-            </label>
-          </RadioGroup>
+            onChange={setKaitoResourceType}
+            idSuffix="vllm"
+          />
         </div>
-      </div>
       )}
 
       {/* KAITO Model Configuration - only show for KAITO runtime with non-vLLM models */}

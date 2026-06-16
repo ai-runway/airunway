@@ -8,6 +8,7 @@ import type { KaitoResourceType } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 import type { GgufRunMode, KaitoComputeType } from './deploymentFormModel'
+import { KaitoResourceTypeSelector } from './KaitoResourceTypeSelector'
 
 interface KaitoModelConfigurationProps {
   computeType: KaitoComputeType
@@ -72,52 +73,10 @@ export function KaitoModelConfiguration({
           </p>
         </div>
 
-        <div className="space-y-3">
-          <Label>Resource Type</Label>
-          <RadioGroup
-            value={resourceType}
-            onValueChange={(value) => onResourceTypeChange(value as KaitoResourceType)}
-            className="grid gap-3"
-          >
-            <label
-              htmlFor="resource-workspace"
-              className={cn(
-                'flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors',
-                resourceType === 'workspace'
-                  ? 'border-primary bg-primary/5'
-                  : 'border-border hover:border-muted-foreground/50'
-              )}
-            >
-              <RadioGroupItem value="workspace" id="resource-workspace" className="mt-1" />
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">Workspace</span>
-                  <Badge variant="secondary" className="text-xs">Stable</Badge>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Original KAITO resource type (v1beta1). Recommended for most deployments.
-                </p>
-              </div>
-            </label>
-            <label
-              htmlFor="resource-inferenceset"
-              className={cn(
-                'flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors',
-                resourceType === 'inferenceset'
-                  ? 'border-primary bg-primary/5'
-                  : 'border-border hover:border-muted-foreground/50'
-              )}
-            >
-              <RadioGroupItem value="inferenceset" id="resource-inferenceset" className="mt-1" />
-              <div className="flex-1">
-                <span className="font-medium">InferenceSet</span>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Newer KAITO resource type (v1alpha1). Supports flexible replica scaling.
-                </p>
-              </div>
-            </label>
-          </RadioGroup>
-        </div>
+        <KaitoResourceTypeSelector
+          value={resourceType}
+          onChange={onResourceTypeChange}
+        />
 
         {isHuggingFaceGgufModel && (
           <div className="space-y-3">
