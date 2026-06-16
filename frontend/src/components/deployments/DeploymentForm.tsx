@@ -6,7 +6,6 @@ import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useConfetti } from '@/components/ui/confetti'
 import { useCreateDeployment, usePVCs, type DeploymentConfig } from '@/hooks/useDeployments'
 import { useHuggingFaceStatus, useGgufFiles } from '@/hooks/useHuggingFace'
@@ -15,13 +14,14 @@ import { useGatewayStatus } from '@/hooks/useGateway'
 import { useToast } from '@/hooks/useToast'
 import { generateDeploymentName, cn } from '@/lib/utils'
 import { type Model, type DetailedClusterCapacity, type AutoscalerDetectionResult, type RuntimeStatus, type PremadeModel, type AIConfiguratorResult, aikitApi, type Engine, type KaitoResourceType } from '@/lib/api'
-import { ChevronDown, AlertCircle, Rocket, CheckCircle2, Sparkles, AlertTriangle, Server, Cpu, Box, Loader2, HardDrive } from 'lucide-react'
+import { ChevronDown, AlertCircle, Rocket, CheckCircle2, Sparkles, AlertTriangle, Server, Box, HardDrive } from 'lucide-react'
 import { CapacityWarning } from './CapacityWarning'
 import { AIConfiguratorPanel } from './AIConfiguratorPanel'
 import { ManifestViewer } from './ManifestViewer'
 import { CostEstimate } from './CostEstimate'
 import { StorageVolumesSection } from './StorageVolumesSection'
 import { GpuPerReplicaField } from './GpuPerReplicaField'
+import { KaitoModelConfiguration } from './KaitoModelConfiguration'
 import { calculateGpuRecommendation, calculateMultiNode } from '@/lib/gpu-recommendations'
 import {
   FP8_ARG_ENGINES,
@@ -942,174 +942,19 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
 
       {/* KAITO Model Configuration - only show for KAITO runtime with non-vLLM models */}
       {selectedRuntime === 'kaito' && !isVllmModel && (
-        <div className="glass-panel">
-          <h3 className="text-lg font-semibold flex items-center gap-2 mb-4">
-            <Box className="h-5 w-5" />
-            KAITO Model Configuration
-          </h3>
-          <div className="space-y-6">
-            {/* Compute Type Selection - only for non-vLLM models (vLLM always requires GPU) */}
-            <div className="space-y-3">
-              <Label>Compute Type</Label>
-              <RadioGroup
-                value={kaitoComputeType}
-                onValueChange={(value) => setKaitoComputeType(value as KaitoComputeType)}
-                className="flex gap-4"
-              >
-                <div className="flex items-center space-x-2">
-                  <RadioGroupItem value="cpu" id="compute-cpu" />
-                  <Label htmlFor="compute-cpu" className="cursor-pointer flex items-center gap-1">
-                    <Cpu className="h-4 w-4" />
-                    CPU
-                  </Label>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <RadioGroupItem value="gpu" id="compute-gpu" />
-                  <Label htmlFor="compute-gpu" className="cursor-pointer flex items-center gap-1">
-                    <Server className="h-4 w-4" />
-                    GPU
-                  </Label>
-                </div>
-              </RadioGroup>
-              <p className="text-xs text-muted-foreground">
-                  {kaitoComputeType === 'cpu'
-                  ? 'Run inference on CPU compute - slower but no GPU required'
-                  : 'Run inference on GPU compute - faster performance'}
-              </p>
-            </div>
-
-            {/* KAITO Resource Type Selection */}
-            <div className="space-y-3">
-              <Label>Resource Type</Label>
-              <RadioGroup
-                value={kaitoResourceType}
-                onValueChange={(value) => setKaitoResourceType(value as KaitoResourceType)}
-                className="grid gap-3"
-              >
-                <label
-                  htmlFor="resource-workspace"
-                  className={cn(
-                    "flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors",
-                    kaitoResourceType === 'workspace'
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:border-muted-foreground/50"
-                  )}
-                >
-                  <RadioGroupItem value="workspace" id="resource-workspace" className="mt-1" />
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">Workspace</span>
-                      <Badge variant="secondary" className="text-xs">Stable</Badge>
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Original KAITO resource type (v1beta1). Recommended for most deployments.
-                    </p>
-                  </div>
-                </label>
-                <label
-                  htmlFor="resource-inferenceset"
-                  className={cn(
-                    "flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors",
-                    kaitoResourceType === 'inferenceset'
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:border-muted-foreground/50"
-                  )}
-                >
-                  <RadioGroupItem value="inferenceset" id="resource-inferenceset" className="mt-1" />
-                  <div className="flex-1">
-                    <span className="font-medium">InferenceSet</span>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Newer KAITO resource type (v1alpha1). Supports flexible replica scaling.
-                    </p>
-                  </div>
-                </label>
-              </RadioGroup>
-            </div>
-
-            {/* Run Mode Selection - only for HuggingFace GGUF models */}
-            {isHuggingFaceGgufModel && (
-              <div className="space-y-3">
-                <Label>Run Mode</Label>
-                <RadioGroup
-                  value={ggufRunMode}
-                  onValueChange={(value) => setGgufRunMode(value as GgufRunMode)}
-                  className="grid gap-3"
-                >
-                  <label
-                    htmlFor="run-direct"
-                    className={cn(
-                      "flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors",
-                      ggufRunMode === 'direct'
-                        ? "border-primary bg-primary/5"
-                        : "border-border hover:border-muted-foreground/50"
-                    )}
-                  >
-                    <RadioGroupItem value="direct" id="run-direct" className="mt-1" />
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">Direct Run</span>
-                        <Badge variant="secondary" className="text-xs">Recommended</Badge>
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Downloads model at runtime. No Docker required.
-                      </p>
-                    </div>
-                  </label>
-                  <label
-                    htmlFor="run-build"
-                    className={cn(
-                      "flex items-start space-x-3 rounded-lg border p-3 cursor-pointer transition-colors",
-                      ggufRunMode === 'build'
-                        ? "border-primary bg-primary/5"
-                        : "border-border hover:border-muted-foreground/50"
-                    )}
-                  >
-                    <RadioGroupItem value="build" id="run-build" className="mt-1" />
-                    <div className="flex-1">
-                      <span className="font-medium">Build Image</span>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Pre-builds container image. Requires Docker running locally.
-                      </p>
-                    </div>
-                  </label>
-                </RadioGroup>
-              </div>
-            )}
-
-            {/* GGUF File Selection - for HuggingFace GGUF models */}
-            {isHuggingFaceGgufModel && (
-              <div className="space-y-3">
-                <Label htmlFor="ggufFile">GGUF File</Label>
-                {ggufFilesLoading ? (
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Loading GGUF files from repository...
-                  </div>
-                ) : ggufFiles.length > 0 ? (
-                  <Select value={ggufFile} onValueChange={setGgufFile}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select a GGUF file" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ggufFiles.map((file) => (
-                        <SelectItem key={file} value={file}>
-                          {file}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <div className="text-sm text-muted-foreground py-2">
-                    No GGUF files found in this repository.
-                  </div>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  Select the quantization variant to use. Q4_K_M offers a good balance of quality and size.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
+        <KaitoModelConfiguration
+          computeType={kaitoComputeType}
+          onComputeTypeChange={setKaitoComputeType}
+          resourceType={kaitoResourceType}
+          onResourceTypeChange={setKaitoResourceType}
+          isHuggingFaceGgufModel={isHuggingFaceGgufModel}
+          ggufRunMode={ggufRunMode}
+          onGgufRunModeChange={setGgufRunMode}
+          ggufFilesLoading={ggufFilesLoading}
+          ggufFiles={ggufFiles}
+          ggufFile={ggufFile}
+          onGgufFileChange={setGgufFile}
+        />
       )}
 
       {/* Deployment Mode - show for non-KAITO runtimes OR KAITO with vLLM models */}
