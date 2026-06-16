@@ -22,8 +22,6 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
-	"github.com/kaito-project/airunway/controller/internal/validation"
 )
 
 const (
@@ -285,103 +282,10 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 	}
 
 	// Validate provider compatibility when both provider and engine are specified.
-	// Uses the cached Reader to avoid a synchronous apiserver round-trip per
-	// admission; falls back to the uncached APIReader only when the cache
-	// reports NotFound, to absorb the race where a brand-new
-	// InferenceProviderConfig hasn't yet propagated to informers.
-	//
-	// Mocker mode escape hatch: a ModelDeployment annotated with
-	// airunway.ai/dynamo-test-backend=mocker targeting the dynamo provider runs
-	// the GPU-less python3 -m dynamo.mocker backend, so the provider's GPU
-	// capability check must not reject it at admission. This is a test-only path
-	// (the dynamo provider re-validates compatibility during reconciliation).
-	// The annotation key is kept as a literal here to avoid importing the
-	// provider module from the controller webhook (see
-	// providers/dynamo/mocker.go AnnotationDynamoTestBackend / DynamoTestBackendMocker).
-	isDynamoMocker := obj.Annotations["airunway.ai/dynamo-test-backend"] == "mocker" &&
-		spec.Provider != nil && spec.Provider.Name == "dynamo"
-
-	// The Dynamo mocker backend only simulates the vLLM engine. Enforce the
-	// vLLM-only constraint at admission so a non-vllm engine + mocker annotation
-	// is rejected here rather than admitted and failing later during provider
-	// reconciliation (the dynamo provider re-validates this too). An empty engine
-	// type is allowed — the provider defaults it to vllm.
-	if isDynamoMocker && spec.Engine.Type != "" && spec.Engine.Type != airunwayv1alpha1.EngineTypeVLLM {
-		allErrs = append(allErrs, field.Invalid(
-			specPath.Child("engine", "type"),
-			spec.Engine.Type,
-			"the dynamo mocker test backend only supports the vllm engine",
-		))
-	}
-
-	if !isDynamoMocker && spec.Provider != nil && spec.Provider.Name != "" && spec.Engine.Type != "" && v.Reader != nil {
-		var providerConfig airunwayv1alpha1.InferenceProviderConfig
-		err := v.Reader.Get(ctx, client.ObjectKey{Name: spec.Provider.Name}, &providerConfig)
-		if apierrors.IsNotFound(err) && v.APIReader != nil {
-			// Cache may be stale for a just-created provider; confirm against
-			// the API server before we tell the user the provider doesn't
-			// exist. Any error from the fallback is preserved verbatim so
-			// the existing switch below classifies it the same way it would
-			// have under the old all-APIReader path.
-			err = v.APIReader.Get(ctx, client.ObjectKey{Name: spec.Provider.Name}, &providerConfig)
-		}
-		switch {
-		case apierrors.IsNotFound(err):
-			// Reject obviously-bogus provider names at admission time so the
-			// user gets immediate feedback rather than waiting for reconcile.
-			allErrs = append(allErrs, field.Invalid(
-				specPath.Child("provider", "name"),
-				spec.Provider.Name,
-				fmt.Sprintf("InferenceProviderConfig %q not found", spec.Provider.Name),
-			))
-		case meta.IsNoMatchError(err):
-			// CRD is not installed (cluster mid-bootstrap). Skip — the
-			// controller will catch this during reconciliation.
-		case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
-			// Webhook RBAC is misconfigured (e.g. ServiceAccount missing
-			// `get` on InferenceProviderConfig). Do NOT silently skip
-			// validation — that would mask a serious misconfiguration and
-			// disable admission-time enforcement cluster-wide. Surface it
-			// as an InternalError so the apiserver rejects admission with
-			// an actionable diagnostic.
-			allErrs = append(allErrs, field.InternalError(
-				specPath.Child("provider", "name"),
-				fmt.Errorf("cannot verify provider %q: %w", spec.Provider.Name, err),
-			))
-		case err != nil:
-			// Transient API error (timeout, connection refused, etc.). Do not
-			// block admission on infra flakes — log and skip so the controller
-			// can re-validate later.
-			logf.FromContext(ctx).Info(
-				"failed to look up InferenceProviderConfig for webhook validation; skipping provider/engine compatibility check",
-				"provider", spec.Provider.Name,
-				"error", err.Error(),
-			)
-			warnings = append(warnings, fmt.Sprintf(
-				"could not verify provider %q compatibility at admission time (%v); the controller will re-validate during reconciliation",
-				spec.Provider.Name, err,
-			))
-		case providerConfig.Spec.Capabilities != nil:
-			gpuCount := int32(0)
-			if spec.Resources != nil && spec.Resources.GPU != nil {
-				gpuCount = spec.Resources.GPU.Count
-			}
-			for _, ce := range validation.CheckProviderCompatibility(
-				spec.Provider.Name,
-				&providerConfig,
-				nil,
-				spec.Engine.Type,
-				servingMode,
-				gpuCount,
-			) {
-				fp := specPath
-				for _, seg := range ce.FieldPath {
-					fp = fp.Child(seg)
-				}
-				allErrs = append(allErrs, field.Invalid(fp, ce.BadValue, ce.Message))
-			}
-		}
-	}
+	providerValidation := validateProviderCompatibility(ctx, obj, specPath, servingMode, v.Reader, v.APIReader)
+	warnings = append(warnings, providerValidation.Warnings...)
+	allErrs = append(allErrs, providerValidation.Errors...)
+	isDynamoMocker := providerValidation.IsDynamoMocker
 
 	// Validate serving/scaling configuration
 	allErrs = append(allErrs, validateServingAndScaling(spec, specPath, servingMode, isDynamoMocker)...)
