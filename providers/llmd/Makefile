@@ -12,7 +12,7 @@ export
 # Inject the build-time tag into the provider binary so it
 # tracks /versions.env automatically. The Go fallback in config.go only
 # applies when bypassing this Makefile (e.g. `go run`, `go test`).
-LDFLAGS := -X github.com/kaito-project/airunway/providers/llmd.LLMDSchedulerVersion=ghcr.io/llm-d/llm-d-inference-scheduler:v$(LLMD_VERSION)
+LDFLAGS := -X github.com/kaito-project/airunway/providers/llmd.LLMDSchedulerImage=ghcr.io/llm-d/llm-d-inference-scheduler:v$(LLMD_VERSION)
 
 .PHONY: build vet test docker-build deploy generate-deploy-manifests
 
