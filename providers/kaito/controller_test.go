@@ -469,6 +469,71 @@ func TestReconcileAlreadyRunning(t *testing.T) {
 	}
 }
 
+// TestReconcileRunningUpdatesMessage reproduces issue #289: once the Workspace
+// is ready the phase flips to Running, but the status message must no longer
+// claim it is "waiting for pods to be ready".
+func TestReconcileRunningUpdatesMessage(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = "test-uid"
+	controllerutil.AddFinalizer(md, FinalizerName)
+	// Simulate a prior reconcile loop that left the deploying-phase message.
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+	md.Status.Message = "Workspace created, waiting for pods to be ready"
+
+	ws := &unstructured.Unstructured{}
+	setWorkspaceGVK(ws)
+	ws.SetName("test")
+	ws.SetNamespace("default")
+	ws.SetOwnerReferences([]metav1.OwnerReference{
+		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+	})
+	ws.Object["resource"] = map[string]interface{}{
+		"count": int64(1),
+		"labelSelector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{
+				"kubernetes.io/os": "linux",
+			},
+		},
+	}
+	ws.Object["inference"] = map[string]interface{}{
+		"preset": map[string]interface{}{
+			"name": "test-model",
+		},
+	}
+	ws.Object["status"] = map[string]interface{}{
+		"conditions": []interface{}{
+			map[string]interface{}{
+				"type":   "WorkspaceSucceeded",
+				"status": "True",
+			},
+		},
+	}
+
+	deploy := newReadyKaitoDeployment()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, ws).WithStatusSubresource(md).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated)
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		t.Fatalf("expected Running phase, got %s", updated.Status.Phase)
+	}
+	if strings.Contains(updated.Status.Message, "waiting for pods") {
+		t.Errorf("status message still claims waiting for pods while Running: %q", updated.Status.Message)
+	}
+	if updated.Status.Message == "" {
+		t.Errorf("expected a non-empty status message in Running phase")
+	}
+}
+
 func TestReconcileHandleDeletion(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")

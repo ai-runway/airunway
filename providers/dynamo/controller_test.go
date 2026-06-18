@@ -3,6 +3,7 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -691,6 +692,7 @@ func TestSyncStatusRunning(t *testing.T) {
 	r := NewDynamoProviderReconciler(c, scheme, "")
 
 	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Status.Message = "DynamoGraphDeployment created, waiting for pods to be ready"
 	desired := &unstructured.Unstructured{}
 	setDGDGVK(desired)
 	desired.SetName("test")
@@ -702,6 +704,13 @@ func TestSyncStatusRunning(t *testing.T) {
 	}
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
 		t.Errorf("expected Running phase, got %s", md.Status.Phase)
+	}
+	// Issue #289: a Running deployment must not keep the "waiting for pods" message.
+	if strings.Contains(md.Status.Message, "waiting for pods") {
+		t.Errorf("status message still claims waiting for pods while Running: %q", md.Status.Message)
+	}
+	if md.Status.Message == "" {
+		t.Errorf("expected a non-empty status message in Running phase")
 	}
 }
 

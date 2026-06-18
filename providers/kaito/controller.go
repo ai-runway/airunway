@@ -667,6 +667,10 @@ func (r *KaitoProviderReconciler) syncStatus(ctx context.Context, md *airunwayv1
 	md.Status.Phase = statusResult.Phase
 	if statusResult.Message != "" {
 		md.Status.Message = statusResult.Message
+	} else if statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
+		// The translator reports no message for a healthy Workspace; replace the
+		// stale "waiting for pods" message so status reflects the Running phase.
+		md.Status.Message = "Workspace created, pods are ready"
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint

@@ -438,6 +438,10 @@ func (r *DynamoProviderReconciler) syncStatus(ctx context.Context, md *airunwayv
 	md.Status.Phase = statusResult.Phase
 	if statusResult.Message != "" {
 		md.Status.Message = statusResult.Message
+	} else if statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
+		// The translator reports no message for a healthy DynamoGraphDeployment;
+		// replace the stale "waiting for pods" message so status reflects Running.
+		md.Status.Message = "DynamoGraphDeployment created, pods are ready"
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint
