@@ -28,24 +28,6 @@ spec:
       tags:
         - personal
         - automation
-      recommendedSecurity:
-        # OpenClaw writes session state to its working directory, so it
-        # cannot run with readOnlyRootFilesystem=true. Other defaults
-        # follow the Restricted PSS profile.
-        podSecurityStandard: restricted
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 1000
-          seccompProfile:
-            type: RuntimeDefault
-        containerSecurityContext:
-          # Container-level field: writable root FS is required for
-          # OpenClaw's session state. Privilege escalation stays off.
-          readOnlyRootFilesystem: false
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
 ---
 # CRD-native agent framework: Kagent.
 # Demonstrates a framework whose provider renders the AgentDeployment
@@ -78,15 +60,3 @@ spec:
       tags:
         - devops
         - observability
-      recommendedSecurity:
-        podSecurityStandard: restricted
-        securityContext:
-          runAsNonRoot: true
-          seccompProfile:
-            type: RuntimeDefault
-        containerSecurityContext:
-          readOnlyRootFilesystem: true
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL

@@ -20,7 +20,6 @@ import (
 	"reflect"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -199,7 +198,6 @@ func TestAgentProviderConfigSpec_CatalogItemNames(t *testing.T) {
 func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 	ready := true
 	requiresOp := true
-	readOnlyRootFS := false
 	now := metav1.Now()
 	orig := &AgentProviderConfig{
 		Spec: AgentProviderConfigSpec{
@@ -216,13 +214,7 @@ func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 					Description: "OpenClaw-powered personal automation",
 					Tags:        []string{"personal", "automation"},
 					Image:       "ghcr.io/openclaw/openclaw:latest",
-					RecommendedSecurity: &AgentSecuritySpec{
-						PodSecurityStandard: PodSecurityStandardRestricted,
-						ContainerSecurityContext: &corev1.SecurityContext{
-							ReadOnlyRootFilesystem: &readOnlyRootFS,
-						},
-					},
-					Template: &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"hi"}`)},
+					Template:    &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"hi"}`)},
 				},
 			},
 		},
@@ -248,9 +240,6 @@ func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 	}
 	if &cp.Spec.Catalog[0] == &orig.Spec.Catalog[0] {
 		t.Error("Catalog slice should be a fresh allocation, not shared")
-	}
-	if cp.Spec.Catalog[0].RecommendedSecurity == orig.Spec.Catalog[0].RecommendedSecurity {
-		t.Error("Catalog[0].RecommendedSecurity should be a fresh allocation, not shared")
 	}
 	if cp.Spec.Catalog[0].Template == orig.Spec.Catalog[0].Template {
 		t.Error("Catalog[0].Template RawExtension should be a fresh allocation, not shared")

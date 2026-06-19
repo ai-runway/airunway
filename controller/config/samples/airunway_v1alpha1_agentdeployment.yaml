@@ -51,7 +51,7 @@ spec:
     requests:
       cpu: "200m"
       memory: "256Mi"
-  # OpenClaw writes to its working directory, so the openclaw
-  # AgentProviderConfig catalog entry ships a recommendedSecurity with
-  # containerSecurityContext.readOnlyRootFilesystem=false. Security posture
-  # is owned by the provider/catalog, not set per AgentDeployment.
+  # Security posture is owned by the framework provider: each provider
+  # applies the security context appropriate for its framework when it
+  # renders the agent workload (e.g. OpenClaw needs a writable root
+  # filesystem for session state). It is not set per AgentDeployment.
