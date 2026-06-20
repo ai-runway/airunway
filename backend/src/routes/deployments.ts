@@ -379,7 +379,7 @@ function validateSupportedCapability(
 
   if (!supported.includes(value)) {
     throw new HTTPException(422, {
-      message: `Provider "${providerId}" does not support ${label} "${value}". Supported ${label}s: ${supported.join(', ')}`,
+      message: `Provider "${providerId}" does not support ${label} "${value}". Supported ${label} values: ${supported.join(', ')}`,
     });
   }
 }
