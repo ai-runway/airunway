@@ -80,7 +80,7 @@ jobs:
           echo "=== Dynamo Provider Logs ==="
           kubectl logs -n airunway-system -l control-plane=dynamo-provider --tail=200
           echo "=== Dynamo Operator Logs ==="
-          kubectl logs -n dynamo-system --all-containers --tail=200 --prefix
+          kubectl logs -n dynamo-system --all-containers --tail=200 --prefix 2>/dev/null || echo "No Dynamo operator logs"
           echo "=== Events ==="
           kubectl get events -A --sort-by=.lastTimestamp
           echo "=== Pods ==="
