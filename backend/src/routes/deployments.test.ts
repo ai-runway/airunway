@@ -540,6 +540,27 @@ describe('Deployment Routes', () => {
       const data = await res.json();
       expect(data.error.message).toContain('does not support model source "huggingface"');
     });
+
+    test('POST /api/deployments/preview defers to admission when provider config lookup has a transient error', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => {
+          throw new Error('Kubernetes API temporarily unavailable');
+        }),
+      );
+
+      const res = await app.request('/api/deployments/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...validDeploymentBody,
+          provider: 'custom-provider',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.resources[0].manifest.spec.provider.name).toBe('custom-provider');
+    });
   });
 
   describe('POST /api/deployments - storage validation', () => {

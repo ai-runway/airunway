@@ -416,7 +416,16 @@ async function validateProviderCapabilities(config: DeploymentConfig): Promise<v
     return;
   }
 
-  const providerConfig = await kubernetesService.getInferenceProviderConfig(config.provider);
+  let providerConfig;
+  try {
+    providerConfig = await kubernetesService.getInferenceProviderConfig(config.provider);
+  } catch (error) {
+    logger.warn(
+      { providerId: config.provider, error: error instanceof Error ? error.message : String(error) },
+      'Unable to fetch provider config for capability validation; deferring to admission checks',
+    );
+    return;
+  }
   if (!providerConfig) {
     throw new HTTPException(404, { message: `Provider not found: ${config.provider}` });
   }

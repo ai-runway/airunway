@@ -37,10 +37,5 @@
     "deployment"
   ],
   "author": "",
-  "license": "MIT",
-  "devDependencies": {
-    "@typescript-eslint/parser": "^6.18.1",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-react-refresh": "^0.4.5"
-  }
+  "license": "MIT"
 }

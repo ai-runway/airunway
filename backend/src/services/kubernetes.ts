@@ -1019,8 +1019,11 @@ class KubernetesService {
       );
       return ((response as { body?: InferenceProviderConfigResource })?.body
         || response) as InferenceProviderConfigResource;
-    } catch {
-      return null;
+    } catch (error) {
+      if (getK8sStatusCode(error) === 404) {
+        return null;
+      }
+      throw error;
     }
   }
 
