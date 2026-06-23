@@ -59,6 +59,7 @@ help:
 	@echo ""
 	@echo "Provider Targets:"
 	@echo "  providers-test         Run all provider tests"
+	@echo "  gpu-e2e                Run GPU e2e suite on a GPU cluster (GPU_E2E_ARGS=...)"
 	@echo ""
 	@echo "Cluster Setup Targets:"
 	@echo "  setup-gateway          Install Gateway API CRDs, Istio, BBR, and the inference Gateway"
@@ -199,6 +200,12 @@ providers-test: verify-versions
 	cd providers/llmd && go test ./...
 	cd providers/vllm && go test ./...
 	@echo "✅ Provider tests completed"
+
+# Run the GPU end-to-end suite against a pre-existing GPU cluster.
+# All logic lives in scripts/gpu-e2e.sh; pass flags via GPU_E2E_ARGS.
+# Example: make gpu-e2e GPU_E2E_ARGS="--provider all --registry quay.io/surajd"
+gpu-e2e:
+	@bash scripts/gpu-e2e.sh $(GPU_E2E_ARGS)
 
 # Generate deploy manifests for controller and dashboard
 generate-deploy-manifests:
