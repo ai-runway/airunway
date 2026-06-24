@@ -92,8 +92,9 @@ func TestGPUProviders(t *testing.T) {
 // than inline steps: a leaf parallel subtest's own cleanups run as soon as that
 // subtest finishes — on success OR on a mid-case t.Fatal — and promptly, not at
 // the end of the batch. That frees this case's GPU for siblings even when an
-// assertion fails. Cleanups run LIFO, so teardown is registered first (runs
-// last, after debug has captured state on failure).
+// assertion fails. Cleanups run LIFO, so they are registered in reverse of the
+// order they run: recordResult first (runs last, after teardown and debug),
+// then cleanup, then debug capture (runs first, while state still exists).
 func runCase(t *testing.T, tc testCase) {
 	// Registered first → runs last: record the final PASS/FAIL/SKIP after
 	// teardown and debug have run.
