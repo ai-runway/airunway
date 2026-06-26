@@ -135,7 +135,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
-          images: ghcr.io/kaito-project/airunway/dashboard
+          images: ghcr.io/${{ github.repository }}/dashboard
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -178,7 +178,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
-          images: ghcr.io/kaito-project/airunway/controller
+          images: ghcr.io/${{ github.repository }}/controller
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -234,7 +234,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
-          images: ghcr.io/kaito-project/airunway/model-downloader
+          images: ghcr.io/${{ github.repository }}/model-downloader
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
