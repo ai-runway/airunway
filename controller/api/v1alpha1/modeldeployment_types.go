@@ -70,6 +70,37 @@ const (
 	APIFormatAnthropicMessages APIFormat = "anthropic-messages"
 )
 
+// ValidAPIFormatsForEngine defines the maximum set of API formats each engine
+// type can natively support. Providers may declare a subset (e.g., KubeRay
+// vLLM only exposes openai-chat because Ray Serve does not pass through
+// /v1/responses or /v1/messages), but must never declare formats beyond
+// this map.
+var ValidAPIFormatsForEngine = map[EngineType][]APIFormat{
+	EngineTypeVLLM:     {APIFormatOpenAIChat, APIFormatOpenAIResponses, APIFormatAnthropicMessages},
+	EngineTypeSGLang:   {APIFormatOpenAIChat, APIFormatAnthropicMessages},
+	EngineTypeTRTLLM:   {APIFormatOpenAIChat, APIFormatOpenAIResponses},
+	EngineTypeLlamaCpp: {APIFormatOpenAIChat},
+}
+
+// ValidateAPIFormatsForEngine checks that every format in the list is valid
+// for the given engine type. Returns an error describing the first invalid format.
+func ValidateAPIFormatsForEngine(engine EngineType, formats []APIFormat) error {
+	valid, ok := ValidAPIFormatsForEngine[engine]
+	if !ok {
+		return fmt.Errorf("unknown engine type %q", engine)
+	}
+	validSet := make(map[APIFormat]bool, len(valid))
+	for _, f := range valid {
+		validSet[f] = true
+	}
+	for _, f := range formats {
+		if !validSet[f] {
+			return fmt.Errorf("engine %q does not support API format %q", engine, f)
+		}
+	}
+	return nil
+}
+
 // DeploymentPhase defines the phase of the deployment
 // +kubebuilder:validation:Enum=Pending;Deploying;Running;Failed;Terminating
 type DeploymentPhase string

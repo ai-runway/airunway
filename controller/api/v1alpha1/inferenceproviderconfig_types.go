@@ -196,6 +196,35 @@ func (c *ProviderCapabilities) GetEngineCapability(engine EngineType) *EngineCap
 	return nil
 }
 
+// SupportsAPIFormat returns true if this engine supports the specified API format.
+// When the APIFormats list is empty, only openai-chat is assumed (backward compatibility).
+func (e *EngineCapability) SupportsAPIFormat(f APIFormat) bool {
+	if e == nil {
+		return false
+	}
+	if len(e.APIFormats) == 0 {
+		return f == APIFormatOpenAIChat
+	}
+	for _, a := range e.APIFormats {
+		if a == f {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveAPIFormats returns the API formats this engine supports.
+// When the APIFormats list is empty, it materializes [openai-chat] for backward compatibility.
+func (e *EngineCapability) EffectiveAPIFormats() []APIFormat {
+	if e == nil {
+		return nil
+	}
+	if len(e.APIFormats) == 0 {
+		return []APIFormat{APIFormatOpenAIChat}
+	}
+	return e.APIFormats
+}
+
 // SupportsServingMode returns true if this engine supports the specified serving mode.
 func (e *EngineCapability) SupportsServingMode(mode ServingMode) bool {
 	if e == nil {
@@ -238,6 +267,16 @@ func (c *ProviderCapabilities) SupportsGPU(engine EngineType) bool {
 // SupportsCPU returns true if the given engine supports CPU-only inference
 func (c *ProviderCapabilities) SupportsCPU(engine EngineType) bool {
 	return c.GetEngineCapability(engine).SupportsCPU()
+}
+
+// SupportsAPIFormat returns true if the given engine supports the specified API format
+func (c *ProviderCapabilities) SupportsAPIFormat(engine EngineType, f APIFormat) bool {
+	return c.GetEngineCapability(engine).SupportsAPIFormat(f)
+}
+
+// EffectiveAPIFormats returns the API formats the given engine supports
+func (c *ProviderCapabilities) EffectiveAPIFormats(engine EngineType) []APIFormat {
+	return c.GetEngineCapability(engine).EffectiveAPIFormats()
 }
 
 // EngineNames returns a list of all engine types supported by this provider
