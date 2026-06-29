@@ -12,7 +12,8 @@
     "lint": "headlamp-plugin lint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tsc": "tsc --noEmit"
+    "tsc": "tsc --noEmit",
+    "package": "headlamp-plugin package . ."
   },
   "dependencies": {
     "@airunway/shared": "workspace:*"

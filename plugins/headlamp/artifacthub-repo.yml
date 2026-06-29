@@ -3,3 +3,6 @@
 repositoryID: airunway-headlamp-plugin
 name: AI Runway Headlamp Plugin
 kind: headlamp
+owners:
+  - name: sozercan
+    email: sozercan@gmail.com

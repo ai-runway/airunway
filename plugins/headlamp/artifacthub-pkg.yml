@@ -1,18 +1,24 @@
 # AI Runway Headlamp Plugin - ArtifactHub Package Metadata
+# NOTE: version, archive-url, and archive-checksum are updated automatically
+# by the release-headlamp-plugin GitHub Actions workflow on each release.
 version: "0.1.0"
 name: airunway-headlamp-plugin
 displayName: AI Runway
 createdAt: "2024-01-01T00:00:00Z"
+category: ai-machine-learning
 description: |
   AI Runway Headlamp Plugin provides ML model deployment management within the
-  Headlamp Kubernetes dashboard. It supports KAITO, KubeRay, and Dynamo runtimes
-  for deploying and managing machine learning inference workloads.
+  Headlamp Kubernetes dashboard. Deploy, monitor, and manage inference workloads
+  across multiple providers including KAITO, KubeRay, Dynamo, and llm-d.
 
   ## Features
 
   - **Deployment Management**: Create, view, and delete ML model deployments
   - **Model Catalog**: Browse curated models and HuggingFace models
-  - **Runtime Status**: Monitor KAITO, KubeRay, and Dynamo installation status
+  - **Provider Status**: Monitor KAITO, KubeRay, Dynamo, and llm-d installation status
+  - **Gateway Integration**: Gateway API Inference Extension support for traffic routing
+  - **Disaggregated Serving**: Configure prefill/decode separation for supported providers
+  - **Manifest Preview**: Review generated Kubernetes resources before deploying
   - **Metrics & Logs**: View deployment metrics and pod logs
   - **GPU Dashboard**: Monitor GPU capacity and availability
   - **AI-Powered Configuration**: Get intelligent deployment configuration suggestions
@@ -21,7 +27,7 @@ description: |
 
   - Headlamp 0.25.0 or later
   - AI Runway backend service running in the cluster
-  - At least one supported ML runtime (KAITO, KubeRay, or Dynamo) installed
+  - At least one supported inference provider (KAITO, KubeRay, Dynamo, or llm-d) installed
 
 logoPath: logo.png
 homeURL: https://github.com/kaito-project/airunway
@@ -35,7 +41,11 @@ keywords:
   - inference
   - kaito
   - kuberay
+  - dynamo
+  - llm-d
   - vllm
+  - sglang
+  - gateway
   - headlamp
   - plugin
 links:
@@ -46,12 +56,13 @@ links:
   - name: Issues
     url: https://github.com/kaito-project/airunway/issues
 maintainers:
-  - name: Sertac Ozercan
+  - name: sozercan
     email: sozercan@gmail.com
 annotations:
-  headlamp/plugin/archive-url: https://github.com/kaito-project/airunway/releases/download/v0.1.0/airunway-headlamp-plugin-0.1.0.tar.gz
+  headlamp/plugin/archive-url: https://github.com/kaito-project/airunway/releases/download/headlamp-plugin-v0.1.0/airunway-headlamp-plugin-0.1.0.tar.gz
   headlamp/plugin/archive-checksum: ""
-  headlamp/plugin/distro-compat: linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64
+  headlamp/plugin/version-compat: ">=0.25.0"
+  headlamp/plugin/distro-compat: in-cluster,desktop,web,docker-desktop
 license: Apache-2.0
 provider:
   name: AIRunway
