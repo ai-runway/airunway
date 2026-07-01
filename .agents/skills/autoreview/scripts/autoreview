@@ -655,7 +655,7 @@ def local_bundle(repo: Path) -> str:
         safe_diff(repo, [], ["--stat"]),
         bounded(safe_diff(repo, [], ["--patch", "--find-renames"])),
     ]
-    untracked = [line for line in git(repo, "ls-files", "--others", "--exclude-standard").splitlines() if line]
+    untracked = [decode_git_quoted_path(line) for line in git(repo, "ls-files", "--others", "--exclude-standard").splitlines() if line]
     if untracked:
         parts.append("# Untracked Files")
         for rel in untracked:
@@ -681,8 +681,8 @@ def status_line_paths(line: str) -> list[str]:
         return []
     path_text = line[3:].strip()
     if " -> " in path_text:
-        return [part.strip().strip('"') for part in path_text.split(" -> ") if part.strip()]
-    return [path_text.strip('"')]
+        return [decode_git_quoted_path(part.strip()) for part in path_text.split(" -> ") if part.strip()]
+    return [decode_git_quoted_path(path_text)]
 
 
 def branch_bundle(repo: Path, base_ref: str) -> str:
@@ -720,7 +720,7 @@ def review_changed_lines(repo: Path, target: str, target_ref: str | None, commit
         ]:
             merge_line_ranges(ranges, parse_changed_line_ranges(patch))
         for rel in git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
-            path = rel.strip()
+            path = decode_git_quoted_path(rel.strip())
             if path:
                 ranges.setdefault(path, []).append((1, max(1, file_line_count(repo / path))))
     elif target == "branch":

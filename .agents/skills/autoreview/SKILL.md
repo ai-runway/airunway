@@ -152,7 +152,7 @@ Repo-local helper:
 On native Windows, invoke the extensionless Python helper through Python:
 
 ```powershell
-python skills\autoreview\scripts\autoreview --help
+python .agents\skills\autoreview\scripts\autoreview --help
 ```
 
 The smoke harness has thin shell wrappers over a shared Python implementation:
@@ -162,7 +162,7 @@ The smoke harness has thin shell wrappers over a shared Python implementation:
 ```
 
 ```powershell
-skills\autoreview\scripts\test-review-harness.ps1 -Fixture benign -Engine codex
+.agents\skills\autoreview\scripts\test-review-harness.ps1 -Fixture benign -Engine codex
 ```
 
 The helper:
