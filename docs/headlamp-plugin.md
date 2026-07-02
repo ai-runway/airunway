@@ -2,7 +2,7 @@
 
 This document describes the architecture, design decisions, and technical details of the AI Runway Headlamp plugin.
 
-For installation and development instructions, see the [plugin README](https://github.com/kaito-project/airunway/blob/main/plugins/headlamp/README.md).
+For installation and development instructions, see the [plugin README](https://github.com/ai-runway/airunway/blob/main/plugins/headlamp/README.md).
 
 ---
 

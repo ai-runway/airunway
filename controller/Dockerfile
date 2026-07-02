@@ -30,7 +30,7 @@ RUN test -n "${GAIE_VERSION}" || (echo "ERROR: GAIE_VERSION build arg is require
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN cd controller && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a \
-      -ldflags="-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}" \
+      -ldflags="-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}" \
       -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary

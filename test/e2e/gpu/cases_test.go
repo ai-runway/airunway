@@ -87,5 +87,5 @@ var cases = []testCase{
 	},
 	// Disaggregated Dynamo serving is intentionally excluded: it serves correctly
 	// in isolation but its shared-BBR restart races with concurrent aggregated
-	// requests (kaito-project/airunway#334). Re-add as a data-only case once fixed.
+	// requests (ai-runway/airunway#334). Re-add as a data-only case once fixed.
 }

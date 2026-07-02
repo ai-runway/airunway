@@ -9,7 +9,7 @@ export
 # Inject build-time defaults into the controller binary so the values track
 # /versions.env automatically. The Go fallback literals in the source files
 # only apply when bypassing the Makefile (e.g. `go run`, `go test`).
-LDFLAGS := -X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)
+LDFLAGS := -X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))

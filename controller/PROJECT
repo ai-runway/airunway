@@ -7,7 +7,7 @@ domain: airunway.ai
 layout:
 - go.kubebuilder.io/v4
 projectName: controller
-repo: github.com/kaito-project/airunway/controller
+repo: github.com/ai-runway/airunway/controller
 resources:
 - api:
     crdVersion: v1
@@ -16,7 +16,7 @@ resources:
   domain: airunway.ai
   group: ""
   kind: ModelDeployment
-  path: github.com/kaito-project/airunway/controller/api/v1alpha1
+  path: github.com/ai-runway/airunway/controller/api/v1alpha1
   version: v1alpha1
   webhooks:
     defaulting: true
@@ -28,6 +28,6 @@ resources:
   domain: airunway.ai
   group: ""
   kind: InferenceProviderConfig
-  path: github.com/kaito-project/airunway/controller/api/v1alpha1
+  path: github.com/ai-runway/airunway/controller/api/v1alpha1
   version: v1alpha1
 version: "3"

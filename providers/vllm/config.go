@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -36,7 +36,7 @@ const (
 	ProviderConfigName = "vllm"
 
 	// ProviderDocumentation is the documentation URL for the vLLM provider
-	ProviderDocumentation = "https://github.com/kaito-project/airunway/tree/main/docs/providers/vllm.md"
+	ProviderDocumentation = "https://github.com/ai-runway/airunway/tree/main/docs/providers/vllm.md"
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute

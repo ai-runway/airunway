@@ -220,7 +220,7 @@ jobs:
           source versions.env
           make controller-build
           if ! go version -m controller/bin/manager \
-            | grep -F -- "-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}"; then
+            | grep -F -- "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}"; then
             echo "❌ ldflags injection of DefaultGAIEVersion=${GAIE_VERSION} did not land in controller/bin/manager"
             exit 1
           fi
@@ -235,7 +235,7 @@ jobs:
           source versions.env
           cd providers/dynamo && make build && cd -
           if ! go version -m providers/dynamo/bin/provider \
-            | grep -F -- "-X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=${DYNAMO_VERSION}"; then
+            | grep -F -- "-X github.com/ai-runway/airunway/providers/dynamo.DynamoVersion=${DYNAMO_VERSION}"; then
             echo "❌ ldflags injection of DynamoVersion=${DYNAMO_VERSION} did not land in providers/dynamo/bin/provider"
             exit 1
           fi

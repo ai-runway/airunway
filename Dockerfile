@@ -75,7 +75,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 # Labels for container registry
 LABEL org.opencontainers.image.title="AIRunway"
 LABEL org.opencontainers.image.description="Web-based platform for deploying and managing LLM frameworks on Kubernetes"
-LABEL org.opencontainers.image.source="https://github.com/kaito-project/airunway"
+LABEL org.opencontainers.image.source="https://github.com/ai-runway/airunway"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Copy the compiled binary and CLI tools used by installation routes

@@ -22,7 +22,7 @@
 - `shared/types/` - Shared TypeScript definitions
 - `plugins/headlamp/` - Headlamp dashboard plugin
 - `docs/` - Detailed documentation (read as needed; also the source rendered on the website)
-- `website/` - Docusaurus site published to https://kaito-project.github.io/airunway/. Reads from `docs/` via `docs.path: '../docs'` — write docs as plain GitHub-Flavored Markdown and they render in both places.
+- `website/` - Docusaurus site published to https://ai-runway.github.io/airunway/. Reads from `docs/` via `docs.path: '../docs'` — write docs as plain GitHub-Flavored Markdown and they render in both places.
 
 **Core pattern**: Provider abstraction via CRDs:
 - `ModelDeployment` - Unified API for deploying ML models

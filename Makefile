@@ -3,13 +3,13 @@
 .PHONY: model-downloader-docker-build setup-gateway cleanup-gateway
 
 # Controller image
-CONTROLLER_IMG ?= ghcr.io/kaito-project/airunway/controller:latest
+CONTROLLER_IMG ?= ghcr.io/ai-runway/airunway/controller:latest
 
 # Dashboard image
-DASHBOARD_IMG ?= ghcr.io/kaito-project/airunway/dashboard:latest
+DASHBOARD_IMG ?= ghcr.io/ai-runway/airunway/dashboard:latest
 
 # Model downloader image
-MODEL_DOWNLOADER_IMG ?= ghcr.io/kaito-project/airunway/model-downloader:latest
+MODEL_DOWNLOADER_IMG ?= ghcr.io/ai-runway/airunway/model-downloader:latest
 
 # Image build settings
 PLATFORM ?= linux/amd64

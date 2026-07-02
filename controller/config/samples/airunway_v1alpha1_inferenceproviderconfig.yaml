@@ -11,8 +11,8 @@ metadata:
     airunway.ai/display-name: KAITO
     airunway.ai/description: Kubernetes AI Toolchain Operator for simplified model deployment
     airunway.ai/default-namespace: kaito-workspace
-    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md
-    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md
+    airunway.ai/documentation-url: https://github.com/ai-runway/airunway/tree/main/docs/providers/kaito.md
+    airunway.ai/documentation: https://github.com/ai-runway/airunway/tree/main/docs/providers/kaito.md
 spec:
   capabilities:
     engines:
@@ -41,8 +41,8 @@ metadata:
     airunway.ai/display-name: Dynamo
     airunway.ai/description: NVIDIA Dynamo for high-performance GPU inference
     airunway.ai/default-namespace: dynamo-system
-    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md
-    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md
+    airunway.ai/documentation-url: https://github.com/ai-runway/airunway/tree/main/docs/providers/dynamo.md
+    airunway.ai/documentation: https://github.com/ai-runway/airunway/tree/main/docs/providers/dynamo.md
 spec:
   capabilities:
     engines:
@@ -89,8 +89,8 @@ metadata:
     airunway.ai/display-name: KubeRay
     airunway.ai/description: Ray Serve via KubeRay for distributed Ray-based model serving with vLLM
     airunway.ai/default-namespace: ray-system
-    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md
-    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md
+    airunway.ai/documentation-url: https://github.com/ai-runway/airunway/tree/main/docs/providers/kuberay.md
+    airunway.ai/documentation: https://github.com/ai-runway/airunway/tree/main/docs/providers/kuberay.md
 spec:
   capabilities:
     engines:
@@ -113,8 +113,8 @@ metadata:
     airunway.ai/display-name: llm-d
     airunway.ai/description: 'llm-d provider: deploys vLLM Deployments + Services directly. Requires GPU nodes with the NVIDIA device plugin.'
     airunway.ai/default-namespace: default
-    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md
-    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md
+    airunway.ai/documentation-url: https://github.com/ai-runway/airunway/tree/main/docs/providers/llmd.md
+    airunway.ai/documentation: https://github.com/ai-runway/airunway/tree/main/docs/providers/llmd.md
 spec:
   capabilities:
     engines:
