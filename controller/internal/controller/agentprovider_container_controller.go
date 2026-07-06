@@ -77,6 +77,24 @@ type containerConfig struct {
 	// frameworks that need a writable workdir (e.g. OpenClaw). Provider-owned
 	// posture, expressed per-framework — never a user-facing security knob.
 	WritableRootFilesystem bool `json:"writableRootFilesystem,omitempty"`
+	// Command overrides the image entrypoint. Useful for generic/dev images
+	// (e.g. a smoke-test server) and for wrapping frameworks whose default
+	// entrypoint is not an HTTP server.
+	Command []string `json:"command,omitempty"`
+	// Args overrides the image arguments.
+	Args []string `json:"args,omitempty"`
+	// Port overrides the container/serving port. Real framework images serve on
+	// varied ports (e.g. LangGraph 8000, OpenClaw 18789); this lets the
+	// Service target the right one. Defaults to 8080.
+	Port int32 `json:"port,omitempty"`
+}
+
+// containerPort returns the configured serving port, defaulting to 8080.
+func containerPort(cfg containerConfig) int32 {
+	if cfg.Port > 0 {
+		return cfg.Port
+	}
+	return agentContainerPort
 }
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -148,7 +166,7 @@ func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunw
 // and reports readiness from the Deployment's available replicas.
 func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) (ctrl.Result, error) {
 	deployment := renderAgentDeployment(ad, cfg, binding, configMapName)
-	service := renderAgentService(ad)
+	service := renderAgentService(ad, cfg)
 	for _, obj := range []client.Object{deployment, service} {
 		if err := r.applyOwned(ctx, ad, obj); err != nil {
 			return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
@@ -297,7 +315,7 @@ func agentPodSpec(cfg containerConfig, binding airunwayv1alpha1.ModelBindingStat
 	container := corev1.Container{
 		Name:  "agent",
 		Image: cfg.Image,
-		Ports: []corev1.ContainerPort{{ContainerPort: agentContainerPort}},
+		Ports: []corev1.ContainerPort{{ContainerPort: containerPort(cfg)}},
 		Env:   env,
 		VolumeMounts: []corev1.VolumeMount{{
 			Name: "agent-config", MountPath: agentConfigMountDir, ReadOnly: true,
@@ -307,6 +325,12 @@ func agentPodSpec(cfg containerConfig, binding airunwayv1alpha1.ModelBindingStat
 			ReadOnlyRootFilesystem:   ptr.To(!cfg.WritableRootFilesystem),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
+	}
+	if len(cfg.Command) > 0 {
+		container.Command = cfg.Command
+	}
+	if len(cfg.Args) > 0 {
+		container.Args = cfg.Args
 	}
 
 	return corev1.PodSpec{
@@ -362,13 +386,13 @@ func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, b
 }
 
 // renderAgentService renders the ClusterIP Service fronting the agent.
-func renderAgentService(ad *airunwayv1alpha1.AgentDeployment) *corev1.Service {
+func renderAgentService(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig) *corev1.Service {
 	return &corev1.Service{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
 		Spec: corev1.ServiceSpec{
 			Selector: agentSelector(ad),
-			Ports:    []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt32(agentContainerPort)}},
+			Ports:    []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt32(containerPort(cfg))}},
 		},
 	}
 }

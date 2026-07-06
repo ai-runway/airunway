@@ -146,11 +146,49 @@ func TestRenderAgentDeployment_WritableRootForFramework(t *testing.T) {
 	}
 }
 
+func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
+	ad := containerAD("smoke", containerConfig{Image: "img:1"}, nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
+	cfg := containerConfig{Image: "img:1", Command: []string{"python", "/serve.py"}, Args: []string{"--verbose"}, Port: 9000}
+
+	dep := renderAgentDeployment(ad, cfg, binding, "smoke-config")
+	c := dep.Spec.Template.Spec.Containers[0]
+	if len(c.Command) != 2 || c.Command[0] != "python" || c.Command[1] != "/serve.py" {
+		t.Errorf("command = %v", c.Command)
+	}
+	if len(c.Args) != 1 || c.Args[0] != "--verbose" {
+		t.Errorf("args = %v", c.Args)
+	}
+	if c.Ports[0].ContainerPort != 9000 {
+		t.Errorf("containerPort = %d, want 9000", c.Ports[0].ContainerPort)
+	}
+	// The Service must target the overridden port too.
+	svc := renderAgentService(ad, cfg)
+	if svc.Spec.Ports[0].TargetPort.IntValue() != 9000 {
+		t.Errorf("service targetPort = %v, want 9000", svc.Spec.Ports[0].TargetPort)
+	}
+}
+
+func TestContainerPortDefault(t *testing.T) {
+	if got := containerPort(containerConfig{}); got != agentContainerPort {
+		t.Errorf("default port = %d, want %d", got, agentContainerPort)
+	}
+	if got := containerPort(containerConfig{Port: 8000}); got != 8000 {
+		t.Errorf("override port = %d, want 8000", got)
+	}
+}
+
 func TestParseContainerConfig(t *testing.T) {
-	raw := &runtime.RawExtension{Raw: []byte(`{"image":"img:2","writableRootFilesystem":true,"systemPrompt":"x"}`)}
+	raw := &runtime.RawExtension{Raw: []byte(`{"image":"img:2","writableRootFilesystem":true,"port":8000,"command":["/bin/serve"],"systemPrompt":"x"}`)}
 	cfg := parseContainerConfig(raw)
 	if cfg.Image != "img:2" || !cfg.WritableRootFilesystem {
 		t.Errorf("parsed = %+v", cfg)
+	}
+	if cfg.Port != 8000 {
+		t.Errorf("port = %d, want 8000", cfg.Port)
+	}
+	if len(cfg.Command) != 1 || cfg.Command[0] != "/bin/serve" {
+		t.Errorf("command = %v", cfg.Command)
 	}
 	if got := parseContainerConfig(nil); got.Image != "" {
 		t.Errorf("nil config should be empty, got %+v", got)
