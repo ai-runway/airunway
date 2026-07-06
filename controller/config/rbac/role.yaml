@@ -28,14 +28,47 @@ rules:
   - patch
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - airunway.ai
   resources:
+  - agentdeployments
   - inferenceproviderconfigs
   verbs:
   - get
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - airunway.ai
+  resources:
+  - agentdeployments/finalizers
+  - modeldeployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - airunway.ai
+  resources:
+  - agentdeployments/status
+  - modeldeployments/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - airunway.ai
+  resources:
+  - agentproviderconfigs
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - airunway.ai
@@ -49,20 +82,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - airunway.ai
-  resources:
-  - modeldeployments/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - airunway.ai
-  resources:
-  - modeldeployments/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - apps
   resources:
