@@ -60,3 +60,65 @@ spec:
       tags:
         - devops
         - observability
+---
+# CRD-native agent framework: Orka (Kubernetes-native agent swarms).
+# Like Kagent this is a crd-backend framework, but its coordinator/specialist
+# agents run as Kubernetes Jobs (a task/one-shot shape) rather than
+# long-running servers — the concrete driver for the spec.lifecycle open
+# question in the design.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: orka
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  capabilities:
+    backend: crd
+    requiresOperator: true
+    modelBindingModes:
+      - deploymentRef
+      - externalAPI
+    protocols:
+      - mcp
+      - openaiTools
+  catalog:
+    - name: orka-task-swarm
+      title: "Task swarm (Orka)"
+      description: >-
+        A coordinator agent decomposes a task and spawns specialist agents in
+        parallel as Kubernetes Jobs, then synthesises the results.
+      tags:
+        - automation
+        - swarm
+---
+# Container-based agent framework: Hermes. Served by the SAME generic
+# container provider as OpenClaw/CrewAI/LangGraph — added purely as catalog
+# data (image + recipe), with no new provider code. This is the
+# "extensible by data, not code" property in practice.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: hermes
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  capabilities:
+    backend: container
+    requiresOperator: false
+    modelBindingModes:
+      - externalAPI
+      - deploymentRef
+    protocols:
+      - openaiTools
+  catalog:
+    - name: hermes-assistant
+      title: "Hermes assistant"
+      description: >-
+        Hermes running as a fast container-based task assistant, bound to any
+        OpenAI-compatible model managed by AI Runway.
+      image: ghcr.io/hermes/hermes-agent:latest
+      tags:
+        - automation

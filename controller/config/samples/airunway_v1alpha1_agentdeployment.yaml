@@ -55,3 +55,54 @@ spec:
   # applies the security context appropriate for its framework when it
   # renders the agent workload (e.g. OpenClaw needs a writable root
   # filesystem for session state). It is not set per AgentDeployment.
+---
+# Example: Hermes (container backend) with an explicit BYO image override and
+# a writable root filesystem. Shows spec.config carrying both the provider-
+# consumed fields (image, writableRootFilesystem) and framework passthrough
+# (systemPrompt), all mounted for the container as /etc/airunway/agent.json.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: hermes-helper
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: hermes
+  models:
+    - name: default
+      externalAPI:
+        type: openai
+        baseURL: https://api.openai.com/v1
+        modelName: gpt-4o-mini
+        credentialsRef:
+          name: openai-api-key
+          key: api-key
+  config:
+    image: ghcr.io/hermes/hermes-agent:poc
+    writableRootFilesystem: true
+    systemPrompt: "You are Hermes, a fast and concise task assistant."
+---
+# Example: Orka (crd backend) task swarm bound to an external model.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: research-swarm
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: orka
+  models:
+    - name: default
+      externalAPI:
+        type: openai
+        baseURL: https://api.openai.com/v1
+        modelName: gpt-4o-mini
+        credentialsRef:
+          name: openai-api-key
+          key: api-key
+  config:
+    systemPrompt: "Decompose the task and coordinate specialist agents."
