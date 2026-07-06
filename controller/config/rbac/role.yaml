@@ -147,6 +147,19 @@ rules:
   - list
   - watch
 - apiGroups:
+  - kagent.dev
+  resources:
+  - agents
+  - modelconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - networking.istio.io
   resources:
   - destinationrules
