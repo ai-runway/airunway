@@ -179,7 +179,10 @@ func renderKagentModelConfig(ad *airunwayv1alpha1.AgentDeployment, binding airun
 		}
 	}
 	if binding.CredentialsRef != nil {
-		spec["apiKeySecretRef"] = binding.CredentialsRef.Name
+		// kagent v1alpha2 renamed this field from v1alpha1's apiKeySecretRef to
+		// apiKeySecret; a CEL rule also requires apiKeySecret + apiKeySecretKey
+		// to be set together.
+		spec["apiKeySecret"] = binding.CredentialsRef.Name
 		spec["apiKeySecretKey"] = binding.CredentialsRef.Key
 	}
 

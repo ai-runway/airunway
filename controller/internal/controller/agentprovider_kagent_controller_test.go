@@ -127,9 +127,9 @@ func TestRenderKagentModelConfig(t *testing.T) {
 	if baseURL != "https://api.openai.com/v1" {
 		t.Errorf("openAI.baseUrl = %q, want the binding base URL", baseURL)
 	}
-	secretRef, _, _ := unstructured.NestedString(mc.Object, "spec", "apiKeySecretRef")
+	secretRef, _, _ := unstructured.NestedString(mc.Object, "spec", "apiKeySecret")
 	if secretRef != "openai-api-key" {
-		t.Errorf("apiKeySecretRef = %q, want openai-api-key", secretRef)
+		t.Errorf("apiKeySecret = %q, want openai-api-key", secretRef)
 	}
 }
 
@@ -151,8 +151,8 @@ func TestRenderKagentModelConfig_InClusterEndpoint(t *testing.T) {
 	if baseURL != "http://my-model.default.svc.cluster.local:80/v1" {
 		t.Errorf("openAI.baseUrl = %q", baseURL)
 	}
-	if _, found, _ := unstructured.NestedString(mc.Object, "spec", "apiKeySecretRef"); found {
-		t.Error("apiKeySecretRef should be absent when the binding has no credentials")
+	if _, found, _ := unstructured.NestedString(mc.Object, "spec", "apiKeySecret"); found {
+		t.Error("apiKeySecret should be absent when the binding has no credentials")
 	}
 }
 

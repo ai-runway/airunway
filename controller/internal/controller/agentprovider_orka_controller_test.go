@@ -198,6 +198,10 @@ var _ = Describe("Orka crd provider", func() {
 		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
 
 		By("flipping to Running once the Orka Agent reports Ready=True")
+		// Simulate what the real Orka operator writes on the Agent status. The
+		// real Agent CRD requires status.activeTasks, so set it too (the stub
+		// CRD did not enforce this; the real schema does).
+		Expect(unstructured.SetNestedField(agent.Object, int64(0), "status", "activeTasks")).To(Succeed())
 		Expect(unstructured.SetNestedSlice(agent.Object, []interface{}{
 			map[string]interface{}{"type": "Ready", "status": "True", "reason": "Ready", "message": "ok",
 				"lastTransitionTime": metav1.Now().Format("2006-01-02T15:04:05Z07:00")},
