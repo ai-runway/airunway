@@ -228,10 +228,8 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 	return obj
 }
 
-// applyProviderStatus writes ONLY the provider-owned status fields via
-// server-side apply under the kagent field owner. Core-owned fields
-// (framework, modelBindings, and the core conditions) are omitted, so the API
-// server leaves the core controller's writes intact.
+// applyProviderStatus writes the provider-owned status via the shared SSA
+// helper under the kagent field owner.
 func (r *KagentProviderReconciler) applyProviderStatus(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -241,41 +239,7 @@ func (r *KagentProviderReconciler) applyProviderStatus(
 	providerReady metav1.ConditionStatus,
 	reason, message string,
 ) error {
-	apply := &airunwayv1alpha1.AgentDeployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: airunwayv1alpha1.GroupVersion.String(),
-			Kind:       "AgentDeployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace},
-		Status: airunwayv1alpha1.AgentDeploymentStatus{
-			Phase:    phase,
-			Runtime:  rt,
-			Replicas: replicas,
-			Conditions: []metav1.Condition{{
-				Type:               airunwayv1alpha1.AgentConditionTypeProviderReady,
-				Status:             providerReady,
-				Reason:             reason,
-				Message:            message,
-				LastTransitionTime: providerReadyTransition(ad, providerReady),
-				ObservedGeneration: ad.Generation,
-			}},
-		},
-	}
-
-	return r.Status().Patch(ctx, apply, client.Apply,
-		client.FieldOwner(KagentFieldOwner),
-		client.ForceOwnership,
-	)
-}
-
-// providerReadyTransition preserves the existing ProviderReady
-// LastTransitionTime when the status is unchanged, so repeated reconciles do
-// not churn the timestamp (SSA re-applies the whole condition entry).
-func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1.ConditionStatus) metav1.Time {
-	if existing := meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady); existing != nil && existing.Status == status {
-		return existing.LastTransitionTime
-	}
-	return metav1.Now()
+	return applyProviderOwnedStatus(ctx, r.Client, ad, KagentFieldOwner, phase, rt, replicas, providerReady, reason, message)
 }
 
 // SetupWithManager wires the kagent provider. It watches AgentDeployment and

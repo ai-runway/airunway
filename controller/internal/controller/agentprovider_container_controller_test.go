@@ -1,0 +1,331 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+)
+
+// --- Pure render-function unit tests (no cluster) --------------------------
+
+func containerAD(name string, cfg containerConfig, extra map[string]any) *airunwayv1alpha1.AgentDeployment {
+	merged := map[string]any{}
+	if cfg.Image != "" {
+		merged["image"] = cfg.Image
+	}
+	if cfg.WritableRootFilesystem {
+		merged["writableRootFilesystem"] = true
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	raw, _ := json.Marshal(merged)
+
+	ad := &airunwayv1alpha1.AgentDeployment{}
+	ad.Name = name
+	ad.Namespace = "default"
+	ad.Spec.Framework.Name = "crewai"
+	ad.Spec.Config = &runtime.RawExtension{Raw: raw}
+	return ad
+}
+
+func TestRenderAgentConfigMap(t *testing.T) {
+	ad := containerAD("research", containerConfig{Image: "img:1"}, map[string]any{"systemPrompt": "be brief"})
+	cm := renderAgentConfigMap(ad)
+
+	if cm.Name != "research-config" {
+		t.Errorf("name = %q, want research-config", cm.Name)
+	}
+	payload, ok := cm.Data[agentConfigFileName]
+	if !ok {
+		t.Fatalf("configmap missing %q key", agentConfigFileName)
+	}
+	// The full spec.config is mounted verbatim so the BYO image reads its
+	// framework config from the pinned path.
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+		t.Fatalf("agent.json not valid JSON: %v", err)
+	}
+	if parsed["systemPrompt"] != "be brief" {
+		t.Errorf("agent.json missing systemPrompt passthrough: %v", parsed)
+	}
+}
+
+func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
+	ad := containerAD("research", containerConfig{Image: "ghcr.io/x/crewai:poc"}, nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{
+		Name: "default", BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
+	}
+	dep := renderAgentDeployment(ad, containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding, "research-config")
+
+	c := dep.Spec.Template.Spec.Containers[0]
+	if c.Image != "ghcr.io/x/crewai:poc" {
+		t.Errorf("image = %q", c.Image)
+	}
+
+	// Provider-owned hardening (design §7): runAsNonRoot + seccomp at pod level.
+	pod := dep.Spec.Template.Spec
+	if pod.SecurityContext == nil || pod.SecurityContext.RunAsNonRoot == nil || !*pod.SecurityContext.RunAsNonRoot {
+		t.Error("pod securityContext.runAsNonRoot must be true (provider-owned hardening)")
+	}
+	if pod.SecurityContext.SeccompProfile == nil || pod.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Error("pod seccompProfile must be RuntimeDefault")
+	}
+	// Container: drop ALL caps, no privilege escalation, read-only root by default.
+	if c.SecurityContext == nil || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
+		t.Error("allowPrivilegeEscalation must be false")
+	}
+	if c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem {
+		t.Error("readOnlyRootFilesystem must default to true")
+	}
+	if len(c.SecurityContext.Capabilities.Drop) != 1 || c.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("capabilities must drop ALL, got %v", c.SecurityContext.Capabilities.Drop)
+	}
+
+	// Model binding injected as OpenAI-compatible env.
+	env := map[string]string{}
+	var apiKeyFromSecret bool
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+		if e.Name == "OPENAI_API_KEY" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			apiKeyFromSecret = true
+			if e.ValueFrom.SecretKeyRef.Name != "openai-api-key" {
+				t.Errorf("OPENAI_API_KEY secret = %q", e.ValueFrom.SecretKeyRef.Name)
+			}
+		}
+	}
+	if env["OPENAI_BASE_URL"] != "https://api.openai.com/v1" {
+		t.Errorf("OPENAI_BASE_URL = %q", env["OPENAI_BASE_URL"])
+	}
+	if env["AIRUNWAY_AGENT_CONFIG"] != agentConfigMountPath {
+		t.Errorf("AIRUNWAY_AGENT_CONFIG = %q, want %q", env["AIRUNWAY_AGENT_CONFIG"], agentConfigMountPath)
+	}
+	if !apiKeyFromSecret {
+		t.Error("OPENAI_API_KEY must be sourced from the binding secret")
+	}
+}
+
+func TestRenderAgentDeployment_WritableRootForFramework(t *testing.T) {
+	ad := containerAD("openclaw", containerConfig{Image: "img:1", WritableRootFilesystem: true}, nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1", WritableRootFilesystem: true}, binding, "openclaw-config")
+
+	roFS := dep.Spec.Template.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem
+	if roFS == nil || *roFS {
+		t.Error("readOnlyRootFilesystem must be false when the framework declares a writable root need")
+	}
+}
+
+func TestParseContainerConfig(t *testing.T) {
+	raw := &runtime.RawExtension{Raw: []byte(`{"image":"img:2","writableRootFilesystem":true,"systemPrompt":"x"}`)}
+	cfg := parseContainerConfig(raw)
+	if cfg.Image != "img:2" || !cfg.WritableRootFilesystem {
+		t.Errorf("parsed = %+v", cfg)
+	}
+	if got := parseContainerConfig(nil); got.Image != "" {
+		t.Errorf("nil config should be empty, got %+v", got)
+	}
+}
+
+// --- envtest reconcile specs -----------------------------------------------
+
+var _ = Describe("Container provider", func() {
+	ctx := context.Background()
+
+	makeContainerProvider := func(name string, catalogImage string) {
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend:           airunwayv1alpha1.AgentProviderBackendContainer,
+					ModelBindingModes: []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI},
+				},
+			},
+		}
+		if catalogImage != "" {
+			apc.Spec.Catalog = []airunwayv1alpha1.AgentCatalogItem{
+				{Name: name + "-recipe", Title: "Recipe", Image: catalogImage},
+			}
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+		apc.Status.Ready = ptrBool(true)
+		Expect(k8sClient.Status().Update(ctx, apc)).To(Succeed())
+	}
+
+	makeContainerAgent := func(name, framework, image string) {
+		cfgMap := map[string]any{"systemPrompt": "You are a research assistant."}
+		if image != "" {
+			cfgMap["image"] = image
+		}
+		raw, _ := json.Marshal(cfgMap)
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: framework},
+				Config:    &runtime.RawExtension{Raw: raw},
+				Models: []airunwayv1alpha1.ModelBinding{{
+					Name: "default",
+					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+	}
+
+	reconcileCore := func(name string) {
+		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+	}
+	reconcileContainer := func(name string) {
+		r := &ContainerProviderReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+	}
+	getAgent := func(name string) *airunwayv1alpha1.AgentDeployment {
+		out := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, out)).To(Succeed())
+		return out
+	}
+	prCond := func(ad *airunwayv1alpha1.AgentDeployment) *metav1.Condition {
+		return meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+	}
+
+	It("waits for core bindings before rendering", func() {
+		makeContainerProvider("crewai-wait", "")
+		makeContainerAgent("c-wait", "crewai-wait", "ghcr.io/x/crewai:poc")
+
+		reconcileContainer("c-wait")
+		ad := getAgent("c-wait")
+		Expect(prCond(ad).Reason).To(Equal("WaitingForBindings"))
+
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-wait", Namespace: "default"}, dep)).NotTo(Succeed())
+	})
+
+	It("renders Deployment + Service + ConfigMap and tracks readiness", func() {
+		makeContainerProvider("crewai-run", "")
+		makeContainerAgent("c-run", "crewai-run", "ghcr.io/x/crewai:poc")
+
+		reconcileCore("c-run")
+		reconcileContainer("c-run")
+
+		By("creating the ConfigMap with the mounted agent.json")
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run-config", Namespace: "default"}, cm)).To(Succeed())
+		Expect(cm.Data).To(HaveKey(agentConfigFileName))
+
+		By("creating the Deployment with the BYO image and injected binding env")
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run", Namespace: "default"}, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/x/crewai:poc"))
+		Expect(dep.OwnerReferences).To(HaveLen(1))
+		Expect(dep.OwnerReferences[0].Name).To(Equal("c-run"))
+
+		By("creating the Service")
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run", Namespace: "default"}, svc)).To(Succeed())
+
+		By("reporting Deploying + ProviderReady=False while no replicas are available")
+		ad := getAgent("c-run")
+		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
+		Expect(prCond(ad).Status).To(Equal(metav1.ConditionFalse))
+		// Core-owned fields survive the provider write.
+		Expect(ad.Status.ModelBindings).To(HaveLen(1))
+
+		By("flipping to Running + ProviderReady=True once the Deployment reports available replicas")
+		dep.Status.Replicas = 1
+		dep.Status.ReadyReplicas = 1
+		dep.Status.AvailableReplicas = 1
+		Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+
+		reconcileContainer("c-run")
+		ad = getAgent("c-run")
+		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
+		Expect(prCond(ad).Status).To(Equal(metav1.ConditionTrue))
+		Expect(ad.Status.Replicas).NotTo(BeNil())
+		Expect(ad.Status.Replicas.Available).To(Equal(int32(1)))
+	})
+
+	It("falls back to the framework catalog image when spec.config has none", func() {
+		makeContainerProvider("crewai-catalog", "ghcr.io/x/from-catalog:poc")
+		makeContainerAgent("c-catalog", "crewai-catalog", "") // no image in config
+
+		reconcileCore("c-catalog")
+		reconcileContainer("c-catalog")
+
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-catalog", Namespace: "default"}, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/x/from-catalog:poc"))
+	})
+
+	It("fails with MissingImage when neither config nor catalog supplies an image", func() {
+		makeContainerProvider("crewai-noimg", "")
+		makeContainerAgent("c-noimg", "crewai-noimg", "")
+
+		reconcileCore("c-noimg")
+		reconcileContainer("c-noimg")
+
+		ad := getAgent("c-noimg")
+		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseFailed))
+		Expect(prCond(ad).Reason).To(Equal("MissingImage"))
+	})
+
+	It("ignores agents whose framework is not container-backed", func() {
+		// A crd-backend framework must be skipped by the container provider.
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "somecrd"},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend:           airunwayv1alpha1.AgentProviderBackendCRD,
+					ModelBindingModes: []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+		apc.Status.Ready = ptrBool(true)
+		Expect(k8sClient.Status().Update(ctx, apc)).To(Succeed())
+
+		makeContainerAgent("c-notmine", "somecrd", "img:1")
+		reconcileCore("c-notmine")
+		reconcileContainer("c-notmine")
+
+		// The container provider must not have created a Deployment.
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-notmine", Namespace: "default"}, dep)).NotTo(Succeed())
+	})
+})
