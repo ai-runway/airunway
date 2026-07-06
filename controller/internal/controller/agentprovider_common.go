@@ -21,6 +21,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
@@ -80,4 +83,32 @@ func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1
 		return existing.LastTransitionTime
 	}
 	return metav1.Now()
+}
+
+// upstreamCRReady reports whether an already-applied upstream custom resource
+// reports Ready=True in its status.conditions. It lets a crd-backend provider
+// (kagent, Orka) reflect the framework operator's own readiness back into
+// AgentDeployment's ProviderReady, rather than reporting ready the moment the
+// CR is created. Returns false when the CR is missing or has no Ready=True
+// condition yet.
+func upstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, name, namespace string) bool {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	if err := c.Get(ctx, k8stypes.NamespacedName{Name: name, Namespace: namespace}, u); err != nil {
+		return false
+	}
+	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	for _, raw := range conds {
+		cm, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if cm["type"] == "Ready" {
+			return cm["status"] == "True"
+		}
+	}
+	return false
 }

@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -153,6 +154,28 @@ func TestParseContainerConfig(t *testing.T) {
 	}
 	if got := parseContainerConfig(nil); got.Image != "" {
 		t.Errorf("nil config should be empty, got %+v", got)
+	}
+}
+
+func TestRenderAgentJob(t *testing.T) {
+	ad := containerAD("swarm", containerConfig{Image: "img:1"}, nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
+	job := renderAgentJob(ad, containerConfig{Image: "img:1"}, binding, "swarm-config")
+
+	if job.Kind != "Job" || job.APIVersion != "batch/v1" {
+		t.Fatalf("GVK = %s/%s", job.APIVersion, job.Kind)
+	}
+	// Jobs require a non-Always restart policy.
+	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("restartPolicy = %q, want Never", job.Spec.Template.Spec.RestartPolicy)
+	}
+	// Shares the hardened pod spec + image.
+	c := job.Spec.Template.Spec.Containers[0]
+	if c.Image != "img:1" {
+		t.Errorf("image = %q", c.Image)
+	}
+	if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil || c.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Error("job pod must share the hardened security posture (drop ALL)")
 	}
 }
 
@@ -327,5 +350,54 @@ var _ = Describe("Container provider", func() {
 		// The container provider must not have created a Deployment.
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-notmine", Namespace: "default"}, dep)).NotTo(Succeed())
+	})
+
+	It("renders a one-shot Job when spec.lifecycle is job", func() {
+		makeContainerProvider("crewai-job", "")
+
+		// Build an agent with lifecycle: job.
+		cfgRaw, _ := json.Marshal(map[string]any{"image": "ghcr.io/x/task:poc", "systemPrompt": "do the task"})
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "c-job", Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "crewai-job"},
+				Lifecycle: airunwayv1alpha1.AgentLifecycleJob,
+				Config:    &runtime.RawExtension{Raw: cfgRaw},
+				Models: []airunwayv1alpha1.ModelBinding{{
+					Name: "default",
+					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+		reconcileCore("c-job")
+		reconcileContainer("c-job")
+
+		By("creating a Job (not a Deployment or Service)")
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, job)).To(Succeed())
+		Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+		Expect(job.OwnerReferences).To(HaveLen(1))
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, dep)).NotTo(Succeed())
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, svc)).NotTo(Succeed())
+
+		By("reporting Deploying while the Job has not started")
+		ad2 := getAgent("c-job")
+		Expect(ad2.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
+		Expect(prCond(ad2).Reason).To(Equal("JobPending"))
+
+		By("flipping to Running once the Job reports an active pod")
+		job.Status.Active = 1
+		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+		reconcileContainer("c-job")
+		ad2 = getAgent("c-job")
+		Expect(ad2.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
+		Expect(prCond(ad2).Status).To(Equal(metav1.ConditionTrue))
 	})
 })

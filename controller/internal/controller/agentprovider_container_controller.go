@@ -23,6 +23,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,7 +35,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 )
@@ -80,12 +80,11 @@ type containerConfig struct {
 }
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile renders the container workload for a container-backed AgentDeployment.
 func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	var ad airunwayv1alpha1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &ad); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -122,27 +121,45 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	binding := ad.Status.ModelBindings[0]
-	configMap := renderAgentConfigMap(&ad)
-	deployment := renderAgentDeployment(&ad, cfg, binding, configMap.Name)
-	service := renderAgentService(&ad)
 
-	for _, obj := range []client.Object{configMap, deployment, service} {
-		if err := controllerutil.SetControllerReference(&ad, obj, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("set owner reference: %w", err)
-		}
-		if err := r.Patch(ctx, obj, client.Apply, client.FieldOwner(ContainerFieldOwner), client.ForceOwnership); err != nil {
-			logger.Error(err, "Failed to apply workload object", "kind", obj.GetObjectKind().GroupVersionKind().Kind)
-			return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+	// The ConfigMap (mounted agent.json) is shared by both lifecycles.
+	configMap := renderAgentConfigMap(&ad)
+	if err := r.applyOwned(ctx, &ad, configMap); err != nil {
+		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "RenderFailed", err.Error())
+	}
+
+	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
+		return r.reconcileJob(ctx, &ad, cfg, binding, configMap.Name)
+	}
+	return r.reconcileDeployment(ctx, &ad, cfg, binding, configMap.Name)
+}
+
+// applyOwned sets the AgentDeployment as controller owner and server-side
+// applies the object under the container field owner.
+func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
+	if err := controllerutil.SetControllerReference(ad, obj, r.Scheme); err != nil {
+		return fmt.Errorf("set owner reference: %w", err)
+	}
+	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(ContainerFieldOwner), client.ForceOwnership)
+}
+
+// reconcileDeployment renders + applies the long-running Deployment and Service
+// and reports readiness from the Deployment's available replicas.
+func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) (ctrl.Result, error) {
+	deployment := renderAgentDeployment(ad, cfg, binding, configMapName)
+	service := renderAgentService(ad)
+	for _, obj := range []client.Object{deployment, service} {
+		if err := r.applyOwned(ctx, ad, obj); err != nil {
+			return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "RenderFailed", err.Error())
 		}
 	}
 
-	// Read back the Deployment to report replica counts and readiness.
 	var live appsv1.Deployment
 	if err := r.Get(ctx, k8stypes.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &live); err != nil {
 		return ctrl.Result{}, err
 	}
-
 	replicas := &airunwayv1alpha1.AgentReplicaStatus{
 		Desired:   ptr.Deref(live.Spec.Replicas, 1),
 		Ready:     live.Status.ReadyReplicas,
@@ -150,20 +167,59 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	rt := &airunwayv1alpha1.AgentRuntimeStatus{
 		WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
-			APIVersion: "apps/v1", Kind: "Deployment",
-			Name: deployment.Name, Namespace: deployment.Namespace,
+			APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, Namespace: deployment.Namespace,
 		},
 		Address: fmt.Sprintf("http://%s.%s.svc.cluster.local", service.Name, service.Namespace),
 	}
 
 	if live.Status.AvailableReplicas > 0 {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, &ad,
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
 			metav1.ConditionTrue, "WorkloadReady", "Agent workload has available replicas")
 	}
-	return ctrl.Result{RequeueAfter: 15 * time.Second}, r.status(ctx, &ad,
+	return ctrl.Result{RequeueAfter: 15 * time.Second}, r.status(ctx, ad,
 		airunwayv1alpha1.AgentPhaseDeploying, rt, replicas,
 		metav1.ConditionFalse, "WorkloadNotReady", "Waiting for the agent workload to become available")
+}
+
+// reconcileJob renders + applies the one-shot Job and maps its status onto the
+// agent phase (Active/Succeeded => Running+ready; Failed => Failed).
+func (r *ContainerProviderReconciler) reconcileJob(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) (ctrl.Result, error) {
+	job := renderAgentJob(ad, cfg, binding, configMapName)
+	if err := r.applyOwned(ctx, ad, job); err != nil {
+		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "RenderFailed", err.Error())
+	}
+
+	var live batchv1.Job
+	if err := r.Get(ctx, k8stypes.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &live); err != nil {
+		return ctrl.Result{}, err
+	}
+	replicas := &airunwayv1alpha1.AgentReplicaStatus{
+		Desired:   ptr.Deref(live.Spec.Parallelism, 1),
+		Ready:     live.Status.Active,
+		Available: live.Status.Succeeded,
+	}
+	rt := &airunwayv1alpha1.AgentRuntimeStatus{
+		WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
+			APIVersion: "batch/v1", Kind: "Job", Name: job.Name, Namespace: job.Namespace,
+		},
+	}
+
+	switch {
+	case live.Status.Failed > 0:
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseFailed, rt, replicas,
+			metav1.ConditionFalse, "JobFailed", "Agent job reported a failed pod")
+	case live.Status.Succeeded > 0 || live.Status.Active > 0:
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
+			metav1.ConditionTrue, "JobRunning", "Agent job is active or has completed")
+	default:
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseDeploying, rt, replicas,
+			metav1.ConditionFalse, "JobPending", "Waiting for the agent job to start")
+	}
 }
 
 // frameworkIsContainer reports whether the agent's framework uses the
@@ -214,10 +270,13 @@ func renderAgentConfigMap(ad *airunwayv1alpha1.AgentDeployment) *corev1.ConfigMa
 	}
 }
 
-// renderAgentDeployment renders the agent Deployment. It bakes in a hardened,
-// provider-owned security posture (runAsNonRoot, dropped capabilities,
-// seccomp) and injects the resolved model binding as OpenAI-compatible env.
-func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) *appsv1.Deployment {
+// agentPodSpec builds the shared pod spec for a container-backed agent: the
+// BYO image, the resolved model binding injected as OpenAI-compatible env, the
+// mounted agent.json config, and a hardened, provider-owned security posture
+// (runAsNonRoot, dropped capabilities, seccomp; readOnlyRootFilesystem relaxed
+// only when the framework declares it needs a writable workdir — expressed
+// here in the provider, not in the user-facing API, per design §7).
+func agentPodSpec(cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) corev1.PodSpec {
 	env := []corev1.EnvVar{
 		{Name: "AIRUNWAY_AGENT_CONFIG", Value: agentConfigMountPath},
 		{Name: "OPENAI_BASE_URL", Value: binding.BaseURL},
@@ -243,9 +302,6 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 		VolumeMounts: []corev1.VolumeMount{{
 			Name: "agent-config", MountPath: agentConfigMountDir, ReadOnly: true,
 		}},
-		// Provider-owned hardening. readOnlyRootFilesystem is relaxed only when
-		// the framework declares it needs a writable workdir — expressed here,
-		// in the provider, not in the user-facing API (see design §7).
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: ptr.To(false),
 			ReadOnlyRootFilesystem:   ptr.To(!cfg.WritableRootFilesystem),
@@ -253,6 +309,25 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 		},
 	}
 
+	return corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{
+			RunAsNonRoot:   ptr.To(true),
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+		Containers: []corev1.Container{container},
+		Volumes: []corev1.Volume{{
+			Name: "agent-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+				},
+			},
+		}},
+	}
+}
+
+// renderAgentDeployment renders a long-running Deployment for the agent.
+func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
@@ -261,21 +336,26 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 			Selector: &metav1.LabelSelector{MatchLabels: agentSelector(ad)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: agentLabels(ad)},
-				Spec: corev1.PodSpec{
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot:   ptr.To(true),
-						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-					},
-					Containers: []corev1.Container{container},
-					Volumes: []corev1.Volume{{
-						Name: "agent-config",
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
-							},
-						},
-					}},
-				},
+				Spec:       agentPodSpec(cfg, binding, configMapName),
+			},
+		},
+	}
+}
+
+// renderAgentJob renders a one-shot Job for the agent (spec.lifecycle: job).
+// The pod spec is shared with the Deployment path; only the restart policy
+// differs (Jobs require Never or OnFailure).
+func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) *batchv1.Job {
+	pod := agentPodSpec(cfg, binding, configMapName)
+	pod.RestartPolicy = corev1.RestartPolicyNever
+	return &batchv1.Job{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
+		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: ptr.To[int32](3),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: agentLabels(ad)},
+				Spec:       pod,
 			},
 		},
 	}
@@ -322,6 +402,7 @@ func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&batchv1.Job{}).
 		Named("agent-provider-container").
 		Complete(r)
 }

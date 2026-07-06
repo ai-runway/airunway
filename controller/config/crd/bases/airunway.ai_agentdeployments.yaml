@@ -91,6 +91,16 @@ spec:
                 required:
                 - name
                 type: object
+              lifecycle:
+                default: deployment
+                description: |-
+                  lifecycle selects long-running (deployment) vs one-shot (job) execution
+                  for container-backed agents. Ignored by crd-backend frameworks, whose
+                  operator owns the execution shape. Defaults to deployment.
+                enum:
+                - deployment
+                - job
+                type: string
               models:
                 description: |-
                   models lists the model endpoints the agent can talk to. At least

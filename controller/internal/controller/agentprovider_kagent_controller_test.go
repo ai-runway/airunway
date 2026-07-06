@@ -278,4 +278,36 @@ var _ = Describe("Kagent crd provider", func() {
 		Expect(meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound)).To(BeTrue())
 		Expect(meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeFrameworkReady)).To(BeTrue())
 	})
+
+	It("reflects the kagent Agent's readiness into ProviderReady", func() {
+		makeReadyKagentProvider()
+		makeKagentAgent("kagent-ready")
+
+		reconcileCore("kagent-ready")
+		reconcileKagent("kagent-ready")
+
+		// Before the kagent Agent reports Ready, the provider stays Deploying.
+		ad := getAgent("kagent-ready")
+		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
+		Expect(meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady).Status).
+			To(Equal(metav1.ConditionFalse))
+
+		By("simulating the kagent operator marking the Agent Ready=True")
+		agent := &unstructured.Unstructured{}
+		agent.SetGroupVersionKind(agentGVK)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kagent-ready", Namespace: "default"}, agent)).To(Succeed())
+		Expect(unstructured.SetNestedSlice(agent.Object, []interface{}{
+			map[string]interface{}{"type": "Ready", "status": "True", "reason": "AgentRunning", "message": "ok",
+				"lastTransitionTime": metav1.Now().Format("2006-01-02T15:04:05Z07:00")},
+		}, "status", "conditions")).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, agent)).To(Succeed())
+
+		By("re-reconciling: ProviderReady flips True and phase becomes Running")
+		reconcileKagent("kagent-ready")
+		ad = getAgent("kagent-ready")
+		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
+		pr := meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(pr.Status).To(Equal(metav1.ConditionTrue))
+		Expect(pr.Reason).To(Equal("AgentReady"))
+	})
 })

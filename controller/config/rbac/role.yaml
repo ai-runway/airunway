@@ -95,6 +95,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases
@@ -102,6 +114,19 @@ rules:
   - create
   - get
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  - providers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - gateway.networking.k8s.io
   resources:

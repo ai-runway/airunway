@@ -134,13 +134,19 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		},
 	}
 
-	// The kagent controller owns actual readiness of the Agent; for the PoC we
-	// report Deploying + ProviderReady=False until a follow-up wires reading
-	// the kagent Agent's own Ready condition back into ProviderReady.
-	logger.Info("Rendered kagent resources", "agent", agent.GetName(), "modelConfig", modelConfig.GetName())
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, r.applyProviderStatus(ctx, &ad,
+	// Reflect the kagent Agent's own readiness back into ProviderReady, rather
+	// than reporting ready the moment the CR is applied.
+	if upstreamCRReady(ctx, r.Client, kagentAgentGVK, agent.GetName(), agent.GetNamespace()) {
+		logger.Info("kagent Agent is ready", "agent", agent.GetName())
+		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.applyProviderStatus(ctx, &ad,
+			airunwayv1alpha1.AgentPhaseRunning, runtimeStatus, nil,
+			metav1.ConditionTrue, "AgentReady", "kagent Agent reports ready")
+	}
+
+	logger.Info("Rendered kagent resources; awaiting kagent readiness", "agent", agent.GetName(), "modelConfig", modelConfig.GetName())
+	return ctrl.Result{RequeueAfter: 15 * time.Second}, r.applyProviderStatus(ctx, &ad,
 		airunwayv1alpha1.AgentPhaseDeploying, runtimeStatus, nil,
-		metav1.ConditionFalse, "AgentRendered", "kagent Agent and ModelConfig applied; awaiting kagent readiness")
+		metav1.ConditionFalse, "AwaitingKagent", "kagent Agent and ModelConfig applied; awaiting kagent readiness")
 }
 
 // parseKagentConfig extracts the kagent-specific fields from the opaque

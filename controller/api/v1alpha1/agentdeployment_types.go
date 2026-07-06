@@ -48,7 +48,6 @@ const (
 	ModelBindingModeExternalAPI ModelBindingMode = "externalAPI"
 )
 
-
 // AgentFrameworkRef identifies which agent framework provider should
 // reconcile this AgentDeployment. The name must match an
 // AgentProviderConfig.metadata.name registered in the cluster.
@@ -223,6 +222,19 @@ type OTLPSpec struct {
 	Protocol string `json:"protocol,omitempty"`
 }
 
+// AgentLifecycle selects how a container-backed agent workload runs.
+// +kubebuilder:validation:Enum=deployment;job
+type AgentLifecycle string
+
+const (
+	// AgentLifecycleDeployment runs the agent as a long-running Deployment
+	// (the default) — a server that stays up to handle requests.
+	AgentLifecycleDeployment AgentLifecycle = "deployment"
+	// AgentLifecycleJob runs the agent as a one-shot Job that executes a task
+	// to completion and exits. Suits task/swarm-style agents.
+	AgentLifecycleJob AgentLifecycle = "job"
+)
+
 // AgentDeploymentSpec defines the desired state of an AgentDeployment.
 type AgentDeploymentSpec struct {
 	// framework selects which agent framework provider reconciles this
@@ -230,6 +242,13 @@ type AgentDeploymentSpec struct {
 	// AgentProviderConfig registered in the cluster.
 	// +kubebuilder:validation:Required
 	Framework AgentFrameworkRef `json:"framework"`
+
+	// lifecycle selects long-running (deployment) vs one-shot (job) execution
+	// for container-backed agents. Ignored by crd-backend frameworks, whose
+	// operator owns the execution shape. Defaults to deployment.
+	// +kubebuilder:default=deployment
+	// +optional
+	Lifecycle AgentLifecycle `json:"lifecycle,omitempty"`
 
 	// models lists the model endpoints the agent can talk to. At least
 	// one entry is required. Each binding is identified by its name,
