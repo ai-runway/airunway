@@ -55,8 +55,22 @@ make test        # or: KUBEBUILDER_ASSETS=$(pwd)/bin/k8s/<ver> go test ./interna
 
 envtest has no kubelet, so it cannot run the actual agents. End-to-end validation against a real cluster — install the framework operator, apply the samples in `config/samples/`, invoke the agent — is manual. The `crd`/kagent + Azure OpenAI path was validated by hand on a CPU cluster (see the repo's `tmp/agent-poc-test/RESULTS.md`).
 
+### Schema fidelity (automated, high-confidence)
+
+The crd providers are tested against the **real** upstream CRDs, not permissive stubs: `internal/controller/testdata/crds/` vendors the actual `kagent.dev` (ModelConfig + Agent) and `core.orka.ai` (Provider + Agent) CRDs, so envtest enforces their real structural schemas and CEL rules when the providers apply their rendered resources. This is what caught the kagent `apiKeySecretRef`→`apiKeySecret` v1alpha2 rename. Re-vendor these files when bumping the target upstream version.
+
+### crd backends
+
+- **kagent**: install the operator (`helm install kagent-crds` + `kagent` from `oci://ghcr.io/kagent-dev/kagent/helm/`), apply the `sre-bot` sample, then invoke over A2A at `:8083/api/a2a/<ns>/<name>` (the `ask.sh` pattern). The rendered `ModelConfig` must be in the Agent's namespace (kagent rejects cross-namespace); the provider already renders it alongside the Agent.
+- **Orka**: install the operator (`core.orka.ai`), apply `research-swarm`. Orka checks the referenced `Provider.status.ready` before the `Agent` goes Ready, so the Provider must reconcile first — the provider applies Provider before Agent and the requeue converges. A standalone Agent is a valid config object; create a `Task` referencing it to actually execute.
+
+### container backend
+
+No off-the-shelf framework image honors the mounted-`agent.json` + `OPENAI_*` contract as-is: OpenClaw serves `:18789` with its own config format, LangGraph serves `:8000` and needs `langgraph build`, and Hermes has retired `OPENAI_BASE_URL`. **CrewAI** is the easiest first real target — its library reads `OPENAI_BASE_URL`/`OPENAI_API_KEY` from env natively, so it needs only a thin FastAPI wrapper that reads `/etc/airunway/agent.json`. Use the `spec.config` `image`/`command`/`args`/`port`/`writableRootFilesystem` fields to adapt to a given image (e.g. `port: 8000` for LangGraph). To smoke-test the plumbing alone (ConfigMap mount + env injection + Service), point `spec.config.image` at a tiny non-root HTTP image that echoes `/etc/airunway/agent.json` and the `OPENAI_*` env, then curl the Service.
+
 ## Deferred follow-ups
 
 - Extract providers into out-of-tree shims (separate modules, like `providers/dynamo`).
 - Full GAIE endpoint discovery for `gatewayEndpoint` bindings.
 - MCP tool wiring, A2A dependencies, and the egress `NetworkPolicy`.
+- Publish/point at real wrapped framework images (CrewAI wrapper first) so the container backend runs an actual agent end-to-end.
