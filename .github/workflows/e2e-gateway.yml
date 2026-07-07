@@ -25,6 +25,7 @@ jobs:
           source versions.env
           set +a
           echo "GAIE_VERSION=${GAIE_VERSION}" >> "$GITHUB_ENV"
+          echo "KAITO_VERSION=${KAITO_VERSION}" >> "$GITHUB_ENV"
 
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -78,6 +79,7 @@ jobs:
           # If Gateway API Inference Extension CRDs are pre-installed (e.g. via kubectl apply),
           # add --skip-crds to avoid a field-manager conflict on InferencePool.
           helm install kaito-workspace kaito/workspace \
+            --version "$KAITO_VERSION" \
             --namespace kaito-workspace \
             --create-namespace \
             --set featureGates.disableNodeAutoProvisioning=true
