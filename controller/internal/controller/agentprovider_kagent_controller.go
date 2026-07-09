@@ -80,6 +80,12 @@ type KagentProviderReconciler struct {
 type kagentConfig struct {
 	SystemPrompt string `json:"systemPrompt,omitempty"`
 	Description  string `json:"description,omitempty"`
+	// Runtime selects the kagent ADK runtime ("python" or "go"). Defaults to
+	// "python": it is kagent's full-featured default and its image is the one
+	// the project publishes reliably (the "go" golang-adk image has had its
+	// pinned digests disappear from cr.kagent.dev). Override to "go" only when
+	// the faster-startup Go ADK is required and its image is known-good.
+	Runtime string `json:"runtime,omitempty"`
 }
 
 // +kubebuilder:rbac:groups=kagent.dev,resources=agents;modelconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -216,9 +222,13 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 		description = fmt.Sprintf("airunway agent %s", ad.Name)
 	}
 
+	runtime := cfg.Runtime
+	if runtime == "" {
+		runtime = "python"
+	}
 	declarative := map[string]interface{}{
 		"modelConfig": modelConfigName,
-		"runtime":     "go",
+		"runtime":     runtime,
 	}
 	if cfg.SystemPrompt != "" {
 		declarative["systemMessage"] = cfg.SystemPrompt
