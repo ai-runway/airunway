@@ -133,12 +133,14 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: providers/${{ matrix.provider }}/go.sum
 
-      # `providers/dynamo/Makefile`'s `build` target depends on
+      # `providers/{dynamo,llmd,vllm}/Makefile`'s `build` target depends on
       # `verify-versions`, which regenerates `shared/types/versions.generated.ts`
-      # via bun. Install bun on every matrix job (the other three providers
-      # don't need it but skipping conditionally would be more brittle than
-      # the ~3s install).
+      # via bun. Install bun only for those three providers; kaito and kuberay
+      # have `build: vet` (no verify-versions dependency) and don't need it.
+      # Skipping conditionally avoids transient Bun download failures breaking
+      # jobs that don't use Bun at all.
       - name: Setup Bun
+        if: contains(fromJSON('["dynamo", "llmd", "vllm"]'), matrix.provider)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
