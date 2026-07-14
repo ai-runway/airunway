@@ -434,6 +434,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	agentDiscovery, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to create discovery client for agent provider readiness")
+		os.Exit(1)
+	}
+	if err := (&controller.AgentProviderConfigReconciler{
+		Client:    mgr.GetClient(),
+		Discovery: agentDiscovery,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentProviderConfig")
+		os.Exit(1)
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

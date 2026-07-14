@@ -57,6 +57,7 @@ rules:
   - airunway.ai
   resources:
   - agentdeployments/status
+  - agentproviderconfigs/status
   - modeldeployments/status
   verbs:
   - get
