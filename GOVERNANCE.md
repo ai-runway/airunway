@@ -253,11 +253,6 @@ This governance document may be amended by:
 
 ---
 
-## History
-[Moving AI Runway out of KAITO organization] was an early step in AI Runway's emergence as an independent project.
-
---
-
 ## References
 
 - [CNCF Governance Templates](https://contribute.cncf.io/maintainers/governance/)
