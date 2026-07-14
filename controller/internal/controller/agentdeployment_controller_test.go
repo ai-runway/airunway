@@ -139,10 +139,100 @@ var _ = Describe("AgentDeployment core controller", func() {
 		})
 	})
 
+	Context("when the binding is a deploymentRef to an in-cluster model", func() {
+		It("resolves the in-cluster endpoint and references the keyless placeholder credential", func() {
+			createReadyProvider("kagent-depref", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeDeploymentRef)
+
+			// An in-cluster ModelDeployment that has published a serving
+			// endpoint but carries no credential (KAITO llama.cpp is keyless).
+			md := &airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-model", Namespace: "default"},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model: airunwayv1alpha1.ModelSpec{
+						Source:     airunwayv1alpha1.ModelSourceCustom,
+						ServedName: "llama-3.2-1b-instruct",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, md)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, md) })
+			md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "demo-model", Port: 80}
+			Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+
+			ad := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-depref", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-depref"},
+					Models: []airunwayv1alpha1.ModelBinding{
+						{
+							Name:          "default",
+							DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "demo-model"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+			reconcileOnce("agent-depref")
+			out := get("agent-depref")
+
+			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
+			Expect(mb).NotTo(BeNil())
+			Expect(mb.Status).To(Equal(metav1.ConditionTrue))
+
+			Expect(out.Status.ModelBindings).To(HaveLen(1))
+			b := out.Status.ModelBindings[0]
+			Expect(b.BindingMode).To(Equal(airunwayv1alpha1.ModelBindingModeDeploymentRef))
+			Expect(b.BaseURL).To(Equal("http://demo-model.default.svc.cluster.local:80/v1"))
+			Expect(b.ModelName).To(Equal("llama-3.2-1b-instruct"))
+			Expect(b.ObservedResourceUID).To(Equal(string(md.UID)))
+
+			// Keyless in-cluster models still get a placeholder credentialsRef
+			// so framework providers render valid CRs without AI Runway ever
+			// creating or reading a Secret.
+			Expect(b.CredentialsRef).NotTo(BeNil())
+			Expect(b.CredentialsRef.Name).To(Equal(keylessModelCredentialSecret))
+			Expect(b.CredentialsRef.Key).To(Equal(keylessModelCredentialKey))
+		})
+
+		It("rejects a cross-namespace deploymentRef until AgentReferenceGrant exists", func() {
+			createReadyProvider("kagent-xns", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeDeploymentRef)
+
+			ad := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-xns", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-xns"},
+					Models: []airunwayv1alpha1.ModelBinding{
+						{
+							Name: "default",
+							DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{
+								Name:      "some-model",
+								Namespace: "other-namespace",
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+			reconcileOnce("agent-xns")
+			out := get("agent-xns")
+
+			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
+			Expect(mb).NotTo(BeNil())
+			Expect(mb.Status).To(Equal(metav1.ConditionFalse))
+			Expect(mb.Reason).To(Equal("CrossNamespaceRefNotAllowed"))
+			Expect(out.Status.ModelBindings).To(BeEmpty())
+		})
+	})
+
 	Context("when the framework is not registered", func() {
 		It("refuses with FrameworkNotRegistered", func() {
 			newAgent("agent-noframework", "does-not-exist")
-
 			reconcileOnce("agent-noframework")
 			ad := get("agent-noframework")
 

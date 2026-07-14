@@ -48,6 +48,19 @@ const (
 	// re-checking a not-yet-satisfiable dependency (framework not ready, a
 	// referenced ModelDeployment without an endpoint yet).
 	agentRequeueInterval = 15 * time.Second
+
+	// keylessModelCredentialSecret and keylessModelCredentialKey identify the
+	// well-known placeholder Secret referenced by keyless in-cluster model
+	// bindings (deploymentRef). In-cluster model servers AI Runway deploys
+	// (e.g. KAITO llama.cpp) require no API key, but framework CRDs (kagent
+	// ModelConfig, orka Provider) and the generic container agent all expect a
+	// credential. Core points status.modelBindings[].credentialsRef at this
+	// placeholder so every provider's existing credentialsRef path renders
+	// valid output, WITHOUT AI Runway ever creating or reading a Secret —
+	// preserving the zero-secrets-verbs RBAC property. The Secret ships as an
+	// install/prereq artifact and its value is ignored by the model server.
+	keylessModelCredentialSecret = "airunway-model-noauth"
+	keylessModelCredentialKey    = "token"
 )
 
 // AgentDeploymentReconciler reconciles the core, framework-neutral concerns
@@ -240,6 +253,7 @@ func (r *AgentDeploymentReconciler) resolveOneBinding(
 	switch mode {
 	case airunwayv1alpha1.ModelBindingModeExternalAPI:
 		ext := m.ExternalAPI
+		st.APIType = ext.Type
 		st.BaseURL = ext.BaseURL
 		st.ModelName = ext.ModelName
 		st.CredentialsRef = ext.CredentialsRef
@@ -280,6 +294,16 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 		ns = ad.Namespace
 	}
 
+	// A cross-namespace deploymentRef would let a namespaced AgentDeployment
+	// consume a ModelDeployment in another namespace using the controller's
+	// cluster-wide access. Until AgentReferenceGrant enforcement exists,
+	// reject references whose resolved namespace differs from the
+	// AgentDeployment's own namespace.
+	if ns != ad.Namespace {
+		return st, false, false, "CrossNamespaceRefNotAllowed",
+			fmt.Sprintf("Binding %q references ModelDeployment %s/%s in another namespace; cross-namespace references require an AgentReferenceGrant (not yet supported)", m.Name, ns, ref.Name)
+	}
+
 	var md airunwayv1alpha1.ModelDeployment
 	if err := r.Get(ctx, k8stypes.NamespacedName{Name: ref.Name, Namespace: ns}, &md); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -294,6 +318,16 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 	if st.BaseURL == "" {
 		return st, false, true, "ModelDeploymentNotReady",
 			fmt.Sprintf("Binding %q target ModelDeployment %s/%s has no resolved endpoint yet", m.Name, ns, ref.Name)
+	}
+
+	// In-cluster models AI Runway deploys are keyless, but framework CRDs
+	// (kagent ModelConfig, orka Provider) and the container agent still expect
+	// a credential field. Reference a well-known placeholder Secret so every
+	// provider's existing credentialsRef path renders valid output. AI Runway
+	// never creates or reads this Secret; the model server ignores its value.
+	st.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
+		Name: keylessModelCredentialSecret,
+		Key:  keylessModelCredentialKey,
 	}
 	return st, true, false, "", ""
 }
