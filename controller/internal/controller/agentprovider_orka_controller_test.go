@@ -77,6 +77,27 @@ func TestRenderOrkaProvider(t *testing.T) {
 	}
 }
 
+func TestRenderOrkaProvider_KeylessUsesPlaceholderSecret(t *testing.T) {
+	// A credential-free binding (keyless in-cluster model via deploymentRef)
+	// must still render a valid Orka Provider: the CRD requires spec.secretRef,
+	// so the renderer falls back to the well-known no-auth placeholder Secret.
+	ad := orkaAD("swarm", nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{
+		Name: "default", BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef,
+		BaseURL: "http://demo-llm.default.svc.cluster.local/v1", ModelName: "llama",
+	}
+	p := renderOrkaProvider(ad, binding)
+
+	secretName, found, _ := unstructured.NestedString(p.Object, "spec", "secretRef", "name")
+	if !found || secretName != keylessModelCredentialSecret {
+		t.Errorf("secretRef.name = %q (found=%v), want placeholder %q", secretName, found, keylessModelCredentialSecret)
+	}
+	secretKey, _, _ := unstructured.NestedString(p.Object, "spec", "secretRef", "key")
+	if secretKey != keylessModelCredentialKey {
+		t.Errorf("secretRef.key = %q, want %q", secretKey, keylessModelCredentialKey)
+	}
+}
+
 func TestRenderOrkaProvider_AzureType(t *testing.T) {
 	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeAzureOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{

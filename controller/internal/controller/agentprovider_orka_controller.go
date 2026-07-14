@@ -136,11 +136,19 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 	if binding.ModelName != "" {
 		spec["defaultModel"] = binding.ModelName
 	}
+	// Orka's Provider CRD requires spec.secretRef (name + key), but a
+	// credential-free binding (a keyless in-cluster model reached via
+	// deploymentRef, or an externalAPI endpoint with no key) resolves without
+	// a CredentialsRef. Fall back to the well-known no-auth placeholder Secret
+	// so the rendered Provider always passes structural validation; the model
+	// server ignores the value.
+	secretName, secretKey := keylessModelCredentialSecret, keylessModelCredentialKey
 	if binding.CredentialsRef != nil {
-		spec["secretRef"] = map[string]interface{}{
-			"name": binding.CredentialsRef.Name,
-			"key":  binding.CredentialsRef.Key,
-		}
+		secretName, secretKey = binding.CredentialsRef.Name, binding.CredentialsRef.Key
+	}
+	spec["secretRef"] = map[string]interface{}{
+		"name": secretName,
+		"key":  secretKey,
 	}
 
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
