@@ -27,6 +27,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,9 +42,6 @@ func containerAD(name string, cfg containerConfig, extra map[string]any) *airunw
 	merged := map[string]any{}
 	if cfg.Image != "" {
 		merged["image"] = cfg.Image
-	}
-	if cfg.WritableRootFilesystem {
-		merged["writableRootFilesystem"] = true
 	}
 	for k, v := range extra {
 		merged[k] = v
@@ -86,7 +84,7 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 		Name: "default", BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 	}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding, "research-config")
+	dep := renderAgentDeployment(ad, containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding, "research-config", false)
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != "ghcr.io/x/crewai:poc" {
@@ -136,13 +134,58 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 }
 
 func TestRenderAgentDeployment_WritableRootForFramework(t *testing.T) {
-	ad := containerAD("openclaw", containerConfig{Image: "img:1", WritableRootFilesystem: true}, nil)
+	ad := containerAD("openclaw", containerConfig{Image: "img:1"}, nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1", WritableRootFilesystem: true}, binding, "openclaw-config")
+	// writableRoot is a provider-owned decision passed by the reconciler, not a
+	// user-facing spec.config field.
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "openclaw-config", true)
 
 	roFS := dep.Spec.Template.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem
 	if roFS == nil || *roFS {
 		t.Error("readOnlyRootFilesystem must be false when the framework declares a writable root need")
+	}
+
+	// A writable /tmp scratch mount is always provided regardless of root FS.
+	var hasTmp bool
+	for _, m := range dep.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.MountPath == "/tmp" {
+			hasTmp = true
+		}
+	}
+	if !hasTmp {
+		t.Error("a writable /tmp mount must always be present")
+	}
+}
+
+func TestRenderAgentDeployment_ResourcesAndOTLP(t *testing.T) {
+	ad := containerAD("obs", containerConfig{Image: "img:1"}, nil)
+	ad.Spec.Resources = &airunwayv1alpha1.AgentResourceSpec{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+	}
+	ad.Spec.Observability = &airunwayv1alpha1.AgentObservabilitySpec{
+		OTLP: &airunwayv1alpha1.OTLPSpec{Endpoint: "http://collector:4318", Protocol: "http/protobuf"},
+	}
+	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "obs-config", false)
+	c := dep.Spec.Template.Spec.Containers[0]
+
+	if c.Resources.Requests.Cpu().String() != "250m" {
+		t.Errorf("cpu request = %v, want 250m", c.Resources.Requests.Cpu())
+	}
+	if c.Resources.Limits.Memory().String() != "512Mi" {
+		t.Errorf("memory limit = %v, want 512Mi", c.Resources.Limits.Memory())
+	}
+
+	env := map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://collector:4318" {
+		t.Errorf("OTEL endpoint = %q", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	if env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/protobuf" {
+		t.Errorf("OTEL protocol = %q", env["OTEL_EXPORTER_OTLP_PROTOCOL"])
 	}
 }
 
@@ -151,7 +194,7 @@ func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
 	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
 	cfg := containerConfig{Image: "img:1", Command: []string{"python", "/serve.py"}, Args: []string{"--verbose"}, Port: 9000}
 
-	dep := renderAgentDeployment(ad, cfg, binding, "smoke-config")
+	dep := renderAgentDeployment(ad, cfg, binding, "smoke-config", false)
 	c := dep.Spec.Template.Spec.Containers[0]
 	if len(c.Command) != 2 || c.Command[0] != "python" || c.Command[1] != "/serve.py" {
 		t.Errorf("command = %v", c.Command)
@@ -179,9 +222,9 @@ func TestContainerPortDefault(t *testing.T) {
 }
 
 func TestParseContainerConfig(t *testing.T) {
-	raw := &runtime.RawExtension{Raw: []byte(`{"image":"img:2","writableRootFilesystem":true,"port":8000,"command":["/bin/serve"],"systemPrompt":"x"}`)}
+	raw := &runtime.RawExtension{Raw: []byte(`{"image":"img:2","port":8000,"command":["/bin/serve"],"systemPrompt":"x"}`)}
 	cfg := parseContainerConfig(raw)
-	if cfg.Image != "img:2" || !cfg.WritableRootFilesystem {
+	if cfg.Image != "img:2" {
 		t.Errorf("parsed = %+v", cfg)
 	}
 	if cfg.Port != 8000 {
@@ -198,7 +241,7 @@ func TestParseContainerConfig(t *testing.T) {
 func TestRenderAgentJob(t *testing.T) {
 	ad := containerAD("swarm", containerConfig{Image: "img:1"}, nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
-	job := renderAgentJob(ad, containerConfig{Image: "img:1"}, binding, "swarm-config")
+	job := renderAgentJob(ad, containerConfig{Image: "img:1"}, binding, "swarm-config", false)
 
 	if job.Kind != "Job" || job.APIVersion != "batch/v1" {
 		t.Fatalf("GVK = %s/%s", job.APIVersion, job.Kind)

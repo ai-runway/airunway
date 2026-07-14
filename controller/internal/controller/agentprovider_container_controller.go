@@ -35,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 )
@@ -73,10 +74,6 @@ type containerConfig struct {
 	// Image is the BYO agent container image. Required for the container
 	// backend unless the framework's catalog supplies a default.
 	Image string `json:"image,omitempty"`
-	// WritableRootFilesystem relaxes the hardened read-only root FS default for
-	// frameworks that need a writable workdir (e.g. OpenClaw). Provider-owned
-	// posture, expressed per-framework — never a user-facing security knob.
-	WritableRootFilesystem bool `json:"writableRootFilesystem,omitempty"`
 	// Command overrides the image entrypoint. Useful for generic/dev images
 	// (e.g. a smoke-test server) and for wrapping frameworks whose default
 	// entrypoint is not an HTTP server.
@@ -111,13 +108,14 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	// Only handle agents whose framework uses the container backend. Look up
-	// the provider config to learn the backend; ignore the agent otherwise.
-	isContainer, image, err := r.frameworkIsContainer(ctx, &ad)
+	// Only handle agents whose framework uses the container backend. Resolve
+	// the provider-owned settings (backend, default image, security posture)
+	// from the framework's AgentProviderConfig; ignore the agent otherwise.
+	settings, err := r.resolveContainerProvider(ctx, &ad)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !isContainer {
+	if !settings.isContainer {
 		return ctrl.Result{}, nil
 	}
 
@@ -130,12 +128,15 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	cfg := parseContainerConfig(ad.Spec.Config)
 	if cfg.Image == "" {
-		cfg.Image = image // fall back to the framework catalog image
+		cfg.Image = settings.image // fall back to the framework's unambiguous catalog image
 	}
 	if cfg.Image == "" {
+		msg := "No container image: set spec.config.image or a framework catalog image"
+		if settings.imageErr != "" {
+			msg = settings.imageErr
+		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
-			metav1.ConditionFalse, "MissingImage",
-			"No container image: set spec.config.image or a framework catalog image")
+			metav1.ConditionFalse, "MissingImage", msg)
 	}
 
 	binding := ad.Status.ModelBindings[0]
@@ -148,9 +149,9 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
-		return r.reconcileJob(ctx, &ad, cfg, binding, configMap.Name)
+		return r.reconcileJob(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot)
 	}
-	return r.reconcileDeployment(ctx, &ad, cfg, binding, configMap.Name)
+	return r.reconcileDeployment(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot)
 }
 
 // applyOwned sets the AgentDeployment as controller owner and server-side
@@ -164,8 +165,12 @@ func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunw
 
 // reconcileDeployment renders + applies the long-running Deployment and Service
 // and reports readiness from the Deployment's available replicas.
-func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) (ctrl.Result, error) {
-	deployment := renderAgentDeployment(ad, cfg, binding, configMapName)
+func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) (ctrl.Result, error) {
+	// A prior spec.lifecycle: job leaves a one-shot Job behind. Delete it so the
+	// two lifecycles never run side by side.
+	r.deleteObsolete(ctx, ad, &batchv1.Job{})
+
+	deployment := renderAgentDeployment(ad, cfg, binding, configMapName, writableRoot)
 	service := renderAgentService(ad, cfg)
 	for _, obj := range []client.Object{deployment, service} {
 		if err := r.applyOwned(ctx, ad, obj); err != nil {
@@ -201,9 +206,15 @@ func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, a
 }
 
 // reconcileJob renders + applies the one-shot Job and maps its status onto the
-// agent phase (Active/Succeeded => Running+ready; Failed => Failed).
-func (r *ContainerProviderReconciler) reconcileJob(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) (ctrl.Result, error) {
-	job := renderAgentJob(ad, cfg, binding, configMapName)
+// agent phase. A Job is only reported Failed once it surfaces a true JobFailed
+// condition (i.e. backoffLimit exhausted) — individual failed pod attempts that
+// the Job controller will still retry keep the agent in a pending/running state.
+func (r *ContainerProviderReconciler) reconcileJob(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) (ctrl.Result, error) {
+	// A prior spec.lifecycle: deployment leaves a Deployment + Service behind.
+	// Delete them so the two lifecycles never run side by side.
+	r.deleteObsolete(ctx, ad, &appsv1.Deployment{}, &corev1.Service{})
+
+	job := renderAgentJob(ad, cfg, binding, configMapName, writableRoot)
 	if err := r.applyOwned(ctx, ad, job); err != nil {
 		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "RenderFailed", err.Error())
@@ -225,11 +236,11 @@ func (r *ContainerProviderReconciler) reconcileJob(ctx context.Context, ad *airu
 	}
 
 	switch {
-	case live.Status.Failed > 0:
+	case jobConditionTrue(&live, batchv1.JobFailed):
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseFailed, rt, replicas,
-			metav1.ConditionFalse, "JobFailed", "Agent job reported a failed pod")
-	case live.Status.Succeeded > 0 || live.Status.Active > 0:
+			metav1.ConditionFalse, "JobFailed", "Agent job failed (backoff limit exhausted)")
+	case jobConditionTrue(&live, batchv1.JobComplete) || live.Status.Succeeded > 0 || live.Status.Active > 0:
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
 			metav1.ConditionTrue, "JobRunning", "Agent job is active or has completed")
@@ -240,27 +251,78 @@ func (r *ContainerProviderReconciler) reconcileJob(ctx context.Context, ad *airu
 	}
 }
 
-// frameworkIsContainer reports whether the agent's framework uses the
-// container backend, and returns the framework's catalog image if any (the
-// first catalog item carrying an image). It returns false when the framework
-// is unregistered (the core controller surfaces that error to the user).
-func (r *ContainerProviderReconciler) frameworkIsContainer(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) (bool, string, error) {
+// jobConditionTrue reports whether a Job carries the given condition with
+// status True.
+func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool {
+	for i := range job.Status.Conditions {
+		c := job.Status.Conditions[i]
+		if c.Type == condType && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteObsolete best-effort deletes owned workloads left over from a previous
+// spec.lifecycle so a lifecycle switch does not leave both kinds running. Each
+// object is looked up by the agent's name in its namespace.
+func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) {
+	logger := log.FromContext(ctx)
+	for _, obj := range objs {
+		obj.SetName(ad.Name)
+		obj.SetNamespace(ad.Namespace)
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to delete obsolete workload from previous lifecycle",
+				"kind", fmt.Sprintf("%T", obj), "name", ad.Name)
+		}
+	}
+}
+
+// containerProviderSettings holds the provider-owned rendering settings the
+// container provider resolves from the framework's AgentProviderConfig (not
+// from the user's AgentDeployment): whether the agent uses the container
+// backend, the default catalog image (if unambiguous), and the provider-owned
+// writable-root-filesystem posture.
+type containerProviderSettings struct {
+	isContainer  bool
+	image        string
+	imageErr     string
+	writableRoot bool
+}
+
+// resolveContainerProvider looks up the framework's AgentProviderConfig and
+// derives the provider-owned settings. The default image is taken from the
+// catalog only when exactly one catalog entry carries an image; multiple images
+// are ambiguous (an AgentDeployment carries no catalog-item identity), so the
+// caller must require an explicit spec.config.image instead of guessing.
+func (r *ContainerProviderReconciler) resolveContainerProvider(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) (containerProviderSettings, error) {
 	var apc airunwayv1alpha1.AgentProviderConfig
 	if err := r.Get(ctx, k8stypes.NamespacedName{Name: ad.Spec.Framework.Name}, &apc); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, "", nil
+			return containerProviderSettings{}, nil
 		}
-		return false, "", err
+		return containerProviderSettings{}, err
 	}
 	if apc.Spec.Capabilities == nil || apc.Spec.Capabilities.Backend != airunwayv1alpha1.AgentProviderBackendContainer {
-		return false, "", nil
+		return containerProviderSettings{}, nil
 	}
+
+	s := containerProviderSettings{isContainer: true}
+	s.writableRoot = apc.Spec.Capabilities.WritableRootFilesystem != nil && *apc.Spec.Capabilities.WritableRootFilesystem
+
+	var images []string
 	for i := range apc.Spec.Catalog {
 		if apc.Spec.Catalog[i].Image != "" {
-			return true, apc.Spec.Catalog[i].Image, nil
+			images = append(images, apc.Spec.Catalog[i].Image)
 		}
 	}
-	return true, "", nil
+	switch {
+	case len(images) == 1:
+		s.image = images[0]
+	case len(images) > 1:
+		s.imageErr = "framework catalog advertises multiple images; set spec.config.image explicitly to select one"
+	}
+	return s, nil
 }
 
 // parseContainerConfig extracts the container provider's fields from the opaque
@@ -290,11 +352,13 @@ func renderAgentConfigMap(ad *airunwayv1alpha1.AgentDeployment) *corev1.ConfigMa
 
 // agentPodSpec builds the shared pod spec for a container-backed agent: the
 // BYO image, the resolved model binding injected as OpenAI-compatible env, the
-// mounted agent.json config, and a hardened, provider-owned security posture
-// (runAsNonRoot, dropped capabilities, seccomp; readOnlyRootFilesystem relaxed
-// only when the framework declares it needs a writable workdir — expressed
-// here in the provider, not in the user-facing API, per design §7).
-func agentPodSpec(cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) corev1.PodSpec {
+// requested OTLP observability env, the mounted agent.json config, the agent's
+// requested resources, and a hardened, provider-owned security posture
+// (runAsNonRoot, dropped capabilities, seccomp, read-only root filesystem with
+// an always-writable /tmp scratch mount). The read-only root is relaxed only
+// when the framework's provider config declares it needs a writable root
+// (writableRoot) — a provider-owned property, never a user-facing knob.
+func agentPodSpec(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) corev1.PodSpec {
 	env := []corev1.EnvVar{
 		{Name: "AIRUNWAY_AGENT_CONFIG", Value: agentConfigMountPath},
 		{Name: "OPENAI_BASE_URL", Value: binding.BaseURL},
@@ -311,18 +375,23 @@ func agentPodSpec(cfg containerConfig, binding airunwayv1alpha1.ModelBindingStat
 			},
 		})
 	}
+	env = append(env, otlpEnv(ad)...)
 
 	container := corev1.Container{
 		Name:  "agent",
 		Image: cfg.Image,
 		Ports: []corev1.ContainerPort{{ContainerPort: containerPort(cfg)}},
 		Env:   env,
-		VolumeMounts: []corev1.VolumeMount{{
-			Name: "agent-config", MountPath: agentConfigMountDir, ReadOnly: true,
-		}},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "agent-config", MountPath: agentConfigMountDir, ReadOnly: true},
+			// Always provide a writable scratch dir so frameworks that need to
+			// write (caches, sessions) work without relaxing the whole root FS.
+			{Name: "tmp", MountPath: "/tmp"},
+		},
+		Resources: agentResources(ad),
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: ptr.To(false),
-			ReadOnlyRootFilesystem:   ptr.To(!cfg.WritableRootFilesystem),
+			ReadOnlyRootFilesystem:   ptr.To(!writableRoot),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
 	}
@@ -339,19 +408,52 @@ func agentPodSpec(cfg containerConfig, binding airunwayv1alpha1.ModelBindingStat
 			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 		Containers: []corev1.Container{container},
-		Volumes: []corev1.Volume{{
-			Name: "agent-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+		Volumes: []corev1.Volume{
+			{
+				Name: "agent-config",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+					},
 				},
 			},
-		}},
+			{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		},
 	}
 }
 
+// agentResources maps spec.resources onto container requests/limits so the
+// limits accepted by the CRD are actually enforced on the workload.
+func agentResources(ad *airunwayv1alpha1.AgentDeployment) corev1.ResourceRequirements {
+	var req corev1.ResourceRequirements
+	if ad.Spec.Resources == nil {
+		return req
+	}
+	if len(ad.Spec.Resources.Requests) > 0 {
+		req.Requests = ad.Spec.Resources.Requests
+	}
+	if len(ad.Spec.Resources.Limits) > 0 {
+		req.Limits = ad.Spec.Resources.Limits
+	}
+	return req
+}
+
+// otlpEnv translates spec.observability.otlp into the standard OTLP exporter
+// environment variables the agent runtime reads, per the API contract.
+func otlpEnv(ad *airunwayv1alpha1.AgentDeployment) []corev1.EnvVar {
+	if ad.Spec.Observability == nil || ad.Spec.Observability.OTLP == nil {
+		return nil
+	}
+	otlp := ad.Spec.Observability.OTLP
+	env := []corev1.EnvVar{{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: otlp.Endpoint}}
+	if otlp.Protocol != "" {
+		env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_PROTOCOL", Value: otlp.Protocol})
+	}
+	return env
+}
+
 // renderAgentDeployment renders a long-running Deployment for the agent.
-func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) *appsv1.Deployment {
+func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
@@ -360,7 +462,7 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 			Selector: &metav1.LabelSelector{MatchLabels: agentSelector(ad)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: agentLabels(ad)},
-				Spec:       agentPodSpec(cfg, binding, configMapName),
+				Spec:       agentPodSpec(ad, cfg, binding, configMapName, writableRoot),
 			},
 		},
 	}
@@ -369,8 +471,8 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 // renderAgentJob renders a one-shot Job for the agent (spec.lifecycle: job).
 // The pod spec is shared with the Deployment path; only the restart policy
 // differs (Jobs require Never or OnFailure).
-func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string) *batchv1.Job {
-	pod := agentPodSpec(cfg, binding, configMapName)
+func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) *batchv1.Job {
+	pod := agentPodSpec(ad, cfg, binding, configMapName, writableRoot)
 	pod.RestartPolicy = corev1.RestartPolicyNever
 	return &batchv1.Job{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
@@ -427,6 +529,8 @@ func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&airunwayv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{}).
 		Named("agent-provider-container").
 		Complete(r)
 }
