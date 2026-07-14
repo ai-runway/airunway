@@ -253,6 +253,11 @@ This governance document may be amended by:
 
 ---
 
+## History
+[Moving AI Runway out of KAITO organization] was an early step in AI Runway's emergence as an independent project.
+
+--
+
 ## References
 
 - [CNCF Governance Templates](https://contribute.cncf.io/maintainers/governance/)
@@ -260,3 +265,4 @@ This governance document may be amended by:
 - [Helm Governance](https://github.com/helm/community/blob/main/governance/governance.md)
 - [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md)
 - [AI Runway Contributing Guide](CONTRIBUTING.md)
+- [Moving AI Runway out of KAITO organization](https://github.com/kaito-project/kaito/issues/2154)
