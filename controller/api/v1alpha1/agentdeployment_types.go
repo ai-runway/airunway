@@ -59,11 +59,6 @@ type AgentFrameworkRef struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 	Name string `json:"name"`
-
-	// version optionally pins a framework provider version. When empty,
-	// providers use their default version. Format is provider-defined.
-	// +optional
-	Version string `json:"version,omitempty"`
 }
 
 // ModelDeploymentBinding binds the agent to an in-cluster ModelDeployment.
@@ -250,14 +245,16 @@ type AgentDeploymentSpec struct {
 	// +optional
 	Lifecycle AgentLifecycle `json:"lifecycle,omitempty"`
 
-	// models lists the model endpoints the agent can talk to. At least
-	// one entry is required. Each binding is identified by its name,
-	// which framework-specific spec.config blobs reference (e.g.
-	// {"defaultModel": "reasoning"}). Most agents only need one
-	// binding; multi-binding support exists for agents that mix a
-	// reasoning model with cheaper utility models.
+	// models lists the model endpoints the agent can talk to. Exactly
+	// one entry is supported in v1alpha1: every framework provider
+	// consumes status.modelBindings[0], so multi-binding manifests would
+	// silently ignore the extra entries. The list shape (with a name
+	// key) is retained for forward compatibility with multi-model
+	// selection; the MaxItems cap will be lifted once providers render
+	// named bindings.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
 	// +listType=map
 	// +listMapKey=name
 	Models []ModelBinding `json:"models"`
@@ -265,11 +262,12 @@ type AgentDeploymentSpec struct {
 	// config carries framework-specific configuration (e.g. system
 	// prompt, skills, crew definition, graph definition).
 	//
-	// The shape is defined by the framework provider, validated against
-	// its JSON schema during reconciliation. Use RawExtension here so
-	// the core controller does not need to learn every framework's
-	// schema; provider controllers parse and validate this field
-	// themselves.
+	// The shape is defined by the framework provider. Use RawExtension
+	// here so the core controller does not need to learn every
+	// framework's schema; each provider controller parses this field
+	// itself. Providers currently perform best-effort parsing and ignore
+	// unknown keys — there is no enforced JSON-schema validation contract
+	// yet, so malformed config is treated as empty rather than rejected.
 	// +optional
 	Config *runtime.RawExtension `json:"config,omitempty"`
 
@@ -301,6 +299,14 @@ type ModelBindingStatus struct {
 	// bindingMode echoes which binding mode in spec.models[name] was used.
 	// +optional
 	BindingMode ModelBindingMode `json:"bindingMode,omitempty"`
+
+	// apiType echoes the ExternalAPIBinding.Type for externalAPI
+	// bindings (openai, anthropic, azureOpenAI, custom), so providers can
+	// render the correct provider shape instead of assuming OpenAI. Empty
+	// for deploymentRef and gatewayEndpoint bindings, which are always
+	// OpenAI-compatible in-cluster endpoints.
+	// +optional
+	APIType ExternalAPIType `json:"apiType,omitempty"`
 
 	// baseURL is the resolved OpenAI-compatible base URL for the model
 	// endpoint (e.g. http://my-model.inference.svc.cluster.local/v1).

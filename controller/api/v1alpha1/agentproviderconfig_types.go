@@ -81,6 +81,26 @@ type AgentProviderCapabilities struct {
 	// flows. Mirrors InferenceProviderConfig.requiresCRD semantics.
 	// +optional
 	RequiresOperator *bool `json:"requiresOperator,omitempty"`
+
+	// operatorAPIGroup is the Kubernetes API group of the upstream
+	// operator this framework renders into (e.g. "kagent.dev" or
+	// "core.orka.ai"). When set for a crd backend, the controller marks
+	// the provider ready only once this API group is served in the
+	// cluster, so agents are never rendered before the operator is
+	// installed. Ignored for container backends, which have no operator.
+	// +optional
+	OperatorAPIGroup string `json:"operatorAPIGroup,omitempty"`
+
+	// writableRootFilesystem relaxes the container backend's hardened
+	// read-only root filesystem for frameworks that legitimately need a
+	// writable root (e.g. images that write outside /tmp). This is a
+	// provider-owned property of the framework, NOT a user-facing knob:
+	// it lives here on the framework's capabilities, not on an
+	// AgentDeployment, so a deployment author cannot weaken the security
+	// posture. A writable /tmp is always provided regardless. Ignored for
+	// crd backends, whose upstream operator owns pod security.
+	// +optional
+	WritableRootFilesystem *bool `json:"writableRootFilesystem,omitempty"`
 }
 
 // AgentCatalogItem is a curated, one-click deployable recipe. The

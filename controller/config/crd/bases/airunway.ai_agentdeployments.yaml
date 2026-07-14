@@ -62,11 +62,12 @@ spec:
                   config carries framework-specific configuration (e.g. system
                   prompt, skills, crew definition, graph definition).
 
-                  The shape is defined by the framework provider, validated against
-                  its JSON schema during reconciliation. Use RawExtension here so
-                  the core controller does not need to learn every framework's
-                  schema; provider controllers parse and validate this field
-                  themselves.
+                  The shape is defined by the framework provider. Use RawExtension
+                  here so the core controller does not need to learn every
+                  framework's schema; each provider controller parses this field
+                  itself. Providers currently perform best-effort parsing and ignore
+                  unknown keys — there is no enforced JSON-schema validation contract
+                  yet, so malformed config is treated as empty rather than rejected.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               framework:
@@ -83,11 +84,6 @@ spec:
                     minLength: 1
                     pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                     type: string
-                  version:
-                    description: |-
-                      version optionally pins a framework provider version. When empty,
-                      providers use their default version. Format is provider-defined.
-                    type: string
                 required:
                 - name
                 type: object
@@ -103,12 +99,13 @@ spec:
                 type: string
               models:
                 description: |-
-                  models lists the model endpoints the agent can talk to. At least
-                  one entry is required. Each binding is identified by its name,
-                  which framework-specific spec.config blobs reference (e.g.
-                  {"defaultModel": "reasoning"}). Most agents only need one
-                  binding; multi-binding support exists for agents that mix a
-                  reasoning model with cheaper utility models.
+                  models lists the model endpoints the agent can talk to. Exactly
+                  one entry is supported in v1alpha1: every framework provider
+                  consumes status.modelBindings[0], so multi-binding manifests would
+                  silently ignore the extra entries. The list shape (with a name
+                  key) is retained for forward compatibility with multi-model
+                  selection; the MaxItems cap will be lifted once providers render
+                  named bindings.
                 items:
                   description: |-
                     ModelBinding describes how the agent connects to one model. Exactly
@@ -224,6 +221,7 @@ spec:
                       must be set
                     rule: ((has(self.deploymentRef)?1:0)+(has(self.gatewayEndpoint)?1:0)+(has(self.externalAPI)?1:0))
                       == 1
+                maxItems: 1
                 minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
@@ -386,6 +384,19 @@ spec:
                     that the resolution surface (cross-namespace grants, secret lookups,
                     gateway endpoint discovery) lives in exactly one place.
                   properties:
+                    apiType:
+                      description: |-
+                        apiType echoes the ExternalAPIBinding.Type for externalAPI
+                        bindings (openai, anthropic, azureOpenAI, custom), so providers can
+                        render the correct provider shape instead of assuming OpenAI. Empty
+                        for deploymentRef and gatewayEndpoint bindings, which are always
+                        OpenAI-compatible in-cluster endpoints.
+                      enum:
+                      - openai
+                      - anthropic
+                      - azureOpenAI
+                      - custom
+                      type: string
                     baseURL:
                       description: |-
                         baseURL is the resolved OpenAI-compatible base URL for the model
