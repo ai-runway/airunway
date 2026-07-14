@@ -110,6 +110,11 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
 					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatOpenAIResponses,
+						airunwayv1alpha1.APIFormatAnthropicMessages,
+					},
 					GPUSupport:  true,
 					RequiresCRD: &requiresCRD,
 					Gateway: &airunwayv1alpha1.GatewayCapabilities{

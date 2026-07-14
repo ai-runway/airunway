@@ -87,6 +87,13 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
 					},
+					// Ray Serve LLM (build_openai_app) only exposes /v1/chat/completions,
+					// /v1/completions, /v1/embeddings, and /v1/models — the /v1/responses
+					// and /v1/messages endpoints are not passed through to the underlying
+					// vLLM engine.
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+					},
 					GPUSupport: true,
 				},
 			},

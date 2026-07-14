@@ -121,6 +121,11 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
 					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatOpenAIResponses,
+						airunwayv1alpha1.APIFormatAnthropicMessages,
+					},
 					GPUSupport: true,
 					Gateway:    dynamoGatewayCapabilities(),
 				},
@@ -130,6 +135,10 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
 					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatAnthropicMessages,
+					},
 					GPUSupport: true,
 					Gateway:    dynamoGatewayCapabilities(),
 				},
@@ -137,6 +146,10 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 					Name: airunwayv1alpha1.EngineTypeTRTLLM,
 					ServingModes: []airunwayv1alpha1.ServingMode{
 						airunwayv1alpha1.ServingModeAggregated,
+					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatOpenAIResponses,
 					},
 					GPUSupport: true,
 					Gateway:    dynamoGatewayCapabilities(),

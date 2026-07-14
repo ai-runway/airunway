@@ -52,6 +52,11 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(vllmCap.ServingModes) != 1 || vllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected vllm to support only aggregated serving mode")
 	}
+	assertAPIFormats(t, "vllm", vllmCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	llamaCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeLlamaCpp)
 	if llamaCap == nil {
@@ -65,6 +70,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	}
 	if len(llamaCap.ServingModes) != 1 || llamaCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected llamacpp to support only aggregated serving mode")
+	}
+	if len(llamaCap.APIFormats) != 1 || llamaCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected llamacpp to support openai-chat API format")
 	}
 
 	if len(spec.SelectionRules) != 2 {
@@ -326,5 +334,24 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	}
 	if len(health.OperatorPods) < 2 {
 		t.Fatalf("expected namespace and cross-namespace KAITO operator probes, got %+v", health.OperatorPods)
+	}
+}
+
+func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alpha1.APIFormat) {
+	t.Helper()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %s to support %d API formats, got %d: %v", engine, len(expected), len(got), got)
+	}
+	for _, e := range expected {
+		found := false
+		for _, a := range got {
+			if a == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s to support API format %s", engine, e)
+		}
 	}
 }

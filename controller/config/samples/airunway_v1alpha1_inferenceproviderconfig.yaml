@@ -18,9 +18,11 @@ spec:
     engines:
       - name: vllm
         servingModes: [aggregated]
+        apiFormats: [openai-chat, openai-responses, anthropic-messages]
         gpuSupport: true
       - name: llamacpp
         servingModes: [aggregated]
+        apiFormats: [openai-chat]
         gpuSupport: true
         cpuSupport: true
   selectionRules:
@@ -48,6 +50,7 @@ spec:
     engines:
       - name: vllm
         servingModes: [aggregated, disaggregated]
+        apiFormats: [openai-chat, openai-responses, anthropic-messages]
         gpuSupport: true
         gateway:
           managesInferencePool: true
@@ -55,6 +58,7 @@ spec:
           inferencePoolNamespace: "{namespace}"
       - name: sglang
         servingModes: [aggregated, disaggregated]
+        apiFormats: [openai-chat, anthropic-messages]
         gpuSupport: true
         gateway:
           managesInferencePool: true
@@ -62,6 +66,7 @@ spec:
           inferencePoolNamespace: "{namespace}"
       - name: trtllm
         servingModes: [aggregated]
+        apiFormats: [openai-chat, openai-responses]
         gpuSupport: true
         gateway:
           managesInferencePool: true
@@ -96,6 +101,7 @@ spec:
     engines:
       - name: vllm
         servingModes: [aggregated, disaggregated]
+        apiFormats: [openai-chat]
         gpuSupport: true
   selectionRules:
     - condition: "has(spec.resources.gpu) && spec.resources.gpu.count > 1 && spec.engine.type == 'vllm'"
@@ -120,6 +126,7 @@ spec:
     engines:
       - name: vllm
         servingModes: [aggregated, disaggregated]
+        apiFormats: [openai-chat, openai-responses, anthropic-messages]
         gpuSupport: true
         requiresCRD: false
   selectionRules: []
