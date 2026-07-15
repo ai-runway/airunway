@@ -176,7 +176,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /provider
-        image: ghcr.io/kaito-project/airunway/kuberay-provider:latest
+        image: ghcr.io/ai-runway/airunway/kuberay-provider:latest
         livenessProbe:
           httpGet:
             path: /healthz

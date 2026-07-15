@@ -205,9 +205,12 @@ export interface Condition {
   lastTransitionTime?: string;
 }
 
+export type APIFormat = 'openai-chat' | 'openai-responses' | 'anthropic-messages';
+
 export interface GatewayStatus {
   endpoint?: string;
   modelName?: string;
+  apiFormats?: APIFormat[];
 }
 
 export interface GatewayInfo {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kaito-project/airunway/test/e2e/gpu/e2eutil"
+	"github.com/ai-runway/airunway/test/e2e/gpu/e2eutil"
 )
 
 // assertDynamoDeep runs the Dynamo-specific assertions that the uniform

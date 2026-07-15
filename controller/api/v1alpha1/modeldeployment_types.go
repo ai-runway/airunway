@@ -56,6 +56,51 @@ const (
 	ServingModeDisaggregated ServingMode = "disaggregated"
 )
 
+// APIFormat defines the API format supported by an inference engine.
+// Each format corresponds to a specific vendor's API contract.
+// +kubebuilder:validation:Enum=openai-chat;openai-responses;anthropic-messages
+type APIFormat string
+
+const (
+	// APIFormatOpenAIChat is the OpenAI Chat Completions API (POST /v1/chat/completions)
+	APIFormatOpenAIChat APIFormat = "openai-chat"
+	// APIFormatOpenAIResponses is the OpenAI Responses API (POST /v1/responses)
+	APIFormatOpenAIResponses APIFormat = "openai-responses"
+	// APIFormatAnthropicMessages is the Anthropic Messages API (POST /v1/messages)
+	APIFormatAnthropicMessages APIFormat = "anthropic-messages"
+)
+
+// ValidAPIFormatsForEngine defines the maximum set of API formats each engine
+// type can natively support. Providers may declare a subset (e.g., KubeRay
+// vLLM only exposes openai-chat because Ray Serve does not pass through
+// /v1/responses or /v1/messages), but must never declare formats beyond
+// this map.
+var ValidAPIFormatsForEngine = map[EngineType][]APIFormat{
+	EngineTypeVLLM:     {APIFormatOpenAIChat, APIFormatOpenAIResponses, APIFormatAnthropicMessages},
+	EngineTypeSGLang:   {APIFormatOpenAIChat, APIFormatAnthropicMessages},
+	EngineTypeTRTLLM:   {APIFormatOpenAIChat, APIFormatOpenAIResponses},
+	EngineTypeLlamaCpp: {APIFormatOpenAIChat},
+}
+
+// ValidateAPIFormatsForEngine checks that every format in the list is valid
+// for the given engine type. Returns an error describing the first invalid format.
+func ValidateAPIFormatsForEngine(engine EngineType, formats []APIFormat) error {
+	valid, ok := ValidAPIFormatsForEngine[engine]
+	if !ok {
+		return fmt.Errorf("unknown engine type %q", engine)
+	}
+	validSet := make(map[APIFormat]bool, len(valid))
+	for _, f := range valid {
+		validSet[f] = true
+	}
+	for _, f := range formats {
+		if !validSet[f] {
+			return fmt.Errorf("engine %q does not support API format %q", engine, f)
+		}
+	}
+	return nil
+}
+
 // DeploymentPhase defines the phase of the deployment
 // +kubebuilder:validation:Enum=Pending;Deploying;Running;Failed;Terminating
 type DeploymentPhase string
@@ -477,6 +522,10 @@ type GatewayStatus struct {
 	// gatewayNamespace is the namespace of the Gateway resource used for routing.
 	// +optional
 	GatewayNamespace string `json:"gatewayNamespace,omitempty"`
+	// apiFormats is the list of API formats supported by this deployment's engine.
+	// Populated from the engine's capabilities in InferenceProviderConfig.
+	// +optional
+	APIFormats []APIFormat `json:"apiFormats,omitempty"`
 }
 
 // ImageStatus contains information about resolved and verified images.

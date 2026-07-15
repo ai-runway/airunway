@@ -152,7 +152,7 @@ describe('KubernetesService - Runtime Status', () => {
           'airunway.ai/display-name': 'Dynamo',
           'airunway.ai/description': 'NVIDIA Dynamo for high-performance GPU inference',
           'airunway.ai/default-namespace': 'dynamo-system',
-          'airunway.ai/documentation-url': 'https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md',
+          'airunway.ai/documentation-url': 'https://github.com/ai-runway/airunway/tree/main/docs/providers/dynamo.md',
           'airunway.ai/capabilities': JSON.stringify({
             engines: ['vllm', 'sglang', 'trtllm'],
             servingModes: ['aggregated', 'disaggregated'],

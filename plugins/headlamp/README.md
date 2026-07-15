@@ -28,7 +28,7 @@ A [Headlamp](https://headlamp.dev/) plugin that integrates AIRunway's ML deploym
 
 ```bash
 # Clone the repository
-git clone https://github.com/kaito-project/airunway.git
+git clone https://github.com/ai-runway/airunway.git
 cd airunway/plugins/headlamp
 
 # Build and deploy

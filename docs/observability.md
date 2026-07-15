@@ -15,7 +15,7 @@ AI Runway exposes Prometheus metrics from both the controller and inference prov
 
 ## Getting started
 
-See the [Observability Demo](https://github.com/kaito-project/airunway/blob/main/demos/observability/README.md) for a complete walkthrough covering:
+See the [Observability Demo](https://github.com/ai-runway/airunway/blob/main/demos/observability/README.md) for a complete walkthrough covering:
 
 1. Installing kube-prometheus-stack
 2. Configuring Prometheus to scrape the controller (ServiceMonitor + RBAC)

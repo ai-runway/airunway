@@ -1,5 +1,5 @@
 KUSTOMIZE ?= ../../controller/bin/kustomize
-IMG ?= ghcr.io/kaito-project/airunway/kaito-provider:latest
+IMG ?= ghcr.io/ai-runway/airunway/kaito-provider:latest
 PLATFORM ?= linux/amd64
 PUSH ?= false
 PUSH_ENABLED := $(filter true TRUE 1 yes YES on ON,$(PUSH))

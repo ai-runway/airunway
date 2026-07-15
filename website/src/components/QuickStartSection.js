@@ -24,8 +24,8 @@ export default function QuickStartSection() {
             Apply the controller and optional dashboard manifests directly into
             your cluster.
           </p>
-          <CodeBlock language="bash">{`kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/deploy/controller.yaml
-kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/deploy/dashboard.yaml
+          <CodeBlock language="bash">{`kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/controller.yaml
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/dashboard.yaml
 kubectl port-forward -n airunway-system svc/airunway 3001:80`}</CodeBlock>
         </div>
       </div>

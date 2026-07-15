@@ -17,7 +17,7 @@ limitations under the License.
 package dynamo
 
 import (
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 // Mocker mode is an internal, test-only Dynamo backend that swaps the real

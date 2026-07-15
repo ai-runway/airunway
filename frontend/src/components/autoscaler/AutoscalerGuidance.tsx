@@ -22,7 +22,7 @@ export function AutoscalerGuidance({ autoscaler, variant = 'default', className 
         links: [
           {
             label: 'Verify Configuration',
-            href: 'https://github.com/kaito-project/airunway/blob/main/docs/azure-autoscaling.md#verification',
+            href: 'https://github.com/ai-runway/airunway/blob/main/docs/azure-autoscaling.md#verification',
           },
         ],
       };
@@ -35,7 +35,7 @@ export function AutoscalerGuidance({ autoscaler, variant = 'default', className 
         links: [
           {
             label: 'Troubleshooting Guide',
-            href: 'https://github.com/kaito-project/airunway/blob/main/docs/azure-autoscaling.md#troubleshooting',
+            href: 'https://github.com/ai-runway/airunway/blob/main/docs/azure-autoscaling.md#troubleshooting',
           },
         ],
       };
@@ -48,7 +48,7 @@ export function AutoscalerGuidance({ autoscaler, variant = 'default', className 
       links: [
         {
           label: 'Setup Guide (AKS)',
-          href: 'https://github.com/kaito-project/airunway/blob/main/docs/azure-autoscaling.md#option-1-aks-managed-autoscaler-recommended',
+          href: 'https://github.com/ai-runway/airunway/blob/main/docs/azure-autoscaling.md#option-1-aks-managed-autoscaler-recommended',
         },
       ],
     };

@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -36,7 +36,7 @@ const (
 	ProviderConfigName = "llmd"
 
 	// ProviderDocumentation is the documentation URL for the llm-d provider
-	ProviderDocumentation = "https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md"
+	ProviderDocumentation = "https://github.com/ai-runway/airunway/tree/main/docs/providers/llmd.md"
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
@@ -109,6 +109,11 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 					ServingModes: []airunwayv1alpha1.ServingMode{
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
+					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatOpenAIResponses,
+						airunwayv1alpha1.APIFormatAnthropicMessages,
 					},
 					GPUSupport:  true,
 					RequiresCRD: &requiresCRD,

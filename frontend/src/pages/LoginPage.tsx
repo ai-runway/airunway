@@ -148,7 +148,7 @@ export function LoginPage() {
             <p>
               Need help?{' '}
               <a
-                href="https://github.com/kaito-project/airunway#authentication"
+                href="https://github.com/ai-runway/airunway#authentication"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-primary hover:underline"
