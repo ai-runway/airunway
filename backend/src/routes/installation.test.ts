@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach } from 'bun:test';
 import { PINNED_GAIE_VERSION } from '@airunway/shared';
 import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
@@ -982,41 +982,9 @@ describe('Installation Provider Routes', () => {
 describe('Gateway Installation Routes', () => {
   const restores: Array<() => void> = [];
 
-  // Deterministic mock guard for the gpu-throughput suite.
-  //
-  // Those route tests each stub huggingFaceService.getModelArchitecture on the
-  // shared singleton. When that stub is not in effect at request time, the
-  // route falls through to the REAL implementation, which fetches config.json
-  // from HuggingFace. Crucially, getModelArchitecture swallows every fetch
-  // error and returns `undefined`, so the route silently degrades — dropping
-  // arch-derived fields (doesNotFit / aggregateTokensPerSec) and defaulting
-  // contextLen — and the assertion fails with a confusing value rather than
-  // pointing at the missing mock. Because it depends on real network behaviour,
-  // it fails only intermittently in CI (the observed flake) while passing
-  // locally. A fetch-level guard can't catch this — the service swallows the
-  // throw — so instead we install a throwing default for the method itself.
-  // Every gpu-throughput test overrides it with its own mock (applied after
-  // this beforeEach); any test that fails to do so now fails loudly and
-  // identically everywhere instead of flaking.
-  const realGetModelArchitecture = huggingFaceService.getModelArchitecture;
-  beforeEach(() => {
-    (huggingFaceService as unknown as Record<string, unknown>).getModelArchitecture = async (
-      modelId: string,
-    ) => {
-      throw new Error(
-        `getModelArchitecture called without a test mock (modelId=${modelId}). ` +
-          'Stub it via mockServiceMethod(huggingFaceService, ...) in the test.',
-      );
-    };
-  });
-
   afterEach(() => {
     restores.forEach((r) => r());
     restores.length = 0;
-    // Restore the real method last, after any mockServiceMethod restores (which
-    // would otherwise reinstate the throwing default captured as their original).
-    (huggingFaceService as unknown as Record<string, unknown>).getModelArchitecture =
-      realGetModelArchitecture;
   });
 
 

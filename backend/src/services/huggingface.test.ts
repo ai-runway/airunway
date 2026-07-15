@@ -1,23 +1,26 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
-import { isValidHfRepoId, encodeHfRepoPath } from './huggingface';
+import { huggingFaceService, isValidHfRepoId, encodeHfRepoPath } from './huggingface';
 
 // Store original fetch
 const originalFetch = global.fetch;
 
 describe('HuggingFaceService', () => {
   let mockFetch: ReturnType<typeof mock>;
-  let huggingFaceService: typeof import('./huggingface').huggingFaceService;
 
-  beforeEach(async () => {
-    // Create mock fetch
+  beforeEach(() => {
+    // Create mock fetch. The service reads global.fetch at call time, so
+    // swapping it here is enough — no need to reload the module. Reloading
+    // (delete require.cache + re-import) would replace the shared singleton in
+    // the module registry and break other test files that captured the
+    // original instance at import time (e.g. the installation route), which is
+    // a nondeterministic, order-dependent, CI-only flake.
     mockFetch = mock(() => Promise.resolve(new Response()));
     // @ts-expect-error - Mocking global fetch for testing
     global.fetch = mockFetch;
 
-    // Clear module cache and re-import
-    delete require.cache[require.resolve('./huggingface')];
-    const module = await import('./huggingface');
-    huggingFaceService = module.huggingFaceService;
+    // Reset the module-level architecture cache so cache-behaviour tests start
+    // clean. (Previously a full module reload gave each test a fresh cache.)
+    huggingFaceService.clearArchitectureCacheForTests();
   });
 
   afterEach(() => {
