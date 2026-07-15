@@ -9,6 +9,14 @@ on:
         description: 'Version tag (e.g., v1.0.0)'
         required: true
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - 'providers/dynamo/**'
+      - 'controller/**'
+      - 'versions.env'
+      - '.github/workflows/release-dynamo-provider.yml'
 
 permissions:
   contents: read
@@ -27,6 +35,23 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Set image version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! [[ "$DISPATCH_VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Invalid version: use only letters, numbers, dots, underscores, and hyphens." >&2
+              exit 1
+            fi
+            image_version="$DISPATCH_VERSION"
+          else
+            image_version="main-${GITHUB_SHA::12}"
+          fi
+          printf 'IMAGE_VERSION=%s\n' "$image_version" >> "$GITHUB_ENV"
 
       - name: Log in to Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -51,10 +76,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/kaito-project/airunway/dynamo-provider:${{ inputs.version }}
-            ghcr.io/kaito-project/airunway/dynamo-provider:latest
+            ghcr.io/ai-runway/airunway/dynamo-provider:${{ env.IMAGE_VERSION }}
+            ghcr.io/ai-runway/airunway/dynamo-provider:latest
           build-args: |
             DYNAMO_VERSION=${{ env.DYNAMO_VERSION }}
-            SHIM_VERSION=${{ inputs.version }}
+            SHIM_VERSION=${{ env.IMAGE_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

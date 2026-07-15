@@ -63,6 +63,21 @@ spec:
                       description: EngineCapability defines per-engine capability
                         metadata
                       properties:
+                        apiFormats:
+                          description: |-
+                            apiFormats is the list of API formats this engine supports
+                            (e.g., openai-chat, anthropic-messages). Consumers should treat
+                            an empty list as equivalent to [openai-chat] for backward compatibility.
+                          items:
+                            description: |-
+                              APIFormat defines the API format supported by an inference engine.
+                              Each format corresponds to a specific vendor's API contract.
+                            enum:
+                            - openai-chat
+                            - openai-responses
+                            - anthropic-messages
+                            type: string
+                          type: array
                         cpuSupport:
                           description: cpuSupport indicates if this engine supports
                             CPU-only inference

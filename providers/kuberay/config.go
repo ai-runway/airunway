@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -38,7 +38,7 @@ const (
 	ProviderConfigName = "kuberay"
 
 	// ProviderDocumentation is the documentation URL for the KubeRay provider
-	ProviderDocumentation = "https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md"
+	ProviderDocumentation = "https://github.com/ai-runway/airunway/tree/main/docs/providers/kuberay.md"
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
@@ -86,6 +86,13 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 					ServingModes: []airunwayv1alpha1.ServingMode{
 						airunwayv1alpha1.ServingModeAggregated,
 						airunwayv1alpha1.ServingModeDisaggregated,
+					},
+					// Ray Serve LLM (build_openai_app) only exposes /v1/chat/completions,
+					// /v1/completions, /v1/embeddings, and /v1/models — the /v1/responses
+					// and /v1/messages endpoints are not passed through to the underlying
+					// vLLM engine.
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
 					},
 					GPUSupport: true,
 				},

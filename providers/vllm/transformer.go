@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -60,7 +60,7 @@ const (
 // Single source of truth: /versions.env at the repo root. The build-time value
 // is injected via:
 //
-//	-ldflags "-X github.com/kaito-project/airunway/providers/vllm.VLLMVersion=$(VLLM_VERSION)"
+//	-ldflags "-X github.com/ai-runway/airunway/providers/vllm.VLLMVersion=$(VLLM_VERSION)"
 //
 // (see providers/vllm/Makefile). The string literal below is a fallback for
 // `go run` / `go test` invocations that bypass the Makefile and must be kept in

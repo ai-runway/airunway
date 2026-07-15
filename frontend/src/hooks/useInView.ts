@@ -8,8 +8,8 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
  */
 export function useInView<T extends Element = HTMLDivElement>(
   options?: IntersectionObserverInit
-): { ref: RefObject<T | null>; inView: boolean } {
-  const ref = useRef<T>(null)
+): { ref: RefObject<T>; inView: boolean } {
+  const ref = useRef<T>(null!)
   const [inView, setInView] = useState(false)
 
   useEffect(() => {

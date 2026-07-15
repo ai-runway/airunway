@@ -150,7 +150,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /provider
-        image: ghcr.io/kaito-project/airunway/llmd-provider:latest
+        image: ghcr.io/ai-runway/airunway/llmd-provider:latest
         livenessProbe:
           httpGet:
             path: /healthz

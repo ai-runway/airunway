@@ -25,7 +25,7 @@ export default function HeroSection() {
           Get Started
         </Link>
         <Link
-          to="https://github.com/kaito-project/airunway/releases"
+          to="https://github.com/ai-runway/airunway/releases"
           className="button button--secondary button--lg"
         >
           Download

@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -15,6 +17,7 @@ env:
 
 jobs:
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     name: Build and Release
     runs-on: ubuntu-latest
     steps:
@@ -135,7 +138,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/kaito-project/airunway/dashboard
+          images: ghcr.io/ai-runway/airunway/dashboard
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -178,7 +181,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/kaito-project/airunway/controller
+          images: ghcr.io/ai-runway/airunway/controller
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -234,7 +237,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/kaito-project/airunway/model-downloader
+          images: ghcr.io/ai-runway/airunway/model-downloader
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

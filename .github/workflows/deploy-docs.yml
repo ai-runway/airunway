@@ -62,7 +62,7 @@ jobs:
     # Only publish on push to main on the canonical repo. PR builds verify the
     # build but never deploy. Permissions scoped to this job alone so PR
     # builds keep a read-only token.
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository == 'kaito-project/airunway'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository == 'ai-runway/airunway'
     permissions:
       pages: write
       id-token: write

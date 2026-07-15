@@ -112,7 +112,7 @@ kind: InferenceProviderConfig
 metadata:
   name: dynamo
   annotations:
-    airunway.ai/documentation: "https://github.com/kaito-project/dynamo-provider"
+    airunway.ai/documentation: "https://github.com/ai-runway/airunway/tree/main/docs/providers/dynamo.md"
     airunway.ai/installation: |
       {
         "description": "NVIDIA Dynamo for high-performance GPU inference",

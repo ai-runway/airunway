@@ -42,10 +42,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
-	"github.com/kaito-project/airunway/controller/internal/gateway"
-	airmetrics "github.com/kaito-project/airunway/controller/internal/metrics"
-	"github.com/kaito-project/airunway/controller/internal/validation"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/gateway"
+	airmetrics "github.com/ai-runway/airunway/controller/internal/metrics"
+	"github.com/ai-runway/airunway/controller/internal/validation"
 )
 
 // ModelDeploymentReconciler reconciles a ModelDeployment object
@@ -287,7 +287,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// supported: the previously-selected provider's resources and finalizer would
 	// be orphaned because provider controllers only clean up on ModelDeployment
 	// deletion, not on deselection (tracked in
-	// https://github.com/kaito-project/airunway/issues/325). Fail explicitly here
+	// https://github.com/ai-runway/airunway/issues/325). Fail explicitly here
 	// rather than silently keeping the old provider, so the conflict is visible.
 	if md.Spec.Provider != nil && md.Spec.Provider.Name != "" &&
 		md.Status.Provider != nil && md.Status.Provider.Name != "" &&
