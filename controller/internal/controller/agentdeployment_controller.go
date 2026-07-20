@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -48,28 +49,15 @@ const (
 	// re-checking a not-yet-satisfiable dependency (framework not ready, a
 	// referenced ModelDeployment without an endpoint yet).
 	agentRequeueInterval = 15 * time.Second
-
-	// keylessModelCredentialSecret and keylessModelCredentialKey identify the
-	// well-known placeholder Secret referenced by keyless in-cluster model
-	// bindings (deploymentRef). In-cluster model servers AI Runway deploys
-	// (e.g. KAITO llama.cpp) require no API key, but framework CRDs (kagent
-	// ModelConfig, orka Provider) and the generic container agent all expect a
-	// credential. Core points status.modelBindings[].credentialsRef at this
-	// placeholder so every provider's existing credentialsRef path renders
-	// valid output, WITHOUT AI Runway ever creating or reading a Secret —
-	// preserving the zero-secrets-verbs RBAC property. The Secret ships as an
-	// install/prereq artifact and its value is ignored by the model server.
-	keylessModelCredentialSecret = "airunway-model-noauth"
-	keylessModelCredentialKey    = "token"
 )
 
 // AgentDeploymentReconciler reconciles the core, framework-neutral concerns
 // of an AgentDeployment: it validates the requested framework against its
-// registered AgentProviderConfig and resolves every spec.models[] entry into
-// a stable status.modelBindings[] contract the framework provider consumes.
+// registered AgentProviderConfig and resolves spec.model into a stable
+// status.modelBinding contract the framework provider consumes.
 //
 // It deliberately does NOT render agent workloads — that is the framework
-// provider's job. Core owns framework/modelBindings and the ModelBound,
+// provider's job. Core owns framework/modelBinding and the ModelBound,
 // FrameworkReady, and aggregate Ready conditions; providers own phase,
 // runtime, replicas, and ProviderReady.
 type AgentDeploymentReconciler struct {
@@ -82,7 +70,6 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // Reconcile resolves framework and model bindings for an AgentDeployment.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -111,11 +98,11 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	result := ctrl.Result{}
 	framework, frameworkReady := r.resolveFramework(ctx, &ad, &conds)
 
-	var bindings []airunwayv1alpha1.ModelBindingStatus
+	var binding *airunwayv1alpha1.ModelBindingStatus
 	modelBound := false
 	if frameworkReady {
 		var requeue bool
-		bindings, modelBound, requeue = r.resolveModelBindings(ctx, &ad, framework.provider, &conds)
+		binding, modelBound, requeue = r.resolveModelBinding(ctx, &ad, framework.provider, &conds)
 		if requeue {
 			result.RequeueAfter = agentRequeueInterval
 		}
@@ -142,7 +129,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			ad.Generation, "ResolutionIncomplete", "Framework or model binding resolution is incomplete")
 	}
 
-	if err := r.applyCoreStatus(ctx, &ad, framework.status, bindings, conds); err != nil {
+	if err := r.applyCoreStatus(ctx, &ad, framework.status, binding, conds); err != nil {
 		logger.Error(err, "Failed to apply core status", "name", ad.Name)
 		return ctrl.Result{}, err
 	}
@@ -201,42 +188,37 @@ func (r *AgentDeploymentReconciler) resolveFramework(
 	}, true
 }
 
-// resolveModelBindings resolves every spec.models[] entry into a
-// ModelBindingStatus, validating each binding mode against the provider's
-// declared capabilities. It returns the resolved bindings, whether ALL
-// entries resolved (modelBound), and whether the caller should requeue for a
-// dependency that is not yet satisfiable.
-func (r *AgentDeploymentReconciler) resolveModelBindings(
+// resolveModelBinding resolves spec.model into a ModelBindingStatus, validating
+// the binding mode against the provider's declared capabilities. It returns the
+// resolved binding, whether the binding resolved (modelBound), and whether the
+// caller should requeue for a dependency that is not yet satisfiable.
+func (r *AgentDeploymentReconciler) resolveModelBinding(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
 	provider *airunwayv1alpha1.AgentProviderConfig,
 	conds *[]metav1.Condition,
-) (bindings []airunwayv1alpha1.ModelBindingStatus, modelBound bool, requeue bool) {
+) (binding *airunwayv1alpha1.ModelBindingStatus, modelBound bool, requeue bool) {
 	caps := provider.Spec.Capabilities
+	m := &ad.Spec.Model
+	mode := bindingMode(m)
 
-	for i := range ad.Spec.Models {
-		m := &ad.Spec.Models[i]
-		mode := bindingMode(m)
+	if !caps.HasBindingMode(mode) {
+		setAgentCondition(conds, airunwayv1alpha1.AgentConditionTypeModelBound, metav1.ConditionFalse,
+			ad.Generation, "UnsupportedBindingMode",
+			fmt.Sprintf("spec.model uses mode %q which framework %q does not support", mode, provider.Name))
+		return nil, false, false
+	}
 
-		if !caps.HasBindingMode(mode) {
-			setAgentCondition(conds, airunwayv1alpha1.AgentConditionTypeModelBound, metav1.ConditionFalse,
-				ad.Generation, "UnsupportedBindingMode",
-				fmt.Sprintf("Binding %q uses mode %q which framework %q does not support", m.Name, mode, provider.Name))
-			return nil, false, false
-		}
-
-		st, ok, rq, reason, msg := r.resolveOneBinding(ctx, ad, m, mode)
-		if !ok {
-			setAgentCondition(conds, airunwayv1alpha1.AgentConditionTypeModelBound, metav1.ConditionFalse,
-				ad.Generation, reason, msg)
-			return nil, false, rq
-		}
-		bindings = append(bindings, st)
+	st, ok, rq, reason, msg := r.resolveOneBinding(ctx, ad, m, mode)
+	if !ok {
+		setAgentCondition(conds, airunwayv1alpha1.AgentConditionTypeModelBound, metav1.ConditionFalse,
+			ad.Generation, reason, msg)
+		return nil, false, rq
 	}
 
 	setAgentCondition(conds, airunwayv1alpha1.AgentConditionTypeModelBound, metav1.ConditionTrue,
-		ad.Generation, "ModelsBound", fmt.Sprintf("Resolved %d model binding(s)", len(bindings)))
-	return bindings, true, false
+		ad.Generation, "ModelBound", "Resolved model binding")
+	return &st, true, false
 }
 
 // resolveOneBinding resolves a single ModelBinding into its status form. On
@@ -248,7 +230,7 @@ func (r *AgentDeploymentReconciler) resolveOneBinding(
 	m *airunwayv1alpha1.ModelBinding,
 	mode airunwayv1alpha1.ModelBindingMode,
 ) (st airunwayv1alpha1.ModelBindingStatus, ok, requeue bool, reason, msg string) {
-	st = airunwayv1alpha1.ModelBindingStatus{Name: m.Name, BindingMode: mode}
+	st = airunwayv1alpha1.ModelBindingStatus{BindingMode: mode}
 
 	switch mode {
 	case airunwayv1alpha1.ModelBindingModeExternalAPI:
@@ -273,14 +255,13 @@ func (r *AgentDeploymentReconciler) resolveOneBinding(
 		return st, true, false, "", ""
 
 	default:
-		return st, false, false, "UnknownBindingMode",
-			fmt.Sprintf("Binding %q has no recognised binding mode", m.Name)
+		return st, false, false, "UnknownBindingMode", "spec.model has no recognised binding mode"
 	}
 }
 
 // resolveDeploymentRef resolves an in-cluster ModelDeployment reference into a
-// binding: the OpenAI-compatible base URL from the model's service endpoint (or
-// gateway), the served model name, and the ModelDeployment UID so providers
+// binding: the OpenAI-compatible base URL from the model's gateway/service
+// endpoint, the served model name, and the ModelDeployment UID so providers
 // re-render if the target is deleted and recreated.
 func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 	ctx context.Context,
@@ -301,14 +282,14 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 	// AgentDeployment's own namespace.
 	if ns != ad.Namespace {
 		return st, false, false, "CrossNamespaceRefNotAllowed",
-			fmt.Sprintf("Binding %q references ModelDeployment %s/%s in another namespace; cross-namespace references require an AgentReferenceGrant (not yet supported)", m.Name, ns, ref.Name)
+			fmt.Sprintf("spec.model references ModelDeployment %s/%s in another namespace; cross-namespace references require an AgentReferenceGrant (not yet supported)", ns, ref.Name)
 	}
 
 	var md airunwayv1alpha1.ModelDeployment
 	if err := r.Get(ctx, k8stypes.NamespacedName{Name: ref.Name, Namespace: ns}, &md); err != nil {
 		if apierrors.IsNotFound(err) {
 			return st, false, true, "ModelDeploymentNotFound",
-				fmt.Sprintf("Binding %q references ModelDeployment %s/%s which does not exist", m.Name, ns, ref.Name)
+				fmt.Sprintf("spec.model references ModelDeployment %s/%s which does not exist", ns, ref.Name)
 		}
 		return st, false, true, "ModelDeploymentLookupFailed", err.Error()
 	}
@@ -317,18 +298,12 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 	st.BaseURL, st.ModelName = modelDeploymentEndpoint(&md)
 	if st.BaseURL == "" {
 		return st, false, true, "ModelDeploymentNotReady",
-			fmt.Sprintf("Binding %q target ModelDeployment %s/%s has no resolved endpoint yet", m.Name, ns, ref.Name)
+			fmt.Sprintf("spec.model target ModelDeployment %s/%s has no resolved endpoint yet", ns, ref.Name)
 	}
 
-	// In-cluster models AI Runway deploys are keyless, but framework CRDs
-	// (kagent ModelConfig, orka Provider) and the container agent still expect
-	// a credential field. Reference a well-known placeholder Secret so every
-	// provider's existing credentialsRef path renders valid output. AI Runway
-	// never creates or reads this Secret; the model server ignores its value.
-	st.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
-		Name: keylessModelCredentialSecret,
-		Key:  keylessModelCredentialKey,
-	}
+	// In-cluster model endpoints are keyless. Core leaves credentials empty and
+	// each provider backend handles this explicitly: container injects a literal
+	// OPENAI_API_KEY value, and CRD backends provision a managed no-auth Secret.
 	return st, true, false, "", ""
 }
 
@@ -341,7 +316,7 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
 	framework *airunwayv1alpha1.AgentFrameworkStatus,
-	bindings []airunwayv1alpha1.ModelBindingStatus,
+	binding *airunwayv1alpha1.ModelBindingStatus,
 	conds []metav1.Condition,
 ) error {
 	apply := &airunwayv1alpha1.AgentDeployment{
@@ -355,7 +330,7 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 		},
 		Status: airunwayv1alpha1.AgentDeploymentStatus{
 			Framework:          framework,
-			ModelBindings:      bindings,
+			ModelBinding:       binding,
 			ObservedGeneration: ad.Generation,
 			Conditions:         coreOwnedConditions(conds),
 		},
@@ -402,10 +377,12 @@ func bindingMode(m *airunwayv1alpha1.ModelBinding) airunwayv1alpha1.ModelBinding
 }
 
 // modelDeploymentEndpoint derives an OpenAI-compatible base URL and served
-// model name from a ModelDeployment's status. It prefers the gateway endpoint
-// (already a full URL) and falls back to the in-cluster service endpoint.
-// Returns an empty base URL when the ModelDeployment has not published an
-// endpoint yet.
+// model name from a ModelDeployment's status. It prefers the in-cluster Gateway
+// service URL when gateway routing is configured (so deploymentRef follows the
+// same OpenAI-native/BBR path as gatewayEndpoint bindings), then falls back to
+// the gateway endpoint address, and finally to the model service endpoint.
+// Returns an empty base URL when the ModelDeployment has not published any
+// usable endpoint yet.
 func modelDeploymentEndpoint(md *airunwayv1alpha1.ModelDeployment) (baseURL, modelName string) {
 	modelName = md.Name
 	if md.Spec.Model.ServedName != "" {
@@ -418,7 +395,18 @@ func modelDeploymentEndpoint(md *airunwayv1alpha1.ModelDeployment) (baseURL, mod
 		if gw.ModelName != "" {
 			modelName = gw.ModelName
 		}
-		return gw.Endpoint, modelName
+		if gw.GatewayName != "" && gw.GatewayNamespace != "" {
+			return fmt.Sprintf("http://%s.%s.svc.cluster.local/v1", gw.GatewayName, gw.GatewayNamespace), modelName
+		}
+		return normalizeOpenAIBaseURL(gw.Endpoint), modelName
+	}
+	if gw := md.Status.Gateway; gw != nil {
+		if gw.ModelName != "" {
+			modelName = gw.ModelName
+		}
+		if gw.GatewayName != "" && gw.GatewayNamespace != "" {
+			return fmt.Sprintf("http://%s.%s.svc.cluster.local/v1", gw.GatewayName, gw.GatewayNamespace), modelName
+		}
 	}
 
 	if ep := md.Status.Endpoint; ep != nil && ep.Service != "" {
@@ -430,6 +418,23 @@ func modelDeploymentEndpoint(md *airunwayv1alpha1.ModelDeployment) (baseURL, mod
 	}
 
 	return "", modelName
+}
+
+// normalizeOpenAIBaseURL ensures the URL is HTTP(S) and includes the /v1
+// OpenAI-compatible path expected by providers.
+func normalizeOpenAIBaseURL(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	endpoint = strings.TrimRight(endpoint, "/")
+	if endpoint == "" {
+		return ""
+	}
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		if strings.HasSuffix(endpoint, "/v1") {
+			return endpoint
+		}
+		return endpoint + "/v1"
+	}
+	return "http://" + endpoint + "/v1"
 }
 
 // gatewayBaseURL derives the in-cluster base URL for a Gateway reference.

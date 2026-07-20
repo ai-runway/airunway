@@ -67,14 +67,11 @@ var _ = Describe("AgentDeployment core controller", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec: airunwayv1alpha1.AgentDeploymentSpec{
 				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: framework},
-				Models: []airunwayv1alpha1.ModelBinding{
-					{
-						Name: "default",
-						ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
-							Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
-							BaseURL:   "https://api.openai.com/v1",
-							ModelName: "gpt-4o-mini",
-						},
+				Model: airunwayv1alpha1.ModelBinding{
+					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+						Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
+						BaseURL:   "https://api.openai.com/v1",
+						ModelName: "gpt-4o-mini",
 					},
 				},
 			},
@@ -125,11 +122,10 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(ad.Status.Framework.Name).To(Equal("kagent-happy"))
 			Expect(ad.Status.Framework.ProviderVersion).To(Equal("v0.0.0-test"))
 
-			Expect(ad.Status.ModelBindings).To(HaveLen(1))
-			Expect(ad.Status.ModelBindings[0].Name).To(Equal("default"))
-			Expect(ad.Status.ModelBindings[0].BindingMode).To(Equal(airunwayv1alpha1.ModelBindingModeExternalAPI))
-			Expect(ad.Status.ModelBindings[0].BaseURL).To(Equal("https://api.openai.com/v1"))
-			Expect(ad.Status.ModelBindings[0].ModelName).To(Equal("gpt-4o-mini"))
+			Expect(ad.Status.ModelBinding).NotTo(BeNil())
+			Expect(ad.Status.ModelBinding.BindingMode).To(Equal(airunwayv1alpha1.ModelBindingModeExternalAPI))
+			Expect(ad.Status.ModelBinding.BaseURL).To(Equal("https://api.openai.com/v1"))
+			Expect(ad.Status.ModelBinding.ModelName).To(Equal("gpt-4o-mini"))
 
 			// Not Ready yet: the provider has not reported ProviderReady.
 			ready := condition(ad, airunwayv1alpha1.AgentConditionTypeReady)
@@ -140,7 +136,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 	})
 
 	Context("when the binding is a deploymentRef to an in-cluster model", func() {
-		It("resolves the in-cluster endpoint and references the keyless placeholder credential", func() {
+		It("resolves the in-cluster endpoint for a keyless deploymentRef binding", func() {
 			createReadyProvider("kagent-depref", airunwayv1alpha1.AgentProviderBackendCRD,
 				airunwayv1alpha1.ModelBindingModeDeploymentRef)
 
@@ -164,11 +160,8 @@ var _ = Describe("AgentDeployment core controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: "agent-depref", Namespace: "default"},
 				Spec: airunwayv1alpha1.AgentDeploymentSpec{
 					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-depref"},
-					Models: []airunwayv1alpha1.ModelBinding{
-						{
-							Name:          "default",
-							DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "demo-model"},
-						},
+					Model: airunwayv1alpha1.ModelBinding{
+						DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "demo-model"},
 					},
 				},
 			}
@@ -182,19 +175,62 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(mb).NotTo(BeNil())
 			Expect(mb.Status).To(Equal(metav1.ConditionTrue))
 
-			Expect(out.Status.ModelBindings).To(HaveLen(1))
-			b := out.Status.ModelBindings[0]
+			Expect(out.Status.ModelBinding).NotTo(BeNil())
+			b := *out.Status.ModelBinding
 			Expect(b.BindingMode).To(Equal(airunwayv1alpha1.ModelBindingModeDeploymentRef))
 			Expect(b.BaseURL).To(Equal("http://demo-model.default.svc.cluster.local:80/v1"))
 			Expect(b.ModelName).To(Equal("llama-3.2-1b-instruct"))
 			Expect(b.ObservedResourceUID).To(Equal(string(md.UID)))
 
-			// Keyless in-cluster models still get a placeholder credentialsRef
-			// so framework providers render valid CRs without AI Runway ever
-			// creating or reading a Secret.
-			Expect(b.CredentialsRef).NotTo(BeNil())
-			Expect(b.CredentialsRef.Name).To(Equal(keylessModelCredentialSecret))
-			Expect(b.CredentialsRef.Key).To(Equal(keylessModelCredentialKey))
+			// Core leaves keyless credentials empty; provider backends handle the
+			// final credential materialization/injection.
+			Expect(b.CredentialsRef).To(BeNil())
+		})
+
+		It("prefers the gateway service URL and gateway model name when gateway routing is configured", func() {
+			createReadyProvider("kagent-depref-gw", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeDeploymentRef)
+
+			md := &airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-model-gw", Namespace: "default"},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model: airunwayv1alpha1.ModelSpec{
+						Source:     airunwayv1alpha1.ModelSourceCustom,
+						ServedName: "llama-3.2-1b-instruct",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, md)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, md) })
+			md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "demo-model-gw", Port: 80}
+			md.Status.Gateway = &airunwayv1alpha1.GatewayStatus{
+				Endpoint:         "10.0.0.42",
+				GatewayName:      "inference-gateway",
+				GatewayNamespace: "gateway-system",
+				ModelName:        "llama-3.2-1b-gateway",
+			}
+			Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+
+			ad := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-depref-gw", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-depref-gw"},
+					Model: airunwayv1alpha1.ModelBinding{
+						DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "demo-model-gw"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+			reconcileOnce("agent-depref-gw")
+			out := get("agent-depref-gw")
+
+			Expect(out.Status.ModelBinding).NotTo(BeNil())
+			b := *out.Status.ModelBinding
+			Expect(b.BaseURL).To(Equal("http://inference-gateway.gateway-system.svc.cluster.local/v1"))
+			Expect(b.ModelName).To(Equal("llama-3.2-1b-gateway"))
+			Expect(b.CredentialsRef).To(BeNil())
 		})
 
 		It("rejects a cross-namespace deploymentRef until AgentReferenceGrant exists", func() {
@@ -205,13 +241,10 @@ var _ = Describe("AgentDeployment core controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: "agent-xns", Namespace: "default"},
 				Spec: airunwayv1alpha1.AgentDeploymentSpec{
 					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-xns"},
-					Models: []airunwayv1alpha1.ModelBinding{
-						{
-							Name: "default",
-							DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{
-								Name:      "some-model",
-								Namespace: "other-namespace",
-							},
+					Model: airunwayv1alpha1.ModelBinding{
+						DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{
+							Name:      "some-model",
+							Namespace: "other-namespace",
 						},
 					},
 				},
@@ -226,7 +259,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(mb).NotTo(BeNil())
 			Expect(mb.Status).To(Equal(metav1.ConditionFalse))
 			Expect(mb.Reason).To(Equal("CrossNamespaceRefNotAllowed"))
-			Expect(out.Status.ModelBindings).To(BeEmpty())
+			Expect(out.Status.ModelBinding).To(BeNil())
 		})
 	})
 
@@ -336,11 +369,11 @@ var _ = Describe("AgentDeployment core controller", func() {
 
 			// Core-owned fields MUST be set.
 			Expect(ad.Status.Framework).NotTo(BeNil())
-			Expect(ad.Status.ModelBindings).To(HaveLen(1))
+			Expect(ad.Status.ModelBinding).NotTo(BeNil())
 			Expect(condition(ad, airunwayv1alpha1.AgentConditionTypeFrameworkReady).Status).To(Equal(metav1.ConditionTrue))
 			Expect(condition(ad, airunwayv1alpha1.AgentConditionTypeModelBound).Status).To(Equal(metav1.ConditionTrue))
 
-			// With framework + models + ProviderReady all true, Ready aggregates True.
+			// With framework + model + ProviderReady all true, Ready aggregates True.
 			ready := condition(ad, airunwayv1alpha1.AgentConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue), fmt.Sprintf("expected Ready=True, got %+v", ready))

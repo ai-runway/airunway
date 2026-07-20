@@ -66,7 +66,7 @@ var (
 
 // KagentProviderReconciler renders an AgentDeployment whose framework is
 // "kagent" (a crd-backend framework) into kagent-native Agent + ModelConfig
-// custom resources, consuming the core-resolved status.modelBindings. It owns
+// custom resources, consuming the core-resolved status.modelBinding. It owns
 // the provider half of the AgentDeployment status (phase, runtime, replicas,
 // ProviderReady).
 type KagentProviderReconciler struct {
@@ -89,6 +89,7 @@ type kagentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=kagent.dev,resources=agents;modelconfigs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
 func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -109,12 +110,17 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// bindings are resolved, so we never build a ModelConfig from a half-
 	// resolved endpoint.
 	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
-		len(ad.Status.ModelBindings) == 0 {
+		ad.Status.ModelBinding == nil {
 		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
 	}
 
-	binding := ad.Status.ModelBindings[0]
+	binding := *ad.Status.ModelBinding
+	binding, err := ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
+	if err != nil {
+		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
+	}
 	cfg := parseKagentConfig(ad.Spec.Config)
 
 	modelConfig := renderKagentModelConfig(&ad, binding)

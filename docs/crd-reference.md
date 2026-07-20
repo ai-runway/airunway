@@ -138,6 +138,59 @@ status:
 | `airunway.ai/documentation` | string | URL to provider documentation |
 | `airunway.ai/installation` | JSON string | Installation metadata (description, defaultNamespace, helmRepos, helmCharts, steps). The backend parses this JSON to show installation commands and steps in the UI. |
 
+## AgentProviderConfig
+
+Cluster-scoped resource for agent framework registration. Capabilities stay in `spec`, while marketplace metadata and install guidance are carried in annotations.
+
+```yaml
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: kagent
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "kagent-k8s-sre",
+          "title": "Kubernetes SRE (Kagent)",
+          "description": "Diagnose deployments, pods, and networking.",
+          "tags": ["devops", "observability"]
+        }
+      ]
+    airunway.ai/install-instructions: "Install the Kagent operator before deploying agents with this framework."
+spec:
+  capabilities:
+    backend: crd
+    requiresOperator: true
+    operatorAPIGroup: kagent.dev
+    modelBindingModes: [deploymentRef, gatewayEndpoint, externalAPI]
+    protocols: [mcp, a2a, openaiTools]
+status:
+  ready: true
+  version: "kagent-provider:v0.1.0"
+```
+
+### AgentProviderConfig annotations
+
+| Annotation | Type | Description |
+|---|---|---|
+| `airunway.ai/agent-catalog` | JSON string | Catalog entries shown in the agent marketplace UI. Value must be a JSON array of items with unique `name` and non-empty `title`. |
+| `airunway.ai/install-instructions` | string | Plain-text install guidance shown when `status.conditions[type=Ready].reason` is `OperatorNotInstalled`. |
+
+## AgentDeployment model binding behavior
+
+For `spec.model.deploymentRef`, the core controller resolves the model binding in this order:
+
+1. If `ModelDeployment.status.gateway.gatewayName` and `gatewayNamespace` are present, use the in-cluster gateway service URL `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`.
+2. Else if `ModelDeployment.status.gateway.endpoint` is present, use that endpoint (normalized to an OpenAI-compatible `/v1` base URL).
+3. Else fall back to the model Service endpoint from `ModelDeployment.status.endpoint`.
+
+The resolved `status.modelBinding.modelName` prefers `status.gateway.modelName`, then `spec.model.servedName`, then `spec.model.id`.
+
+For keyless in-cluster `deploymentRef` bindings, core leaves `status.modelBinding.credentialsRef` empty. Container backends inject `OPENAI_API_KEY=not-required` directly, while CRD backends provision an Airunway-managed per-agent no-auth Secret and reference it in their rendered CRs.
+
+`spec.provider.overrides` is an escape hatch for validated security-context overrides. Supported sections are `workload` and `container`, each allowing only `podSecurityContext` and `securityContext` keys with allow-listed security fields.
+
 ## See also
 
 - [Architecture Overview](architecture.md)

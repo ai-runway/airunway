@@ -18,21 +18,36 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+)
+
+const (
+	// keylessCredentialSecretSuffix is appended to AgentDeployment names for the
+	// per-agent no-auth Secret used by CRD-backed frameworks.
+	keylessCredentialSecretSuffix = "-model-noauth"
+	// keylessCredentialKey is the Secret data key and credentialsRef.key value.
+	keylessCredentialKey = "token"
+	// keylessCredentialValue is the placeholder token literal for keyless
+	// in-cluster model endpoints.
+	keylessCredentialValue = "not-required"
 )
 
 // applyProviderOwnedStatus writes ONLY the provider-owned AgentDeployment
 // status fields (phase, runtime, replicas, and the ProviderReady condition)
 // via server-side apply under the given field owner. Core-owned fields
-// (framework, modelBindings, and the core conditions) are omitted, so the API
+// (framework, modelBinding, and the core conditions) are omitted, so the API
 // server leaves the core controller's writes intact.
 //
 // Both framework providers (crd and container) share this so the SSA
@@ -111,4 +126,60 @@ func upstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersi
 		}
 	}
 	return false
+}
+
+// keylessCredentialSecretName returns the deterministic per-agent Secret name
+// used for keyless in-cluster model credentials.
+func keylessCredentialSecretName(agentName string) string {
+	return agentName + keylessCredentialSecretSuffix
+}
+
+// ensureBindingCredentials guarantees a binding has CredentialsRef. When core
+// resolves a keyless binding (credentialsRef=nil), CRD-backed providers need a
+// Kubernetes Secret reference to satisfy upstream CRD schemas (kagent/orka).
+// This helper creates/updates an owner-referenced no-auth Secret and returns
+// the binding with CredentialsRef set.
+func ensureBindingCredentials(
+	ctx context.Context,
+	c client.Client,
+	scheme *runtime.Scheme,
+	ad *airunwayv1alpha1.AgentDeployment,
+	binding airunwayv1alpha1.ModelBindingStatus,
+	fieldOwner string,
+) (airunwayv1alpha1.ModelBindingStatus, error) {
+	if binding.CredentialsRef != nil {
+		return binding, nil
+	}
+	if scheme == nil {
+		return binding, fmt.Errorf("scheme is required to create keyless credential secret")
+	}
+
+	secretName := keylessCredentialSecretName(ad.Name)
+	secret := &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: ad.Namespace,
+			Labels: map[string]string{
+				"airunway.ai/agent":     ad.Name,
+				"airunway.ai/framework": ad.Spec.Framework.Name,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			keylessCredentialKey: []byte(keylessCredentialValue),
+		},
+	}
+	if err := controllerutil.SetControllerReference(ad, secret, scheme); err != nil {
+		return binding, fmt.Errorf("set owner reference on keyless credential secret: %w", err)
+	}
+	if err := c.Patch(ctx, secret, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+		return binding, fmt.Errorf("apply keyless credential secret %s/%s: %w", secret.Namespace, secret.Name, err)
+	}
+
+	binding.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
+		Name: secretName,
+		Key:  keylessCredentialKey,
+	}
+	return binding, nil
 }

@@ -6,6 +6,17 @@ apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
   name: openclaw
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "openclaw-personal-assistant",
+          "title": "Personal AI assistant (OpenClaw)",
+          "description": "OpenClaw running as a personal automation agent. Bind to any OpenAI-compatible model managed by AI Runway.",
+          "image": "ghcr.io/openclaw/openclaw:latest",
+          "tags": ["personal", "automation"]
+        }
+      ]
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
@@ -18,16 +29,6 @@ spec:
       - externalAPI
     protocols:
       - openaiTools
-  catalog:
-    - name: openclaw-personal-assistant
-      title: "Personal AI assistant (OpenClaw)"
-      description: >-
-        OpenClaw running as a personal automation agent. Bind to any
-        OpenAI-compatible model managed by AI Runway.
-      image: ghcr.io/openclaw/openclaw:latest
-      tags:
-        - personal
-        - automation
 ---
 # CRD-native agent framework: Kagent.
 # Demonstrates a framework whose provider renders the AgentDeployment
@@ -36,6 +37,17 @@ apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
   name: kagent
+  annotations:
+    airunway.ai/install-instructions: "Install the Kagent operator in the cluster before deploying agents with this framework."
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "kagent-k8s-sre",
+          "title": "Kubernetes SRE (Kagent)",
+          "description": "Diagnose deployments, pods, and networking. Backed by Kagent's native Agent CR.",
+          "tags": ["devops", "observability"]
+        }
+      ]
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
@@ -51,15 +63,6 @@ spec:
       - mcp
       - a2a
       - openaiTools
-  catalog:
-    - name: kagent-k8s-sre
-      title: "Kubernetes SRE (Kagent)"
-      description: >-
-        Diagnose deployments, pods, and networking. Backed by Kagent's
-        native Agent CR.
-      tags:
-        - devops
-        - observability
 ---
 # CRD-native agent framework: Orka (Kubernetes-native agent swarms).
 # Like Kagent this is a crd-backend framework, but its coordinator/specialist
@@ -70,6 +73,17 @@ apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
   name: orka
+  annotations:
+    airunway.ai/install-instructions: "Install the Orka operator in the cluster before deploying agents with this framework."
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "orka-task-swarm",
+          "title": "Task swarm (Orka)",
+          "description": "A coordinator agent decomposes a task and spawns specialist agents in parallel as Kubernetes Jobs, then synthesises the results.",
+          "tags": ["automation", "swarm"]
+        }
+      ]
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
@@ -83,15 +97,6 @@ spec:
     protocols:
       - mcp
       - openaiTools
-  catalog:
-    - name: orka-task-swarm
-      title: "Task swarm (Orka)"
-      description: >-
-        A coordinator agent decomposes a task and spawns specialist agents in
-        parallel as Kubernetes Jobs, then synthesises the results.
-      tags:
-        - automation
-        - swarm
 ---
 # Container-based agent framework: Hermes. Served by the SAME generic
 # container provider as OpenClaw/CrewAI/LangGraph — added purely as catalog
@@ -101,6 +106,17 @@ apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
   name: hermes
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "hermes-assistant",
+          "title": "Hermes assistant",
+          "description": "Hermes running as a fast container-based task assistant, bound to any OpenAI-compatible model managed by AI Runway.",
+          "image": "ghcr.io/hermes/hermes-agent:latest",
+          "tags": ["automation"]
+        }
+      ]
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
@@ -113,12 +129,3 @@ spec:
       - deploymentRef
     protocols:
       - openaiTools
-  catalog:
-    - name: hermes-assistant
-      title: "Hermes assistant"
-      description: >-
-        Hermes running as a fast container-based task assistant, bound to any
-        OpenAI-compatible model managed by AI Runway.
-      image: ghcr.io/hermes/hermes-agent:latest
-      tags:
-        - automation

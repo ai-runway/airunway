@@ -70,6 +70,7 @@ type orkaAgentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers;agents,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
 func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -84,12 +85,17 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
-		len(ad.Status.ModelBindings) == 0 {
+		ad.Status.ModelBinding == nil {
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
 	}
 
-	binding := ad.Status.ModelBindings[0]
+	binding := *ad.Status.ModelBinding
+	binding, err := ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
+	if err != nil {
+		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
+	}
 	var cfg orkaAgentConfig
 	if ad.Spec.Config != nil && len(ad.Spec.Config.Raw) > 0 {
 		_ = json.Unmarshal(ad.Spec.Config.Raw, &cfg)
@@ -136,13 +142,10 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 	if binding.ModelName != "" {
 		spec["defaultModel"] = binding.ModelName
 	}
-	// Orka's Provider CRD requires spec.secretRef (name + key), but a
-	// credential-free binding (a keyless in-cluster model reached via
-	// deploymentRef, or an externalAPI endpoint with no key) resolves without
-	// a CredentialsRef. Fall back to the well-known no-auth placeholder Secret
-	// so the rendered Provider always passes structural validation; the model
-	// server ignores the value.
-	secretName, secretKey := keylessModelCredentialSecret, keylessModelCredentialKey
+	// Orka's Provider CRD requires spec.secretRef (name + key). Reconcile
+	// ensures keyless bindings have a managed no-auth Secret; this fallback keeps
+	// render output valid when called directly in unit tests.
+	secretName, secretKey := keylessCredentialSecretName(ad.Name), keylessCredentialKey
 	if binding.CredentialsRef != nil {
 		secretName, secretKey = binding.CredentialsRef.Name, binding.CredentialsRef.Key
 	}
@@ -163,15 +166,19 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 // models) are OpenAI-compatible.
 func orkaProviderType(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1alpha1.ModelBindingStatus) string {
 	if binding.BindingMode == airunwayv1alpha1.ModelBindingModeExternalAPI {
-		for i := range ad.Spec.Models {
-			m := &ad.Spec.Models[i]
-			if m.Name == binding.Name && m.ExternalAPI != nil {
-				switch m.ExternalAPI.Type {
-				case airunwayv1alpha1.ExternalAPITypeAnthropic:
-					return "anthropic"
-				case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
-					return "azure-openai"
-				}
+		switch binding.APIType {
+		case airunwayv1alpha1.ExternalAPITypeAnthropic:
+			return "anthropic"
+		case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
+			return "azure-openai"
+		}
+		// Fallback for older status objects that may not yet carry apiType.
+		if ad.Spec.Model.ExternalAPI != nil {
+			switch ad.Spec.Model.ExternalAPI.Type {
+			case airunwayv1alpha1.ExternalAPITypeAnthropic:
+				return "anthropic"
+			case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
+				return "azure-openai"
 			}
 		}
 	}

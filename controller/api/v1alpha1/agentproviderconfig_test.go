@@ -17,12 +17,23 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
+
+func catalogJSON(t *testing.T, items []AgentCatalogItem) string {
+	t.Helper()
+	raw, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("marshal catalog: %v", err)
+	}
+	return string(raw)
+}
 
 func TestAgentProviderCapabilities_HasBindingMode(t *testing.T) {
 	tests := []struct {
@@ -114,79 +125,172 @@ func TestAgentProviderCapabilities_HasProtocol(t *testing.T) {
 	}
 }
 
-func TestAgentProviderConfigSpec_GetCatalogItem(t *testing.T) {
-	spec := &AgentProviderConfigSpec{
-		Catalog: []AgentCatalogItem{
-			{Name: "kagent-k8s-sre", Title: "Kubernetes SRE"},
-			{Name: "openclaw-personal-assistant", Title: "Personal Assistant"},
-		},
-	}
-
+func TestAgentProviderConfig_CatalogItems(t *testing.T) {
 	t.Run("nil receiver returns nil", func(t *testing.T) {
-		var s *AgentProviderConfigSpec
-		if got := s.GetCatalogItem("anything"); got != nil {
-			t.Errorf("expected nil from nil receiver, got %+v", got)
+		var apc *AgentProviderConfig
+		got, err := apc.CatalogItems()
+		if err != nil {
+			t.Fatalf("CatalogItems() error = %v", err)
 		}
-	})
-
-	t.Run("empty catalog returns nil", func(t *testing.T) {
-		empty := &AgentProviderConfigSpec{}
-		if got := empty.GetCatalogItem("anything"); got != nil {
-			t.Errorf("expected nil from empty catalog, got %+v", got)
-		}
-	})
-
-	t.Run("hit returns pointer into the slice", func(t *testing.T) {
-		got := spec.GetCatalogItem("openclaw-personal-assistant")
-		if got == nil {
-			t.Fatal("expected catalog item, got nil")
-		}
-		if got.Title != "Personal Assistant" {
-			t.Errorf("unexpected title: %q", got.Title)
-		}
-		// Confirm it's a pointer into the underlying slice so callers
-		// can compare by identity. (See GetCatalogItem godoc: callers
-		// must not mutate through this pointer.)
-		if got != &spec.Catalog[1] {
-			t.Error("GetCatalogItem should return a pointer into the underlying slice")
-		}
-	})
-
-	t.Run("miss returns nil", func(t *testing.T) {
-		if got := spec.GetCatalogItem("does-not-exist"); got != nil {
-			t.Errorf("expected nil for missing name, got %+v", got)
-		}
-	})
-}
-
-func TestAgentProviderConfigSpec_CatalogItemNames(t *testing.T) {
-	t.Run("nil receiver returns nil", func(t *testing.T) {
-		var s *AgentProviderConfigSpec
-		if got := s.CatalogItemNames(); got != nil {
+		if got != nil {
 			t.Errorf("expected nil from nil receiver, got %v", got)
 		}
 	})
 
-	t.Run("empty catalog returns empty slice", func(t *testing.T) {
-		s := &AgentProviderConfigSpec{}
-		got := s.CatalogItemNames()
-		if len(got) != 0 {
-			t.Errorf("expected empty slice, got %v", got)
+	t.Run("missing annotation returns nil", func(t *testing.T) {
+		apc := &AgentProviderConfig{}
+		got, err := apc.CatalogItems()
+		if err != nil {
+			t.Fatalf("CatalogItems() error = %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil from missing annotation, got %v", got)
+		}
+	})
+
+	t.Run("annotation parses", func(t *testing.T) {
+		apc := &AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					AgentProviderCatalogAnnotation: catalogJSON(t, []AgentCatalogItem{
+						{Name: "kagent-k8s-sre", Title: "Kubernetes SRE"},
+						{Name: "openclaw-personal-assistant", Title: "Personal Assistant"},
+					}),
+				},
+			},
+		}
+		got, err := apc.CatalogItems()
+		if err != nil {
+			t.Fatalf("CatalogItems() error = %v", err)
+		}
+		if len(got) != 2 || got[1].Title != "Personal Assistant" {
+			t.Errorf("unexpected parsed catalog: %+v", got)
+		}
+	})
+
+	t.Run("invalid json returns error", func(t *testing.T) {
+		apc := &AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					AgentProviderCatalogAnnotation: "{not-json",
+				},
+			},
+		}
+		_, err := apc.CatalogItems()
+		if err == nil {
+			t.Fatal("expected parse error, got nil")
+		}
+		if !strings.Contains(err.Error(), AgentProviderCatalogAnnotation) {
+			t.Errorf("expected error mentioning annotation key, got %v", err)
+		}
+	})
+
+	t.Run("duplicate names returns error", func(t *testing.T) {
+		apc := &AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					AgentProviderCatalogAnnotation: catalogJSON(t, []AgentCatalogItem{
+						{Name: "dup", Title: "One"},
+						{Name: "dup", Title: "Two"},
+					}),
+				},
+			},
+		}
+		_, err := apc.CatalogItems()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "duplicate") {
+			t.Errorf("expected duplicate error, got %v", err)
+		}
+	})
+}
+
+func TestAgentProviderConfig_GetCatalogItem(t *testing.T) {
+	apc := &AgentProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				AgentProviderCatalogAnnotation: catalogJSON(t, []AgentCatalogItem{
+					{Name: "kagent-k8s-sre", Title: "Kubernetes SRE"},
+					{Name: "openclaw-personal-assistant", Title: "Personal Assistant"},
+				}),
+			},
+		},
+	}
+
+	item, ok, err := apc.GetCatalogItem("openclaw-personal-assistant")
+	if err != nil {
+		t.Fatalf("GetCatalogItem() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected catalog hit, got miss")
+	}
+	if item.Title != "Personal Assistant" {
+		t.Errorf("unexpected item title: %q", item.Title)
+	}
+
+	_, ok, err = apc.GetCatalogItem("does-not-exist")
+	if err != nil {
+		t.Fatalf("GetCatalogItem() miss error = %v", err)
+	}
+	if ok {
+		t.Fatal("expected miss, got hit")
+	}
+}
+
+func TestAgentProviderConfig_CatalogItemNames(t *testing.T) {
+	t.Run("nil receiver returns nil", func(t *testing.T) {
+		var apc *AgentProviderConfig
+		got, err := apc.CatalogItemNames()
+		if err != nil {
+			t.Fatalf("CatalogItemNames() error = %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil from nil receiver, got %v", got)
 		}
 	})
 
 	t.Run("returns names in declaration order", func(t *testing.T) {
-		s := &AgentProviderConfigSpec{
-			Catalog: []AgentCatalogItem{
-				{Name: "a"},
-				{Name: "b"},
-				{Name: "c"},
+		apc := &AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					AgentProviderCatalogAnnotation: catalogJSON(t, []AgentCatalogItem{
+						{Name: "a", Title: "A"},
+						{Name: "b", Title: "B"},
+						{Name: "c", Title: "C"},
+					}),
+				},
 			},
 		}
 		want := []string{"a", "b", "c"}
-		got := s.CatalogItemNames()
+		got, err := apc.CatalogItemNames()
+		if err != nil {
+			t.Fatalf("CatalogItemNames() error = %v", err)
+		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("CatalogItemNames() = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestAgentProviderConfig_InstallInstructions(t *testing.T) {
+	t.Run("nil receiver returns empty", func(t *testing.T) {
+		var apc *AgentProviderConfig
+		if got := apc.InstallInstructions(); got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("trims and returns annotation value", func(t *testing.T) {
+		apc := &AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					AgentProviderInstallInstructionsAnnotation: "  kubectl apply -f https://example.com/install.yaml  ",
+				},
+			},
+		}
+		if got := apc.InstallInstructions(); got != "kubectl apply -f https://example.com/install.yaml" {
+			t.Errorf("InstallInstructions() = %q", got)
 		}
 	})
 }
@@ -200,22 +304,26 @@ func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 	requiresOp := true
 	now := metav1.Now()
 	orig := &AgentProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				AgentProviderCatalogAnnotation: catalogJSON(t, []AgentCatalogItem{
+					{
+						Name:        "openclaw-personal-assistant",
+						Title:       "Personal Assistant",
+						Description: "OpenClaw-powered personal automation",
+						Tags:        []string{"personal", "automation"},
+						Image:       "ghcr.io/openclaw/openclaw:latest",
+						Template:    &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"hi"}`)},
+					},
+				}),
+			},
+		},
 		Spec: AgentProviderConfigSpec{
 			Capabilities: &AgentProviderCapabilities{
 				Backend:           AgentProviderBackendContainer,
 				RequiresOperator:  &requiresOp,
 				ModelBindingModes: []ModelBindingMode{ModelBindingModeDeploymentRef, ModelBindingModeExternalAPI},
 				Protocols:         []AgentToolProtocol{AgentToolProtocolMCP, AgentToolProtocolOpenAITools},
-			},
-			Catalog: []AgentCatalogItem{
-				{
-					Name:        "openclaw-personal-assistant",
-					Title:       "Personal Assistant",
-					Description: "OpenClaw-powered personal automation",
-					Tags:        []string{"personal", "automation"},
-					Image:       "ghcr.io/openclaw/openclaw:latest",
-					Template:    &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"hi"}`)},
-				},
 			},
 		},
 		Status: AgentProviderConfigStatus{
@@ -238,11 +346,8 @@ func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 	if &cp.Spec.Capabilities.ModelBindingModes[0] == &orig.Spec.Capabilities.ModelBindingModes[0] {
 		t.Error("Capabilities.ModelBindingModes slice should be a fresh allocation, not shared")
 	}
-	if &cp.Spec.Catalog[0] == &orig.Spec.Catalog[0] {
-		t.Error("Catalog slice should be a fresh allocation, not shared")
-	}
-	if cp.Spec.Catalog[0].Template == orig.Spec.Catalog[0].Template {
-		t.Error("Catalog[0].Template RawExtension should be a fresh allocation, not shared")
+	if cp.Annotations == nil {
+		t.Fatal("Annotations should be copied")
 	}
 	if cp.Status.Ready == orig.Status.Ready {
 		t.Error("Status.Ready *bool should be a fresh allocation, not shared")
@@ -256,9 +361,9 @@ func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 	if *orig.Status.Ready != true {
 		t.Error("mutating copy Ready leaked into original")
 	}
-	cp.Spec.Catalog[0].Title = "Changed"
-	if orig.Spec.Catalog[0].Title != "Personal Assistant" {
-		t.Errorf("mutating copy Catalog[0].Title leaked into original: %q", orig.Spec.Catalog[0].Title)
+	cp.Annotations[AgentProviderCatalogAnnotation] = "changed"
+	if orig.Annotations[AgentProviderCatalogAnnotation] == "changed" {
+		t.Error("mutating copy annotation leaked into original")
 	}
 }
 

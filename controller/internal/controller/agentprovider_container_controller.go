@@ -61,10 +61,122 @@ const (
 // (OpenClaw, CrewAI, LangGraph, Hermes, ...) into a Deployment + Service +
 // ConfigMap. A single generic provider serves every container framework
 // because the image is supplied per-deployment (spec.config.image) or by the
-// framework's catalog entry — the framework is data, not code.
+// framework's catalog annotation entry — the framework is data, not code.
 type ContainerProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+func parseContainerSecurityOverrides(ad *airunwayv1alpha1.AgentDeployment) (*containerSecurityOverrides, error) {
+	if ad.Spec.Provider == nil || ad.Spec.Provider.Overrides == nil || len(ad.Spec.Provider.Overrides.Raw) == 0 {
+		return nil, nil
+	}
+
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(ad.Spec.Provider.Overrides.Raw, &root); err != nil {
+		return nil, fmt.Errorf("parse spec.provider.overrides JSON: %w", err)
+	}
+
+	keys := []string{"workload", "container"}
+
+	var merged containerSecurityOverrides
+	var found bool
+	for _, key := range keys {
+		sectionRaw, ok := root[key]
+		if !ok || len(sectionRaw) == 0 || string(sectionRaw) == "null" {
+			continue
+		}
+		var section containerSecurityOverrides
+		if err := json.Unmarshal(sectionRaw, &section); err != nil {
+			return nil, fmt.Errorf("parse spec.provider.overrides.%s: %w", key, err)
+		}
+		merged.PodSecurityContext = mergePodSecurityContext(merged.PodSecurityContext, section.PodSecurityContext)
+		merged.SecurityContext = mergeSecurityContext(merged.SecurityContext, section.SecurityContext)
+		found = true
+	}
+
+	if !found {
+		return nil, nil
+	}
+	return &merged, nil
+}
+
+func mergePodSecurityContext(dst, src *corev1.PodSecurityContext) *corev1.PodSecurityContext {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = &corev1.PodSecurityContext{}
+	}
+	if src.RunAsUser != nil {
+		dst.RunAsUser = src.RunAsUser
+	}
+	if src.RunAsGroup != nil {
+		dst.RunAsGroup = src.RunAsGroup
+	}
+	if src.RunAsNonRoot != nil {
+		dst.RunAsNonRoot = src.RunAsNonRoot
+	}
+	if src.FSGroup != nil {
+		dst.FSGroup = src.FSGroup
+	}
+	if len(src.SupplementalGroups) > 0 {
+		dst.SupplementalGroups = append([]int64(nil), src.SupplementalGroups...)
+	}
+	if src.FSGroupChangePolicy != nil {
+		dst.FSGroupChangePolicy = src.FSGroupChangePolicy
+	}
+	if src.SeccompProfile != nil {
+		dst.SeccompProfile = src.SeccompProfile.DeepCopy()
+	}
+	return dst
+}
+
+func mergeSecurityContext(dst, src *corev1.SecurityContext) *corev1.SecurityContext {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = &corev1.SecurityContext{}
+	}
+	if src.RunAsUser != nil {
+		dst.RunAsUser = src.RunAsUser
+	}
+	if src.RunAsGroup != nil {
+		dst.RunAsGroup = src.RunAsGroup
+	}
+	if src.RunAsNonRoot != nil {
+		dst.RunAsNonRoot = src.RunAsNonRoot
+	}
+	if src.AllowPrivilegeEscalation != nil {
+		dst.AllowPrivilegeEscalation = src.AllowPrivilegeEscalation
+	}
+	if src.ReadOnlyRootFilesystem != nil {
+		dst.ReadOnlyRootFilesystem = src.ReadOnlyRootFilesystem
+	}
+	if src.Capabilities != nil {
+		dst.Capabilities = &corev1.Capabilities{
+			Drop: append([]corev1.Capability(nil), src.Capabilities.Drop...),
+		}
+	}
+	if src.SeccompProfile != nil {
+		dst.SeccompProfile = src.SeccompProfile.DeepCopy()
+	}
+	return dst
+}
+
+func applyContainerSecurityOverrides(
+	podSecurity *corev1.PodSecurityContext,
+	containerSecurity *corev1.SecurityContext,
+	overrides *containerSecurityOverrides,
+) {
+	if overrides == nil {
+		return
+	}
+	podMerged := mergePodSecurityContext(podSecurity, overrides.PodSecurityContext)
+	containerMerged := mergeSecurityContext(containerSecurity, overrides.SecurityContext)
+	*podSecurity = *podMerged
+	*containerSecurity = *containerMerged
 }
 
 // containerConfig is the container-backend spec.config contract. The full
@@ -121,7 +233,7 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Consume the core-resolved bindings; do not render until they are ready.
 	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
-		len(ad.Status.ModelBindings) == 0 {
+		ad.Status.ModelBinding == nil {
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
 	}
@@ -138,8 +250,13 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "MissingImage", msg)
 	}
+	securityOverrides, err := parseContainerSecurityOverrides(&ad)
+	if err != nil {
+		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "InvalidProviderOverrides", err.Error())
+	}
 
-	binding := ad.Status.ModelBindings[0]
+	binding := *ad.Status.ModelBinding
 
 	// The ConfigMap (mounted agent.json) is shared by both lifecycles.
 	configMap := renderAgentConfigMap(&ad)
@@ -149,9 +266,9 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
-		return r.reconcileJob(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot)
+		return r.reconcileJob(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot, securityOverrides)
 	}
-	return r.reconcileDeployment(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot)
+	return r.reconcileDeployment(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot, securityOverrides)
 }
 
 // applyOwned sets the AgentDeployment as controller owner and server-side
@@ -165,12 +282,20 @@ func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunw
 
 // reconcileDeployment renders + applies the long-running Deployment and Service
 // and reports readiness from the Deployment's available replicas.
-func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) (ctrl.Result, error) {
+func (r *ContainerProviderReconciler) reconcileDeployment(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	cfg containerConfig,
+	binding airunwayv1alpha1.ModelBindingStatus,
+	configMapName string,
+	writableRoot bool,
+	securityOverrides *containerSecurityOverrides,
+) (ctrl.Result, error) {
 	// A prior spec.lifecycle: job leaves a one-shot Job behind. Delete it so the
 	// two lifecycles never run side by side.
 	r.deleteObsolete(ctx, ad, &batchv1.Job{})
 
-	deployment := renderAgentDeployment(ad, cfg, binding, configMapName, writableRoot)
+	deployment := renderAgentDeployment(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
 	service := renderAgentService(ad, cfg)
 	for _, obj := range []client.Object{deployment, service} {
 		if err := r.applyOwned(ctx, ad, obj); err != nil {
@@ -209,12 +334,20 @@ func (r *ContainerProviderReconciler) reconcileDeployment(ctx context.Context, a
 // agent phase. A Job is only reported Failed once it surfaces a true JobFailed
 // condition (i.e. backoffLimit exhausted) — individual failed pod attempts that
 // the Job controller will still retry keep the agent in a pending/running state.
-func (r *ContainerProviderReconciler) reconcileJob(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) (ctrl.Result, error) {
+func (r *ContainerProviderReconciler) reconcileJob(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	cfg containerConfig,
+	binding airunwayv1alpha1.ModelBindingStatus,
+	configMapName string,
+	writableRoot bool,
+	securityOverrides *containerSecurityOverrides,
+) (ctrl.Result, error) {
 	// A prior spec.lifecycle: deployment leaves a Deployment + Service behind.
 	// Delete them so the two lifecycles never run side by side.
 	r.deleteObsolete(ctx, ad, &appsv1.Deployment{}, &corev1.Service{})
 
-	job := renderAgentJob(ad, cfg, binding, configMapName, writableRoot)
+	job := renderAgentJob(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
 	if err := r.applyOwned(ctx, ad, job); err != nil {
 		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "RenderFailed", err.Error())
@@ -290,11 +423,19 @@ type containerProviderSettings struct {
 	writableRoot bool
 }
 
+// containerSecurityOverrides is the provider override contract for the
+// container backend. It allows controlled security-context overrides while
+// keeping provider-owned secure defaults.
+type containerSecurityOverrides struct {
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+	SecurityContext    *corev1.SecurityContext    `json:"securityContext,omitempty"`
+}
+
 // resolveContainerProvider looks up the framework's AgentProviderConfig and
 // derives the provider-owned settings. The default image is taken from the
-// catalog only when exactly one catalog entry carries an image; multiple images
-// are ambiguous (an AgentDeployment carries no catalog-item identity), so the
-// caller must require an explicit spec.config.image instead of guessing.
+// catalog annotation only when exactly one entry carries an image; multiple
+// images are ambiguous (an AgentDeployment carries no catalog-item identity), so
+// the caller must require an explicit spec.config.image instead of guessing.
 func (r *ContainerProviderReconciler) resolveContainerProvider(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) (containerProviderSettings, error) {
 	var apc airunwayv1alpha1.AgentProviderConfig
 	if err := r.Get(ctx, k8stypes.NamespacedName{Name: ad.Spec.Framework.Name}, &apc); err != nil {
@@ -310,17 +451,23 @@ func (r *ContainerProviderReconciler) resolveContainerProvider(ctx context.Conte
 	s := containerProviderSettings{isContainer: true}
 	s.writableRoot = apc.Spec.Capabilities.WritableRootFilesystem != nil && *apc.Spec.Capabilities.WritableRootFilesystem
 
+	catalog, err := apc.CatalogItems()
+	if err != nil {
+		return containerProviderSettings{}, fmt.Errorf("parse %s annotation on AgentProviderConfig %q: %w",
+			airunwayv1alpha1.AgentProviderCatalogAnnotation, apc.Name, err)
+	}
+
 	var images []string
-	for i := range apc.Spec.Catalog {
-		if apc.Spec.Catalog[i].Image != "" {
-			images = append(images, apc.Spec.Catalog[i].Image)
+	for i := range catalog {
+		if catalog[i].Image != "" {
+			images = append(images, catalog[i].Image)
 		}
 	}
 	switch {
 	case len(images) == 1:
 		s.image = images[0]
 	case len(images) > 1:
-		s.imageErr = "framework catalog advertises multiple images; set spec.config.image explicitly to select one"
+		s.imageErr = "framework catalog annotation advertises multiple images; set spec.config.image explicitly to select one"
 	}
 	return s, nil
 }
@@ -357,8 +504,16 @@ func renderAgentConfigMap(ad *airunwayv1alpha1.AgentDeployment) *corev1.ConfigMa
 // (runAsNonRoot, dropped capabilities, seccomp, read-only root filesystem with
 // an always-writable /tmp scratch mount). The read-only root is relaxed only
 // when the framework's provider config declares it needs a writable root
-// (writableRoot) — a provider-owned property, never a user-facing knob.
-func agentPodSpec(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) corev1.PodSpec {
+// (writableRoot) — a provider-owned property. Validated
+// spec.provider.overrides can further adjust pod/container security context.
+func agentPodSpec(
+	ad *airunwayv1alpha1.AgentDeployment,
+	cfg containerConfig,
+	binding airunwayv1alpha1.ModelBindingStatus,
+	configMapName string,
+	writableRoot bool,
+	securityOverrides *containerSecurityOverrides,
+) corev1.PodSpec {
 	env := []corev1.EnvVar{
 		{Name: "AIRUNWAY_AGENT_CONFIG", Value: agentConfigMountPath},
 		{Name: "OPENAI_BASE_URL", Value: binding.BaseURL},
@@ -374,8 +529,26 @@ func agentPodSpec(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, bin
 				},
 			},
 		})
+	} else {
+		// Keyless in-cluster model endpoints still expect OPENAI_API_KEY to be
+		// present in many framework SDKs; inject a harmless literal token.
+		env = append(env, corev1.EnvVar{
+			Name:  "OPENAI_API_KEY",
+			Value: keylessCredentialValue,
+		})
 	}
 	env = append(env, otlpEnv(ad)...)
+
+	containerSecurity := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr.To(false),
+		ReadOnlyRootFilesystem:   ptr.To(!writableRoot),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+	podSecurity := &corev1.PodSecurityContext{
+		RunAsNonRoot:   ptr.To(true),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	applyContainerSecurityOverrides(podSecurity, containerSecurity, securityOverrides)
 
 	container := corev1.Container{
 		Name:  "agent",
@@ -388,12 +561,8 @@ func agentPodSpec(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, bin
 			// write (caches, sessions) work without relaxing the whole root FS.
 			{Name: "tmp", MountPath: "/tmp"},
 		},
-		Resources: agentResources(ad),
-		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			ReadOnlyRootFilesystem:   ptr.To(!writableRoot),
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-		},
+		Resources:       agentResources(ad),
+		SecurityContext: containerSecurity,
 	}
 	if len(cfg.Command) > 0 {
 		container.Command = cfg.Command
@@ -403,11 +572,8 @@ func agentPodSpec(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, bin
 	}
 
 	return corev1.PodSpec{
-		SecurityContext: &corev1.PodSecurityContext{
-			RunAsNonRoot:   ptr.To(true),
-			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-		},
-		Containers: []corev1.Container{container},
+		SecurityContext: podSecurity,
+		Containers:      []corev1.Container{container},
 		Volumes: []corev1.Volume{
 			{
 				Name: "agent-config",
@@ -453,7 +619,14 @@ func otlpEnv(ad *airunwayv1alpha1.AgentDeployment) []corev1.EnvVar {
 }
 
 // renderAgentDeployment renders a long-running Deployment for the agent.
-func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) *appsv1.Deployment {
+func renderAgentDeployment(
+	ad *airunwayv1alpha1.AgentDeployment,
+	cfg containerConfig,
+	binding airunwayv1alpha1.ModelBindingStatus,
+	configMapName string,
+	writableRoot bool,
+	securityOverrides *containerSecurityOverrides,
+) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
@@ -462,7 +635,7 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 			Selector: &metav1.LabelSelector{MatchLabels: agentSelector(ad)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: agentLabels(ad)},
-				Spec:       agentPodSpec(ad, cfg, binding, configMapName, writableRoot),
+				Spec:       agentPodSpec(ad, cfg, binding, configMapName, writableRoot, securityOverrides),
 			},
 		},
 	}
@@ -471,8 +644,15 @@ func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, cfg containerCo
 // renderAgentJob renders a one-shot Job for the agent (spec.lifecycle: job).
 // The pod spec is shared with the Deployment path; only the restart policy
 // differs (Jobs require Never or OnFailure).
-func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig, binding airunwayv1alpha1.ModelBindingStatus, configMapName string, writableRoot bool) *batchv1.Job {
-	pod := agentPodSpec(ad, cfg, binding, configMapName, writableRoot)
+func renderAgentJob(
+	ad *airunwayv1alpha1.AgentDeployment,
+	cfg containerConfig,
+	binding airunwayv1alpha1.ModelBindingStatus,
+	configMapName string,
+	writableRoot bool,
+	securityOverrides *containerSecurityOverrides,
+) *batchv1.Job {
+	pod := agentPodSpec(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
 	pod.RestartPolicy = corev1.RestartPolicyNever
 	return &batchv1.Job{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},

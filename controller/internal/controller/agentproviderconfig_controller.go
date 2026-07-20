@@ -77,7 +77,7 @@ func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	ready, reason, msg := r.evaluate(apc.Spec.Capabilities)
+	ready, reason, msg := r.evaluate(&apc)
 	if err := r.applyReadiness(ctx, &apc, ready, reason, msg); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -86,8 +86,10 @@ func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 	return ctrl.Result{RequeueAfter: agentProviderHeartbeatInterval}, nil
 }
 
-// evaluate derives readiness from the declared capabilities.
-func (r *AgentProviderConfigReconciler) evaluate(caps *airunwayv1alpha1.AgentProviderCapabilities) (ready bool, reason, msg string) {
+// evaluate derives readiness from the declared capabilities and optional
+// provider metadata (such as install instructions annotations).
+func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProviderConfig) (ready bool, reason, msg string) {
+	caps := apc.Spec.Capabilities
 	if caps.Backend == airunwayv1alpha1.AgentProviderBackendContainer {
 		return true, "ProviderRunning", "Container rendering provider is available"
 	}
@@ -102,8 +104,12 @@ func (r *AgentProviderConfigReconciler) evaluate(caps *airunwayv1alpha1.AgentPro
 		return false, "DiscoveryFailed", fmt.Sprintf("could not query API group %q: %v", group, err)
 	}
 	if !served {
+		msg := fmt.Sprintf("operator API group %q is not installed in the cluster", group)
+		if install := apc.InstallInstructions(); install != "" {
+			msg = fmt.Sprintf("%s. Install instructions: %s", msg, install)
+		}
 		return false, "OperatorNotInstalled",
-			fmt.Sprintf("operator API group %q is not installed in the cluster", group)
+			msg
 	}
 	return true, "OperatorInstalled", fmt.Sprintf("operator API group %q is present", group)
 }

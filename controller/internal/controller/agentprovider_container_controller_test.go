@@ -81,10 +81,10 @@ func TestRenderAgentConfigMap(t *testing.T) {
 func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 	ad := containerAD("research", containerConfig{Image: "ghcr.io/x/crewai:poc"}, nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{
-		Name: "default", BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+		BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 	}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding, "research-config", false)
+	dep := renderAgentDeployment(ad, containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding, "research-config", false, nil)
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != "ghcr.io/x/crewai:poc" {
@@ -135,10 +135,10 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 
 func TestRenderAgentDeployment_WritableRootForFramework(t *testing.T) {
 	ad := containerAD("openclaw", containerConfig{Image: "img:1"}, nil)
-	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
+	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
 	// writableRoot is a provider-owned decision passed by the reconciler, not a
 	// user-facing spec.config field.
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "openclaw-config", true)
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "openclaw-config", true, nil)
 
 	roFS := dep.Spec.Template.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem
 	if roFS == nil || *roFS {
@@ -157,6 +157,131 @@ func TestRenderAgentDeployment_WritableRootForFramework(t *testing.T) {
 	}
 }
 
+func TestRenderAgentDeployment_KeylessBindingInjectsLiteralAPIKey(t *testing.T) {
+	ad := containerAD("keyless", containerConfig{Image: "img:1"}, nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{
+		BaseURL:   "http://demo-model.default.svc.cluster.local:80/v1",
+		ModelName: "llama-3.2-1b-instruct",
+	}
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "keyless-config", false, nil)
+
+	var apiKey *corev1.EnvVar
+	for i := range dep.Spec.Template.Spec.Containers[0].Env {
+		if dep.Spec.Template.Spec.Containers[0].Env[i].Name == "OPENAI_API_KEY" {
+			apiKey = &dep.Spec.Template.Spec.Containers[0].Env[i]
+			break
+		}
+	}
+	if apiKey == nil {
+		t.Fatal("OPENAI_API_KEY env var was not rendered")
+	}
+	if apiKey.ValueFrom != nil {
+		t.Fatalf("OPENAI_API_KEY should be a literal for keyless bindings, got ValueFrom=%+v", apiKey.ValueFrom)
+	}
+	if apiKey.Value != keylessCredentialValue {
+		t.Fatalf("OPENAI_API_KEY = %q, want %q", apiKey.Value, keylessCredentialValue)
+	}
+}
+
+func TestRenderAgentDeployment_AppliesSecurityOverrides(t *testing.T) {
+	ad := containerAD("override", containerConfig{Image: "img:1"}, nil)
+	binding := airunwayv1alpha1.ModelBindingStatus{
+		BaseURL:   "http://demo-model.default.svc.cluster.local:80/v1",
+		ModelName: "llama-3.2-1b-instruct",
+	}
+
+	runAsUser := int64(2000)
+	runAsGroup := int64(2001)
+	fsGroup := int64(2002)
+	readOnly := false
+	allowPrivilegeEscalation := true
+	localhostProfile := "profiles/default.json"
+	overrides := &containerSecurityOverrides{
+		PodSecurityContext: &corev1.PodSecurityContext{
+			RunAsUser:  &runAsUser,
+			RunAsGroup: &runAsGroup,
+			FSGroup:    &fsGroup,
+			SeccompProfile: &corev1.SeccompProfile{
+				Type:             corev1.SeccompProfileTypeLocalhost,
+				LocalhostProfile: &localhostProfile,
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                &runAsUser,
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			ReadOnlyRootFilesystem:   &readOnly,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"NET_RAW"},
+			},
+		},
+	}
+
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "override-config", false, overrides)
+	podSC := dep.Spec.Template.Spec.SecurityContext
+	if podSC == nil || podSC.RunAsUser == nil || *podSC.RunAsUser != runAsUser {
+		t.Fatalf("pod runAsUser override not applied: %+v", podSC)
+	}
+	if podSC.SeccompProfile == nil || podSC.SeccompProfile.Type != corev1.SeccompProfileTypeLocalhost {
+		t.Fatalf("pod seccomp override not applied: %+v", podSC.SeccompProfile)
+	}
+	containerSC := dep.Spec.Template.Spec.Containers[0].SecurityContext
+	if containerSC == nil || containerSC.ReadOnlyRootFilesystem == nil || *containerSC.ReadOnlyRootFilesystem != readOnly {
+		t.Fatalf("container readOnlyRootFilesystem override not applied: %+v", containerSC)
+	}
+	if containerSC.AllowPrivilegeEscalation == nil || *containerSC.AllowPrivilegeEscalation != allowPrivilegeEscalation {
+		t.Fatalf("container allowPrivilegeEscalation override not applied: %+v", containerSC)
+	}
+	if containerSC.Capabilities == nil || len(containerSC.Capabilities.Drop) != 1 || containerSC.Capabilities.Drop[0] != "NET_RAW" {
+		t.Fatalf("container capabilities.drop override not applied: %+v", containerSC.Capabilities)
+	}
+}
+
+func TestParseContainerSecurityOverrides_MergesSections(t *testing.T) {
+	raw := []byte(`{
+		"workload": {
+			"podSecurityContext": {
+				"runAsUser": 1000
+			}
+		},
+		"container": {
+			"securityContext": {
+				"readOnlyRootFilesystem": false,
+				"allowPrivilegeEscalation": true
+			}
+		}
+	}`)
+	ad := &airunwayv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "default"},
+		Spec: airunwayv1alpha1.AgentDeploymentSpec{
+			Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "crewai"},
+			Model: airunwayv1alpha1.ModelBinding{
+				ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+					Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
+					BaseURL:   "https://api.openai.com/v1",
+					ModelName: "gpt-4o-mini",
+				},
+			},
+			Provider: &airunwayv1alpha1.AgentProviderSpec{
+				Overrides: &runtime.RawExtension{Raw: raw},
+			},
+		},
+	}
+
+	overrides, err := parseContainerSecurityOverrides(ad)
+	if err != nil {
+		t.Fatalf("parseContainerSecurityOverrides returned error: %v", err)
+	}
+	if overrides == nil || overrides.PodSecurityContext == nil || overrides.PodSecurityContext.RunAsUser == nil || *overrides.PodSecurityContext.RunAsUser != 1000 {
+		t.Fatalf("expected merged pod runAsUser override, got %+v", overrides)
+	}
+	if overrides.SecurityContext == nil || overrides.SecurityContext.ReadOnlyRootFilesystem == nil || *overrides.SecurityContext.ReadOnlyRootFilesystem {
+		t.Fatalf("expected readOnlyRootFilesystem=false override, got %+v", overrides.SecurityContext)
+	}
+	if overrides.SecurityContext.AllowPrivilegeEscalation == nil || !*overrides.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("expected allowPrivilegeEscalation=true override, got %+v", overrides.SecurityContext)
+	}
+}
+
 func TestRenderAgentDeployment_ResourcesAndOTLP(t *testing.T) {
 	ad := containerAD("obs", containerConfig{Image: "img:1"}, nil)
 	ad.Spec.Resources = &airunwayv1alpha1.AgentResourceSpec{
@@ -166,8 +291,8 @@ func TestRenderAgentDeployment_ResourcesAndOTLP(t *testing.T) {
 	ad.Spec.Observability = &airunwayv1alpha1.AgentObservabilitySpec{
 		OTLP: &airunwayv1alpha1.OTLPSpec{Endpoint: "http://collector:4318", Protocol: "http/protobuf"},
 	}
-	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "obs-config", false)
+	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
+	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "obs-config", false, nil)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	if c.Resources.Requests.Cpu().String() != "250m" {
@@ -191,10 +316,10 @@ func TestRenderAgentDeployment_ResourcesAndOTLP(t *testing.T) {
 
 func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
 	ad := containerAD("smoke", containerConfig{Image: "img:1"}, nil)
-	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
+	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
 	cfg := containerConfig{Image: "img:1", Command: []string{"python", "/serve.py"}, Args: []string{"--verbose"}, Port: 9000}
 
-	dep := renderAgentDeployment(ad, cfg, binding, "smoke-config", false)
+	dep := renderAgentDeployment(ad, cfg, binding, "smoke-config", false, nil)
 	c := dep.Spec.Template.Spec.Containers[0]
 	if len(c.Command) != 2 || c.Command[0] != "python" || c.Command[1] != "/serve.py" {
 		t.Errorf("command = %v", c.Command)
@@ -240,8 +365,8 @@ func TestParseContainerConfig(t *testing.T) {
 
 func TestRenderAgentJob(t *testing.T) {
 	ad := containerAD("swarm", containerConfig{Image: "img:1"}, nil)
-	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", BaseURL: "http://x/v1", ModelName: "m"}
-	job := renderAgentJob(ad, containerConfig{Image: "img:1"}, binding, "swarm-config", false)
+	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
+	job := renderAgentJob(ad, containerConfig{Image: "img:1"}, binding, "swarm-config", false, nil)
 
 	if job.Kind != "Job" || job.APIVersion != "batch/v1" {
 		t.Fatalf("GVK = %s/%s", job.APIVersion, job.Kind)
@@ -276,8 +401,13 @@ var _ = Describe("Container provider", func() {
 			},
 		}
 		if catalogImage != "" {
-			apc.Spec.Catalog = []airunwayv1alpha1.AgentCatalogItem{
+			catalog := []airunwayv1alpha1.AgentCatalogItem{
 				{Name: name + "-recipe", Title: "Recipe", Image: catalogImage},
+			}
+			raw, err := json.Marshal(catalog)
+			Expect(err).NotTo(HaveOccurred())
+			apc.Annotations = map[string]string{
+				airunwayv1alpha1.AgentProviderCatalogAnnotation: string(raw),
 			}
 		}
 		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
@@ -297,12 +427,11 @@ var _ = Describe("Container provider", func() {
 			Spec: airunwayv1alpha1.AgentDeploymentSpec{
 				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: framework},
 				Config:    &runtime.RawExtension{Raw: raw},
-				Models: []airunwayv1alpha1.ModelBinding{{
-					Name: "default",
+				Model: airunwayv1alpha1.ModelBinding{
 					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
 						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 					},
-				}},
+				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
@@ -368,7 +497,7 @@ var _ = Describe("Container provider", func() {
 		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
 		Expect(prCond(ad).Status).To(Equal(metav1.ConditionFalse))
 		// Core-owned fields survive the provider write.
-		Expect(ad.Status.ModelBindings).To(HaveLen(1))
+		Expect(ad.Status.ModelBinding).NotTo(BeNil())
 
 		By("flipping to Running + ProviderReady=True once the Deployment reports available replicas")
 		dep.Status.Replicas = 1
@@ -444,12 +573,11 @@ var _ = Describe("Container provider", func() {
 				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "crewai-job"},
 				Lifecycle: airunwayv1alpha1.AgentLifecycleJob,
 				Config:    &runtime.RawExtension{Raw: cfgRaw},
-				Models: []airunwayv1alpha1.ModelBinding{{
-					Name: "default",
+				Model: airunwayv1alpha1.ModelBinding{
 					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
 						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 					},
-				}},
+				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ad)).To(Succeed())

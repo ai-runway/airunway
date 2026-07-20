@@ -23,6 +23,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -99,7 +100,6 @@ func TestRenderKagentModelConfig(t *testing.T) {
 	ad.Namespace = "agent-poc"
 
 	binding := airunwayv1alpha1.ModelBindingStatus{
-		Name:      "default",
 		BaseURL:   "https://api.openai.com/v1",
 		ModelName: "gpt-4o-mini",
 		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{
@@ -141,7 +141,6 @@ func TestRenderKagentModelConfig_InClusterEndpoint(t *testing.T) {
 	ad.Namespace = "default"
 
 	binding := airunwayv1alpha1.ModelBindingStatus{
-		Name:      "default",
 		BaseURL:   "http://my-model.default.svc.cluster.local:80/v1",
 		ModelName: "llama",
 	}
@@ -163,13 +162,16 @@ var _ = Describe("Kagent crd provider", func() {
 
 	agentGVK := kagentAgentGVK
 
-	makeReadyKagentProvider := func() {
+	makeReadyKagentProvider := func(modes ...airunwayv1alpha1.ModelBindingMode) {
+		if len(modes) == 0 {
+			modes = []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI}
+		}
 		apc := &airunwayv1alpha1.AgentProviderConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: KagentFrameworkName},
 			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
 				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
 					Backend:           airunwayv1alpha1.AgentProviderBackendCRD,
-					ModelBindingModes: []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI},
+					ModelBindingModes: modes,
 				},
 			},
 		}
@@ -186,14 +188,13 @@ var _ = Describe("Kagent crd provider", func() {
 			Spec: airunwayv1alpha1.AgentDeploymentSpec{
 				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: KagentFrameworkName},
 				Config:    &runtime.RawExtension{Raw: cfg},
-				Models: []airunwayv1alpha1.ModelBinding{{
-					Name: "default",
+				Model: airunwayv1alpha1.ModelBinding{
 					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
 						Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
 						BaseURL:   "https://api.openai.com/v1",
 						ModelName: "gpt-4o-mini",
 					},
-				}},
+				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
@@ -274,9 +275,58 @@ var _ = Describe("Kagent crd provider", func() {
 		Expect(ad.Status.Runtime).NotTo(BeNil())
 		Expect(ad.Status.Runtime.WorkloadRef.Kind).To(Equal("Agent"))
 		// Core-owned fields survive.
-		Expect(ad.Status.ModelBindings).To(HaveLen(1))
+		Expect(ad.Status.ModelBinding).NotTo(BeNil())
 		Expect(meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound)).To(BeTrue())
 		Expect(meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeFrameworkReady)).To(BeTrue())
+	})
+
+	It("creates a managed keyless Secret for deploymentRef bindings", func() {
+		makeReadyKagentProvider(airunwayv1alpha1.ModelBindingModeDeploymentRef)
+
+		md := &airunwayv1alpha1.ModelDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo-model", Namespace: "default"},
+			Spec: airunwayv1alpha1.ModelDeploymentSpec{
+				Model: airunwayv1alpha1.ModelSpec{
+					Source:     airunwayv1alpha1.ModelSourceCustom,
+					ServedName: "llama-3.2-1b-instruct",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, md)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, md) })
+		md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "demo-model", Port: 80}
+		Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "kagent-keyless", Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: KagentFrameworkName},
+				Model: airunwayv1alpha1.ModelBinding{
+					DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "demo-model"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+		reconcileCore("kagent-keyless")
+		reconcileKagent("kagent-keyless")
+
+		secretName := keylessCredentialSecretName("kagent-keyless")
+		secret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, secret)).To(Succeed())
+		Expect(secret.Data).To(HaveKey(keylessCredentialKey))
+		Expect(string(secret.Data[keylessCredentialKey])).To(Equal(keylessCredentialValue))
+		Expect(secret.GetOwnerReferences()).To(HaveLen(1))
+		Expect(secret.GetOwnerReferences()[0].Name).To(Equal("kagent-keyless"))
+
+		modelConfig := &unstructured.Unstructured{}
+		modelConfig.SetGroupVersionKind(kagentModelConfigGVK)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kagent-keyless-model", Namespace: "default"}, modelConfig)).To(Succeed())
+		apiKeySecret, _, _ := unstructured.NestedString(modelConfig.Object, "spec", "apiKeySecret")
+		Expect(apiKeySecret).To(Equal(secretName))
+		apiKeySecretKey, _, _ := unstructured.NestedString(modelConfig.Object, "spec", "apiKeySecretKey")
+		Expect(apiKeySecretKey).To(Equal(keylessCredentialKey))
 	})
 
 	It("reflects the kagent Agent's readiness into ProviderReady", func() {

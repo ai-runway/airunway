@@ -9,10 +9,9 @@ metadata:
 spec:
   framework:
     name: kagent
-  models:
-    - name: default
-      deploymentRef:
-        name: llama-3-8b
+  model:
+    deploymentRef:
+      name: llama-3-8b
   config:
     systemPrompt: |
       You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
@@ -38,15 +37,14 @@ metadata:
 spec:
   framework:
     name: openclaw
-  models:
-    - name: default
-      externalAPI:
-        type: openai
-        baseURL: https://api.openai.com/v1
-        modelName: gpt-4o-mini
-        credentialsRef:
-          name: openai-api-key
-          key: api-key
+  model:
+    externalAPI:
+      type: openai
+      baseURL: https://api.openai.com/v1
+      modelName: gpt-4o-mini
+      credentialsRef:
+        name: openai-api-key
+        key: api-key
   resources:
     requests:
       cpu: "200m"
@@ -70,15 +68,19 @@ metadata:
 spec:
   framework:
     name: hermes
-  models:
-    - name: default
-      externalAPI:
-        type: openai
-        baseURL: https://api.openai.com/v1
-        modelName: gpt-4o-mini
-        credentialsRef:
-          name: openai-api-key
-          key: api-key
+  model:
+    externalAPI:
+      type: openai
+      baseURL: https://api.openai.com/v1
+      modelName: gpt-4o-mini
+      credentialsRef:
+        name: openai-api-key
+        key: api-key
+  provider:
+    overrides:
+      workload:
+        securityContext:
+          readOnlyRootFilesystem: false
   config:
     image: ghcr.io/hermes/hermes-agent:poc
     writableRootFilesystem: true
@@ -95,14 +97,13 @@ metadata:
 spec:
   framework:
     name: orka
-  models:
-    - name: default
-      externalAPI:
-        type: openai
-        baseURL: https://api.openai.com/v1
-        modelName: gpt-4o-mini
-        credentialsRef:
-          name: openai-api-key
-          key: api-key
+  model:
+    externalAPI:
+      type: openai
+      baseURL: https://api.openai.com/v1
+      modelName: gpt-4o-mini
+      credentialsRef:
+        name: openai-api-key
+        key: api-key
   config:
     systemPrompt: "Decompose the task and coordinate specialist agents."

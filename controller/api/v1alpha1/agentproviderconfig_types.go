@@ -17,6 +17,10 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -52,6 +56,20 @@ const (
 	AgentToolProtocolA2A AgentToolProtocol = "a2a"
 	// AgentToolProtocolOpenAITools indicates OpenAI tool/function calling support.
 	AgentToolProtocolOpenAITools AgentToolProtocol = "openaiTools"
+)
+
+const (
+	// AgentProviderCatalogAnnotation stores the provider's marketplace catalog as
+	// a JSON array of AgentCatalogItem values on AgentProviderConfig metadata.
+	//
+	// Catalog data is UI metadata, not reconciled runtime intent, so it lives on
+	// annotations rather than spec.
+	AgentProviderCatalogAnnotation = "airunway.ai/agent-catalog"
+
+	// AgentProviderInstallInstructionsAnnotation carries plain-text install
+	// instructions for the provider's upstream operator/shim. The readiness
+	// controller surfaces this when a required operator is missing.
+	AgentProviderInstallInstructionsAnnotation = "airunway.ai/install-instructions"
 )
 
 // AgentProviderCapabilities declares what an agent framework can do.
@@ -165,16 +183,6 @@ type AgentProviderConfigSpec struct {
 	// AgentProviderCapabilities.Backend).
 	// +kubebuilder:validation:Required
 	Capabilities *AgentProviderCapabilities `json:"capabilities"`
-
-	// catalog lists deployable recipes (curated model+agent combos)
-	// the dashboard surfaces under this framework on the marketplace
-	// page. Recipes are not required; a provider can register
-	// itself with no catalog and still accept hand-written
-	// AgentDeployments.
-	// +optional
-	// +listType=map
-	// +listMapKey=name
-	Catalog []AgentCatalogItem `json:"catalog,omitempty"`
 }
 
 // AgentProviderConfigStatus is written by the framework provider.
@@ -261,35 +269,83 @@ func (c *AgentProviderCapabilities) HasProtocol(p AgentToolProtocol) bool {
 	return false
 }
 
-// GetCatalogItem returns the catalog item with the given name, or nil
-// when the spec has no matching entry.
+// CatalogItems decodes the provider's catalog from
+// metadata.annotations[airunway.ai/agent-catalog].
 //
-// The returned pointer aliases s.Catalog[i], so callers MUST NOT
-// mutate the underlying item: this method is used during reconciliation
-// hot paths where the spec is shared, cache-backed memory. Treat the
-// result as read-only; copy first if you need to modify it.
-func (s *AgentProviderConfigSpec) GetCatalogItem(name string) *AgentCatalogItem {
-	if s == nil {
-		return nil
+// A missing annotation returns (nil, nil). Invalid JSON or invalid item
+// content returns an error.
+func (c *AgentProviderConfig) CatalogItems() ([]AgentCatalogItem, error) {
+	if c == nil || len(c.Annotations) == 0 {
+		return nil, nil
 	}
-	for i := range s.Catalog {
-		if s.Catalog[i].Name == name {
-			return &s.Catalog[i]
+	raw := c.Annotations[AgentProviderCatalogAnnotation]
+	if raw == "" {
+		return nil, nil
+	}
+	var items []AgentCatalogItem
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("invalid %q annotation: %w", AgentProviderCatalogAnnotation, err)
+	}
+	if err := validateCatalogItems(items); err != nil {
+		return nil, fmt.Errorf("invalid %q annotation: %w", AgentProviderCatalogAnnotation, err)
+	}
+	return items, nil
+}
+
+// GetCatalogItem returns one catalog item by name.
+func (c *AgentProviderConfig) GetCatalogItem(name string) (AgentCatalogItem, bool, error) {
+	items, err := c.CatalogItems()
+	if err != nil {
+		return AgentCatalogItem{}, false, err
+	}
+	for i := range items {
+		if items[i].Name == name {
+			return items[i], true, nil
 		}
 	}
-	return nil
+	return AgentCatalogItem{}, false, nil
 }
 
 // CatalogItemNames returns the catalog item names in declaration order.
-func (s *AgentProviderConfigSpec) CatalogItemNames() []string {
-	if s == nil {
-		return nil
+func (c *AgentProviderConfig) CatalogItemNames() ([]string, error) {
+	items, err := c.CatalogItems()
+	if err != nil {
+		return nil, err
 	}
-	names := make([]string, len(s.Catalog))
-	for i := range s.Catalog {
-		names[i] = s.Catalog[i].Name
+	if len(items) == 0 {
+		return nil, nil
 	}
-	return names
+	names := make([]string, len(items))
+	for i := range items {
+		names[i] = items[i].Name
+	}
+	return names, nil
+}
+
+// InstallInstructions returns the provider's optional operator install hint.
+func (c *AgentProviderConfig) InstallInstructions() string {
+	if c == nil || len(c.Annotations) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(c.Annotations[AgentProviderInstallInstructionsAnnotation])
+}
+
+func validateCatalogItems(items []AgentCatalogItem) error {
+	seen := make(map[string]struct{}, len(items))
+	for i := range items {
+		item := items[i]
+		if item.Name == "" {
+			return fmt.Errorf("catalog[%d].name: required", i)
+		}
+		if item.Title == "" {
+			return fmt.Errorf("catalog[%d].title: required", i)
+		}
+		if _, ok := seen[item.Name]; ok {
+			return fmt.Errorf("catalog[%d].name %q: duplicate", i, item.Name)
+		}
+		seen[item.Name] = struct{}{}
+	}
+	return nil
 }
 
 func init() {

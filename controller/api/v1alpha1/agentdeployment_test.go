@@ -29,11 +29,11 @@ func TestAgentDeployment_DeepCopy(t *testing.T) {
 	orig := &AgentDeployment{
 		Spec: AgentDeploymentSpec{
 			Framework: AgentFrameworkRef{Name: "kagent"},
-			Models: []ModelBinding{
-				{
-					Name:          "default",
-					DeploymentRef: &ModelDeploymentBinding{Name: "llama-3-8b"},
-				},
+			Model: ModelBinding{
+				DeploymentRef: &ModelDeploymentBinding{Name: "llama-3-8b"},
+			},
+			Provider: &AgentProviderSpec{
+				Overrides: &runtime.RawExtension{Raw: []byte(`{"workload":{"securityContext":{"runAsUser":1000}}}`)},
 			},
 			Config: &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"hi"}`)},
 		},
@@ -42,11 +42,14 @@ func TestAgentDeployment_DeepCopy(t *testing.T) {
 	if cp == orig {
 		t.Fatal("DeepCopy returned the same pointer")
 	}
-	if &cp.Spec.Models[0] == &orig.Spec.Models[0] {
-		t.Error("Models slice should be a fresh allocation, not shared")
+	if cp.Spec.Model.DeploymentRef == orig.Spec.Model.DeploymentRef {
+		t.Error("Model.DeploymentRef should be a fresh allocation, not shared")
 	}
-	if cp.Spec.Models[0].DeploymentRef == orig.Spec.Models[0].DeploymentRef {
-		t.Error("Models[0].DeploymentRef should be a fresh allocation, not shared")
+	if cp.Spec.Provider == orig.Spec.Provider {
+		t.Error("Provider should be a fresh allocation, not shared")
+	}
+	if cp.Spec.Provider.Overrides == orig.Spec.Provider.Overrides {
+		t.Error("Provider.Overrides RawExtension should be a fresh allocation, not shared")
 	}
 	if cp.Spec.Config == orig.Spec.Config {
 		t.Error("Config RawExtension should be a fresh allocation, not shared")
@@ -57,9 +60,9 @@ func TestAgentDeployment_DeepCopy(t *testing.T) {
 	if orig.Spec.Framework.Name != "kagent" {
 		t.Errorf("mutating copy leaked into original: %q", orig.Spec.Framework.Name)
 	}
-	cp.Spec.Models[0].Name = "changed"
-	if orig.Spec.Models[0].Name != "default" {
-		t.Errorf("mutating copy Models[0].Name leaked into original: %q", orig.Spec.Models[0].Name)
+	cp.Spec.Model.DeploymentRef.Name = "changed"
+	if orig.Spec.Model.DeploymentRef.Name != "llama-3-8b" {
+		t.Errorf("mutating copy Model.DeploymentRef.Name leaked into original: %q", orig.Spec.Model.DeploymentRef.Name)
 	}
 }
 

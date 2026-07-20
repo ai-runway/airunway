@@ -43,6 +43,7 @@ import (
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -400,6 +401,10 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "ModelDeployment")
 			os.Exit(1)
 		}
+		if err := webhookv1alpha1.SetupAgentDeploymentWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "AgentDeployment")
+			os.Exit(1)
+		}
 	}
 
 	if err := (&controller.AgentDeploymentReconciler{
@@ -410,27 +415,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.KagentProviderReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "KagentProvider")
-		os.Exit(1)
-	}
-
-	if err := (&controller.ContainerProviderReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ContainerProvider")
-		os.Exit(1)
-	}
-
-	if err := (&controller.OrkaProviderReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "OrkaProvider")
+	if err := controller.RegisterAgentProviders(mgr,
+		controller.AgentProviderRegistration{
+			Name: "KagentProvider",
+			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+				return &controller.KagentProviderReconciler{Client: c, Scheme: s}
+			},
+		},
+		controller.AgentProviderRegistration{
+			Name: "ContainerProvider",
+			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+				return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
+			},
+		},
+		controller.AgentProviderRegistration{
+			Name: "OrkaProvider",
+			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+				return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
+			},
+		},
+	); err != nil {
+		setupLog.Error(err, "unable to create agent provider controllers")
 		os.Exit(1)
 	}
 

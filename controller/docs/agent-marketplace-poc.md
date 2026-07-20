@@ -6,8 +6,8 @@ Proof-of-concept controller for the Agent Marketplace ([#200](https://github.com
 
 Two responsibilities, split exactly as the `AgentDeploymentStatus` ownership contract describes, with **server-side apply under distinct field owners** so the API server itself prevents the two writers from clobbering each other's status (the anti-thrash lesson from #264).
 
-- **Core controller** (`AgentDeploymentReconciler`, field owner `airunway-agents-core`) — framework-neutral. It resolves `spec.framework.name` to a registered, ready `AgentProviderConfig` (`FrameworkReady`), resolves every `spec.models[]` entry into a stable `status.modelBindings[]` contract (`ModelBound`), and aggregates `Ready`. It never renders workloads.
-- **Framework providers** — each watches `AgentDeployment`, filters to its framework/backend, consumes `status.modelBindings[]` (never re-resolving), renders framework-native resources, and owns `phase`, `runtime`, `replicas`, and `ProviderReady` under its own field owner.
+- **Core controller** (`AgentDeploymentReconciler`, field owner `airunway-agents-core`) — framework-neutral. It resolves `spec.framework.name` to a registered, ready `AgentProviderConfig` (`FrameworkReady`), resolves `spec.model` into a stable `status.modelBinding` contract (`ModelBound`), and aggregates `Ready`. It never renders workloads.
+- **Framework providers** — each watches `AgentDeployment`, filters to its framework/backend, consumes `status.modelBinding` (never re-resolving), renders framework-native resources, and owns `phase`, `runtime`, `replicas`, and `ProviderReady` under its own field owner.
 
 The shared `conditions` list is `listType=map` keyed by `type`, so SSA merges core-owned (`FrameworkReady`, `ModelBound`, `Ready`) and provider-owned (`ProviderReady`) conditions per key without either writer dropping the other's.
 

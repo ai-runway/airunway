@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -111,5 +112,32 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).To(Equal("OperatorNotInstalled"))
+	})
+
+	It("includes install instructions in OperatorNotInstalled when annotated", func() {
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "cap-crd-install-hint",
+				Annotations: map[string]string{
+					airunwayv1alpha1.AgentProviderInstallInstructionsAnnotation: "Run: kubectl apply -f https://example.com/install.yaml",
+				},
+			},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend:          airunwayv1alpha1.AgentProviderBackendCRD,
+					OperatorAPIGroup: "kagent.dev",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+
+		reconcileWith("cap-crd-install-hint") // no groups served
+		out := get("cap-crd-install-hint")
+		cond := meta.FindStatusCondition(out.Status.Conditions, agentProviderReadyCondition)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("OperatorNotInstalled"))
+		Expect(strings.Contains(cond.Message, "Install instructions")).To(BeTrue())
+		Expect(strings.Contains(cond.Message, "kubectl apply -f https://example.com/install.yaml")).To(BeTrue())
 	})
 })

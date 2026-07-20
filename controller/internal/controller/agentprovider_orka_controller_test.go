@@ -40,15 +40,15 @@ func orkaAD(name string, ext *airunwayv1alpha1.ExternalAPIBinding) *airunwayv1al
 	ad.Name = name
 	ad.Namespace = "default"
 	ad.Spec.Framework.Name = OrkaFrameworkName
-	ad.Spec.Models = []airunwayv1alpha1.ModelBinding{{Name: "default", ExternalAPI: ext}}
+	ad.Spec.Model = airunwayv1alpha1.ModelBinding{ExternalAPI: ext}
 	return ad
 }
 
 func TestRenderOrkaProvider(t *testing.T) {
 	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{
-		Name: "default", BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
-		BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+		BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
+		BaseURL:     "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 	}
 	p := renderOrkaProvider(ad, binding)
@@ -77,31 +77,32 @@ func TestRenderOrkaProvider(t *testing.T) {
 	}
 }
 
-func TestRenderOrkaProvider_KeylessUsesPlaceholderSecret(t *testing.T) {
+func TestRenderOrkaProvider_KeylessUsesManagedSecretName(t *testing.T) {
 	// A credential-free binding (keyless in-cluster model via deploymentRef)
 	// must still render a valid Orka Provider: the CRD requires spec.secretRef,
-	// so the renderer falls back to the well-known no-auth placeholder Secret.
+	// so the renderer falls back to the deterministic managed no-auth Secret.
 	ad := orkaAD("swarm", nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{
-		Name: "default", BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef,
-		BaseURL: "http://demo-llm.default.svc.cluster.local/v1", ModelName: "llama",
+		BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef,
+		BaseURL:     "http://demo-llm.default.svc.cluster.local/v1", ModelName: "llama",
 	}
 	p := renderOrkaProvider(ad, binding)
 
 	secretName, found, _ := unstructured.NestedString(p.Object, "spec", "secretRef", "name")
-	if !found || secretName != keylessModelCredentialSecret {
-		t.Errorf("secretRef.name = %q (found=%v), want placeholder %q", secretName, found, keylessModelCredentialSecret)
+	expectedName := keylessCredentialSecretName(ad.Name)
+	if !found || secretName != expectedName {
+		t.Errorf("secretRef.name = %q (found=%v), want managed secret %q", secretName, found, expectedName)
 	}
 	secretKey, _, _ := unstructured.NestedString(p.Object, "spec", "secretRef", "key")
-	if secretKey != keylessModelCredentialKey {
-		t.Errorf("secretRef.key = %q, want %q", secretKey, keylessModelCredentialKey)
+	if secretKey != keylessCredentialKey {
+		t.Errorf("secretRef.key = %q, want %q", secretKey, keylessCredentialKey)
 	}
 }
 
 func TestRenderOrkaProvider_AzureType(t *testing.T) {
 	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeAzureOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{
-		Name: "default", BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI, ModelName: "gpt-4.1",
+		BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI, ModelName: "gpt-4.1",
 	}
 	p := renderOrkaProvider(ad, binding)
 	typ, _, _ := unstructured.NestedString(p.Object, "spec", "type")
@@ -112,7 +113,7 @@ func TestRenderOrkaProvider_AzureType(t *testing.T) {
 
 func TestRenderOrkaAgent(t *testing.T) {
 	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
-	binding := airunwayv1alpha1.ModelBindingStatus{Name: "default", ModelName: "gpt-4o-mini"}
+	binding := airunwayv1alpha1.ModelBindingStatus{ModelName: "gpt-4o-mini"}
 	agent := renderOrkaAgent(ad, orkaAgentConfig{SystemPrompt: "coordinate specialists"}, binding, "swarm-provider")
 
 	if agent.GetKind() != "Agent" || agent.GetName() != "swarm" {
@@ -161,13 +162,12 @@ var _ = Describe("Orka crd provider", func() {
 			Spec: airunwayv1alpha1.AgentDeploymentSpec{
 				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: OrkaFrameworkName},
 				Config:    &runtime.RawExtension{Raw: cfg},
-				Models: []airunwayv1alpha1.ModelBinding{{
-					Name: "default",
+				Model: airunwayv1alpha1.ModelBinding{
 					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
 						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 						CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 					},
-				}},
+				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
