@@ -86,7 +86,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.25"
           cache-dependency-path: controller/go.sum
@@ -128,22 +128,55 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.25"
           cache-dependency-path: providers/${{ matrix.provider }}/go.sum
 
-      # `providers/dynamo/Makefile`'s `build` target depends on
+      # `providers/{dynamo,llmd,vllm}/Makefile`'s `build` target depends on
       # `verify-versions`, which regenerates `shared/types/versions.generated.ts`
-      # via bun. Install bun on every matrix job (only dynamo needs it, but
-      # skipping conditionally would be more brittle than the small install cost).
+      # via bun. Install bun only for those three providers; kaito and kuberay
+      # have `build: vet` (no verify-versions dependency) and don't need it.
+      # Skipping conditionally avoids transient Bun download failures breaking
+      # jobs that don't use Bun at all.
       - name: Setup Bun
+        if: contains(fromJSON('["dynamo", "llmd", "vllm"]'), matrix.provider)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
 
       - name: make build
         run: make -C providers/${{ matrix.provider }} build
+
+      # Assert the shimVersion injection survives future refactors. Checks (a)
+      # and (b) read the -ldflags string recorded in the binary (proves the flag
+      # was *passed*); check (c) asserts the *runtime* value of ProviderVersion
+      # after injection (proves the linker actually *patched* the symbol). (c) is
+      # the one that catches a silent -X no-op — e.g. shimVersion becoming a
+      # const, being renamed, or ProviderVersion being retargeted — which (a)/(b)
+      # cannot, since the flag is still present in those cases.
+      - name: Assert shimVersion injection + git-stamp default
+        run: |
+          set -euo pipefail
+          p=${{ matrix.provider }}
+          mod=$(cd "providers/$p" && go list -m)
+          # (a) the un-overridden build above used the Makefile git-stamp default
+          #     (hex sha, or "unknown" outside a git tree — e.g. source tarball)
+          go version -m "providers/$p/bin/provider" \
+            | grep -Eq -- "-X ${mod}.shimVersion=dev-([0-9a-f]+|unknown)(-dirty)?" \
+            || { echo "❌ git-stamp default missing in $p"; exit 1; }
+          # (b) explicit override proves the injection flag is wired
+          make -C "providers/$p" build SHIM_VERSION=v9.9.9-citest
+          go version -m "providers/$p/bin/provider" \
+            | grep -F -- "-X ${mod}.shimVersion=v9.9.9-citest" \
+            || { echo "❌ shimVersion override injection missing in $p"; exit 1; }
+          # (c) prove the injection actually takes EFFECT at runtime, not just
+          #     that the flag was passed. Fails on a silent -X no-op.
+          EXPECT_PROVIDER_VERSION="${p}-provider:v9.9.9-citest" \
+            go test -C "providers/$p" \
+              -ldflags "-X ${mod}.shimVersion=v9.9.9-citest" \
+              -run TestShimVersionInjection -v ./... \
+            || { echo "❌ shimVersion injection had no runtime effect in $p (silent no-op)"; exit 1; }
 
       - name: make test
         run: make -C providers/${{ matrix.provider }} test
@@ -156,7 +189,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.25"
           cache-dependency-path: controller/go.sum
@@ -189,7 +222,7 @@ jobs:
           source versions.env
           make controller-build
           if ! go version -m controller/bin/manager \
-            | grep -F -- "-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}"; then
+            | grep -F -- "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}"; then
             echo "❌ ldflags injection of DefaultGAIEVersion=${GAIE_VERSION} did not land in controller/bin/manager"
             exit 1
           fi
@@ -204,8 +237,30 @@ jobs:
           source versions.env
           cd providers/dynamo && make build && cd -
           if ! go version -m providers/dynamo/bin/provider \
-            | grep -F -- "-X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=${DYNAMO_VERSION}"; then
+            | grep -F -- "-X github.com/ai-runway/airunway/providers/dynamo.DynamoVersion=${DYNAMO_VERSION}"; then
             echo "❌ ldflags injection of DynamoVersion=${DYNAMO_VERSION} did not land in providers/dynamo/bin/provider"
             exit 1
           fi
           echo "✅ ldflags injection landed: DynamoVersion=${DYNAMO_VERSION}"
+
+  gpu-e2e-check:
+    # Cluster-free gate for the GPU e2e module (test/e2e/gpu). The full suite
+    # needs a GPU cluster and runs out-of-band via scripts/gpu-e2e.sh, but the
+    # module must still stay formatted, vet-clean, and compilable, and its
+    # cluster-free packages (sched, e2eutil) carry real unit tests. This job
+    # runs all of that on a plain runner so the e2e code can't silently rot
+    # between GPU runs.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.25"
+          cache-dependency-path: test/e2e/gpu/go.mod
+
+      - name: Run GPU e2e module checks
+        run: make gpu-e2e-check

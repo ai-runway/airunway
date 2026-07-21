@@ -1,7 +1,7 @@
 # AI Runway website
 
 This is the source for the AI Runway documentation site published at
-[**kaito-project.github.io/airunway**](https://kaito-project.github.io/airunway/).
+[**ai-runway.github.io/airunway**](https://ai-runway.github.io/airunway/).
 Built with [Docusaurus](https://docusaurus.io/) 3.
 
 ## Content layout
@@ -36,7 +36,7 @@ bun run serve    # serve the production build locally on :3000
 `.github/workflows/deploy-docs.yml` builds the site and publishes it via the
 GitHub Actions Pages flow (`actions/upload-pages-artifact` →
 `actions/deploy-pages`). The site is deployed on every push to `main` on the
-canonical `kaito-project/airunway` repo. Pull requests and forks build the
+canonical `ai-runway/airunway` repo. Pull requests and forks build the
 site to verify it compiles, but only the canonical repo deploys.
 
 First-time setup (needs a repository admin): **Settings → Pages → Build and

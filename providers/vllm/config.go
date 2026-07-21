@@ -28,22 +28,32 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
 	// ProviderConfigName is the name of the InferenceProviderConfig for vLLM
 	ProviderConfigName = "vllm"
 
-	// ProviderVersion is the version of the vLLM provider
-	ProviderVersion = "vllm-provider:v0.1.0"
-
 	// ProviderDocumentation is the documentation URL for the vLLM provider
-	ProviderDocumentation = "https://github.com/kaito-project/airunway/tree/main/docs/providers/vllm.md"
+	ProviderDocumentation = "https://github.com/ai-runway/airunway/tree/main/docs/providers/vllm.md"
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
 )
+
+// shimVersion is this shim's reported version tag, injected at build time via:
+//
+//	-ldflags "-X $(go list -m).shimVersion=$(SHIM_VERSION)"
+//
+// The Makefile supplies a release tag (e.g. "v0.3.0") or a git stamp
+// ("dev-<sha>" / "dev-<sha>-dirty"). The "dev" literal below is the last-resort
+// fallback for bare `go build`/`go run`/`go test` that bypass the Makefile.
+var shimVersion = "dev"
+
+// ProviderVersion is the reported version of this shim (e.g.
+// "vllm-provider:v0.3.0"), written to InferenceProviderConfig.status.version.
+var ProviderVersion = ProviderConfigName + "-provider:" + shimVersion
 
 // ProviderConfigManager handles registration and heartbeat for the vLLM provider
 type ProviderConfigManager struct {
@@ -68,6 +78,11 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 					// rendering is experimental and deliberately unadvertised.
 					ServingModes: []airunwayv1alpha1.ServingMode{
 						airunwayv1alpha1.ServingModeAggregated,
+					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatOpenAIResponses,
+						airunwayv1alpha1.APIFormatAnthropicMessages,
 					},
 					GPUSupport: true,
 					CPUSupport: false,

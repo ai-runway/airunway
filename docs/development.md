@@ -721,6 +721,80 @@ curl http://localhost:5000/v1/chat/completions \
   }'
 ```
 
+## GPU End-to-End Testing
+
+`make gpu-e2e` runs a real-GPU end-to-end suite that deploys each inference
+provider through a `ModelDeployment`, drives it to `Running`, and asserts that
+inference actually serves through the inference gateway. Unlike the CPU/mocker
+e2e lanes, it requires real GPU hardware and an already-provisioned cluster — it
+never creates or deletes the cluster.
+
+The harness (`scripts/gpu-e2e.sh`) builds and pushes the controller and provider
+images, installs any missing upstream operator, deploys everything, then runs
+the Go suite under `test/e2e/gpu/`. Providers covered: **Dynamo, vLLM, KAITO**
+(KubeRay is not yet supported).
+
+### Cluster preconditions
+
+The harness installs none of these (except a missing operator via `setup-<p>`):
+
+- **GPU nodes** with the NVIDIA GPU Operator and NFD enabled, so nodes advertise
+  `nvidia.com/gpu` and the `nvidia.com/gpu.present=true` label.
+- **An RWX-capable StorageClass.** The Dynamo model-cache PVC defaults to
+  `ReadWriteMany`; Azure Disk classes are `ReadWriteOnce` and will leave the PVC
+  `Pending`. The default is `azurefile-premium`; override with `--storage-class`.
+- **The inference gateway** (Gateway API CRDs + GAIE + Istio + BBR + a `Gateway`
+  named `inference-gateway`). On a fresh cluster `make -C providers/dynamo
+  setup-dynamo` installs it; otherwise it must already be present and
+  `Programmed`. The suite fails fast if it is missing.
+- **Pull access to the pushed images.** The manager manifests carry no
+  `imagePullSecret`, so the images must be public or the nodes must have pull
+  access. New registry repositories often default to private — make them public
+  once.
+
+### Running it
+
+```bash
+# All three providers, building+pushing images to your registry:
+make gpu-e2e GPU_E2E_ARGS="--provider all --registry <your-registry>"
+
+# A single provider:
+make gpu-e2e GPU_E2E_ARGS="--provider vllm --registry <your-registry>"
+
+# Re-test without rebuilding (requires an explicit, already-pushed tag):
+make gpu-e2e GPU_E2E_ARGS="--provider dynamo --skip-build \
+    --registry <your-registry> --img-tag <tag>"
+
+# Run the Go suite directly against an already-deployed cluster (no rebuild):
+go test -C test/e2e/gpu -tags=e2e -v -run 'TestGPUProviders/vllm' ./
+```
+
+Flags are passed to the script via `GPU_E2E_ARGS`; pass them inside the quotes,
+not as bare `make` arguments. See `scripts/gpu-e2e.sh --help` for the full list.
+Key flags: `--provider`, `--registry` (required when building), `--img-tag`,
+`--storage-class`, `--skip-install`, `--skip-build`, `--keep`.
+
+### Environment knobs
+
+The script forwards these to the Go suite; you can also set them directly when
+running `go test`:
+
+| Variable | Meaning |
+|----------|---------|
+| `GPU_E2E_STORAGE_CLASS` | RWX StorageClass injected into the Dynamo fixture and asserted on (default `azurefile-premium`). Set by `--storage-class`. |
+| `GPU_E2E_KEEP` | When `true`, leave `ModelDeployment`s running after the test for inspection. Set by `--keep`. |
+| `GPU_E2E_RESULTS_DIR` | Optional override for where per-case result bundles are written (default `test/e2e/gpu/gpu-e2e-results/<timestamp>/`). |
+| `GPU_E2E_RUN_TS` | Optional fixed timestamp for the results directory name. |
+
+### Outcomes
+
+Each case ends as **PASS**, **FAIL**, or **SKIP**. A `SKIP` means the cluster
+lacks the capacity to schedule that case (more GPUs requested than any node has,
+or no GPU free before the scheduling deadline) — it does not fail the run. Only a
+genuine error (a broken deployment, failed inference, or orphaned resources after
+delete) is a `FAIL`. Per-case logs and a `result` marker are written under the
+results directory.
+
 ## Troubleshooting
 
 ### Controller not reconciling

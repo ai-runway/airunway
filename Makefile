@@ -1,15 +1,15 @@
-.PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend clean help providers-test verify-versions test-verify-versions
+.PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend clean help providers-test gpu-e2e gpu-e2e-check verify-versions test-verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
 .PHONY: model-downloader-docker-build setup-gateway cleanup-gateway
 
 # Controller image
-CONTROLLER_IMG ?= ghcr.io/kaito-project/airunway/controller:latest
+CONTROLLER_IMG ?= ghcr.io/ai-runway/airunway/controller:latest
 
 # Dashboard image
-DASHBOARD_IMG ?= ghcr.io/kaito-project/airunway/dashboard:latest
+DASHBOARD_IMG ?= ghcr.io/ai-runway/airunway/dashboard:latest
 
 # Model downloader image
-MODEL_DOWNLOADER_IMG ?= ghcr.io/kaito-project/airunway/model-downloader:latest
+MODEL_DOWNLOADER_IMG ?= ghcr.io/ai-runway/airunway/model-downloader:latest
 
 # Image build settings
 PLATFORM ?= linux/amd64
@@ -59,6 +59,8 @@ help:
 	@echo ""
 	@echo "Provider Targets:"
 	@echo "  providers-test         Run all provider tests"
+	@echo "  gpu-e2e                Run GPU e2e suite on a GPU cluster (GPU_E2E_ARGS=...)"
+	@echo "  gpu-e2e-check          Cluster-free checks for the GPU e2e module (gofmt, vet, compile, unit tests)"
 	@echo ""
 	@echo "Cluster Setup Targets:"
 	@echo "  setup-gateway          Install Gateway API CRDs, Istio, BBR, and the inference Gateway"
@@ -202,6 +204,31 @@ providers-test: verify-versions
 	cd providers/agent-kagent && go test ./...
 	cd providers/agent-orka && go test ./...
 	@echo "✅ Provider tests completed"
+
+# Run the GPU end-to-end suite against a pre-existing GPU cluster.
+# All logic lives in scripts/gpu-e2e.sh; pass flags via GPU_E2E_ARGS.
+# Example: make gpu-e2e GPU_E2E_ARGS="--provider all --registry quay.io/surajd"
+gpu-e2e:
+	@bash scripts/gpu-e2e.sh $(GPU_E2E_ARGS)
+
+# Cluster-free validation of the GPU e2e module (test/e2e/gpu). Runs in CI on a
+# plain runner: it never touches a cluster. Three guarantees:
+#   1. gofmt   — the module stays formatted.
+#   2. vet + compile under -tags=e2e — the cluster-coupled suite keeps building
+#      even though CI never runs it (catches selector/API drift at PR time).
+#   3. unit tests for the cluster-free packages (sched, e2eutil) — the
+#      classifier, response parser, and storage-class injector are exercised
+#      for real. These carry no build tag, so `go test` picks them up directly.
+gpu-e2e-check:
+	@echo "▶ gofmt"
+	@test -z "$$(gofmt -l test/e2e/gpu)" || { echo "❌ gofmt: run 'gofmt -w test/e2e/gpu'"; gofmt -l test/e2e/gpu; exit 1; }
+	@echo "▶ go vet (-tags=e2e)"
+	go vet -C test/e2e/gpu -tags=e2e ./...
+	@echo "▶ compile e2e suite (-tags=e2e)"
+	go test -C test/e2e/gpu -tags=e2e -c -o /dev/null ./
+	@echo "▶ unit tests (cluster-free packages)"
+	go test -C test/e2e/gpu ./sched/ ./e2eutil/
+	@echo "✅ GPU e2e module checks passed"
 
 # Generate deploy manifests for controller and dashboard
 generate-deploy-manifests:

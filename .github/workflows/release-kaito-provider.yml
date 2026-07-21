@@ -9,6 +9,14 @@ on:
         description: 'Version tag (e.g., v1.0.0)'
         required: true
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - 'providers/kaito/**'
+      - 'controller/**'
+      - 'versions.env'
+      - '.github/workflows/release-kaito-provider.yml'
 
 permissions:
   contents: read
@@ -26,24 +34,43 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Set image version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! [[ "$DISPATCH_VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Invalid version: use only letters, numbers, dots, underscores, and hyphens." >&2
+              exit 1
+            fi
+            image_version="$DISPATCH_VERSION"
+          else
+            image_version="main-${GITHUB_SHA::12}"
+          fi
+          printf 'IMAGE_VERSION=%s\n' "$image_version" >> "$GITHUB_ENV"
 
       - name: Log in to Container Registry
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: providers/kaito/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/kaito-project/airunway/kaito-provider:${{ inputs.version }}
-            ghcr.io/kaito-project/airunway/kaito-provider:latest
+            ghcr.io/ai-runway/airunway/kaito-provider:${{ env.IMAGE_VERSION }}
+            ghcr.io/ai-runway/airunway/kaito-provider:latest
+          build-args: |
+            SHIM_VERSION=${{ env.IMAGE_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

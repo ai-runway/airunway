@@ -3,9 +3,10 @@ package kuberay
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
@@ -37,6 +38,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	}
 	if len(vllmCap.ServingModes) != 2 {
 		t.Fatalf("expected vllm to support 2 serving modes, got %d", len(vllmCap.ServingModes))
+	}
+	if len(vllmCap.APIFormats) != 1 || vllmCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected vllm to support only openai-chat API format, got %v", vllmCap.APIFormats)
 	}
 
 	if len(spec.SelectionRules) != 1 {
@@ -80,8 +84,8 @@ func TestProviderConstants(t *testing.T) {
 	if ProviderConfigName != "kuberay" {
 		t.Errorf("expected provider config name 'kuberay', got %s", ProviderConfigName)
 	}
-	if ProviderVersion != "kuberay-provider:v0.1.0" {
-		t.Errorf("expected provider version 'kuberay-provider:v0.1.0', got %s", ProviderVersion)
+	if !strings.HasPrefix(ProviderVersion, "kuberay-provider:") {
+		t.Errorf("expected provider version to start with 'kuberay-provider:', got %s", ProviderVersion)
 	}
 }
 

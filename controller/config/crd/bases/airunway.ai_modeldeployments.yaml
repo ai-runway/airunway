@@ -702,6 +702,20 @@ spec:
               gateway:
                 description: gateway contains information about the gateway integration
                 properties:
+                  apiFormats:
+                    description: |-
+                      apiFormats is the list of API formats supported by this deployment's engine.
+                      Populated from the engine's capabilities in InferenceProviderConfig.
+                    items:
+                      description: |-
+                        APIFormat defines the API format supported by an inference engine.
+                        Each format corresponds to a specific vendor's API contract.
+                      enum:
+                      - openai-chat
+                      - openai-responses
+                      - anthropic-messages
+                      type: string
+                    type: array
                   endpoint:
                     description: endpoint is the unified gateway endpoint URL
                     type: string

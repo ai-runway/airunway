@@ -8,7 +8,7 @@ We take security seriously at AI Runway. We appreciate your efforts to responsib
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via [GitHub Security Advisories](https://github.com/kaito-project/airunway/security/advisories/new).
+Instead, please report them via [GitHub Security Advisories](https://github.com/ai-runway/airunway/security/advisories/new).
 
 If you prefer email, you can send your report to the repository maintainers. Please include the word "SECURITY" in the subject line.
 
@@ -51,7 +51,7 @@ We ask that you:
 
 ## Security Updates & Advisories
 
-Security advisories will be published via [GitHub Security Advisories](https://github.com/kaito-project/airunway/security/advisories).
+Security advisories will be published via [GitHub Security Advisories](https://github.com/ai-runway/airunway/security/advisories).
 
 ## Scope
 

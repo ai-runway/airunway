@@ -59,6 +59,9 @@ go.work.sum
 # Provider build outputs
 providers/*/bin/
 
+# GPU e2e per-run result bundles
+gpu-e2e-results/
+
 # Playwright
 /test-results/
 /playwright-report/

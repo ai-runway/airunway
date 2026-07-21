@@ -6,6 +6,11 @@ ARG TARGETARCH
 # injected into the provider binary via -ldflags so the in-image default tracks
 # versions.env and cannot silently drift from it.
 ARG VLLM_VERSION
+# SHIM_VERSION is the reported shim version tag. Required so a hand-run
+# `docker build` cannot silently ship status.version=vllm-provider:dev under
+# a real release tag. The Makefile and release workflow always pass it via
+# --build-arg.
+ARG SHIM_VERSION
 
 WORKDIR /workspace
 
@@ -25,14 +30,19 @@ COPY controller/ controller/
 # Copy the provider Go source
 COPY providers/vllm/ providers/vllm/
 
-# Require VLLM_VERSION so a hand-run `docker build` cannot silently drift from
-# versions.env (the Makefile always passes it via --build-arg).
+# Require VLLM_VERSION and SHIM_VERSION so a hand-run `docker build` cannot
+# silently drift from versions.env or ship status.version=vllm-provider:dev
+# (the Makefile and release workflow always pass both via --build-arg).
 RUN test -n "${VLLM_VERSION}" || (echo "ERROR: VLLM_VERSION build arg is required (see versions.env); pass --build-arg VLLM_VERSION=..." >&2; exit 1)
+RUN test -n "${SHIM_VERSION}" || (echo "ERROR: SHIM_VERSION build arg is required; pass --build-arg SHIM_VERSION=..." >&2; exit 1)
 
 # Build with the committed module graph. -mod=readonly fails if go.mod/go.sum are incomplete.
-RUN cd providers/vllm && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+# MODULE is resolved from go.mod (not hand-typed) so every -X target can never
+# drift from the package path.
+RUN cd providers/vllm && MODULE=$(go list -m) && \
+      CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
       go build -mod=readonly -a \
-      -ldflags="-X github.com/kaito-project/airunway/providers/vllm.VLLMVersion=${VLLM_VERSION}" \
+      -ldflags="-X ${MODULE}.VLLMVersion=${VLLM_VERSION} -X ${MODULE}.shimVersion=${SHIM_VERSION}" \
       -o provider cmd/main.go
 
 # Use distroless as minimal base image to package the provider binary

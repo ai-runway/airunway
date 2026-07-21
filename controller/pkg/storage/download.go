@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -34,7 +34,7 @@ import (
 const (
 	// DefaultDownloadJobImage is the default container image for model download jobs.
 	// This image has huggingface_hub (with hf_xet) pre-installed.
-	DefaultDownloadJobImage = "ghcr.io/kaito-project/airunway/model-downloader:latest"
+	DefaultDownloadJobImage = "ghcr.io/ai-runway/airunway/model-downloader:latest"
 
 	// downloadJobSuffix is the suffix appended to the ModelDeployment name to form the Job name
 	downloadJobSuffix = "-model-download"
