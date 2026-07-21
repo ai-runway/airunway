@@ -23,7 +23,7 @@
     "@iconify/react": "^6.0.2",
     "@kinvolk/headlamp-plugin": "^0.14.0",
     "@mui/material": "^9.0.1",
-    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/react": "^16.0.0",
     "@types/react": "^19.2.16",
     "@types/react-router-dom": "5",
@@ -31,7 +31,7 @@
     "@vitest/coverage-v8": "^4.1.7",
     "jsdom": "^29.1.1",
     "react-router-dom": "7",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.7"
   },
   "peerDependencies": {
