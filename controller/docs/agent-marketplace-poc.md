@@ -1,6 +1,6 @@
 # Agent Marketplace — controller PoC
 
-Proof-of-concept controller for the Agent Marketplace ([#200](https://github.com/kaito-project/airunway/issues/200)). It validates that the `AgentDeployment` / `AgentProviderConfig` API (PR #287) maps cleanly onto real agent frameworks across the two rendering backends, on top of an MVP of the controller logic. This is a PoC: the providers live in-tree in one binary; extracting them into out-of-tree shims (like the inference providers) is a deliberate later step.
+Proof-of-concept controller for the Agent Marketplace ([#200](https://github.com/kaito-project/airunway/issues/200)). It validates that the `AgentDeployment` / `AgentProviderConfig` API (PR #287) maps cleanly onto real agent frameworks across the two rendering backends, on top of an MVP of the controller logic. This is still a PoC: the manager binary currently registers providers in-tree, while the provider shim modules have already been split into separate out-of-tree packages for the runtime cutover path.
 
 ## Architecture
 
@@ -53,7 +53,7 @@ make test        # or: KUBEBUILDER_ASSETS=$(pwd)/bin/k8s/<ver> go test ./interna
 
 ## Live cluster validation (manual, not automated)
 
-envtest has no kubelet, so it cannot run the actual agents. End-to-end validation against a real cluster — install the framework operator, apply the samples in `config/samples/`, invoke the agent — is manual. The `crd`/kagent + Azure OpenAI path was validated by hand on a CPU cluster (see the repo's `tmp/agent-poc-test/RESULTS.md`).
+envtest has no kubelet, so it cannot run the actual agents. End-to-end validation against a real cluster — install the framework operator, apply the samples in `config/samples/`, invoke the agent — is manual. The `crd`/kagent + Azure OpenAI path was validated by hand on a CPU cluster (recorded under `tmp/agent-poc-test/RESULTS.md` in this repo).
 
 ### Schema fidelity (automated, high-confidence)
 
@@ -66,11 +66,11 @@ The crd providers are tested against the **real** upstream CRDs, not permissive 
 
 ### container backend
 
-No off-the-shelf framework image honors the mounted-`agent.json` + `OPENAI_*` contract as-is: OpenClaw serves `:18789` with its own config format, LangGraph serves `:8000` and needs `langgraph build`, and Hermes has retired `OPENAI_BASE_URL`. **CrewAI** is the easiest first real target — its library reads `OPENAI_BASE_URL`/`OPENAI_API_KEY` from env natively, so it needs only a thin FastAPI wrapper that reads `/etc/airunway/agent.json`. Use the `spec.config` `image`/`command`/`args`/`port`/`writableRootFilesystem` fields to adapt to a given image (e.g. `port: 8000` for LangGraph). To smoke-test the plumbing alone (ConfigMap mount + env injection + Service), point `spec.config.image` at a tiny non-root HTTP image that echoes `/etc/airunway/agent.json` and the `OPENAI_*` env, then curl the Service.
+No off-the-shelf framework image honors the mounted-`agent.json` + `OPENAI_*` contract as-is: OpenClaw serves `:18789` with its own config format, LangGraph serves `:8000` and needs `langgraph build`, and Hermes has retired `OPENAI_BASE_URL`. **CrewAI** is the easiest first real target — its library reads `OPENAI_BASE_URL`/`OPENAI_API_KEY` from env natively, so it needs only a thin FastAPI wrapper that reads `/etc/airunway/agent.json`. Use the `spec.config` `image`/`command`/`args`/`port` fields to adapt to a given image (e.g. `port: 8000` for LangGraph). To smoke-test the plumbing alone (ConfigMap mount + env injection + Service), point `spec.config.image` at a tiny non-root HTTP image that echoes `/etc/airunway/agent.json` and the `OPENAI_*` env, then curl the Service.
 
 ## Deferred follow-ups
 
-- Extract providers into out-of-tree shims (separate modules, like `providers/dynamo`).
-- Full GAIE endpoint discovery for `gatewayEndpoint` bindings.
+- Complete the runtime cutover to load provider shims fully out-of-tree (the shim modules now exist, but the main manager still wires providers in-process).
+- Advanced GAIE endpoint discovery for `gatewayEndpoint` bindings (listener/port/path selection beyond the current Gateway status address).
 - MCP tool wiring, A2A dependencies, and the egress `NetworkPolicy`.
 - Publish/point at real wrapped framework images (CrewAI wrapper first) so the container backend runs an actual agent end-to-end.

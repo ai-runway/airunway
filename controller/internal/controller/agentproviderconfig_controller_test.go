@@ -114,6 +114,22 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		Expect(cond.Reason).To(Equal("OperatorNotInstalled"))
 	})
 
+	It("holds not-ready when requiresOperator is true but operatorAPIGroup is missing", func() {
+		requireTrue := true
+		create("cap-crd-misconfigured", airunwayv1alpha1.AgentProviderCapabilities{
+			Backend:          airunwayv1alpha1.AgentProviderBackendCRD,
+			RequiresOperator: &requireTrue,
+		})
+		reconcileWith("cap-crd-misconfigured")
+
+		apc := get("cap-crd-misconfigured")
+		Expect(apc.Status.Ready).NotTo(BeNil())
+		Expect(*apc.Status.Ready).To(BeFalse())
+		cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("OperatorAPIGroupMissing"))
+	})
+
 	It("includes install instructions in OperatorNotInstalled when annotated", func() {
 		apc := &airunwayv1alpha1.AgentProviderConfig{
 			ObjectMeta: metav1.ObjectMeta{

@@ -429,6 +429,7 @@ spec:
                 - Pending
                 - Deploying
                 - Running
+                - Completed
                 - Failed
                 - Terminating
                 type: string

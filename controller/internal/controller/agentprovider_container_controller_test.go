@@ -608,5 +608,14 @@ var _ = Describe("Container provider", func() {
 		ad2 = getAgent("c-job")
 		Expect(ad2.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
 		Expect(prCond(ad2).Status).To(Equal(metav1.ConditionTrue))
+
+		By("flipping to Completed once the Job succeeds")
+		job.Status.Active = 0
+		job.Status.Succeeded = 1
+		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+		reconcileContainer("c-job")
+		ad2 = getAgent("c-job")
+		Expect(ad2.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseCompleted))
+		Expect(prCond(ad2).Reason).To(Equal("JobCompleted"))
 	})
 })

@@ -96,6 +96,14 @@ func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProv
 
 	// crd backend: gate on the operator's API group being served, when known.
 	group := caps.OperatorAPIGroup
+	requiresOperator := caps.RequiresOperator != nil && *caps.RequiresOperator
+	if requiresOperator && group == "" {
+		msg := "capabilities.requiresOperator is true but capabilities.operatorAPIGroup is empty"
+		if install := apc.InstallInstructions(); install != "" {
+			msg = fmt.Sprintf("%s. Install instructions: %s", msg, install)
+		}
+		return false, "OperatorAPIGroupMissing", msg
+	}
 	if group == "" {
 		return true, "ProviderRunning", "Provider controller is running"
 	}

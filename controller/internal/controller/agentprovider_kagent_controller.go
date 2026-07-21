@@ -28,9 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 )
@@ -118,8 +122,12 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	binding := *ad.Status.ModelBinding
 	binding, err := ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
 	if err != nil {
-		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+		statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
+		if statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
 	}
 	cfg := parseKagentConfig(ad.Spec.Config)
 
@@ -132,8 +140,12 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		if err := r.Patch(ctx, obj, client.Apply, client.FieldOwner(KagentFieldOwner), client.ForceOwnership); err != nil {
 			logger.Error(err, "Failed to apply kagent resource", "kind", obj.GetKind(), "name", obj.GetName())
-			return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "RenderFailed", err.Error())
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -210,12 +222,28 @@ func renderKagentModelConfig(ad *airunwayv1alpha1.AgentDeployment, binding airun
 // provider block so any OpenAI-compatible endpoint (including in-cluster
 // models) works.
 func kagentProviderFor(binding airunwayv1alpha1.ModelBindingStatus) (provider string, block map[string]interface{}) {
-	// Default: treat everything as an OpenAI-compatible endpoint driven by the
-	// resolved base URL. externalAPI type only refines this.
-	provider = "OpenAI"
-	block = map[string]interface{}{}
-	if binding.BaseURL != "" {
-		block["openAI"] = map[string]interface{}{"baseUrl": binding.BaseURL}
+	switch binding.APIType {
+	case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
+		provider = "AzureOpenAI"
+		block = map[string]interface{}{
+			"azureOpenAI": map[string]interface{}{
+				"azureEndpoint": binding.BaseURL,
+				"apiVersion":    "2024-02-01",
+			},
+		}
+	case airunwayv1alpha1.ExternalAPITypeAnthropic:
+		provider = "Anthropic"
+		block = map[string]interface{}{
+			"anthropic": map[string]interface{}{
+				"baseUrl": binding.BaseURL,
+			},
+		}
+	default:
+		provider = "OpenAI"
+		block = map[string]interface{}{}
+		if binding.BaseURL != "" {
+			block["openAI"] = map[string]interface{}{"baseUrl": binding.BaseURL}
+		}
 	}
 	return provider, block
 }
@@ -267,11 +295,36 @@ func (r *KagentProviderReconciler) applyProviderStatus(
 	return applyProviderOwnedStatus(ctx, r.Client, ad, KagentFieldOwner, phase, rt, replicas, providerReady, reason, message)
 }
 
+func (r *KagentProviderReconciler) mapProviderConfigToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	apc, ok := obj.(*airunwayv1alpha1.AgentProviderConfig)
+	if !ok || apc.Name != KagentFrameworkName {
+		return nil
+	}
+	var list airunwayv1alpha1.AgentDeploymentList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.Framework.Name != KagentFrameworkName {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
 // SetupWithManager wires the kagent provider. It watches AgentDeployment and
-// re-reconciles when core updates status (e.g. bindings become resolved).
+// framework-provider config changes so existing agents are re-rendered when
+// capabilities/defaults change.
 func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
+		Watches(
+			&airunwayv1alpha1.AgentProviderConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
+			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Named("agent-provider-kagent").
 		Complete(r)
 }

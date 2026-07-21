@@ -16,8 +16,6 @@ spec:
     systemPrompt: |
       You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
       networking issues. Prefer minimal-blast-radius actions.
-    skills:
-      - cluster-diagnose
   resources:
     requests:
       cpu: "200m"
@@ -54,10 +52,10 @@ spec:
   # renders the agent workload (e.g. OpenClaw needs a writable root
   # filesystem for session state). It is not set per AgentDeployment.
 ---
-# Example: Hermes (container backend) with an explicit BYO image override and
-# a writable root filesystem. Shows spec.config carrying both the provider-
-# consumed fields (image, writableRootFilesystem) and framework passthrough
-# (systemPrompt), all mounted for the container as /etc/airunway/agent.json.
+# Example: Hermes (container backend) with an explicit BYO image override.
+# Shows spec.config carrying both provider-consumed fields (image) and
+# framework passthrough (systemPrompt), all mounted for the container as
+# /etc/airunway/agent.json.
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
 metadata:
@@ -83,7 +81,6 @@ spec:
           readOnlyRootFilesystem: false
   config:
     image: ghcr.io/hermes/hermes-agent:poc
-    writableRootFilesystem: true
     systemPrompt: "You are Hermes, a fast and concise task assistant."
 ---
 # Example: Orka (crd backend) task swarm bound to an external model.

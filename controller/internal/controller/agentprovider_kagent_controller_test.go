@@ -155,6 +155,54 @@ func TestRenderKagentModelConfig_InClusterEndpoint(t *testing.T) {
 	}
 }
 
+func TestRenderKagentModelConfig_AzureOpenAIType(t *testing.T) {
+	ad := &airunwayv1alpha1.AgentDeployment{}
+	ad.Name = "azure"
+	ad.Namespace = "default"
+	binding := airunwayv1alpha1.ModelBindingStatus{
+		BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
+		APIType:     airunwayv1alpha1.ExternalAPITypeAzureOpenAI,
+		BaseURL:     "https://my-azure.openai.azure.com",
+		ModelName:   "gpt-4.1",
+	}
+	mc := renderKagentModelConfig(ad, binding)
+
+	provider, _, _ := unstructured.NestedString(mc.Object, "spec", "provider")
+	if provider != "AzureOpenAI" {
+		t.Fatalf("provider = %q, want AzureOpenAI", provider)
+	}
+	azureEndpoint, _, _ := unstructured.NestedString(mc.Object, "spec", "azureOpenAI", "azureEndpoint")
+	if azureEndpoint != "https://my-azure.openai.azure.com" {
+		t.Fatalf("azureOpenAI.azureEndpoint = %q", azureEndpoint)
+	}
+	apiVersion, _, _ := unstructured.NestedString(mc.Object, "spec", "azureOpenAI", "apiVersion")
+	if apiVersion != "2024-02-01" {
+		t.Fatalf("azureOpenAI.apiVersion = %q, want 2024-02-01", apiVersion)
+	}
+}
+
+func TestRenderKagentModelConfig_AnthropicType(t *testing.T) {
+	ad := &airunwayv1alpha1.AgentDeployment{}
+	ad.Name = "anthropic"
+	ad.Namespace = "default"
+	binding := airunwayv1alpha1.ModelBindingStatus{
+		BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
+		APIType:     airunwayv1alpha1.ExternalAPITypeAnthropic,
+		BaseURL:     "https://api.anthropic.com",
+		ModelName:   "claude-3-5-sonnet",
+	}
+	mc := renderKagentModelConfig(ad, binding)
+
+	provider, _, _ := unstructured.NestedString(mc.Object, "spec", "provider")
+	if provider != "Anthropic" {
+		t.Fatalf("provider = %q, want Anthropic", provider)
+	}
+	baseURL, _, _ := unstructured.NestedString(mc.Object, "spec", "anthropic", "baseUrl")
+	if baseURL != "https://api.anthropic.com" {
+		t.Fatalf("anthropic.baseUrl = %q", baseURL)
+	}
+}
+
 // --- envtest reconcile specs -----------------------------------------------
 
 var _ = Describe("Kagent crd provider", func() {

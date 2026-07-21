@@ -55,6 +55,7 @@ spec:
   capabilities:
     backend: crd
     requiresOperator: true
+    operatorAPIGroup: kagent.dev
     modelBindingModes:
       - deploymentRef
       - gatewayEndpoint
@@ -91,6 +92,7 @@ spec:
   capabilities:
     backend: crd
     requiresOperator: true
+    operatorAPIGroup: core.orka.ai
     modelBindingModes:
       - deploymentRef
       - externalAPI

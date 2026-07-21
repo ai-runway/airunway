@@ -23,13 +23,14 @@ import (
 )
 
 // AgentPhase defines the phase of the agent deployment.
-// +kubebuilder:validation:Enum=Pending;Deploying;Running;Failed;Terminating
+// +kubebuilder:validation:Enum=Pending;Deploying;Running;Completed;Failed;Terminating
 type AgentPhase string
 
 const (
 	AgentPhasePending     AgentPhase = "Pending"
 	AgentPhaseDeploying   AgentPhase = "Deploying"
 	AgentPhaseRunning     AgentPhase = "Running"
+	AgentPhaseCompleted   AgentPhase = "Completed"
 	AgentPhaseFailed      AgentPhase = "Failed"
 	AgentPhaseTerminating AgentPhase = "Terminating"
 )

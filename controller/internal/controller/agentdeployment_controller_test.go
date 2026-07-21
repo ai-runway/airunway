@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -133,6 +134,55 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal("WaitingForProvider"))
 		})
+
+		It("holds ModelBound false when externalAPI.credentialsRef Secret is missing", func() {
+			createReadyProvider("kagent-missing-secret", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeExternalAPI)
+			ad := newAgent("agent-missing-secret", "kagent-missing-secret")
+			ad.Spec.Model.ExternalAPI.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
+				Name: "does-not-exist",
+				Key:  "token",
+			}
+			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+
+			reconcileOnce("agent-missing-secret")
+			out := get("agent-missing-secret")
+
+			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
+			Expect(mb).NotTo(BeNil())
+			Expect(mb.Status).To(Equal(metav1.ConditionFalse))
+			Expect(mb.Reason).To(Equal("CredentialSecretNotFound"))
+			Expect(out.Status.ModelBinding).To(BeNil())
+		})
+
+		It("resolves externalAPI.credentialsRef when the Secret key exists", func() {
+			createReadyProvider("kagent-with-secret", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeExternalAPI)
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "openai-creds", Namespace: "default"},
+				Data:       map[string][]byte{"token": []byte("dummy")},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+
+			ad := newAgent("agent-with-secret", "kagent-with-secret")
+			ad.Spec.Model.ExternalAPI.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
+				Name: "openai-creds",
+				Key:  "token",
+			}
+			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+
+			reconcileOnce("agent-with-secret")
+			out := get("agent-with-secret")
+
+			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
+			Expect(mb).NotTo(BeNil())
+			Expect(mb.Status).To(Equal(metav1.ConditionTrue))
+			Expect(out.Status.ModelBinding).NotTo(BeNil())
+			Expect(out.Status.ModelBinding.CredentialsRef).NotTo(BeNil())
+			Expect(out.Status.ModelBinding.CredentialsRef.Name).To(Equal("openai-creds"))
+			Expect(out.Status.ModelBinding.CredentialsRef.Key).To(Equal("token"))
+		})
 	})
 
 	Context("when the binding is a deploymentRef to an in-cluster model", func() {
@@ -187,7 +237,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(b.CredentialsRef).To(BeNil())
 		})
 
-		It("prefers the gateway service URL and gateway model name when gateway routing is configured", func() {
+		It("prefers the gateway status endpoint and gateway model name when gateway routing is configured", func() {
 			createReadyProvider("kagent-depref-gw", airunwayv1alpha1.AgentProviderBackendCRD,
 				airunwayv1alpha1.ModelBindingModeDeploymentRef)
 
@@ -228,9 +278,59 @@ var _ = Describe("AgentDeployment core controller", func() {
 
 			Expect(out.Status.ModelBinding).NotTo(BeNil())
 			b := *out.Status.ModelBinding
-			Expect(b.BaseURL).To(Equal("http://inference-gateway.gateway-system.svc.cluster.local/v1"))
+			Expect(b.BaseURL).To(Equal("http://10.0.0.42/v1"))
 			Expect(b.ModelName).To(Equal("llama-3.2-1b-gateway"))
 			Expect(b.CredentialsRef).To(BeNil())
+		})
+
+		It("maps ModelDeployment changes to referencing AgentDeployments", func() {
+			createReadyProvider("kagent-map", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeDeploymentRef)
+
+			md := &airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "map-model", Namespace: "default"},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model: airunwayv1alpha1.ModelSpec{Source: airunwayv1alpha1.ModelSourceCustom},
+				},
+			}
+			Expect(k8sClient.Create(ctx, md)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, md) })
+
+			ref := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-map-ref", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-map"},
+					Model: airunwayv1alpha1.ModelBinding{
+						DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "map-model"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ref)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, ref) })
+
+			other := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-map-other", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent-map"},
+					Model: airunwayv1alpha1.ModelBinding{
+						ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+							Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
+							BaseURL:   "https://api.openai.com/v1",
+							ModelName: "gpt-4o-mini",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, other)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, other) })
+
+			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			reqs := r.mapModelDeploymentToAgentDeployments(ctx, md)
+			Expect(reqs).To(HaveLen(1))
+			Expect(reqs[0].NamespacedName).To(Equal(types.NamespacedName{
+				Name:      "agent-map-ref",
+				Namespace: "default",
+			}))
 		})
 
 		It("rejects a cross-namespace deploymentRef until AgentReferenceGrant exists", func() {

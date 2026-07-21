@@ -33,9 +33,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 )
@@ -261,8 +265,7 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// The ConfigMap (mounted agent.json) is shared by both lifecycles.
 	configMap := renderAgentConfigMap(&ad)
 	if err := r.applyOwned(ctx, &ad, configMap); err != nil {
-		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
-			metav1.ConditionFalse, "RenderFailed", err.Error())
+		return r.failWithStatus(ctx, &ad, "RenderFailed", err)
 	}
 
 	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
@@ -293,14 +296,15 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 ) (ctrl.Result, error) {
 	// A prior spec.lifecycle: job leaves a one-shot Job behind. Delete it so the
 	// two lifecycles never run side by side.
-	r.deleteObsolete(ctx, ad, &batchv1.Job{})
+	if err := r.deleteObsolete(ctx, ad, &batchv1.Job{}); err != nil {
+		return r.failWithStatus(ctx, ad, "LifecycleCleanupFailed", err)
+	}
 
 	deployment := renderAgentDeployment(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
 	service := renderAgentService(ad, cfg)
 	for _, obj := range []client.Object{deployment, service} {
 		if err := r.applyOwned(ctx, ad, obj); err != nil {
-			return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
-				metav1.ConditionFalse, "RenderFailed", err.Error())
+			return r.failWithStatus(ctx, ad, "RenderFailed", err)
 		}
 	}
 
@@ -331,9 +335,9 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 }
 
 // reconcileJob renders + applies the one-shot Job and maps its status onto the
-// agent phase. A Job is only reported Failed once it surfaces a true JobFailed
-// condition (i.e. backoffLimit exhausted) — individual failed pod attempts that
-// the Job controller will still retry keep the agent in a pending/running state.
+// agent phase. A Job is reported Failed only once it surfaces a true JobFailed
+// condition (i.e. backoffLimit exhausted), Running while active, and Completed
+// once it succeeds.
 func (r *ContainerProviderReconciler) reconcileJob(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -345,12 +349,13 @@ func (r *ContainerProviderReconciler) reconcileJob(
 ) (ctrl.Result, error) {
 	// A prior spec.lifecycle: deployment leaves a Deployment + Service behind.
 	// Delete them so the two lifecycles never run side by side.
-	r.deleteObsolete(ctx, ad, &appsv1.Deployment{}, &corev1.Service{})
+	if err := r.deleteObsolete(ctx, ad, &appsv1.Deployment{}, &corev1.Service{}); err != nil {
+		return r.failWithStatus(ctx, ad, "LifecycleCleanupFailed", err)
+	}
 
 	job := renderAgentJob(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
 	if err := r.applyOwned(ctx, ad, job); err != nil {
-		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
-			metav1.ConditionFalse, "RenderFailed", err.Error())
+		return r.failWithStatus(ctx, ad, "RenderFailed", err)
 	}
 
 	var live batchv1.Job
@@ -370,13 +375,17 @@ func (r *ContainerProviderReconciler) reconcileJob(
 
 	switch {
 	case jobConditionTrue(&live, batchv1.JobFailed):
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
+		return ctrl.Result{}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseFailed, rt, replicas,
 			metav1.ConditionFalse, "JobFailed", "Agent job failed (backoff limit exhausted)")
-	case jobConditionTrue(&live, batchv1.JobComplete) || live.Status.Succeeded > 0 || live.Status.Active > 0:
+	case jobConditionTrue(&live, batchv1.JobComplete) || live.Status.Succeeded > 0:
+		return ctrl.Result{}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseCompleted, rt, replicas,
+			metav1.ConditionTrue, "JobCompleted", "Agent job completed successfully")
+	case live.Status.Active > 0:
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
-			metav1.ConditionTrue, "JobRunning", "Agent job is active or has completed")
+			metav1.ConditionTrue, "JobRunning", "Agent job is active")
 	default:
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseDeploying, rt, replicas,
@@ -399,7 +408,7 @@ func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool 
 // deleteObsolete best-effort deletes owned workloads left over from a previous
 // spec.lifecycle so a lifecycle switch does not leave both kinds running. Each
 // object is looked up by the agent's name in its namespace.
-func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) {
+func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
 	logger := log.FromContext(ctx)
 	for _, obj := range objs {
 		obj.SetName(ad.Name)
@@ -407,8 +416,10 @@ func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *ai
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "failed to delete obsolete workload from previous lifecycle",
 				"kind", fmt.Sprintf("%T", obj), "name", ad.Name)
+			return fmt.Errorf("delete obsolete %T %s/%s: %w", obj, ad.Namespace, ad.Name, err)
 		}
 	}
+	return nil
 }
 
 // containerProviderSettings holds the provider-owned rendering settings the
@@ -690,6 +701,18 @@ func agentLabels(ad *airunwayv1alpha1.AgentDeployment) map[string]string {
 	}
 }
 
+func (r *ContainerProviderReconciler) failWithStatus(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	reason string,
+	cause error,
+) (ctrl.Result, error) {
+	if err := r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil, metav1.ConditionFalse, reason, cause.Error()); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, cause
+}
+
 // status writes provider-owned status via the shared SSA helper.
 func (r *ContainerProviderReconciler) status(
 	ctx context.Context,
@@ -703,6 +726,26 @@ func (r *ContainerProviderReconciler) status(
 	return applyProviderOwnedStatus(ctx, r.Client, ad, ContainerFieldOwner, phase, rt, replicas, providerReady, reason, message)
 }
 
+func (r *ContainerProviderReconciler) mapProviderConfigToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	apc, ok := obj.(*airunwayv1alpha1.AgentProviderConfig)
+	if !ok {
+		return nil
+	}
+
+	var list airunwayv1alpha1.AgentDeploymentList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.Framework.Name != apc.Name {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
 // SetupWithManager wires the container provider and its owned workloads.
 func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -711,6 +754,11 @@ func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Watches(
+			&airunwayv1alpha1.AgentProviderConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
+			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Named("agent-provider-container").
 		Complete(r)
 }

@@ -22,9 +22,11 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -49,6 +51,15 @@ const (
 	// re-checking a not-yet-satisfiable dependency (framework not ready, a
 	// referenced ModelDeployment without an endpoint yet).
 	agentRequeueInterval = 15 * time.Second
+
+	// agentDeploymentFrameworkIndexKey indexes AgentDeployments by framework
+	// name so provider-config changes can requeue only affected agents.
+	agentDeploymentFrameworkIndexKey = "spec.framework.name"
+
+	// agentDeploymentModelRefIndexKey indexes AgentDeployments by
+	// namespace/name deploymentRef target so ModelDeployment changes can
+	// requeue only affected agents.
+	agentDeploymentModelRefIndexKey = "spec.model.deploymentRef"
 )
 
 // AgentDeploymentReconciler reconciles the core, framework-neutral concerns
@@ -70,6 +81,7 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // Reconcile resolves framework and model bindings for an AgentDeployment.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -234,29 +246,87 @@ func (r *AgentDeploymentReconciler) resolveOneBinding(
 
 	switch mode {
 	case airunwayv1alpha1.ModelBindingModeExternalAPI:
-		ext := m.ExternalAPI
-		st.APIType = ext.Type
-		st.BaseURL = ext.BaseURL
-		st.ModelName = ext.ModelName
-		st.CredentialsRef = ext.CredentialsRef
-		return st, true, false, "", ""
+		return r.resolveExternalAPI(ctx, ad, m, st)
 
 	case airunwayv1alpha1.ModelBindingModeDeploymentRef:
 		return r.resolveDeploymentRef(ctx, ad, m, st)
 
 	case airunwayv1alpha1.ModelBindingModeGatewayEndpoint:
-		gw := m.GatewayEndpoint
-		// Gateway endpoint resolution is intentionally minimal for the PoC:
-		// the served model name is authoritative and the base URL is derived
-		// from the referenced Gateway's in-cluster address. Full GAIE
-		// endpoint discovery is a follow-up.
-		st.ModelName = gw.ModelName
-		st.BaseURL = gatewayBaseURL(gw, ad.Namespace)
-		return st, true, false, "", ""
+		return r.resolveGatewayEndpointBinding(ctx, ad, m, st)
 
 	default:
 		return st, false, false, "UnknownBindingMode", "spec.model has no recognised binding mode"
 	}
+}
+
+func (r *AgentDeploymentReconciler) resolveExternalAPI(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	m *airunwayv1alpha1.ModelBinding,
+	st airunwayv1alpha1.ModelBindingStatus,
+) (airunwayv1alpha1.ModelBindingStatus, bool, bool, string, string) {
+	ext := m.ExternalAPI
+	st.APIType = ext.Type
+	st.BaseURL = ext.BaseURL
+	st.ModelName = ext.ModelName
+	st.CredentialsRef = ext.CredentialsRef
+	if ext.CredentialsRef == nil {
+		return st, true, false, "", ""
+	}
+
+	var sec corev1.Secret
+	ref := ext.CredentialsRef
+	key := k8stypes.NamespacedName{Name: ref.Name, Namespace: ad.Namespace}
+	if err := r.Get(ctx, key, &sec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return st, false, true, "CredentialSecretNotFound",
+				fmt.Sprintf("spec.model.externalAPI.credentialsRef references Secret %s/%s which does not exist", ad.Namespace, ref.Name)
+		}
+		return st, false, true, "CredentialSecretLookupFailed", err.Error()
+	}
+	if _, ok := sec.Data[ref.Key]; !ok {
+		return st, false, true, "CredentialKeyNotFound",
+			fmt.Sprintf("spec.model.externalAPI.credentialsRef points to missing key %q in Secret %s/%s", ref.Key, ad.Namespace, ref.Name)
+	}
+	return st, true, false, "", ""
+}
+
+func (r *AgentDeploymentReconciler) resolveGatewayEndpointBinding(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	m *airunwayv1alpha1.ModelBinding,
+	st airunwayv1alpha1.ModelBindingStatus,
+) (airunwayv1alpha1.ModelBindingStatus, bool, bool, string, string) {
+	gw := m.GatewayEndpoint
+	ns := gw.GatewayRef.Namespace
+	if ns == "" {
+		ns = ad.Namespace
+	}
+
+	st.ModelName = gw.ModelName
+	var gateway unstructured.Unstructured
+	gateway.SetAPIVersion("gateway.networking.k8s.io/v1")
+	gateway.SetKind("Gateway")
+	key := k8stypes.NamespacedName{Name: gw.GatewayRef.Name, Namespace: ns}
+	if err := r.Get(ctx, key, &gateway); err != nil {
+		if apierrors.IsNotFound(err) {
+			return st, false, true, "GatewayNotFound",
+				fmt.Sprintf("spec.model.gatewayEndpoint references Gateway %s/%s which does not exist", ns, gw.GatewayRef.Name)
+		}
+		if meta.IsNoMatchError(err) {
+			return st, false, true, "GatewayAPIUnavailable",
+				"gateway.networking.k8s.io/v1 is not available in this cluster; install Gateway API CRDs to use spec.model.gatewayEndpoint"
+		}
+		return st, false, true, "GatewayLookupFailed", err.Error()
+	}
+
+	baseURL := normalizeOpenAIBaseURL(gatewayStatusAddress(&gateway))
+	if baseURL == "" {
+		return st, false, true, "GatewayNotReady",
+			fmt.Sprintf("spec.model.gatewayEndpoint target Gateway %s/%s has no published status address", ns, gw.GatewayRef.Name)
+	}
+	st.BaseURL = baseURL
+	return st, true, false, "", ""
 }
 
 // resolveDeploymentRef resolves an in-cluster ModelDeployment reference into a
@@ -377,10 +447,10 @@ func bindingMode(m *airunwayv1alpha1.ModelBinding) airunwayv1alpha1.ModelBinding
 }
 
 // modelDeploymentEndpoint derives an OpenAI-compatible base URL and served
-// model name from a ModelDeployment's status. It prefers the in-cluster Gateway
-// service URL when gateway routing is configured (so deploymentRef follows the
-// same OpenAI-native/BBR path as gatewayEndpoint bindings), then falls back to
-// the gateway endpoint address, and finally to the model service endpoint.
+// model name from a ModelDeployment's status. It prefers the resolved gateway
+// status endpoint when gateway routing is configured (so deploymentRef follows
+// the same OpenAI-native/BBR path), then falls back to the model service
+// endpoint.
 // Returns an empty base URL when the ModelDeployment has not published any
 // usable endpoint yet.
 func modelDeploymentEndpoint(md *airunwayv1alpha1.ModelDeployment) (baseURL, modelName string) {
@@ -395,17 +465,11 @@ func modelDeploymentEndpoint(md *airunwayv1alpha1.ModelDeployment) (baseURL, mod
 		if gw.ModelName != "" {
 			modelName = gw.ModelName
 		}
-		if gw.GatewayName != "" && gw.GatewayNamespace != "" {
-			return fmt.Sprintf("http://%s.%s.svc.cluster.local/v1", gw.GatewayName, gw.GatewayNamespace), modelName
-		}
 		return normalizeOpenAIBaseURL(gw.Endpoint), modelName
 	}
 	if gw := md.Status.Gateway; gw != nil {
 		if gw.ModelName != "" {
 			modelName = gw.ModelName
-		}
-		if gw.GatewayName != "" && gw.GatewayNamespace != "" {
-			return fmt.Sprintf("http://%s.%s.svc.cluster.local/v1", gw.GatewayName, gw.GatewayNamespace), modelName
 		}
 	}
 
@@ -437,13 +501,22 @@ func normalizeOpenAIBaseURL(endpoint string) string {
 	return "http://" + endpoint + "/v1"
 }
 
-// gatewayBaseURL derives the in-cluster base URL for a Gateway reference.
-func gatewayBaseURL(gw *airunwayv1alpha1.GatewayEndpointBinding, defaultNS string) string {
-	ns := gw.GatewayRef.Namespace
-	if ns == "" {
-		ns = defaultNS
+func gatewayStatusAddress(gw *unstructured.Unstructured) string {
+	addresses, found, err := unstructured.NestedSlice(gw.Object, "status", "addresses")
+	if err != nil || !found {
+		return ""
 	}
-	return fmt.Sprintf("http://%s.%s.svc.cluster.local/v1", gw.GatewayRef.Name, ns)
+	for _, raw := range addresses {
+		addr, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		value, ok := addr["value"].(string)
+		if ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // setAgentCondition upserts a condition, preserving LastTransitionTime on
@@ -469,8 +542,12 @@ func (r *AgentDeploymentReconciler) mapProviderConfigToAgentDeployments(ctx cont
 	}
 
 	var list airunwayv1alpha1.AgentDeploymentList
-	if err := r.List(ctx, &list); err != nil {
-		return nil
+	if err := r.List(ctx, &list, client.MatchingFields{agentDeploymentFrameworkIndexKey: apc.Name}); err != nil {
+		// MatchingFields can fail in tests that bypass SetupWithManager and
+		// therefore skip index registration; fall back to a full list.
+		if err := r.List(ctx, &list); err != nil {
+			return nil
+		}
 	}
 
 	var reqs []reconcile.Request
@@ -487,15 +564,85 @@ func (r *AgentDeploymentReconciler) mapProviderConfigToAgentDeployments(ctx cont
 	return reqs
 }
 
+// mapModelDeploymentToAgentDeployments enqueues AgentDeployments bound to the
+// changed ModelDeployment via spec.model.deploymentRef.
+func (r *AgentDeploymentReconciler) mapModelDeploymentToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
+	if !ok {
+		return nil
+	}
+
+	var list airunwayv1alpha1.AgentDeploymentList
+	modelRef := md.Namespace + "/" + md.Name
+	if err := r.List(ctx, &list, client.MatchingFields{agentDeploymentModelRefIndexKey: modelRef}); err != nil {
+		if err := r.List(ctx, &list); err != nil {
+			return nil
+		}
+	}
+
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		ref := list.Items[i].Spec.Model.DeploymentRef
+		if ref == nil {
+			continue
+		}
+		refNS := ref.Namespace
+		if refNS == "" {
+			refNS = list.Items[i].Namespace
+		}
+		if refNS != md.Namespace || ref.Name != md.Name {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: k8stypes.NamespacedName{
+				Name:      list.Items[i].Name,
+				Namespace: list.Items[i].Namespace,
+			},
+		})
+	}
+	return reqs
+}
+
 // SetupWithManager wires the core AgentDeployment controller. It watches
-// AgentProviderConfig so an AgentDeployment re-reconciles when its framework
-// provider becomes ready.
+// AgentProviderConfig and ModelDeployment so an AgentDeployment re-reconciles
+// when framework readiness or model binding inputs change.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &airunwayv1alpha1.AgentDeployment{}, agentDeploymentFrameworkIndexKey, func(raw client.Object) []string {
+		ad, ok := raw.(*airunwayv1alpha1.AgentDeployment)
+		if !ok || ad.Spec.Framework.Name == "" {
+			return nil
+		}
+		return []string{ad.Spec.Framework.Name}
+	}); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &airunwayv1alpha1.AgentDeployment{}, agentDeploymentModelRefIndexKey, func(raw client.Object) []string {
+		ad, ok := raw.(*airunwayv1alpha1.AgentDeployment)
+		if !ok || ad.Spec.Model.DeploymentRef == nil {
+			return nil
+		}
+		ns := ad.Spec.Model.DeploymentRef.Namespace
+		if ns == "" {
+			ns = ad.Namespace
+		}
+		if ad.Spec.Model.DeploymentRef.Name == "" || ns == "" {
+			return nil
+		}
+		return []string{ns + "/" + ad.Spec.Model.DeploymentRef.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
+			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
+		Watches(
+			&airunwayv1alpha1.ModelDeployment{},
+			handler.EnqueueRequestsFromMapFunc(r.mapModelDeploymentToAgentDeployments),
 			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
 		Named("agentdeployment").

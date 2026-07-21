@@ -28,9 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 )
@@ -93,8 +97,12 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	binding := *ad.Status.ModelBinding
 	binding, err := ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
 	if err != nil {
-		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
+		if statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
 	}
 	var cfg orkaAgentConfig
 	if ad.Spec.Config != nil && len(ad.Spec.Config.Raw) > 0 {
@@ -110,8 +118,12 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		if err := r.Patch(ctx, obj, client.Apply, client.FieldOwner(OrkaFieldOwner), client.ForceOwnership); err != nil {
 			logger.Error(err, "Failed to apply Orka resource", "kind", obj.GetKind(), "name", obj.GetName())
-			return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 				metav1.ConditionFalse, "RenderFailed", err.Error())
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -217,10 +229,34 @@ func (r *OrkaProviderReconciler) status(
 	return applyProviderOwnedStatus(ctx, r.Client, ad, OrkaFieldOwner, phase, rt, nil, providerReady, reason, message)
 }
 
+func (r *OrkaProviderReconciler) mapProviderConfigToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	apc, ok := obj.(*airunwayv1alpha1.AgentProviderConfig)
+	if !ok || apc.Name != OrkaFrameworkName {
+		return nil
+	}
+	var list airunwayv1alpha1.AgentDeploymentList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.Framework.Name != OrkaFrameworkName {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
 // SetupWithManager wires the Orka provider.
 func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
+		Watches(
+			&airunwayv1alpha1.AgentProviderConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
+			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Named("agent-provider-orka").
 		Complete(r)
 }

@@ -17,13 +17,30 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+func makeMinimalAgentDeployment(framework string) *airunwayv1alpha1.AgentDeployment {
+	return &airunwayv1alpha1.AgentDeployment{
+		Spec: airunwayv1alpha1.AgentDeploymentSpec{
+			Framework: airunwayv1alpha1.AgentFrameworkRef{Name: framework},
+			Model: airunwayv1alpha1.ModelBinding{
+				ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+					Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
+					BaseURL:   "https://api.openai.com/v1",
+					ModelName: "gpt-4o-mini",
+				},
+			},
+		},
+	}
+}
 
 func makeAgentProviderSpecWithOverrides(t *testing.T, overrides map[string]interface{}) *airunwayv1alpha1.AgentProviderSpec {
 	t.Helper()
@@ -113,4 +130,91 @@ func TestValidateAgentProviderOverrides_RejectsNonObjectJSON(t *testing.T) {
 	}
 	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
 	requireValidationErrorDetail(t, errs, "overrides must be a JSON object")
+}
+
+func TestValidateAgentProviderOverrides_RejectsAllowPrivilegeEscalationTrue(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"securityContext": map[string]interface{}{
+				"allowPrivilegeEscalation": true,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.securityContext.allowPrivilegeEscalation")
+}
+
+func TestValidateAgentProviderOverrides_RejectsRunAsNonRootFalse(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"podSecurityContext": map[string]interface{}{
+				"runAsNonRoot": false,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.podSecurityContext.runAsNonRoot")
+}
+
+func TestValidateAgentProviderOverrides_RejectsCapabilitiesDropWithoutALL(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"securityContext": map[string]interface{}{
+				"capabilities": map[string]interface{}{
+					"drop": []interface{}{"NET_RAW"},
+				},
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.securityContext.capabilities.drop")
+}
+
+func TestValidateAgentProviderOverrides_RejectsLocalhostSeccompWithoutProfile(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"podSecurityContext": map[string]interface{}{
+				"seccompProfile": map[string]interface{}{
+					"type": "Localhost",
+				},
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.podSecurityContext.seccompProfile.localhostProfile")
+}
+
+func TestAgentDeploymentCustomValidator_RejectsFrameworkChangeOnUpdate(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	oldObj := makeMinimalAgentDeployment("kagent")
+	newObj := makeMinimalAgentDeployment("orka")
+
+	_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
+	if err == nil {
+		t.Fatal("expected framework immutability validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "spec.framework.name") {
+		t.Fatalf("expected error to reference spec.framework.name, got: %v", err)
+	}
+}
+
+func TestAgentDeploymentCustomValidator_AllowsUpdateWhenFrameworkUnchanged(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	oldObj := makeMinimalAgentDeployment("kagent")
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.Provider = makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"securityContext": map[string]interface{}{
+				"allowPrivilegeEscalation": false,
+				"capabilities": map[string]interface{}{
+					"drop": []interface{}{"ALL"},
+				},
+			},
+		},
+	})
+
+	_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
+	if err != nil {
+		t.Fatalf("expected update with unchanged framework to pass, got: %v", err)
+	}
 }

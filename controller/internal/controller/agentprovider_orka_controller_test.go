@@ -165,7 +165,6 @@ var _ = Describe("Orka crd provider", func() {
 				Model: airunwayv1alpha1.ModelBinding{
 					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
 						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
-						CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 					},
 				},
 			},
