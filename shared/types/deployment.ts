@@ -34,6 +34,17 @@ export type GgufRunMode = 'build' | 'direct';
 export type RouterMode = 'default' | 'kv' | 'round-robin';
 export type KaitoResourceType = 'workspace' | 'inferenceset';
 
+export interface RecipeProvenance {
+  source?: string;
+  id?: string;
+  strategy?: string;
+  hardware?: string;
+  variant?: string;
+  precision?: string;
+  features?: string[];
+  revision?: string;
+}
+
 export interface DeploymentConfig {
   name: string;
   namespace: string;
@@ -54,6 +65,8 @@ export interface DeploymentConfig {
     memory?: string;
   };
   engineArgs?: Record<string, unknown>;
+  engineExtraArgs?: string[];
+  env?: Record<string, string>;
   prefillReplicas?: number;
   decodeReplicas?: number;
   prefillGpus?: number;
@@ -67,6 +80,7 @@ export interface DeploymentConfig {
   maxModelLen?: number;
   kaitoResourceType?: KaitoResourceType;
   providerOverrides?: Record<string, unknown>;
+  recipeProvenance?: RecipeProvenance;
   storage?: StorageSpec;
   gatewayEnabled?: boolean;
 }
@@ -85,11 +99,13 @@ export interface ProviderSpec {
 
 export interface EngineSpec {
   type: EngineType;
+  image?: string;
   contextLength?: number;
   trustRemoteCode?: boolean;
   enablePrefixCaching?: boolean;
   enforceEager?: boolean;
   args?: Record<string, string>;
+  extraArgs?: string[];
 }
 
 export interface ServingSpec {
@@ -118,6 +134,12 @@ export interface ScalingSpec {
   maxReplicas?: number;
   prefill?: ComponentScalingSpec;
   decode?: ComponentScalingSpec;
+}
+
+export interface EnvVar {
+  name: string;
+  value?: string;
+  valueFrom?: Record<string, unknown>;
 }
 
 export interface PodTemplateSpec {
@@ -152,7 +174,7 @@ export interface ModelDeploymentSpec {
   scaling?: ScalingSpec;
   resources?: ResourceSpec;
   image?: string;
-  env?: Record<string, string>;
+  env?: EnvVar[];
   podTemplate?: PodTemplateSpec;
   secrets?: SecretSpec;
   gateway?: GatewaySpec;
@@ -201,6 +223,22 @@ export interface GatewayModelInfo {
   ready: boolean;
 }
 
+export interface ImageStatus {
+  requested?: string;
+  resolved?: string;
+  repository?: string;
+  tag?: string;
+  digest?: string;
+  source?: 'stable' | 'nightly' | 'launch' | 'custom' | string;
+  createdAt?: string;
+  revision?: string;
+  age?: string;
+  inNightly?: boolean;
+  verified?: boolean;
+  verificationMessage?: string;
+  message?: string;
+}
+
 export interface EndpointStatus {
   service?: string;
   port?: number;
@@ -227,6 +265,7 @@ export interface ModelDeploymentStatus {
   };
   endpoint?: EndpointStatus;
   gateway?: GatewayStatus;
+  image?: ImageStatus;
   conditions?: Condition[];
   observedGeneration?: number;
 }
@@ -286,6 +325,7 @@ export interface DeploymentStatus {
     ready: number;
   };
   gateway?: GatewayStatus;
+  image?: ImageStatus;
 }
 
 // ==================== Conversion Functions ====================
@@ -452,6 +492,51 @@ function resolveEngineType(config: DeploymentConfig): EngineType {
   return config.engine as EngineType;
 }
 
+const RECIPE_PROVENANCE_GENERATED_BY = 'vllm-recipe-resolver';
+const RECIPE_PROVENANCE_ANNOTATION_PREFIX = 'airunway.ai/recipe.';
+
+export function recipeProvenanceToAnnotations(recipeProvenance?: RecipeProvenance): Record<string, string> | undefined {
+  if (!recipeProvenance) {
+    return undefined;
+  }
+
+  const annotations: Record<string, string> = {};
+  let hasProvenance = false;
+
+  const addStringAnnotation = (field: keyof Omit<RecipeProvenance, 'features'>) => {
+    const value = recipeProvenance[field];
+    // Only emit meaningful provenance: skip undefined/null and empty/whitespace
+    // strings so we never produce annotations like airunway.ai/recipe.source=""
+    // or mark the object generated-by without real provenance.
+    if (typeof value === 'string' && value.trim() !== '') {
+      hasProvenance = true;
+      annotations[`${RECIPE_PROVENANCE_ANNOTATION_PREFIX}${field}`] = value.trim();
+    }
+  };
+
+  addStringAnnotation('source');
+  addStringAnnotation('id');
+  addStringAnnotation('strategy');
+  addStringAnnotation('hardware');
+  addStringAnnotation('variant');
+  addStringAnnotation('precision');
+  addStringAnnotation('revision');
+
+  if (Array.isArray(recipeProvenance.features) && recipeProvenance.features.length > 0) {
+    hasProvenance = true;
+    annotations[`${RECIPE_PROVENANCE_ANNOTATION_PREFIX}features`] = JSON.stringify(recipeProvenance.features);
+  }
+
+  if (!hasProvenance) {
+    return undefined;
+  }
+
+  return {
+    'airunway.ai/generated-by': RECIPE_PROVENANCE_GENERATED_BY,
+    ...annotations,
+  };
+}
+
 function normalizeEngineArgs(engineArgs?: Record<string, unknown>): Record<string, string> | undefined {
   if (!engineArgs) {
     return undefined;
@@ -495,14 +580,23 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
       enablePrefixCaching: config.enablePrefixCaching,
       enforceEager: config.enforceEager,
       args: normalizeEngineArgs(config.engineArgs),
+      extraArgs: config.engineExtraArgs,
     },
     serving: {
       mode: config.mode,
     },
   };
 
+  if (config.env && Object.keys(config.env).length > 0) {
+    spec.env = Object.entries(config.env).map(([name, value]) => ({ name, value }));
+  }
+
   if (config.imageRef) {
-    spec.image = config.imageRef;
+    if (config.provider === 'vllm') {
+      spec.engine.image = config.imageRef;
+    } else {
+      spec.image = config.imageRef;
+    }
   }
 
   // Merge routerMode into providerOverrides when set to a non-default value.
@@ -602,11 +696,14 @@ export function toDeploymentStatus(md: ModelDeployment, pods: PodStatus[] = []):
     prefillReplicas: status.prefillReplicas,
     decodeReplicas: status.decodeReplicas,
     gateway: status.gateway,
+    image: status.image,
     storage: spec.model.storage,
   };
 }
 
 export function toModelDeploymentManifest(config: DeploymentConfig): ModelDeployment {
+  const annotations = recipeProvenanceToAnnotations(config.recipeProvenance);
+
   return {
     apiVersion: 'airunway.ai/v1alpha1',
     kind: 'ModelDeployment',
@@ -618,6 +715,7 @@ export function toModelDeploymentManifest(config: DeploymentConfig): ModelDeploy
         'app.kubernetes.io/instance': config.name,
         'app.kubernetes.io/managed-by': 'airunway',
       },
+      ...(annotations && { annotations }),
     },
     spec: toModelDeploymentSpec(config),
   };

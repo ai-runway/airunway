@@ -2,7 +2,7 @@
 
 ## WHY: Project Purpose
 
-**AI Runway** is a platform for deploying and managing machine learning models on Kubernetes. It provides a unified CRD abstraction (`ModelDeployment`) that works across multiple inference providers (KAITO, Dynamo, KubeRay, llm-d, etc.).
+**AI Runway** is a platform for deploying and managing machine learning models on Kubernetes. It provides a unified CRD abstraction (`ModelDeployment`) that works across multiple inference providers (KAITO, Dynamo, KubeRay, llm-d, Direct vLLM, etc.).
 
 ## WHAT: Tech Stack & Structure
 
@@ -18,6 +18,7 @@
   - `controller/config/` - Kustomize manifests for CRDs/RBAC
 - `frontend/src/` - React components, hooks, pages
 - `backend/src/` - Hono app, providers, services
+- `providers/` - Standalone provider controllers/shims (`dynamo`, `kaito`, `kuberay`, `llmd`, `vllm`); each renders `ModelDeployment` into its upstream resource. `providers/vllm` is the in-repo Direct vLLM provider (renders native `Deployment`+`Service`, selected via `provider.name: vllm`).
 - `shared/types/` - Shared TypeScript definitions
 - `plugins/headlamp/` - Headlamp dashboard plugin
 - `docs/` - Detailed documentation (read as needed; also the source rendered on the website)
@@ -103,7 +104,9 @@ Unified API for deploying ML models. Key fields:
 - `spec.model.id` - HuggingFace model ID or custom identifier
 - `spec.model.source` - `huggingface` or `custom`
 - `spec.engine.type` - `vllm`, `sglang`, `trtllm`, or `llamacpp` (optional, auto-selected from provider capabilities)
-- `spec.provider.name` - Optional explicit provider selection
+- `spec.engine.image` - Optional engine-specific container image override (preferred over legacy top-level `spec.image`; used by Direct vLLM/custom images)
+- `spec.engine.extraArgs` - Optional list of raw engine flags appended verbatim
+- `spec.provider.name` - Optional explicit provider selection (`kaito`, `dynamo`, `kuberay`, `llmd`, `vllm`)
 - `spec.serving.mode` - `aggregated` (default) or `disaggregated`
 - `spec.resources.gpu.count` - GPU count for aggregated mode
 - `spec.scaling.prefill/decode` - Component scaling for disaggregated mode
@@ -112,9 +115,10 @@ Unified API for deploying ML models. Key fields:
 
 ### InferenceProviderConfig
 Cluster-scoped resource for provider registration:
-- `spec.capabilities.engines` - Supported inference engines
-- `spec.capabilities.servingModes` - Supported serving modes
-- `spec.capabilities.gpuSupport/cpuSupport` - Hardware support
+- `spec.capabilities.engines` - Authoritative provider capabilities used by controller selection, webhook compatibility checks, and gateway behavior
+- `spec.capabilities.engines[].servingModes` - Supported serving modes per engine
+- `spec.capabilities.engines[].gpuSupport/cpuSupport` - Hardware support per engine
+- `airunway.ai/capabilities` annotation - Optional compatibility mirror for dashboard/provider discovery clients
 - `spec.selectionRules` - CEL expressions for auto-selection
 - `status.ready` - Provider health status
 

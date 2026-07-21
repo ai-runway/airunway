@@ -291,6 +291,118 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(warnings).To(BeEmpty())
 		})
 
+		It("Should reject conflicting spec.image and spec.engine.image on create", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Image = "legacy:v1"
+			obj.Spec.Engine.Image = "engine:v2"
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.image"))
+			Expect(err.Error()).To(ContainSubstring("spec.engine.image"))
+		})
+
+		It("Should reject conflicting spec.image and spec.engine.image on update", func() {
+			oldObj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			oldObj.Spec.Engine.Image = "engine:v1"
+
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Image = "legacy:v1"
+			obj.Spec.Engine.Image = "engine:v2"
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.image"))
+			Expect(err.Error()).To(ContainSubstring("spec.engine.image"))
+		})
+
+		It("Should reject changing an explicitly-set provider.name", func() {
+			oldObj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			oldObj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "dynamo"}
+
+			obj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "vllm"}
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("provider.name is immutable"))
+		})
+
+		It("Should reject overriding an auto-selected provider recorded only in status", func() {
+			// Auto-selection writes the chosen provider to status, never to the
+			// user's spec. Overriding it via spec.provider.name must be rejected
+			// at admission, not admitted and then failed asynchronously by the
+			// controller.
+			oldObj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			oldObj.Spec.Provider = nil // user never set a provider
+			oldObj.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo"}
+
+			obj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			obj.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "vllm"}
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("provider.name is immutable"))
+		})
+
+		It("Should admit an update that does not change the effective provider", func() {
+			// A plain re-apply (spec.provider.name still empty) must not be
+			// rejected just because status records an auto-selected provider —
+			// otherwise every reconcile-driven update on an auto-selected MD breaks.
+			oldObj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			oldObj.Spec.Provider = nil
+			oldObj.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo"}
+
+			obj.Spec.Model.ID = "Qwen/Qwen2.5-0.5B-Instruct"
+			obj.Spec.Provider = nil
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should admit matching spec.image and spec.engine.image", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Image = "same:v1"
+			obj.Spec.Engine.Image = "same:v1"
+
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("Should reject a flag set in both engine.args and engine.extraArgs on create", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Args = map[string]string{"tensor-parallel-size": "4"}
+			obj.Spec.Engine.ExtraArgs = []string{"--tensor-parallel-size=2"}
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("tensor-parallel-size"))
+			Expect(err.Error()).To(ContainSubstring("spec.engine.args"))
+			Expect(err.Error()).To(ContainSubstring("spec.engine.extraArgs"))
+		})
+
+		It("Should reject a flag set in both engine.args and engine.extraArgs on update", func() {
+			oldObj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Args = map[string]string{"tensor-parallel-size": "4"}
+			obj.Spec.Engine.ExtraArgs = []string{"--tensor-parallel-size", "2"}
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("tensor-parallel-size"))
+		})
+
+		It("Should admit disjoint engine.args and engine.extraArgs", func() {
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Engine.Args = map[string]string{"gpu-memory-utilization": "0.9"}
+			obj.Spec.Engine.ExtraArgs = []string{"--enable-chunked-prefill", "--max-num-seqs=64"}
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("Should admit a single modelCache volume", func() {
 			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
 			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{

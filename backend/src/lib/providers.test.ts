@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   aggregateRequiresCRDFromCapabilities,
+  extractProviderInfo,
   getProviderDisplayName,
   providerRequiresRuntimeCRD,
 } from './providers';
@@ -42,6 +43,24 @@ describe('provider metadata helpers', () => {
   test('preserves explicit requiresCRD flags for operator-backed providers', () => {
     expect(providerRequiresRuntimeCRD('dynamo', false)).toBe(false);
     expect(providerRequiresRuntimeCRD('custom-provider', true, 'Custom Provider')).toBe(true);
+  });
+
+  test('derives requiresCRD from annotation capabilities when spec capabilities are empty', () => {
+    const provider = extractProviderInfo({
+      metadata: {
+        name: 'custom-native-provider',
+        annotations: {
+          'airunway.ai/provider-name': 'Custom Native Provider',
+          'airunway.ai/capabilities': JSON.stringify({
+            engines: [{ name: 'vllm', servingModes: ['aggregated'], requiresCRD: false }],
+          }),
+        },
+      },
+      spec: { capabilities: {} },
+    });
+
+    expect(provider.requiresCRD).toBe(false);
+    expect(provider.capabilities?.engines).toEqual(['vllm']);
   });
 
   test('defaults operator-backed providers to requiring runtime CRDs', () => {

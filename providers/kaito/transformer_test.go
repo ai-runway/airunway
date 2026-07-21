@@ -200,6 +200,32 @@ func TestTransformLlamaCpp(t *testing.T) {
 	}
 }
 
+func TestTransformLlamaCppUsesEngineImageOverride(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeLlamaCpp
+	md.Spec.Image = "legacy-image:latest"
+	md.Spec.Engine.Image = "engine-image:latest"
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	inference, _, _ := unstructured.NestedMap(ws.Object, "inference")
+	template, ok := inference["template"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected inference.template to be a map")
+	}
+	spec, _ := template["spec"].(map[string]interface{})
+	containers, _ := spec["containers"].([]interface{})
+	container, _ := containers[0].(map[string]interface{})
+	if container["image"] != "engine-image:latest" {
+		t.Errorf("expected engine image override, got %v", container["image"])
+	}
+}
+
 func TestTransformLlamaCppUsesExplicitGGUFURL(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")

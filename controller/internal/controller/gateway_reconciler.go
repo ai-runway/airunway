@@ -117,6 +117,15 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	// Determine the HTTPRoute backend via the GAIE InferencePool/EPP path.
 	poolName, poolNamespace := md.Name, md.Namespace
 
+	// Two independent extension points exist:
+	//   1. InferencePool delegation (e.g. Dynamo): the provider's upstream
+	//      operator creates the InferencePool AND the EPP. The controller
+	//      skips both. Opt-in via gatewayCapabilities.ManagesInferencePool.
+	//   2. EPP customization (e.g. llm-d): the controller creates the
+	//      InferencePool and the EPP scaffolding, but uses the provider-
+	//      supplied EPP image and plugin config. Opt-in via
+	//      gatewayCapabilities.EndpointPicker.
+
 	// Use provider managed inference pool if it exists,
 	// otherwise use the default inference pool.
 	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities, gwConfig); ok && err == nil {
@@ -146,9 +155,12 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 
 	if gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool {
 		logger.Info("Skipping EPP creation, provider manages EPP", "provider", resolvedProviderName(md))
-	} else { // Use default EPP
-		// Create or update EPP (EndPoint Picker) for the InferencePool
-		if err := r.reconcileEPP(ctx, md); err != nil {
+	} else { // Use controller-managed EPP (default or provider-customized).
+		var eppOverrides *airunwayv1alpha1.EndpointPickerCapabilities
+		if gatewayCapabilities != nil {
+			eppOverrides = gatewayCapabilities.EndpointPicker
+		}
+		if err := r.reconcileEPP(ctx, md, eppOverrides); err != nil {
 			r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "EPPFailed", err.Error())
 			return fmt.Errorf("reconciling EPP: %w", err)
 		}
@@ -382,8 +394,11 @@ func resolveProviderPoolField(pattern, mdName, mdNamespace, fallback string) str
 }
 
 // reconcileEPP creates or updates the Endpoint Picker Proxy deployment and service
-// for a ModelDeployment's InferencePool.
-func (r *ModelDeploymentReconciler) reconcileEPP(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+// for a ModelDeployment's InferencePool. When overrides is non-nil, its Image
+// and ConfigData take precedence over the controller's defaults.
+func (r *ModelDeploymentReconciler) reconcileEPP(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, overrides *airunwayv1alpha1.EndpointPickerCapabilities) error {
+	logger := log.FromContext(ctx)
+
 	eppName := md.Name + "-epp"
 	eppPort := r.GatewayDetector.EPPServicePort
 	if eppPort == 0 {
@@ -392,6 +407,9 @@ func (r *ModelDeploymentReconciler) reconcileEPP(ctx context.Context, md *airunw
 	eppImage := r.GatewayDetector.EPPImage
 	if eppImage == "" {
 		eppImage = "registry.k8s.io/gateway-api-inference-extension/epp:" + gateway.DefaultGAIEVersion
+	}
+	if overrides != nil && overrides.Image != "" {
+		eppImage = overrides.Image
 	}
 
 	labels := map[string]string{
@@ -481,10 +499,15 @@ func (r *ModelDeploymentReconciler) reconcileEPP(ctx context.Context, md *airunw
 		},
 	}
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Data = map[string]string{
-			"default-plugins.yaml": `apiVersion: inference.networking.x-k8s.io/v1alpha1
+		pluginsYAML := `apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
-`,
+`
+		if overrides != nil && overrides.ConfigData != "" {
+			logger.V(1).Info("Using provider overrides for EPP plugins config")
+			pluginsYAML = overrides.ConfigData
+		}
+		cm.Data = map[string]string{
+			"default-plugins.yaml": pluginsYAML,
 		}
 		return ctrl.SetControllerReference(md, cm, r.Scheme)
 	}); err != nil {
@@ -943,7 +966,8 @@ func (r *ModelDeploymentReconciler) labelModelPods(ctx context.Context, md *airu
 
 	// List pods matching the service selector
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
+	if err := r.List(
+		ctx, &pods,
 		client.InNamespace(md.Namespace),
 		client.MatchingLabels(svc.Spec.Selector),
 	); err != nil {
@@ -1121,6 +1145,9 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
 		logger.V(1).Info("Could not resolve provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
 	}
+	// Only true delegation (ManagesInferencePool: true) means the provider
+	// owns the pool + EPP. EndpointPicker-only customization still leaves the
+	// pool and EPP scaffolding owned by the controller, so they must be cleaned up here.
 	providerManagedPool := gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool
 
 	eppName := md.Name + "-epp"
@@ -1210,6 +1237,10 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities, gwConfig *gateway.GatewayConfig) (bool, error) {
 	logger := log.FromContext(ctx)
 
+	// Only treat the pool as provider-managed when the provider has explicitly
+	// opted in via ManagesInferencePool. Providers that only customize the EPP
+	// (gatewayCapabilities.EndpointPicker without ManagesInferencePool) still
+	// rely on the controller to create the default InferencePool.
 	if gatewayCapabilitities != nil && gatewayCapabilitities.ManagesInferencePool {
 		// Provider manages the pool.
 		return true, nil

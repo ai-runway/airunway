@@ -1,6 +1,9 @@
 import { describe, test, expect } from 'bun:test';
 import { aiConfiguratorService } from './aiconfigurator';
 
+process.env.AIRUNWAY_DISABLE_AICONFIGURATOR = 'true';
+aiConfiguratorService.invalidateStatusCache();
+
 describe('AIConfiguratorService', () => {
   describe('checkStatus', () => {
     test('returns unavailable when aiconfigurator CLI is not found', async () => {

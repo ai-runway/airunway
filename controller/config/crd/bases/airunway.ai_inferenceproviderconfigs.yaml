@@ -51,10 +51,10 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the provider capabilities and selection rules
+            description: spec defines provider capabilities and selection rules
             properties:
               capabilities:
-                description: capabilities defines what this provider supports
+                description: capabilities defines what this provider supports.
                 properties:
                   engines:
                     description: engines is the list of supported inference engines
@@ -71,6 +71,26 @@ spec:
                           description: gateway defines this engine's gateway-related
                             capabilities.
                           properties:
+                            endpointPicker:
+                              description: |-
+                                endpointPicker, when set, customizes the EPP image and plugin
+                                configuration that the controller deploys alongside the default
+                                InferencePool. Ignored when ManagesInferencePool is true (the provider
+                                is then expected to manage the EPP itself).
+                              properties:
+                                configData:
+                                  description: |-
+                                    configData is the raw YAML body of the EndpointPickerConfig that will be
+                                    written into the EPP ConfigMap under the key "default-plugins.yaml" and
+                                    mounted at /config/default-plugins.yaml. When empty, the controller's
+                                    default (empty) EndpointPickerConfig is used.
+                                  type: string
+                                image:
+                                  description: |-
+                                    image is the container image for the EPP. When empty, the controller
+                                    uses its built-in default GAIE EPP image.
+                                  type: string
+                              type: object
                             ignoresServedName:
                               description: |-
                                 ignoresServedName indicates that gateway routing for this provider+engine
@@ -140,8 +160,8 @@ spec:
                 type: object
               selectionRules:
                 description: |-
-                  selectionRules defines rules for auto-selecting this provider
-                  Conditions use CEL (Common Expression Language)
+                  selectionRules defines rules for auto-selecting this provider.
+                  Conditions use CEL (Common Expression Language).
                 items:
                   description: SelectionRule defines a rule for auto-selecting this
                     provider

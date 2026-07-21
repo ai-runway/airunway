@@ -180,13 +180,13 @@ func (t *Transformer) buildDeployment(md *airunwayv1alpha1.ModelDeployment, name
 	// Pod selector labels (must be a stable subset)
 	selectorLabels := map[string]interface{}{
 		"airunway.ai/deployment": md.Name,
-		"app":                        name,
+		"app":                    name,
 	}
 
 	// Pod template labels (must include selector labels)
 	podLabels := map[string]interface{}{
 		"airunway.ai/deployment": md.Name,
-		"app":                        name,
+		"app":                    name,
 	}
 	if md.Spec.PodTemplate != nil && md.Spec.PodTemplate.Metadata != nil {
 		for k, v := range md.Spec.PodTemplate.Metadata.Labels {
@@ -280,7 +280,7 @@ func (t *Transformer) buildService(md *airunwayv1alpha1.ModelDeployment, name, s
 		"type": "ClusterIP",
 		"selector": map[string]interface{}{
 			"airunway.ai/deployment": md.Name,
-			"app":                        selectorApp,
+			"app":                    selectorApp,
 		},
 		"ports": []interface{}{
 			map[string]interface{}{
@@ -357,6 +357,22 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 		args = append(args, "--trust-remote-code")
 	}
 
+	// Prefix caching. vLLM's prefix caching helps the EPP get real cache hits
+	// when the llm-d Router routes requests to a pod that has previously seen
+	// a similar prompt. Defaults to true via the CRD; explicitly map both
+	// states so an override of false produces --no-enable-prefix-caching.
+	if md.Spec.Engine.EnablePrefixCaching {
+		args = append(args, "--enable-prefix-caching")
+	} else {
+		args = append(args, "--no-enable-prefix-caching")
+	}
+
+	// Eager execution (disables CUDA graphs). Off by default; only emit the
+	// flag when explicitly requested.
+	if md.Spec.Engine.EnforceEager {
+		args = append(args, "--enforce-eager")
+	}
+
 	// Tensor parallelism from GPU count
 	tpCount := gpuCount
 	if tpCount == 0 && md.Spec.Resources != nil && md.Spec.Resources.GPU != nil {
@@ -387,6 +403,10 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 		} else {
 			args = append(args, fmt.Sprintf("--%s", key))
 		}
+	}
+
+	if len(md.Spec.Engine.ExtraArgs) > 0 {
+		args = append(args, md.Spec.Engine.ExtraArgs...)
 	}
 
 	return args, nil
@@ -501,8 +521,8 @@ func (t *Transformer) buildLabels(md *airunwayv1alpha1.ModelDeployment) map[stri
 
 // getImage returns the container image to use.
 func (t *Transformer) getImage(md *airunwayv1alpha1.ModelDeployment) string {
-	if md.Spec.Image != "" {
-		return md.Spec.Image
+	if image := md.Spec.ImageOverride(); image != "" {
+		return image
 	}
 	return DefaultVLLMImage
 }

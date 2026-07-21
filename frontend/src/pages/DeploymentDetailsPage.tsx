@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { DeploymentStatusBadge } from '@/components/deployments/DeploymentStatusBadge'
 import { MetricsTab } from '@/components/metrics'
 import { formatRelativeTime } from '@/lib/utils'
+import { getEngineDisplayName, getProviderDisplayName } from '@/lib/deploymentDisplay'
 import { Loader2, ArrowLeft, Trash2, Copy, Terminal, Globe, HardDrive } from 'lucide-react'
 import { useState } from 'react'
 import { buildPortForwardCommand } from '@airunway/shared'
@@ -154,11 +155,11 @@ export function DeploymentDetailsPage() {
             <DeploymentStatusBadge phase={deployment.phase} />
           </div>
           <div>
-            <p className="text-label text-slate-500 mb-1">Runtime</p>
+            <p className="text-label text-slate-500 mb-1">Deployment method</p>
             <Badge
               variant="secondary"
             >
-              {deployment.provider}
+              {getProviderDisplayName(deployment.provider)}
             </Badge>
           </div>
           <div>
@@ -168,8 +169,8 @@ export function DeploymentDetailsPage() {
             </p>
           </div>
           <div>
-            <p className="text-label text-slate-500 mb-1">Engine</p>
-            <Badge variant="outline">{deployment.engine?.toUpperCase() ?? 'Pending'}</Badge>
+            <p className="text-label text-slate-500 mb-1">Model server</p>
+            <Badge variant="outline">{getEngineDisplayName(deployment.engine)}</Badge>
           </div>
           <div>
             <p className="text-label text-slate-500 mb-1">Mode</p>

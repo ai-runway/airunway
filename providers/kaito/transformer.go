@@ -224,7 +224,8 @@ func (t *Transformer) buildInference(md *airunwayv1alpha1.ModelDeployment) (map[
 
 // buildLlamaCppTemplate creates the pod template spec for llamacpp inference
 func (t *Transformer) buildLlamaCppTemplate(md *airunwayv1alpha1.ModelDeployment) (map[string]interface{}, error) {
-	if md.Spec.Image == "" {
+	image := md.Spec.ImageOverride()
+	if image == "" {
 		return nil, fmt.Errorf("image is required for llamacpp engine type")
 	}
 
@@ -247,7 +248,7 @@ func (t *Transformer) buildLlamaCppTemplate(md *airunwayv1alpha1.ModelDeployment
 	// Build container
 	container := map[string]interface{}{
 		"name":  "model",
-		"image": md.Spec.Image,
+		"image": image,
 		"args":  args,
 		"ports": ports,
 	}

@@ -31,6 +31,7 @@ AI Runway gives you a web UI and a unified Kubernetes CRD (`ModelDeployment`) to
 | [**KubeRay**](https://github.com/ray-project/kuberay)    | Ray-based distributed inference                                    | [kuberay.yaml](providers/kuberay/deploy/kuberay.yaml) |
 | [**KAITO**](https://github.com/kaito-project/kaito)      | vLLM (GPU) and llama.cpp (CPU/GPU) support                         | [kaito.yaml](providers/kaito/deploy/kaito.yaml)       |
 | [**LLM-D**](https://github.com/llm-d/llm-d)              | vLLM (GPU) with aggregated or disaggregated serving                | [llmd.yaml](providers/llmd/deploy/llmd.yaml)          |
+| [**Direct vLLM**](docs/providers/vllm.md)                 | Direct OpenAI-compatible vLLM Deployments for newest model support | [vllm.yaml](providers/vllm/deploy/vllm.yaml)          |
 
 ## Quick Start
 

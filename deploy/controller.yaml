@@ -778,10 +778,10 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the provider capabilities and selection rules
+            description: spec defines provider capabilities and selection rules
             properties:
               capabilities:
-                description: capabilities defines what this provider supports
+                description: capabilities defines what this provider supports.
                 properties:
                   engines:
                     description: engines is the list of supported inference engines
@@ -798,6 +798,26 @@ spec:
                           description: gateway defines this engine's gateway-related
                             capabilities.
                           properties:
+                            endpointPicker:
+                              description: |-
+                                endpointPicker, when set, customizes the EPP image and plugin
+                                configuration that the controller deploys alongside the default
+                                InferencePool. Ignored when ManagesInferencePool is true (the provider
+                                is then expected to manage the EPP itself).
+                              properties:
+                                configData:
+                                  description: |-
+                                    configData is the raw YAML body of the EndpointPickerConfig that will be
+                                    written into the EPP ConfigMap under the key "default-plugins.yaml" and
+                                    mounted at /config/default-plugins.yaml. When empty, the controller's
+                                    default (empty) EndpointPickerConfig is used.
+                                  type: string
+                                image:
+                                  description: |-
+                                    image is the container image for the EPP. When empty, the controller
+                                    uses its built-in default GAIE EPP image.
+                                  type: string
+                              type: object
                             ignoresServedName:
                               description: |-
                                 ignoresServedName indicates that gateway routing for this provider+engine
@@ -867,8 +887,8 @@ spec:
                 type: object
               selectionRules:
                 description: |-
-                  selectionRules defines rules for auto-selecting this provider
-                  Conditions use CEL (Common Expression Language)
+                  selectionRules defines rules for auto-selecting this provider.
+                  Conditions use CEL (Common Expression Language).
                 items:
                   description: SelectionRule defines a rule for auto-selecting this
                     provider
@@ -1074,6 +1094,18 @@ spec:
                       enforceEager forces eager execution mode (disables CUDA graphs)
                       Only applicable for vllm and sglang engines
                     type: boolean
+                  extraArgs:
+                    description: |-
+                      extraArgs contains additional raw engine flags. Use this for flags that
+                      do not have a structured field or map representation yet.
+                    items:
+                      type: string
+                    type: array
+                  image:
+                    description: |-
+                      image is an engine-specific container image override. For direct vLLM
+                      deployments this is the vLLM OpenAI-compatible server image.
+                    type: string
                   trustRemoteCode:
                     default: false
                     description: |-
@@ -1404,7 +1436,7 @@ spec:
                 properties:
                   name:
                     description: |-
-                      name is the provider name (e.g., dynamo, kaito, kuberay, llmd)
+                      name is the provider name (e.g., dynamo, kaito, kuberay, llmd, vllm)
                       If not specified, the provider-selector will choose one
                     type: string
                   overrides:
@@ -1690,6 +1722,57 @@ spec:
                   modelName:
                     description: modelName is the model name to use in API requests
                     type: string
+                type: object
+              image:
+                description: image contains information about resolved and verified
+                  images.
+                properties:
+                  age:
+                    description: age is a human-readable image age, when known.
+                    type: string
+                  createdAt:
+                    description: createdAt is the image creation timestamp, when known.
+                    type: string
+                  digest:
+                    description: digest is the immutable image digest when available.
+                    type: string
+                  inNightly:
+                    description: inNightly indicates whether the selected image is
+                      available in the nightly catalog.
+                    type: boolean
+                  message:
+                    description: message explains image resolution or verification
+                      details.
+                    type: string
+                  repository:
+                    description: repository is the image repository.
+                    type: string
+                  requested:
+                    description: requested is the image reference requested by the
+                      user or resolver.
+                    type: string
+                  resolved:
+                    description: resolved is the fully resolved image reference used
+                      by the deployment.
+                    type: string
+                  revision:
+                    description: revision is the upstream source revision associated
+                      with the image, when known.
+                    type: string
+                  source:
+                    description: 'source describes how the image was selected: stable,
+                      nightly, launch, or custom.'
+                    type: string
+                  tag:
+                    description: tag is the image tag.
+                    type: string
+                  verificationMessage:
+                    description: verificationMessage contains details from image verification.
+                    type: string
+                  verified:
+                    description: verified indicates whether the image has passed controller
+                      verification.
+                    type: boolean
                 type: object
               message:
                 description: message is a human-readable message about the current

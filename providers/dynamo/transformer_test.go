@@ -204,8 +204,15 @@ func TestGetImage(t *testing.T) {
 		t.Errorf("expected custom image, got %s", img)
 	}
 
+	// Engine image override takes precedence over legacy spec.image
+	md.Spec.Engine.Image = "engine-image:v2"
+	if img := tr.getImage(md); img != "engine-image:v2" {
+		t.Errorf("expected engine image override, got %s", img)
+	}
+
 	// Default vLLM image
 	md.Spec.Image = ""
+	md.Spec.Engine.Image = ""
 	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeVLLM
 	if img := tr.getImage(md); img != defaultVLLMRuntimeImage {
 		t.Errorf("expected default vllm image, got %s", img)

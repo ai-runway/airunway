@@ -13,7 +13,7 @@ Note: The UI layer shown above includes the Frontend layer and the Backend layer
 | Component                | Language              | Role                                                        | Required?        |
 | ------------------------ | --------------------- | ----------------------------------------------------------- | ---------------- |
 | **Controller**           | Go (Kubebuilder)      | Core operator — manages CRDs, provider selection, lifecycle | ✅ Yes            |
-| **Provider Controllers** | Go                    | Out-of-tree controllers for KAITO, Dynamo, KubeRay, llmd          | ✅ Yes (1+)       |
+| **Providers / Runtime adapters** | Go / provider-specific | Provider-registered controllers or configs for KAITO, Dynamo, KubeRay, llm-d, Direct vLLM | ✅ Yes (1+) |
 | **Backend API**          | TypeScript (Hono/Bun) | REST API — proxies K8s operations, auth, model catalog      | Optional         |
 | **React Frontend**       | React/TypeScript      | Bundled Web UI                                              | ❌ Swappable      |
 | **Headlamp Plugin**      | React/TypeScript      | Alternative UI inside Headlamp dashboard                    | ❌ Swappable      |
@@ -59,36 +59,38 @@ Note: The UI layer shown above includes the Frontend layer and the Backend layer
                   Kubernetes API (client-go / @kubernetes/client-node)
                                │
  ┌─────────────────────────────┼────────────────────────────────────────────┐
- │                    KUBERNETES CLUSTER                                     │
- │                             │                                             │
- │              ┌──────────────▼──────────────┐                             │
- │              │    AI Runway Controller   │  (core operator)           │
- │              │    • Validates specs         │                             │
- │              │    • Selects providers (CEL) │                             │
- │              │    • Manages CRD lifecycle   │                             │
- │              └──────┬───────────────┬───────┘                             │
- │                     │ watches       │ delegates                           │
- │                     ▼               ▼                                     │
- │  ┌──────────────────────┐  ┌──────────────────────────────────────────┐  │
- │  │  ModelDeployment     │  │     Provider Controllers (out-of-tree)   │  │
- │  │  (CRD)               │  │                                          │  │
- │  │                      │  │  ┌────────┐  ┌────────┐  ┌──────────┐┌───────┐  │  │
- │  │  InferenceProvider   │  │  │ KAITO  │  │ Dynamo │  │ KubeRay  ││ llmd  |  │  │
- │  │  Config (CRD)        │  │  └───┬────┘  └───┬────┘  └────┬─────┘└────┬──┘  │  │
- │  └──────────────────────┘  │      │           │            │          │  │
- │                             │      ▼           ▼            ▼          │  │
- │                             │  ┌────────┐  ┌────────┐  ┌──────────┐   │  │
- │                             │  │KAITO   │  │Dynamo  │  │RayService│   │  │
- │                             │  │Workspace│  │Graph   │  │          │   │  │
- │                             │  └────────┘  └────────┘  └──────────┘   │  │
- │                             └──────────────────────────────────────────┘  │
- │                                                                           │
- │              ┌────────────────────────────────────────────┐               │
- │              │        Inference Pods (GPU/CPU)            │               │
- │              │  Running vLLM, sglang, TRT-LLM, llama.cpp │               │
- │              └────────────────────────────────────────────┘               │
- └───────────────────────────────────────────────────────────────────────────┘
+ │                    KUBERNETES CLUSTER                                    │
+ │                             │                                            │
+ │              ┌──────────────▼──────────────┐                            │
+ │              │    AI Runway Controller     │  (core operator)           │
+ │              │    • Validates specs        │                            │
+ │              │    • Selects providers (CEL)│                            │
+ │              │    • Manages targets       │                            │
+ │              └──────┬───────────────┬──────┘                            │
+ │                     │ watches       │ reconciles registered targets      │
+ │                     ▼               ▼                                    │
+ │  ┌──────────────────────┐  ┌─────────────────────────────────────────┐  │
+ │  │  ModelDeployment     │  │ Providers / runtimes registered by      │  │
+ │  │  (CRD)               │  │ InferenceProviderConfig                 │  │
+ │  │                      │  │                                         │  │
+ │  │  InferenceProvider   │  │ KAITO | Dynamo | KubeRay | llm-d |      │  │
+ │  │  Config (CRD)        │  │ Direct vLLM (provider-supplied)         │  │
+ │  └──────────────────────┘  │                                         │  │
+ │                            │ Targets include Workspace, DynamoGraph, │  │
+ │                            │ RayService, llm-d resources, or a       │  │
+ │                            │ plain Kubernetes Deployment             │  │
+ │                            └─────────────────────────────────────────┘  │
+ │                                                                          │
+ │              ┌────────────────────────────────────────────┐              │
+ │              │        Inference Pods (GPU/CPU)            │              │
+ │              │  Running vLLM, sglang, TRT-LLM, llama.cpp │              │
+ │              └────────────────────────────────────────────┘              │
+ └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Provider and Runtime Registration
+
+Providers and direct runtimes register capabilities, selection rules, and installation metadata through `InferenceProviderConfig` resources. Some providers reconcile provider-specific CRDs such as KAITO `Workspace`, Dynamo graph resources, KubeRay `RayService`, or llm-d resources. Direct runtimes such as Direct vLLM can instead target a plain Kubernetes `Deployment`; this repository includes the Direct vLLM provider controller and shim manifests under `providers/vllm/`.
 
 ### Why the Frontend Is Fully Decoupled
 

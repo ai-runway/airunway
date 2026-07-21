@@ -1,5 +1,5 @@
 # Example: KAITO provider registration (typically created by kaito-provider controller)
-# Installation and documentation metadata are stored in annotations, not in spec.
+# Human-facing metadata is stored in annotations; scheduling capabilities live in spec.
 apiVersion: airunway.ai/v1alpha1
 kind: InferenceProviderConfig
 metadata:
@@ -8,7 +8,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: kaito
   annotations:
-    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md"
+    airunway.ai/display-name: KAITO
+    airunway.ai/description: Kubernetes AI Toolchain Operator for simplified model deployment
+    airunway.ai/default-namespace: kaito-workspace
+    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md
+    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md
 spec:
   capabilities:
     engines:
@@ -34,7 +38,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: dynamo
   annotations:
-    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md"
+    airunway.ai/display-name: Dynamo
+    airunway.ai/description: NVIDIA Dynamo for high-performance GPU inference
+    airunway.ai/default-namespace: dynamo-system
+    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md
+    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md
 spec:
   capabilities:
     engines:
@@ -78,7 +86,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: kuberay
   annotations:
-    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md"
+    airunway.ai/display-name: KubeRay
+    airunway.ai/description: Ray Serve via KubeRay for distributed Ray-based model serving with vLLM
+    airunway.ai/default-namespace: ray-system
+    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md
+    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/kuberay.md
 spec:
   capabilities:
     engines:
@@ -98,7 +110,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: llmd
   annotations:
-    airunway.ai/documentation: "https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md"
+    airunway.ai/display-name: llm-d
+    airunway.ai/description: 'llm-d provider: deploys vLLM Deployments + Services directly. Requires GPU nodes with the NVIDIA device plugin.'
+    airunway.ai/default-namespace: default
+    airunway.ai/documentation-url: https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md
+    airunway.ai/documentation: https://github.com/kaito-project/airunway/tree/main/docs/providers/llmd.md
 spec:
   capabilities:
     engines:

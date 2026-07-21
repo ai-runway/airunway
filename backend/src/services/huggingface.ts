@@ -137,6 +137,22 @@ function resolveTransformerConfig(config: HfConfigJson): HfTransformerConfig {
   return config;
 }
 
+// HuggingFace's `expand[]` parameter behaves like an explicit field selection.
+// If we request only safetensors/gated, the API omits compatibility metadata such
+// as config.architectures, pipeline_tag, and library_name, which makes otherwise
+// deployable models disappear from search. Keep every field used by
+// modelCompatibility.ts in this list.
+const HF_MODEL_SEARCH_EXPAND_FIELDS = [
+  'safetensors',
+  'gated',
+  'config',
+  'pipeline_tag',
+  'library_name',
+  'tags',
+  'downloads',
+  'likes',
+];
+
 /**
  * HuggingFace OAuth Service
  * Handles OAuth token exchange and user info retrieval using PKCE flow
@@ -300,7 +316,10 @@ class HuggingFaceService {
     const fetchResults = await Promise.all(
       pipelineTags.map(async (tag) => {
         const searchParams = new URLSearchParams({ ...baseParams, filter: tag });
-        const url = `${HF_MODELS_URL}?${searchParams.toString()}&expand[]=safetensors&expand[]=gated`;
+        for (const field of HF_MODEL_SEARCH_EXPAND_FIELDS) {
+          searchParams.append('expand[]', field);
+        }
+        const url = `${HF_MODELS_URL}?${searchParams.toString()}`;
         const response = await fetch(url, { headers });
         if (!response.ok) {
           logger.warn({ status: response.status, tag }, 'HuggingFace search failed for pipeline tag');

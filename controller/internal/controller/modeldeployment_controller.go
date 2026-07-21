@@ -232,7 +232,19 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// it can be resolved before engine selection.
 	resolvedServingMode := md.ResolvedServingMode()
 
-	// Step 3: Select engine if needed (before validation, since validation needs engine type)
+	// Step 3: Defensively reject conflicting image overrides before selection logic.
+	// The validating webhook normally prevents this, but objects can bypass
+	// admission in tests, during upgrades, or when webhooks are disabled.
+	if err := md.Spec.ValidateImageFields(); err != nil {
+		logger.Error(err, "Image field validation failed", "name", md.Name)
+		r.setImageFieldConflictStatus(&md, err)
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeValidated, metav1.ConditionFalse, "ValidationFailed", err.Error())
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = fmt.Sprintf("Validation failed: %s", err.Error())
+		return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
+	}
+
+	// Step 4: Select engine if needed (before validation, since validation needs engine type)
 	if r.EnableProviderSelector {
 		if err := r.selectEngine(ctx, &md, providerConfigs, resolvedServingMode); err != nil {
 			logger.Error(err, "Engine selection failed", "name", md.Name)
@@ -243,13 +255,13 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// Step 4: Resolve the engine type once for downstream use (validation, CEL
+	// Step 5: Resolve the engine type once for downstream use (validation, CEL
 	// evaluation, provider selection). We pass it through explicitly rather than
 	// mutating md.Spec to avoid any risk of corrupting the shared informer
 	// cache's backing data.
 	resolvedEngineType := md.ResolvedEngineType()
 
-	// Step 5: Validate the spec (uses resolved engine type and serving mode)
+	// Step 6: Validate the spec (uses resolved engine type and serving mode)
 	if err := r.validateSpec(ctx, &md, providerConfigs, resolvedEngineType, resolvedServingMode); err != nil {
 		logger.Error(err, "Validation failed", "name", md.Name)
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeValidated, metav1.ConditionFalse, "ValidationFailed", err.Error())
@@ -270,7 +282,29 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// Step 6: Run provider selection if needed
+	// Step 7: Reject an unsupported provider switch. Once a provider is recorded
+	// in status, re-pointing spec.provider.name to a different provider is not yet
+	// supported: the previously-selected provider's resources and finalizer would
+	// be orphaned because provider controllers only clean up on ModelDeployment
+	// deletion, not on deselection (tracked in
+	// https://github.com/kaito-project/airunway/issues/325). Fail explicitly here
+	// rather than silently keeping the old provider, so the conflict is visible.
+	if md.Spec.Provider != nil && md.Spec.Provider.Name != "" &&
+		md.Status.Provider != nil && md.Status.Provider.Name != "" &&
+		md.Spec.Provider.Name != md.Status.Provider.Name {
+		msg := fmt.Sprintf(
+			"changing spec.provider.name from %q to %q after a provider has been selected is not supported; delete and recreate the ModelDeployment to use a different provider",
+			md.Status.Provider.Name, md.Spec.Provider.Name,
+		)
+		logger.Info("Rejected unsupported provider change", "name", md.Name, "from", md.Status.Provider.Name, "to", md.Spec.Provider.Name)
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionFalse, "ProviderChangeNotSupported", msg)
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = msg
+		r.recordReconcileError(&md, "provider_change")
+		return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
+	}
+
+	// Step 8: Run provider selection if needed
 	if r.EnableProviderSelector {
 		if err := r.selectProvider(ctx, &md, providerConfigs, resolvedEngineType, resolvedServingMode); err != nil {
 			logger.Error(err, "Provider selection failed", "name", md.Name)
@@ -281,7 +315,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// Step 7: Update status
+	// Step 9: Update status
 	// If no provider is selected yet, stay in Pending
 	if md.Status.Provider == nil || md.Status.Provider.Name == "" {
 		if md.Spec.Provider != nil && md.Spec.Provider.Name != "" {
@@ -311,7 +345,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// - status.endpoint
 	// - ProviderCompatible, ResourceCreated, Ready conditions
 
-	// Step 8: Reconcile gateway resources (InferencePool + HTTPRoute) when deployment is running
+	// Step 10: Reconcile gateway resources (InferencePool + HTTPRoute) when deployment is running
 	if md.Status.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
 		if md.Spec.Gateway != nil && md.Spec.Gateway.Enabled != nil && !*md.Spec.Gateway.Enabled {
 			// Gateway explicitly disabled — clean up any existing resources
@@ -356,6 +390,11 @@ func isNoMatchError(err error) bool {
 // validateSpec performs validation on the ModelDeployment spec
 func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, providerConfigs []airunwayv1alpha1.InferenceProviderConfig, engineType airunwayv1alpha1.EngineType, servingMode airunwayv1alpha1.ServingMode) error {
 	spec := &md.Spec
+
+	if err := spec.ValidateImageFields(); err != nil {
+		r.setImageFieldConflictStatus(md, err)
+		return err
+	}
 
 	// Validate model.id is required for huggingface source
 	if spec.Model.Source == airunwayv1alpha1.ModelSourceHuggingFace || spec.Model.Source == "" {
@@ -693,6 +732,15 @@ func (r *ModelDeploymentReconciler) runSelectionAlgorithm(md *airunwayv1alpha1.M
 	}
 
 	return best.name, best.reason, nil
+}
+
+func (r *ModelDeploymentReconciler) setImageFieldConflictStatus(md *airunwayv1alpha1.ModelDeployment, err error) {
+	message := err.Error()
+	r.setCondition(md, airunwayv1alpha1.ConditionTypeImageResolved, metav1.ConditionFalse, "ConflictingImageFields", message)
+	md.Status.Image = &airunwayv1alpha1.ImageStatus{
+		Requested: md.Spec.ImageOverride(),
+		Message:   message,
+	}
 }
 
 // setCondition updates a condition on the ModelDeployment.

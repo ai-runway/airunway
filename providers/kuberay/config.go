@@ -270,12 +270,46 @@ func (m *ProviderConfigManager) Unregister(ctx context.Context) error {
 }
 
 func buildAnnotations() (map[string]string, error) {
-	installJSON, err := json.Marshal(GetInstallationInfo())
+	installation := GetInstallationInfo()
+	health := map[string]interface{}{
+		"crds": []map[string]string{
+			{"name": "rayservices.ray.io", "displayName": "KubeRay RayService CRD"},
+		},
+		"operatorPods": []map[string]interface{}{
+			{
+				"namespace": installation.DefaultNamespace,
+				"selectors": []string{
+					"app.kubernetes.io/name=kuberay-operator,app.kubernetes.io/instance=kuberay-operator",
+					"app.kubernetes.io/name=kuberay-operator",
+				},
+			},
+			{
+				"selectors": []string{"app.kubernetes.io/name=kuberay-operator"},
+			},
+		},
+	}
+
+	installJSON, err := json.Marshal(installation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal installation info: %w", err)
 	}
+	capabilitiesJSON, err := json.Marshal(GetProviderConfigSpec().Capabilities)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal capabilities: %w", err)
+	}
+	healthJSON, err := json.Marshal(health)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal health info: %w", err)
+	}
+
 	return map[string]string{
-		airunwayv1alpha1.AnnotationInstallation:  string(installJSON),
-		airunwayv1alpha1.AnnotationDocumentation: ProviderDocumentation,
+		airunwayv1alpha1.AnnotationDisplayName:      "KubeRay",
+		airunwayv1alpha1.AnnotationDescription:      installation.Description,
+		airunwayv1alpha1.AnnotationDefaultNamespace: installation.DefaultNamespace,
+		airunwayv1alpha1.AnnotationDocumentationURL: ProviderDocumentation,
+		airunwayv1alpha1.AnnotationCapabilities:     string(capabilitiesJSON),
+		airunwayv1alpha1.AnnotationHealth:           string(healthJSON),
+		airunwayv1alpha1.AnnotationInstallation:     string(installJSON),
+		airunwayv1alpha1.AnnotationDocumentation:    ProviderDocumentation,
 	}, nil
 }

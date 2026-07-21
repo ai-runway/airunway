@@ -19,8 +19,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -944,7 +947,7 @@ func TestGateway_CleanupSkipsProviderManagedResources(t *testing.T) {
 
 	resolver := &mockProviderResolver{
 		caps: map[string]*airunwayv1alpha1.GatewayCapabilities{
-			"dynamo": {ManagesInferencePool: true},
+			"dynamo": {ManagesInferencePool: true, InferencePoolNamePattern: "{name}-pool", InferencePoolNamespace: "{namespace}"},
 		},
 	}
 
@@ -1262,4 +1265,133 @@ func TestIsNoMatchError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGateway_EPP_DefaultsWhenNoOverrides verifies that when a provider does
+// not declare EndpointPicker capabilities, the controller falls back to the
+// built-in GAIE EPP image and a minimal default plugin ConfigMap.
+func TestGateway_EPP_DefaultsWhenNoOverrides(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md)
+	ctx := context.Background()
+
+	if err := r.reconcileEPP(ctx, md, nil); err != nil {
+		t.Fatalf("reconcileEPP failed: %v", err)
+	}
+
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &dep); err != nil {
+		t.Fatalf("EPP Deployment not found: %v", err)
+	}
+	img := dep.Spec.Template.Spec.Containers[0].Image
+	if !strings.HasPrefix(img, "registry.k8s.io/gateway-api-inference-extension/epp:") {
+		t.Errorf("expected default GAIE EPP image, got %q", img)
+	}
+
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &cm); err != nil {
+		t.Fatalf("EPP ConfigMap not found: %v", err)
+	}
+	if !strings.Contains(cm.Data["default-plugins.yaml"], "EndpointPickerConfig") {
+		t.Errorf("expected default EndpointPickerConfig ConfigMap, got %q", cm.Data["default-plugins.yaml"])
+	}
+}
+
+// TestGateway_EPP_ProviderOverrides verifies that when a provider supplies
+// EndpointPicker capabilities the controller-managed EPP Deployment uses the
+// provider's image and the ConfigMap carries the provider's plugin config.
+func TestGateway_EPP_ProviderOverrides(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md)
+	ctx := context.Background()
+
+	overrides := &airunwayv1alpha1.EndpointPickerCapabilities{
+		Image:      "ghcr.io/example/custom-epp:v1.2.3",
+		ConfigData: "apiVersion: llm-d.ai/v1alpha1\nkind: EndpointPickerConfig\nplugins:\n- type: custom-scorer\n",
+	}
+	if err := r.reconcileEPP(ctx, md, overrides); err != nil {
+		t.Fatalf("reconcileEPP failed: %v", err)
+	}
+
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &dep); err != nil {
+		t.Fatalf("EPP Deployment not found: %v", err)
+	}
+	if got := dep.Spec.Template.Spec.Containers[0].Image; got != overrides.Image {
+		t.Errorf("expected EPP image %q, got %q", overrides.Image, got)
+	}
+
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &cm); err != nil {
+		t.Fatalf("EPP ConfigMap not found: %v", err)
+	}
+	if got := cm.Data["default-plugins.yaml"]; got != overrides.ConfigData {
+		t.Errorf("expected EPP ConfigMap data to match provider overrides, got %q", got)
+	}
+}
+
+// TestGateway_EPP_OnlyImageOverride verifies image-only overrides leave the
+// default ConfigMap in place, and that the inverse (config-only via empty
+// Image) leaves the default GAIE EPP image in place.
+func TestGateway_EPP_OnlyImageOverride(t *testing.T) {
+	t.Run("image only keeps default ConfigMap", func(t *testing.T) {
+		scheme := newTestScheme()
+		md := newModelDeployment("test-model", "default")
+		detector := fakeDetector(true, "my-gateway", "gateway-ns")
+		r := newTestReconciler(scheme, detector, md)
+		ctx := context.Background()
+
+		if err := r.reconcileEPP(ctx, md, &airunwayv1alpha1.EndpointPickerCapabilities{Image: "ghcr.io/example/only:v0"}); err != nil {
+			t.Fatalf("reconcileEPP failed: %v", err)
+		}
+
+		var dep appsv1.Deployment
+		if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &dep); err != nil {
+			t.Fatalf("EPP Deployment not found: %v", err)
+		}
+		if got := dep.Spec.Template.Spec.Containers[0].Image; got != "ghcr.io/example/only:v0" {
+			t.Errorf("expected overridden EPP image, got %q", got)
+		}
+
+		var cm corev1.ConfigMap
+		if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &cm); err != nil {
+			t.Fatalf("EPP ConfigMap not found: %v", err)
+		}
+		if !strings.Contains(cm.Data["default-plugins.yaml"], "EndpointPickerConfig") {
+			t.Errorf("expected default EndpointPickerConfig ConfigMap when only image is overridden, got %q", cm.Data["default-plugins.yaml"])
+		}
+	})
+
+	t.Run("config only keeps default image", func(t *testing.T) {
+		scheme := newTestScheme()
+		md := newModelDeployment("test-model", "default")
+		detector := fakeDetector(true, "my-gateway", "gateway-ns")
+		r := newTestReconciler(scheme, detector, md)
+		ctx := context.Background()
+
+		configData := "apiVersion: llm-d.ai/v1alpha1\nkind: EndpointPickerConfig\nplugins:\n- type: custom-scorer\n"
+		if err := r.reconcileEPP(ctx, md, &airunwayv1alpha1.EndpointPickerCapabilities{ConfigData: configData}); err != nil {
+			t.Fatalf("reconcileEPP failed: %v", err)
+		}
+
+		var dep appsv1.Deployment
+		if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &dep); err != nil {
+			t.Fatalf("EPP Deployment not found: %v", err)
+		}
+		if img := dep.Spec.Template.Spec.Containers[0].Image; !strings.HasPrefix(img, "registry.k8s.io/gateway-api-inference-extension/epp:") {
+			t.Errorf("expected default GAIE EPP image when only config is overridden, got %q", img)
+		}
+
+		var cm corev1.ConfigMap
+		if err := r.Get(ctx, types.NamespacedName{Name: "test-model-epp", Namespace: "default"}, &cm); err != nil {
+			t.Fatalf("EPP ConfigMap not found: %v", err)
+		}
+		if got := cm.Data["default-plugins.yaml"]; got != configData {
+			t.Errorf("expected EPP ConfigMap data to match provider override, got %q", got)
+		}
+	})
 }

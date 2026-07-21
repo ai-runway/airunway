@@ -1364,6 +1364,18 @@ describe('Hono Routes', () => {
       expect(data.error.message).toBe('Authentication required');
     });
 
+    test('provider detail routes require auth when AUTH_ENABLED=true', async () => {
+      process.env.AUTH_ENABLED = 'true';
+
+      for (const path of ['/api/settings/providers/kaito', '/api/providers/kaito']) {
+        const res = await app.request(path);
+        expect(res.status).toBe(401);
+        expect(res.headers.get(AIRUNWAY_AUTH_ERROR_HEADER)).toBe('true');
+        const data = await res.json();
+        expect(data.error.message).toBe('Authentication required');
+      }
+    });
+
     test('invalid bearer token returns 401', async () => {
       process.env.AUTH_ENABLED = 'true';
 

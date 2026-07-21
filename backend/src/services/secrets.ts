@@ -20,7 +20,7 @@ const HF_TOKEN_KEY = 'HF_TOKEN';
  * Namespaces where the HF secret should be distributed
  * These are the namespaces used by different inference providers
  */
-const TARGET_NAMESPACES = ['dynamo-system', 'kuberay-system', 'kaito-workspace', 'default'];
+const TARGET_NAMESPACES = ['dynamo-system', 'ray-system', 'kuberay-system', 'kaito-workspace', 'default'];
 
 /**
  * Secrets Service

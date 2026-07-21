@@ -2,6 +2,7 @@ package kuberay
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
@@ -204,5 +205,67 @@ func TestUpdateStatusNotFound(t *testing.T) {
 	err := mgr.UpdateStatus(context.Background(), true)
 	if err == nil {
 		t.Fatal("expected error when config not found")
+	}
+}
+
+func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
+	annotations, err := buildAnnotations()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	requiredKeys := []string{
+		airunwayv1alpha1.AnnotationDisplayName,
+		airunwayv1alpha1.AnnotationDescription,
+		airunwayv1alpha1.AnnotationDefaultNamespace,
+		airunwayv1alpha1.AnnotationDocumentationURL,
+		airunwayv1alpha1.AnnotationCapabilities,
+		airunwayv1alpha1.AnnotationHealth,
+		airunwayv1alpha1.AnnotationInstallation,
+		airunwayv1alpha1.AnnotationDocumentation,
+	}
+	for _, key := range requiredKeys {
+		if annotations[key] == "" {
+			t.Fatalf("expected annotation %s to be set", key)
+		}
+	}
+	if annotations[airunwayv1alpha1.AnnotationDisplayName] != "KubeRay" {
+		t.Fatalf("expected KubeRay display name, got %q", annotations[airunwayv1alpha1.AnnotationDisplayName])
+	}
+	if annotations[airunwayv1alpha1.AnnotationDefaultNamespace] != "ray-system" {
+		t.Fatalf("expected ray-system default namespace, got %q", annotations[airunwayv1alpha1.AnnotationDefaultNamespace])
+	}
+
+	var capabilities airunwayv1alpha1.ProviderCapabilities
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationCapabilities]), &capabilities); err != nil {
+		t.Fatalf("failed to decode capabilities annotation: %v", err)
+	}
+	if capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeVLLM) == nil {
+		t.Fatalf("expected annotated vllm capability, got %+v", capabilities.Engines)
+	}
+
+	var health struct {
+		CRDs []struct {
+			Name string `json:"name"`
+		} `json:"crds"`
+		OperatorPods []struct {
+			Namespace string   `json:"namespace"`
+			Selectors []string `json:"selectors"`
+		} `json:"operatorPods"`
+	}
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
+		t.Fatalf("failed to decode health annotation: %v", err)
+	}
+	if len(health.CRDs) != 1 || health.CRDs[0].Name != "rayservices.ray.io" {
+		t.Fatalf("expected KubeRay CRD health probe, got %+v", health.CRDs)
+	}
+	if len(health.OperatorPods) != 2 {
+		t.Fatalf("expected namespace and cross-namespace KubeRay operator probes, got %+v", health.OperatorPods)
+	}
+	if health.OperatorPods[0].Namespace != "ray-system" {
+		t.Fatalf("expected namespaced KubeRay operator probe in ray-system, got %+v", health.OperatorPods[0])
+	}
+	if health.OperatorPods[1].Namespace != "" || len(health.OperatorPods[1].Selectors) != 1 || health.OperatorPods[1].Selectors[0] != "app.kubernetes.io/name=kuberay-operator" {
+		t.Fatalf("expected cross-namespace KubeRay operator fallback, got %+v", health.OperatorPods[1])
 	}
 }

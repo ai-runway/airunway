@@ -43,7 +43,37 @@ const (
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
+
+	// LLMDSchedulerDefaultConfig is the default EndpointPickerConfig shipped
+	// with the llm-d provider. It mirrors deploy/config/epp-config.yaml from
+	// llm-d-inference-scheduler: a heuristic prefix-cache scorer
+	// combined with a decode filter and max-score picker. It does NOT
+	// require any special vLLM flags (--kv-events-config / precise prefix
+	// cache).
+	LLMDSchedulerDefaultConfig = `apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: prefix-cache-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+`
 )
+
+// LLMDSchedulerImage is the llm-d Inference Scheduler image used as the
+// EPP for all llm-d ModelDeployments.
+//
+// Source of truth: /versions.env at the repo root.
+// (see providers/llmd/Makefile). The string literal below is a fallback for
+// `go run` / `go test` invocations that bypass the Makefile.
+var LLMDSchedulerImage = "ghcr.io/llm-d/llm-d-inference-scheduler:v0.6.0"
 
 // ProviderConfigManager handles registration and heartbeat for the llm-d provider
 type ProviderConfigManager struct {
@@ -72,6 +102,18 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 					},
 					GPUSupport:  true,
 					RequiresCRD: &requiresCRD,
+					Gateway: &airunwayv1alpha1.GatewayCapabilities{
+						// llm-d does not delegate InferencePool creation to its own
+						// operator. Instead it provides a custom EPP image (the llm-d
+						// Router Endpoint Picker) with llm-d-specific scoring plugins.
+						// The controller still creates the InferencePool and EPP
+						// scaffolding; only the EPP image and plugin config come from
+						// the provider.
+						EndpointPicker: &airunwayv1alpha1.EndpointPickerCapabilities{
+							Image:      LLMDSchedulerImage,
+							ConfigData: LLMDSchedulerDefaultConfig,
+						},
+					},
 				},
 			},
 		},
@@ -201,12 +243,36 @@ func (m *ProviderConfigManager) Unregister(ctx context.Context) error {
 }
 
 func buildAnnotations() (map[string]string, error) {
-	installJSON, err := json.Marshal(GetInstallationInfo())
+	installation := GetInstallationInfo()
+	defaultNamespace := installation.DefaultNamespace
+	if defaultNamespace == "" {
+		defaultNamespace = "default"
+	}
+	health := map[string]interface{}{
+		"status": map[string]string{"readyPath": "ready"},
+	}
+
+	installJSON, err := json.Marshal(installation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal installation info: %w", err)
 	}
+	capabilitiesJSON, err := json.Marshal(GetProviderConfigSpec().Capabilities)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal capabilities: %w", err)
+	}
+	healthJSON, err := json.Marshal(health)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal health info: %w", err)
+	}
+
 	return map[string]string{
-		airunwayv1alpha1.AnnotationInstallation:  string(installJSON),
-		airunwayv1alpha1.AnnotationDocumentation: ProviderDocumentation,
+		airunwayv1alpha1.AnnotationDisplayName:      "llm-d",
+		airunwayv1alpha1.AnnotationDescription:      installation.Description,
+		airunwayv1alpha1.AnnotationDefaultNamespace: defaultNamespace,
+		airunwayv1alpha1.AnnotationDocumentationURL: ProviderDocumentation,
+		airunwayv1alpha1.AnnotationCapabilities:     string(capabilitiesJSON),
+		airunwayv1alpha1.AnnotationHealth:           string(healthJSON),
+		airunwayv1alpha1.AnnotationInstallation:     string(installJSON),
+		airunwayv1alpha1.AnnotationDocumentation:    ProviderDocumentation,
 	}, nil
 }

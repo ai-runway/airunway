@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Loader2, ArrowLeft, Cpu, HardDrive, Layers, ExternalLink, Info } from 'lucide-react'
 import { GpuFitIndicator } from '@/components/models/GpuFitIndicator'
 import { ThroughputEstimate } from '@/components/models/ThroughputEstimate'
+import { getEngineDisplayName } from '@/lib/deploymentDisplay'
 import { getGpuFitCapacityDisplay } from '@/lib/gpu-fit-capacity'
 import { buildThroughputParams } from '@/lib/gpu-throughput-params'
 import { useGpuThroughput } from '@/hooks/useGpuOperator'
@@ -222,7 +223,7 @@ export function DeployPage() {
         <div className="flex flex-wrap gap-2 mt-4">
           {model.supportedEngines.map((engine) => (
             <Badge key={engine} variant="secondary" className="bg-white/[0.06] border-white/10">
-              {engine.toUpperCase()}
+              {getEngineDisplayName(engine)}
             </Badge>
           ))}
         </div>

@@ -10,6 +10,7 @@ import { metricsService } from '../services/metrics';
 import { validateGpuFit, formatGpuWarnings } from '../services/gpuValidation';
 import { aikitService, GGUF_RUNNER_IMAGE } from '../services/aikit';
 import { handleK8sError } from '../lib/k8s-errors';
+import { extractProviderDetails } from '../lib/providers';
 import models from '../data/models.json';
 import logger from '../lib/logger';
 import type { AppEnv } from '../types/hono';
@@ -132,6 +133,17 @@ const storageSchema = z.object({
   volumes: z.array(storageVolumeSchema).max(8, 'Maximum 8 storage volumes allowed').optional(),
 }).optional();
 
+const recipeProvenanceSchema = z.object({
+  source: z.string().optional(),
+  id: z.string().optional(),
+  strategy: z.string().optional(),
+  hardware: z.string().optional(),
+  variant: z.string().optional(),
+  precision: z.string().optional(),
+  features: z.array(z.string()).optional(),
+  revision: z.string().optional(),
+}).optional();
+
 const createDeploymentSchema = z.object({
   name: resourceNameSchema,
   modelId: z.string().min(1, 'Model ID is required'),
@@ -152,6 +164,8 @@ const createDeploymentSchema = z.object({
     memory: z.string().optional(),
   }).optional(),
   engineArgs: z.record(z.string(), z.unknown()).optional(),
+  engineExtraArgs: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   providerOverrides: z.record(z.string(), z.unknown()).optional(),
   prefillReplicas: z.number().int().min(0).optional(),
   decodeReplicas: z.number().int().min(0).optional(),
@@ -165,6 +179,7 @@ const createDeploymentSchema = z.object({
   computeType: z.enum(['cpu', 'gpu']).optional(),
   maxModelLen: z.number().int().positive().optional(),
   gatewayEnabled: z.boolean().optional(),
+  recipeProvenance: recipeProvenanceSchema,
   storage: storageSchema,
 }).superRefine((data, ctx) => {
   const volumes = data.storage?.volumes;
@@ -351,6 +366,106 @@ const createDeploymentSchema = z.object({
   }
 });
 
+
+function validateSupportedCapability(
+  providerId: string,
+  label: string,
+  value: string | undefined,
+  supported: string[] | undefined,
+): void {
+  if (!value || !supported || supported.length === 0) {
+    return;
+  }
+
+  if (!supported.includes(value)) {
+    throw new HTTPException(422, {
+      message: `Provider "${providerId}" does not support ${label} "${value}". Supported ${label} values: ${supported.join(', ')}`,
+    });
+  }
+}
+
+function getSupportedModesForEngine(
+  capabilities: NonNullable<ReturnType<typeof extractProviderDetails>['capabilities']>,
+  engine: string | undefined,
+): string[] | undefined {
+  if (!engine) return undefined;
+
+  const matchingEngineModes = capabilities.engineCapabilities
+    ?.filter((engineCapability) => engineCapability.name === engine)
+    .flatMap((engineCapability) => engineCapability.servingModes || []);
+
+  return matchingEngineModes && matchingEngineModes.length > 0
+    ? Array.from(new Set(matchingEngineModes))
+    : undefined;
+}
+
+function hasProviderDeploymentCapabilities(
+  capabilities: NonNullable<ReturnType<typeof extractProviderDetails>['capabilities']>,
+): boolean {
+  return Boolean(
+    capabilities.engines.length > 0
+    || (capabilities.engineCapabilities?.length ?? 0) > 0
+    || capabilities.modes.length > 0
+    || capabilities.modelSources.length > 0
+    || capabilities.routerModes.length > 0
+  );
+}
+
+function getProviderOverrideRouterMode(providerOverrides: Record<string, unknown> | undefined): string | undefined {
+  const value = providerOverrides?.routerMode;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+async function validateProviderCapabilities(config: DeploymentConfig): Promise<void> {
+  if (!config.provider) {
+    return;
+  }
+
+  let providerConfig;
+  try {
+    providerConfig = await kubernetesService.getInferenceProviderConfig(config.provider);
+  } catch (error) {
+    logger.warn(
+      { providerId: config.provider, error: error instanceof Error ? error.message : String(error) },
+      'Unable to fetch provider config for capability validation; deferring to admission checks',
+    );
+    return;
+  }
+  if (!providerConfig) {
+    throw new HTTPException(404, { message: `Provider not found: ${config.provider}` });
+  }
+
+  const provider = extractProviderDetails(providerConfig);
+  const capabilities = provider.capabilities ?? {
+    engines: [],
+    modes: [],
+    modelSources: [],
+    routerModes: [],
+    features: {},
+  };
+
+  if (!hasProviderDeploymentCapabilities(capabilities)) {
+    logger.warn({ providerId: config.provider }, 'Provider does not declare deployment capabilities; skipping provider capability validation');
+    return;
+  }
+
+  validateSupportedCapability(config.provider, 'engine', config.engine, capabilities.engines);
+  const supportedModesForEngine = getSupportedModesForEngine(capabilities, config.engine);
+  validateSupportedCapability(
+    config.provider,
+    supportedModesForEngine && config.engine ? `mode for engine ${config.engine}` : 'mode',
+    config.mode,
+    supportedModesForEngine ?? capabilities.modes,
+  );
+  const effectiveModelSource = config.modelSource ?? 'huggingface';
+  validateSupportedCapability(config.provider, 'model source', effectiveModelSource, capabilities.modelSources);
+  const effectiveRouterMode = config.routerMode && config.routerMode !== 'default'
+    ? config.routerMode
+    : getProviderOverrideRouterMode(config.providerOverrides);
+  if (effectiveRouterMode && effectiveRouterMode !== 'default') {
+    validateSupportedCapability(config.provider, 'router mode', effectiveRouterMode, capabilities.routerModes);
+  }
+}
 
 function parseJsonObject(text: string): Record<string, unknown> | undefined {
   try {
@@ -920,6 +1035,7 @@ const deployments = new Hono<AppEnv>()
       ...body,
       namespace: body.namespace || (await configService.getDefaultNamespace()),
     });
+    await validateProviderCapabilities(config);
 
     // GPU fit validation
     let gpuWarnings: string[] = [];
@@ -981,6 +1097,7 @@ const deployments = new Hono<AppEnv>()
       ...body,
       namespace: body.namespace || (await configService.getDefaultNamespace()),
     });
+    await validateProviderCapabilities(config);
 
     // Apply storage defaults that the mutating webhook would add,
     // so the preview manifest matches what Kubernetes will persist.

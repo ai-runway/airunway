@@ -16,18 +16,7 @@ import {
 } from '../services/gpuPerformance';
 import type { GpuThroughputEstimate, NodePoolInfo } from '@airunway/shared';
 import logger from '../lib/logger';
-import { aggregateRequiresCRDFromCapabilities, getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
-
-interface ProviderHelmChartDetails {
-  name: string;
-  chart: string;
-  namespace: string;
-  version?: string;
-  createNamespace?: boolean;
-  values?: Record<string, unknown>;
-  preInstallMissingCrds?: boolean;
-  skipCrds?: boolean;
-}
+import { extractProviderDetails, type ProviderHelmChartDetails } from '../lib/providers';
 
 /** Default context length (tokens) assumed when a model doesn't specify one. */
 const DEFAULT_CONTEXT_LEN = 4096;
@@ -135,105 +124,6 @@ function selectGpuForEstimate(
     }
   }
   return best;
-}
-
-/** Minimal shape of an InferenceProviderConfig CRD object that these helpers read. */
-interface ProviderConfigResource {
-  metadata?: {
-    name?: string;
-    annotations?: Record<string, string>;
-  };
-  spec?: {
-    capabilities?: { engines?: unknown[] } & Record<string, unknown>;
-  };
-}
-
-/** Shape of the parsed `airunway.ai/installation` annotation (all fields optional). */
-interface InstallationAnnotation {
-  description?: string;
-  defaultNamespace?: string;
-  helmRepos?: Array<{ name?: string; url?: string }>;
-  helmCharts?: Array<{
-    name?: string;
-    chart?: string;
-    version?: string;
-    namespace?: string;
-    createNamespace?: boolean;
-    values?: unknown;
-  }>;
-  steps?: Array<{ title?: string; command?: string; description?: string }>;
-}
-
-/**
- * Parse the installation annotation (JSON) from an InferenceProviderConfig CRD object.
- */
-function parseInstallationAnnotation(config: ProviderConfigResource): InstallationAnnotation {
-  const raw = config.metadata?.annotations?.['airunway.ai/installation'];
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as InstallationAnnotation;
-  } catch (error) {
-    logger.warn({
-      provider: config.metadata?.name,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    }, 'Failed to parse installation annotation');
-    return {};
-  }
-}
-
-/**
- * Extract provider details from an InferenceProviderConfig CRD object.
- * Installation and documentation metadata are read from metadata.annotations,
- * not from spec (which only contains controller-reconciled fields).
- */
-function extractProviderDetails(config: ProviderConfigResource) {
-  const name = config.metadata?.name || 'unknown';
-  const annotations = config.metadata?.annotations;
-  const displayName = getProviderDisplayName(name, annotations);
-  const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
-  const installation = parseInstallationAnnotation(config);
-  const capabilities = config.spec?.capabilities || {};
-
-  return {
-    id: name,
-    name: displayName,
-    description: installation.description || '',
-    defaultNamespace: installation.defaultNamespace || 'default',
-    requiresCRD: providerRequiresRuntimeCRD(name, aggregateRequiresCRDFromCapabilities(capabilities), annotatedDisplayName),
-    crdConfig: {
-      // The real CRD apiGroup isn't stored on the InferenceProviderConfig, so we
-      // can't derive it here; emit an empty string to satisfy the CRDConfig type.
-      apiGroup: '',
-    },
-    helmRepos: (installation.helmRepos || [])
-      .filter((r): r is { name: string; url: string } => !!r.name && !!r.url)
-      .map((r) => ({
-        name: r.name,
-        url: r.url,
-      })),
-    helmCharts: (installation.helmCharts || []).map((c): ProviderHelmChartDetails => {
-      const values = c.values && typeof c.values === 'object' && !Array.isArray(c.values)
-        ? c.values as Record<string, unknown>
-        : undefined;
-      if (c.values !== undefined && values === undefined) {
-        logger.warn({ provider: name, chart: c.name }, 'Ignoring malformed Helm chart values in provider installation metadata');
-      }
-
-      return {
-        name: c.name || '',
-        chart: c.chart || '',
-        version: c.version,
-        namespace: c.namespace || '',
-        createNamespace: c.createNamespace,
-        values,
-      };
-    }),
-    installationSteps: (installation.steps || []).map((s) => ({
-      title: s.title,
-      command: s.command,
-      description: s.description,
-    })),
-  };
 }
 
 function shouldPreInstallMissingCrds(providerId: string, chart: ProviderHelmChartDetails) {
@@ -509,6 +399,7 @@ const installation = new Hono()
       providerId,
       status,
       provider.name,
+      provider.health,
       provider.requiresCRD,
     );
     // Layer the shim's heartbeat-aware health view on top of the live

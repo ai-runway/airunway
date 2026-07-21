@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { settingsApi, type Settings, type ProviderInfo } from '@/lib/api'
+import { providersApi, settingsApi, type Settings, type ProviderInfo } from '@/lib/api'
 
 export function useSettings() {
   return useQuery<Settings>({
@@ -29,14 +29,14 @@ export function useUpdateSettings() {
 export function useProviders() {
   return useQuery<{ providers: ProviderInfo[] }>({
     queryKey: ['providers'],
-    queryFn: () => settingsApi.listProviders(),
+    queryFn: () => providersApi.list(),
   })
 }
 
 export function useProviderDetails(providerId: string) {
   return useQuery({
     queryKey: ['provider', providerId],
-    queryFn: () => settingsApi.getProvider(providerId),
+    queryFn: () => providersApi.get(providerId),
     enabled: !!providerId,
   })
 }

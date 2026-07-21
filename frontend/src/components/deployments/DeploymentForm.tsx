@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -14,7 +14,8 @@ import { usePremadeModels } from '@/hooks/useAikit'
 import { useGatewayStatus } from '@/hooks/useGateway'
 import { useToast } from '@/hooks/useToast'
 import { generateDeploymentName, cn } from '@/lib/utils'
-import { type Model, type DetailedClusterCapacity, type AutoscalerDetectionResult, type RuntimeStatus, type PremadeModel, type AIConfiguratorResult, aikitApi, type Engine, type KaitoResourceType } from '@/lib/api'
+import { type Model, type DetailedClusterCapacity, type AutoscalerDetectionResult, type RuntimeStatus, type PremadeModel, type AIConfiguratorResult, aikitApi, vllmRecipesApi, type Engine, type KaitoResourceType, type VllmRecipeIndexEntry, type VllmRecipeResolveRequest, type VllmRecipeResolveResult } from '@/lib/api'
+import { getEngineDisplayName } from '@/lib/deploymentDisplay'
 import { ChevronDown, AlertCircle, Rocket, CheckCircle2, Sparkles, AlertTriangle, Server, Cpu, Box, Loader2, HardDrive } from 'lucide-react'
 import { CapacityWarning } from './CapacityWarning'
 import { AIConfiguratorPanel } from './AIConfiguratorPanel'
@@ -79,6 +80,46 @@ function GpuPerReplicaField({ id, value, onChange, maxGpus = 8, recommendation, 
   )
 }
 
+interface RecipeMetricProps {
+  label: string
+  children: ReactNode
+}
+
+function RecipeMetric({ label, children }: RecipeMetricProps) {
+  return (
+    <div className="min-w-0 rounded-xl border border-border/70 bg-background/40 p-3 shadow-soft-xs dark:border-white/10 dark:bg-white/[0.03]">
+      <span className="sr-only">{label}: {children}</span>
+      <span aria-hidden="true" className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+        {label}
+      </span>
+      <strong aria-hidden="true" className="mt-1 block break-words text-sm font-semibold leading-5 text-foreground">
+        {children}
+      </strong>
+    </div>
+  )
+}
+
+interface RecipeCodePanelProps {
+  title: string
+  value: unknown
+}
+
+function RecipeCodePanel({ title, value }: RecipeCodePanelProps) {
+  return (
+    <div className="min-w-0 overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-soft-xs dark:border-white/10 dark:bg-[#0b1118]/90">
+      <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-muted/30 px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
+        <span className="truncate font-mono text-xs font-semibold text-foreground">{title}</span>
+        <Badge variant="outline" className="shrink-0 border-border/70 px-2 py-0 text-[10px] text-muted-foreground dark:border-white/10">
+          JSON
+        </Badge>
+      </div>
+      <pre className="max-h-56 overflow-auto p-3 font-mono text-xs leading-5 text-muted-foreground">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    </div>
+  )
+}
+
 interface DeploymentFormProps {
   model: Model
   detailedCapacity?: DetailedClusterCapacity
@@ -107,11 +148,10 @@ interface DeploymentFormProps {
   doesNotFitReason?: string
 }
 
-// Subset of Engine type for traditional GPU inference engines (excludes llamacpp which is KAITO-only)
+// Subset of Engine type for traditional GPU inference engines (excludes llama.cpp)
 type TraditionalEngine = 'vllm' | 'sglang' | 'trtllm'
 type RouterMode = 'default' | 'kv' | 'round-robin'
 type DeploymentMode = 'aggregated' | 'disaggregated'
-type RuntimeId = 'dynamo' | 'kuberay' | 'kaito' | 'llmd' | 'vllm'
 type KaitoComputeType = 'cpu' | 'gpu'
 type GgufRunMode = 'build' | 'direct'
 
@@ -124,9 +164,13 @@ const KV_CACHE_DTYPE_ARG = 'kv-cache-dtype'
 // Engines that accept the generic --quantization / --kv-cache-dtype flags.
 // TRT-LLM uses a different mechanism and KAITO ignores generic engine args.
 const FP8_ARG_ENGINES: TraditionalEngine[] = ['vllm', 'sglang']
+const SUPPORTED_ENGINE_IDS: Engine[] = ['vllm', 'sglang', 'trtllm', 'llamacpp']
+const DIRECT_VLLM_NIGHTLY_IMAGE = 'vllm/vllm-openai:cu130-nightly'
+const DIRECT_VLLM_STABLE_IMAGE = 'vllm/vllm-openai:latest'
 
-// Runtime metadata for display
-const RUNTIME_INFO: Record<RuntimeId, { name: string; description: string; defaultNamespace: string }> = {
+type DirectVllmImageChoice = 'nightly' | 'stable' | 'custom'
+
+const FALLBACK_RUNTIME_INFO: Record<string, { name: string; description: string; defaultNamespace: string }> = {
   dynamo: {
     name: 'NVIDIA Dynamo',
     description: 'High-performance inference with KV-cache routing and disaggregated serving',
@@ -135,32 +179,97 @@ const RUNTIME_INFO: Record<RuntimeId, { name: string; description: string; defau
   kuberay: {
     name: 'KubeRay',
     description: 'Ray-based serving with autoscaling and distributed inference',
-    defaultNamespace: 'kuberay-system',
+    defaultNamespace: 'ray-system',
   },
   kaito: {
     name: 'KAITO',
     description: 'Flexible inference with GGUF (llama.cpp) and vLLM support',
     defaultNamespace: 'kaito-workspace',
   },
+  vllm: {
+    name: 'Direct vLLM',
+    description: 'Direct vLLM provider for newest model support and configurable launch images',
+    defaultNamespace: 'default',
+  },
   llmd: {
     name: 'llm-d',
     description: 'GPU-accelerated vLLM inference with disaggregated prefill/decode support',
     defaultNamespace: 'default',
   },
-  vllm: {
-    name: 'vLLM',
-    description: 'High-throughput inference with the native vLLM provider',
-    defaultNamespace: 'default',
-  },
 }
 
-// Engine support by runtime (only traditional GPU engines, not llamacpp)
-const RUNTIME_ENGINES: Record<RuntimeId, TraditionalEngine[]> = {
+const FALLBACK_RUNTIME_ENGINES: Record<string, Engine[]> = {
   dynamo: ['vllm', 'sglang', 'trtllm'],
-  kuberay: ['vllm'], // KubeRay only supports vLLM currently
-  kaito: ['vllm'], // KAITO exposes vLLM in the engine picker; single-engine llama.cpp models bypass it
-  llmd: ['vllm'], // llm-d uses vLLM exclusively
-  vllm: ['vllm'], // Native vLLM provider uses vLLM exclusively
+  kuberay: ['vllm'],
+  kaito: ['vllm', 'llamacpp'],
+  vllm: ['vllm'],
+  llmd: ['vllm'],
+}
+
+const FALLBACK_RUNTIME_MODES: Record<string, DeploymentMode[]> = {
+  dynamo: ['aggregated', 'disaggregated'],
+  kuberay: ['aggregated', 'disaggregated'],
+  kaito: ['aggregated'],
+  vllm: ['aggregated'],
+  llmd: ['aggregated', 'disaggregated'],
+}
+
+const RUNTIME_SELECTION_PRIORITY = ['dynamo', 'kuberay', 'kaito', 'llmd', 'vllm']
+
+function isEngine(value: string): value is Engine {
+  return SUPPORTED_ENGINE_IDS.includes(value as Engine)
+}
+
+function isDeploymentMode(value: string): value is DeploymentMode {
+  return value === 'aggregated' || value === 'disaggregated'
+}
+
+function uniqueValues<T>(values: T[]): T[] {
+  return Array.from(new Set(values))
+}
+
+function getPrioritizedRuntimes(runtimes: RuntimeStatus[]): RuntimeStatus[] {
+  const priority = new Map(RUNTIME_SELECTION_PRIORITY.map((id, index) => [id, index]))
+  return [...runtimes].sort((left, right) => {
+    const leftPriority = priority.get(left.id) ?? Number.MAX_SAFE_INTEGER
+    const rightPriority = priority.get(right.id) ?? Number.MAX_SAFE_INTEGER
+    return leftPriority - rightPriority
+  })
+}
+
+function getRuntimeEngines(runtime?: RuntimeStatus): Engine[] {
+  const discoveredEngines = runtime?.capabilities?.engines?.filter(isEngine) ?? []
+  if (discoveredEngines.length > 0) return discoveredEngines
+  return runtime?.id ? (FALLBACK_RUNTIME_ENGINES[runtime.id] ?? []) : []
+}
+
+function getRuntimeModes(runtime?: RuntimeStatus, engine?: Engine): DeploymentMode[] {
+  // Direct vLLM and KAITO are single-mode deployment methods in this UI even
+  // when generic runtime fixtures or compatibility mirrors carry broader modes.
+  if (runtime?.id === 'vllm' || runtime?.id === 'kaito') {
+    return FALLBACK_RUNTIME_MODES[runtime.id]
+  }
+
+  const perEngineModes = runtime?.capabilities?.engineCapabilities
+    ?.filter((capability) => !engine || capability.name === engine)
+    .flatMap((capability) => capability.servingModes || [])
+    .filter(isDeploymentMode) ?? []
+
+  if (perEngineModes.length > 0) return uniqueValues(perEngineModes)
+
+  const discoveredModes = runtime?.capabilities?.modes?.filter(isDeploymentMode) ?? []
+  if (discoveredModes.length > 0) return discoveredModes
+
+  return runtime?.id ? (FALLBACK_RUNTIME_MODES[runtime.id] ?? ['aggregated']) : ['aggregated']
+}
+
+function runtimeSupportsMode(runtime: RuntimeStatus | undefined, mode: DeploymentMode, engine?: Engine): boolean {
+  return getRuntimeModes(runtime, engine).includes(mode)
+}
+
+function isRuntimeCompatible(runtime: RuntimeStatus, modelEngines: Engine[], mode: DeploymentMode = 'aggregated'): boolean {
+  const runtimeEngines = getRuntimeEngines(runtime)
+  return modelEngines.some((engine) => runtimeEngines.includes(engine) && runtimeSupportsMode(runtime, mode, engine))
 }
 
 function normalizeGatewayAvailability(
@@ -174,17 +283,6 @@ function normalizeGatewayAvailability(
   const nextConfig = { ...config }
   delete nextConfig.gatewayEnabled
   return nextConfig
-}
-
-// Check if a runtime is compatible with a model based on engine support
-function isRuntimeCompatible(runtimeId: RuntimeId, modelEngines: Engine[]): boolean {
-  // KAITO supports llamacpp (GGUF) AND vllm models
-  if (runtimeId === 'kaito') {
-    return modelEngines.includes('llamacpp') || modelEngines.includes('vllm');
-  }
-  // Other models need at least one matching engine with the runtime
-  const runtimeEngines = RUNTIME_ENGINES[runtimeId];
-  return modelEngines.some(e => runtimeEngines.includes(e as TraditionalEngine));
 }
 
 // Extract nodeCount from providerOverrides structure
@@ -271,6 +369,49 @@ export function setFp8PrecisionEngineArgs(
   return Object.keys(nextEngineArgs).length > 0 ? nextEngineArgs : undefined;
 }
 
+function getDirectVllmImageRef(choice: DirectVllmImageChoice, customImage: string): string {
+  switch (choice) {
+    case 'stable':
+      return DIRECT_VLLM_STABLE_IMAGE
+    case 'custom':
+      return customImage.trim()
+    case 'nightly':
+    default:
+      return DIRECT_VLLM_NIGHTLY_IMAGE
+  }
+}
+
+function getDirectVllmImageSelectionForRef(imageRef: string): { choice: DirectVllmImageChoice; customImage: string } {
+  if (imageRef === DIRECT_VLLM_NIGHTLY_IMAGE) {
+    return { choice: 'nightly', customImage: '' }
+  }
+
+  if (imageRef === DIRECT_VLLM_STABLE_IMAGE) {
+    return { choice: 'stable', customImage: '' }
+  }
+
+  return { choice: 'custom', customImage: imageRef }
+}
+
+function normalizeDirectVllmConfig(
+  baseConfig: DeploymentConfig,
+  imageRef: string,
+  fallbackModelId: string
+): DeploymentConfig {
+  return {
+    ...baseConfig,
+    provider: 'vllm',
+    engine: 'vllm',
+    modelSource: 'vllm',
+    modelId: baseConfig.modelId || fallbackModelId,
+    imageRef,
+    resources: {
+      ...baseConfig.resources,
+      gpu: Math.max(1, baseConfig.resources?.gpu ?? 1),
+    },
+  }
+}
+
 export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, weightQuant = 'fp16', kvCacheDtype = 'fp16', fp8Blocked = false, fp8BlockReason, doesNotFit = false, doesNotFitReason }: DeploymentFormProps) {
   const navigate = useNavigate()
   const { toast } = useToast()
@@ -285,34 +426,41 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   const isGatedModel = model.gated === true
   const needsHfAuth = isGatedModel && !hfStatus?.configured
 
-  // Determine default runtime: prefer compatible and installed runtime
-  const getDefaultRuntime = (): RuntimeId => {
+  const getRuntimeDefaultNamespace = (runtime: string): string => {
+    const runtimeStatus = runtimes?.find(r => r.id === runtime)
+    return runtimeStatus?.defaultNamespace || FALLBACK_RUNTIME_INFO[runtime]?.defaultNamespace || 'default'
+  }
+
+  const getRuntimeDisplayName = (runtime: string): string => {
+    const runtimeStatus = runtimes?.find(r => r.id === runtime)
+    return runtimeStatus?.name || FALLBACK_RUNTIME_INFO[runtime]?.name || runtime || 'selected runtime'
+  }
+
+  const getRuntimeDescription = (runtime: RuntimeStatus): string => (
+    runtime.description || FALLBACK_RUNTIME_INFO[runtime.id]?.description || 'No description available'
+  )
+
+  // Determine default runtime from provider discovery: prefer compatible and installed runtime.
+  const getDefaultRuntime = (): string => {
     if (!runtimes || runtimes.length === 0) {
-      // Fallback based on model engines
       return model.supportedEngines.includes('llamacpp') ? 'kaito' : 'dynamo'
     }
 
-    // Find first compatible and installed runtime
-    const compatibleRuntimes: RuntimeId[] = ['dynamo', 'kuberay', 'kaito', 'llmd', 'vllm']
-    for (const rtId of compatibleRuntimes) {
-      const rt = runtimes.find(r => r.id === rtId)
-      if (rt?.installed && isRuntimeCompatible(rtId, model.supportedEngines)) {
-        return rtId
-      }
-    }
+    const prioritizedRuntimes = getPrioritizedRuntimes(runtimes)
+    const compatibleInstalled = prioritizedRuntimes.find(
+      (runtime) => runtime.installed && isRuntimeCompatible(runtime, model.supportedEngines)
+    )
+    if (compatibleInstalled) return compatibleInstalled.id
 
-    // If no compatible installed runtime, return the first compatible runtime that is available to select
-    for (const rtId of compatibleRuntimes) {
-      const rt = runtimes.find(r => r.id === rtId)
-      if (rt && isRuntimeCompatible(rtId, model.supportedEngines)) {
-        return rtId
-      }
-    }
+    const compatible = prioritizedRuntimes.find((runtime) =>
+      isRuntimeCompatible(runtime, model.supportedEngines)
+    )
+    if (compatible) return compatible.id
 
-    return 'dynamo'
+    return prioritizedRuntimes.find((runtime) => runtime.installed)?.id || prioritizedRuntimes[0]?.id || 'dynamo'
   }
-
-  const [selectedRuntime, setSelectedRuntime] = useState<RuntimeId>(getDefaultRuntime)
+  const [selectedRuntime, setSelectedRuntime] = useState<string>(getDefaultRuntime)
+  const runtimeManuallySelectedRef = useRef(false)
   const selectedRuntimeStatus = runtimes?.find(r => r.id === selectedRuntime)
   const isSelectedCrdLessRuntime = selectedRuntimeStatus?.requiresCRD === false
   const isSelectedCrdLessRuntimeNotReady = isSelectedCrdLessRuntime && !selectedRuntimeStatus?.installed
@@ -339,6 +487,18 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   const [ggufFile, setGgufFile] = useState<string>('')
   const [ggufRunMode, setGgufRunMode] = useState<GgufRunMode>('direct')
   const [maxModelLen, setMaxModelLen] = useState<number | undefined>(undefined)
+
+  // Direct vLLM image and recipe state
+  const [directVllmImageChoice, setDirectVllmImageChoice] = useState<DirectVllmImageChoice>('nightly')
+  const [directVllmCustomImage, setDirectVllmCustomImage] = useState('')
+  const [vllmRecipes, setVllmRecipes] = useState<VllmRecipeIndexEntry[]>([])
+  const [vllmRecipesSource, setVllmRecipesSource] = useState('')
+  const [vllmRecipesLoading, setVllmRecipesLoading] = useState(false)
+  const [vllmRecipesLoaded, setVllmRecipesLoaded] = useState(false)
+  const [vllmRecipesError, setVllmRecipesError] = useState<string | null>(null)
+  const [vllmRecipeApplying, setVllmRecipeApplying] = useState(false)
+  const [vllmRecipeWarnings, setVllmRecipeWarnings] = useState<string[]>([])
+  const [resolvedVllmRecipe, setResolvedVllmRecipe] = useState<VllmRecipeResolveResult | null>(null)
 
   // Check if this is a HuggingFace GGUF model (not a premade model)
   // GGUF models have only llamacpp as supported engine and come from HuggingFace
@@ -373,25 +533,20 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     }
   }, [ggufFilesData, ggufFile]);
 
-  // Get supported engines for the selected runtime, filtered by model support
-  const getAvailableEngines = (): TraditionalEngine[] => {
-    const runtimeEngines = RUNTIME_ENGINES[selectedRuntime]
-    // Filter model engines to only those supported by the runtime (excluding llamacpp)
-    return model.supportedEngines.filter(
-      (e): e is TraditionalEngine => runtimeEngines.includes(e as TraditionalEngine)
-    )
+  // Get supported engines for the selected runtime, filtered by model support.
+  const getAvailableEngines = (): Engine[] => {
+    const runtimeEngines = getRuntimeEngines(selectedRuntimeStatus)
+    return model.supportedEngines.filter((engine) => runtimeEngines.includes(engine))
   }
   const availableEngines = getAvailableEngines()
 
-  const getDefaultEngineForRuntime = (runtime: RuntimeId): Engine => {
+  const getDefaultEngineForRuntime = (runtime: string): Engine => {
     if (model.supportedEngines.length === 1) {
       return model.supportedEngines[0]
     }
 
-    const runtimeEngines = RUNTIME_ENGINES[runtime]
-    return model.supportedEngines.find(
-      (e): e is TraditionalEngine => runtimeEngines.includes(e as TraditionalEngine)
-    ) || model.supportedEngines[0] || 'vllm'
+    const runtimeEngines = getRuntimeEngines(runtimes?.find(r => r.id === runtime))
+    return model.supportedEngines.find((engine) => runtimeEngines.includes(engine)) || model.supportedEngines[0] || 'vllm'
   }
 
   const defaultRuntime = getDefaultRuntime()
@@ -399,7 +554,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [config, setConfig] = useState<DeploymentConfig>({
     name: generateDeploymentName(model.id),
-    namespace: RUNTIME_INFO[defaultRuntime].defaultNamespace,
+    namespace: getRuntimeDefaultNamespace(defaultRuntime),
     modelId: model.id,
     engine: getDefaultEngineForRuntime(defaultRuntime),
     mode: 'aggregated',
@@ -410,6 +565,10 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     enforceEager: true,
     enablePrefixCaching: true,
     trustRemoteCode: false,
+    ...(defaultRuntime === 'vllm' ? {
+      modelSource: 'vllm',
+      imageRef: DIRECT_VLLM_NIGHTLY_IMAGE,
+    } : {}),
     // Disaggregated mode defaults
     prefillReplicas: 1,
     decodeReplicas: 1,
@@ -420,6 +579,31 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       gpu: 0, // Will be set from recommendation
     },
   })
+
+  // If runtimes arrive after the form initializes, select the best discovered runtime.
+  useEffect(() => {
+    if (!runtimes || runtimes.length === 0 || runtimeManuallySelectedRef.current) return
+
+    const runtime = getDefaultRuntime()
+    if (!runtime || runtime === selectedRuntime) return
+
+    setSelectedRuntime(runtime)
+    setConfig(prev => {
+      const leavingDirectVllm = prev.provider === 'vllm' && runtime !== 'vllm'
+      return {
+        ...prev,
+        provider: runtime,
+        namespace: getRuntimeDefaultNamespace(runtime),
+        engine: runtime === 'vllm' ? 'vllm' : getDefaultEngineForRuntime(runtime),
+        mode: runtime === 'kaito' || runtime === 'vllm' ? 'aggregated' : prev.mode,
+        providerOverrides: runtime === 'vllm' ? undefined : prev.providerOverrides,
+        modelSource: runtime === 'vllm' ? 'vllm' : leavingDirectVllm ? undefined : prev.modelSource,
+        imageRef: runtime === 'vllm' ? (prev.imageRef || DIRECT_VLLM_NIGHTLY_IMAGE) : leavingDirectVllm ? undefined : prev.imageRef,
+        recipeProvenance: runtime === 'vllm' ? prev.recipeProvenance : undefined,
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimes, selectedRuntime])
 
   // Fetch PVCs for the selected namespace (for existing disk selection)
   const { data: availablePVCs } = usePVCs(
@@ -433,8 +617,112 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     () => calculateGpuRecommendation(model, detailedCapacity),
     [model, detailedCapacity]
   )
+  const recommendedMultiNodeNodeCount = gpuRecommendation.multiNode?.nodeCount
+  const recommendedMultiNodeGpusPerNode = gpuRecommendation.multiNode?.gpusPerNode
+  const recommendedMultiNodePipelineParallelSize = gpuRecommendation.multiNode?.pipelineParallelSize
+
   const currentNodeCount = getNodeCountFromOverrides(config.providerOverrides)
   const currentPipelineParallel = getNumericEngineArg(config.engineArgs, PIPELINE_PARALLEL_SIZE_ARG)
+  const directVllmImageRef = getDirectVllmImageRef(directVllmImageChoice, directVllmCustomImage)
+  const selectedDirectVllmImageRef = config.imageRef || directVllmImageRef
+  const directVllmCustomImageRequired = selectedRuntime === 'vllm' && directVllmImageChoice === 'custom' && !directVllmImageRef
+  const exactVllmRecipe = vllmRecipes.find(recipe => recipe.hf_id === model.id)
+
+  const loadVllmRecipes = useCallback(async () => {
+    setVllmRecipesLoading(true)
+    setVllmRecipesError(null)
+
+    try {
+      const response = await vllmRecipesApi.list()
+      setVllmRecipes(response.recipes || [])
+      setVllmRecipesSource(response.source || '')
+      setVllmRecipesLoaded(true)
+    } catch (err) {
+      setVllmRecipesError(err instanceof Error ? err.message : 'Failed to load vLLM recipes')
+    } finally {
+      setVllmRecipesLoading(false)
+    }
+  }, [])
+
+  const handleApplyVllmRecipe = async () => {
+    const recipeModelId = model.id
+    const imageRef = getDirectVllmImageRef(directVllmImageChoice, directVllmCustomImage)
+
+    if (!exactVllmRecipe) {
+      toast({
+        title: 'No recipe match',
+        description: 'No official vLLM recipe exactly matches this model id.',
+        variant: 'destructive',
+      })
+      return
+    }
+
+    if (directVllmImageChoice === 'custom' && !imageRef) {
+      toast({
+        title: 'Launch image required',
+        description: 'Enter a vLLM launch image before applying a recipe.',
+        variant: 'destructive',
+      })
+      return
+    }
+
+    const imageChoice: VllmRecipeResolveRequest['imageChoice'] = directVllmImageChoice === 'custom'
+      ? { type: 'custom', imageRef }
+      : { type: 'recipe' }
+    const resolveRequest: VllmRecipeResolveRequest = {
+      modelId: recipeModelId,
+      mode: config.mode,
+      imageChoice,
+    }
+
+    setVllmRecipeApplying(true)
+    setVllmRecipesError(null)
+    setVllmRecipeWarnings([])
+
+    try {
+      const resolved = await vllmRecipesApi.resolve(resolveRequest)
+      setResolvedVllmRecipe(resolved)
+      setVllmRecipeWarnings(resolved.warnings || [])
+      const resolvedImageRef = resolved.imageRef || imageRef
+      const resolvedImageSelection = getDirectVllmImageSelectionForRef(resolvedImageRef)
+      setDirectVllmImageChoice(resolvedImageSelection.choice)
+      setDirectVllmCustomImage(resolvedImageSelection.customImage)
+      setConfig(prev => normalizeDirectVllmConfig({
+        ...prev,
+        modelId: recipeModelId,
+        engine: resolved.engine || 'vllm',
+        mode: resolved.mode || prev.mode,
+        resources: {
+          ...prev.resources,
+          ...resolved.resources,
+        },
+        engineArgs: resolved.engineArgs,
+        engineExtraArgs: resolved.engineExtraArgs,
+        env: {
+          ...(prev.env || {}),
+          ...(resolved.env || {}),
+        },
+        recipeProvenance: resolved.recipeProvenance,
+        providerOverrides: undefined,
+        routerMode: 'default',
+      }, resolvedImageRef, recipeModelId))
+
+      toast({
+        title: 'Recipe applied',
+        description: `${recipeModelId} settings were applied to this Direct vLLM deployment.`,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to apply vLLM recipe'
+      setVllmRecipesError(message)
+      toast({
+        title: 'Recipe failed',
+        description: message,
+        variant: 'destructive',
+      })
+    } finally {
+      setVllmRecipeApplying(false)
+    }
+  }
 
   // Auto-populate HF token secret when user is logged in
   useEffect(() => {
@@ -449,6 +737,31 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   useEffect(() => {
     setConfig(prev => normalizeGatewayAvailability(prev, gatewayInfo?.available))
   }, [gatewayInfo?.available])
+
+  useEffect(() => {
+    if (selectedRuntime === 'vllm' && !vllmRecipesLoaded && !vllmRecipesLoading) {
+      void loadVllmRecipes()
+    }
+  }, [loadVllmRecipes, selectedRuntime, vllmRecipesLoaded, vllmRecipesLoading])
+
+  useEffect(() => {
+    if (selectedRuntime !== 'vllm') return
+
+    setConfig(prev => {
+      const next = normalizeDirectVllmConfig(prev, directVllmImageRef, model.id)
+      if (
+        prev.provider === next.provider &&
+        prev.engine === next.engine &&
+        prev.modelSource === next.modelSource &&
+        prev.imageRef === next.imageRef &&
+        prev.modelId === next.modelId &&
+        prev.resources?.gpu === next.resources?.gpu
+      ) {
+        return prev
+      }
+      return next
+    })
+  }, [selectedRuntime, directVllmImageRef, model.id])
 
   // Set initial GPU value from recommendation when component mounts
   useEffect(() => {
@@ -493,15 +806,25 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         }
       }
 
-      if (gpuRecommendation.multiNode) {
-        const recommendedPipelineParallel = gpuRecommendation.multiNode.pipelineParallelSize
+      if (
+        recommendedMultiNodeNodeCount !== undefined &&
+        recommendedMultiNodeGpusPerNode !== undefined &&
+        recommendedMultiNodePipelineParallelSize !== undefined
+      ) {
+        const recommendedPipelineParallel = recommendedMultiNodePipelineParallelSize
         const gpuCount = prev.resources?.gpu ?? 0
+        const recommendedMultiNode: MultiNodeRecommendation = {
+          nodeCount: recommendedMultiNodeNodeCount,
+          gpusPerNode: recommendedMultiNodeGpusPerNode,
+          totalGpus: recommendedMultiNodeNodeCount * recommendedMultiNodeGpusPerNode,
+          pipelineParallelSize: recommendedMultiNodePipelineParallelSize,
+        }
 
         // Intentionally compare against the previous config inside setState so
         // manual topology edits do not trigger this effect and get snapped back.
         if (
-          prevNodeCount === gpuRecommendation.multiNode.nodeCount &&
-          prevTensorParallel === gpuRecommendation.multiNode.gpusPerNode &&
+          prevNodeCount === recommendedMultiNode.nodeCount &&
+          prevTensorParallel === recommendedMultiNode.gpusPerNode &&
           prevPipelineParallel === recommendedPipelineParallel &&
           gpuCount === gpuRecommendation.recommendedGpus
         ) {
@@ -514,8 +837,8 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
             ...prev.resources,
             gpu: gpuRecommendation.recommendedGpus,
           },
-          providerOverrides: buildDynamoMultiNodeOverrides(gpuRecommendation.multiNode!.nodeCount),
-          engineArgs: setDynamoParallelismEngineArgs(prev.engineArgs, gpuRecommendation.multiNode!),
+          providerOverrides: buildDynamoMultiNodeOverrides(recommendedMultiNode.nodeCount),
+          engineArgs: setDynamoParallelismEngineArgs(prev.engineArgs, recommendedMultiNode),
         }
       }
 
@@ -530,7 +853,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       }
     })
   }, [
-    gpuRecommendation.multiNode,
+    recommendedMultiNodeGpusPerNode,
+    recommendedMultiNodeNodeCount,
+    recommendedMultiNodePipelineParallelSize,
     gpuRecommendation.recommendedGpus,
     selectedRuntime,
     config.engine,
@@ -578,13 +903,13 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   }, [premadeModels, model.id, selectedPremadeModel])
 
   // Handle runtime change - update namespace and engine
-  const handleRuntimeChange = (runtime: RuntimeId) => {
+  const handleRuntimeChange = (runtime: string) => {
+    runtimeManuallySelectedRef.current = true
     setTopologyManagedByAIConfig(false)
     setSelectedRuntime(runtime)
-    const newAvailableEngines = model.supportedEngines.filter(
-      (e): e is TraditionalEngine => RUNTIME_ENGINES[runtime].includes(e as TraditionalEngine)
-    )
-    const currentEngineSupported = newAvailableEngines.includes(config.engine as TraditionalEngine)
+    const runtimeEngines = getRuntimeEngines(runtimes?.find(r => r.id === runtime))
+    const newAvailableEngines = model.supportedEngines.filter((engine) => runtimeEngines.includes(engine))
+    const currentEngineSupported = newAvailableEngines.includes(config.engine)
 
     setConfig(prev => {
       const nextEngine = currentEngineSupported ? prev.engine : getDefaultEngineForRuntime(runtime)
@@ -613,18 +938,23 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         }
       }
 
+      const leavingDirectVllm = prev.provider === 'vllm' && runtime !== 'vllm'
+
       return {
         ...prev,
         provider: runtime,
-        namespace: RUNTIME_INFO[runtime].defaultNamespace,
+        namespace: getRuntimeDefaultNamespace(runtime),
         // Reset engine if current one isn't supported by new runtime
-        engine: nextEngine,
+        engine: runtime === 'vllm' ? 'vllm' : nextEngine,
         // Reset router mode if switching away from Dynamo
         routerMode: runtime === 'dynamo' ? prev.routerMode : 'default',
-        // Reset to aggregated mode if switching to KAITO (disaggregated not supported)
-        mode: runtime === 'kaito' ? 'aggregated' : prev.mode,
-        providerOverrides: newProviderOverrides,
+        // Start single-runtime providers in standard aggregated mode
+        mode: runtime === 'kaito' || runtime === 'vllm' ? 'aggregated' : prev.mode,
+        providerOverrides: runtime === 'vllm' ? undefined : newProviderOverrides,
         engineArgs: newEngineArgs,
+        modelSource: runtime === 'vllm' ? 'vllm' : leavingDirectVllm ? undefined : prev.modelSource,
+        imageRef: runtime === 'vllm' ? directVllmImageRef : leavingDirectVllm ? undefined : prev.imageRef,
+        recipeProvenance: runtime === 'vllm' ? prev.recipeProvenance : undefined,
       }
     })
 
@@ -680,6 +1010,14 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     try {
       // Build the deployment config, adding KAITO-specific fields if needed
       let deployConfig = normalizeGatewayAvailability(config, gatewayInfo?.available)
+
+      if (selectedRuntime === 'vllm') {
+        if (directVllmCustomImageRequired) {
+          throw new Error('Enter a vLLM launch image before deploying.')
+        }
+
+        deployConfig = normalizeDirectVllmConfig(deployConfig, deployConfig.imageRef || directVllmImageRef, model.id)
+      }
 
       if (selectedRuntime === 'kaito') {
         // Add kaitoResourceType to all KAITO deployments
@@ -793,7 +1131,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         variant: 'destructive',
       })
     }
-  }, [config, createDeployment, navigate, toast, triggerConfetti, selectedRuntime, kaitoComputeType, kaitoResourceType, selectedPremadeModel, isHuggingFaceGgufModel, isVllmModel, model.id, ggufFile, ggufRunMode, maxModelLen, gatewayInfo?.available])
+  }, [config, createDeployment, navigate, toast, triggerConfetti, selectedRuntime, directVllmCustomImageRequired, directVllmImageRef, kaitoComputeType, kaitoResourceType, selectedPremadeModel, isHuggingFaceGgufModel, isVllmModel, model.id, model.gated, ggufFile, ggufRunMode, maxModelLen, gatewayInfo?.available])
 
   const updateConfig = <K extends keyof DeploymentConfig>(
     key: K,
@@ -915,6 +1253,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   }
 
   const selectedGpus = calculateSelectedGpus()
+  const supportsDisaggregatedMode = runtimeSupportsMode(selectedRuntimeStatus, 'disaggregated', config.engine)
 
   // Compute current multi-node state from providerOverrides
   const currentMultiNode: MultiNodeRecommendation | null = (() => {
@@ -1029,33 +1368,33 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         <div className="glass-panel">
           <h3 className="text-lg font-semibold flex items-center gap-2 mb-4">
             <Server className="h-5 w-5" />
-            Runtime
+            Deployment method
           </h3>
           <div className="grid gap-4 sm:grid-cols-2">
             {runtimes.map((runtime) => {
-              const info = RUNTIME_INFO[runtime.id as RuntimeId]
-              if (!info) return null
-
-              const isCompatible = isRuntimeCompatible(runtime.id as RuntimeId, model.supportedEngines)
-              const isSelected = selectedRuntime === runtime.id
+              const runtimeId = runtime.id
+              const isCompatible = isRuntimeCompatible(runtime, model.supportedEngines, config.mode)
+              const isSelected = selectedRuntime === runtimeId
+              const displayName = getRuntimeDisplayName(runtimeId)
+              const description = getRuntimeDescription(runtime)
               const isCrdLessRuntime = runtime.requiresCRD === false
               const isCrdLessRuntimeNotReady = isCrdLessRuntime && !runtime.installed
 
               return (
                 <div
-                  key={runtime.id}
+                  key={runtimeId}
                   role="radio"
                   aria-checked={isSelected}
                   tabIndex={isCompatible ? 0 : -1}
                   onClick={() => {
                     if (isCompatible) {
-                      handleRuntimeChange(runtime.id as RuntimeId)
+                      handleRuntimeChange(runtimeId)
                     }
                   }}
                   onKeyDown={(e) => {
                     if (isCompatible && (e.key === 'Enter' || e.key === ' ')) {
                       e.preventDefault()
-                      handleRuntimeChange(runtime.id as RuntimeId)
+                      handleRuntimeChange(runtimeId)
                     }
                   }}
                   className={cn(
@@ -1089,7 +1428,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                           isCompatible ? "cursor-pointer" : "cursor-not-allowed"
                         )}
                       >
-                        {info.name}
+                        {displayName}
                       </span>
                       {!isCompatible ? (
                         <Badge variant="outline" className="text-muted-foreground border-muted text-xs">
@@ -1113,11 +1452,11 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                       )}
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      {info.description}
+                      {description}
                     </p>
                     {!isCompatible && (
                       <p className="text-xs text-muted-foreground mt-1">
-                        This model requires {model.supportedEngines.includes('llamacpp') ? 'llama.cpp' : model.supportedEngines.join('/')} which is not supported by this runtime.
+                        This model requires {model.supportedEngines.includes('llamacpp') ? 'llama.cpp' : model.supportedEngines.join('/')} which is not supported by this deployment method.
                       </p>
                     )}
                     {isCompatible && !runtime.installed && isSelected && (
@@ -1127,7 +1466,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                         ) : (
                           <>
                             <Link to="/installation" className="underline hover:no-underline">
-                              Install {info.name}
+                              Install {displayName}
                             </Link>{' '}
                             before deploying.
                           </>
@@ -1138,6 +1477,23 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                 </div>
               )
             })}
+          </div>
+        </div>
+      )}
+
+      {selectedRuntime === 'vllm' && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-medium">Direct vLLM deployment method</p>
+              <p>
+                The Direct vLLM deployment method uses the direct vLLM provider to run the OpenAI-compatible vLLM model server. Use it when a model is too new for managed deployment methods. This gives you newer model support sooner, but images and settings may change quickly.
+              </p>
+              <p>
+                Nightly images change often. The controller may surface image verification or unsupported image warnings during rollout.
+              </p>
+            </div>
           </div>
         </div>
       )}
@@ -1189,7 +1545,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                   id="namespace"
                   value={config.namespace}
                   onChange={(e) => updateConfig('namespace', e.target.value)}
-                  placeholder={RUNTIME_INFO[selectedRuntime].defaultNamespace}
+                  placeholder={getRuntimeDefaultNamespace(selectedRuntime)}
                   required
                 />
               </div>
@@ -1214,25 +1570,27 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         </div>
       </div>
 
-      {/* Engine Selection - show for non-KAITO runtimes OR KAITO with vLLM models */}
-      {(selectedRuntime !== 'kaito' || isVllmModel) && (
+      {/* Engine Selection - hide Direct vLLM because vLLM is its only model server */}
+      {selectedRuntime !== 'vllm' && (selectedRuntime !== 'kaito' || isVllmModel) && (
       <div className="glass-panel">
-        <h3 className="text-lg font-semibold mb-4">Inference Engine</h3>
+        <h3 className="text-lg font-semibold mb-4">Model server</h3>
         <div>
-          {selectedRuntime === 'kaito' && isVllmModel ? (
-            // KAITO vLLM - only vLLM option
-            <RadioGroup value="vllm" className="flex gap-4">
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="vllm" id="engine-vllm" />
-                <Label htmlFor="engine-vllm" className="cursor-pointer">
-                  vLLM
-                </Label>
-              </div>
-            </RadioGroup>
-          ) : availableEngines.length === 0 ? (
+          {availableEngines.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No compatible engines available for this model with {RUNTIME_INFO[selectedRuntime].name}.
+              No compatible model servers available for this model with {getRuntimeDisplayName(selectedRuntime)}.
             </p>
+          ) : availableEngines.length === 1 ? (
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2">
+                <span className="font-medium text-sm">{getEngineDisplayName(availableEngines[0])}</span>
+                <Badge variant="secondary" className="text-xs">
+                  Selected automatically
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {getEngineDisplayName(availableEngines[0])} is the only compatible model server for {getRuntimeDisplayName(selectedRuntime)}.
+              </p>
+            </div>
           ) : (
             <div className="space-y-3">
               <RadioGroup
@@ -1270,9 +1628,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                           "flex items-center gap-2"
                         )}
                       >
-                        {engine === 'vllm' && 'vLLM'}
-                        {engine === 'sglang' && 'SGLang'}
-                        {engine === 'trtllm' && 'TensorRT-LLM'}
+                        {getEngineDisplayName(engine)}
                         {isRecommended && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
                             <Sparkles className="h-3 w-3" />
@@ -1286,7 +1642,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
               </RadioGroup>
               {aiConfigSupportedBackends && aiConfigSupportedBackends.length < availableEngines.length && (
                 <p className="text-xs text-muted-foreground">
-                  Some engines are unavailable based on your GPU type. AI Configurator recommends {aiConfigRecommendedBackend?.toUpperCase()}.
+                  Some model servers are unavailable based on your GPU type. AI Configurator recommends {aiConfigRecommendedBackend ? getEngineDisplayName(aiConfigRecommendedBackend) : 'a compatible model server'}.
                 </p>
               )}
             </div>
@@ -1530,8 +1886,8 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
           <RadioGroup
             value={config.mode}
             onValueChange={(value) => {
-              // Only allow changing mode for non-KAITO runtimes
-              if (selectedRuntime !== 'kaito') {
+              // Only allow changing to disaggregated for runtimes that advertise it
+              if (supportsDisaggregatedMode || value === 'aggregated') {
                 const newMode = value as DeploymentMode;
                 setTopologyManagedByAIConfig(false)
                 // Clear aggregated-only multi-node overrides when switching to disaggregated
@@ -1568,17 +1924,17 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                 </p>
               </div>
             </div>
-            <div className={cn("flex items-start space-x-2", selectedRuntime === 'kaito' && "opacity-50")}>
+            <div className={cn("flex items-start space-x-2", !supportsDisaggregatedMode && "opacity-50")}>
                   <RadioGroupItem
                     value="disaggregated"
                     id="mode-disaggregated"
                     className="mt-1"
-                disabled={selectedRuntime === 'kaito'}
+                disabled={!supportsDisaggregatedMode}
               />
               <div>
                     <Label
                       htmlFor="mode-disaggregated"
-                  className={cn("font-medium flex items-center gap-2", selectedRuntime === 'kaito' ? "cursor-not-allowed" : "cursor-pointer")}
+                  className={cn("font-medium flex items-center gap-2", !supportsDisaggregatedMode ? "cursor-not-allowed" : "cursor-pointer")}
                 >
                   Disaggregated (P/D)
                   {aiConfigRecommendedMode === 'disaggregated' && (
@@ -1591,7 +1947,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                 <p className="text-xs text-muted-foreground">
                       {selectedRuntime === 'kaito'
                     ? 'Separate prefill and decode workers - not supported by KAITO'
-                    : 'Separate prefill and decode workers for better resource utilization'}
+                    : selectedRuntime === 'vllm'
+                      ? 'Use Dynamo, KubeRay, or llm-d for prefill/decode serving'
+                      : 'Separate prefill and decode workers for better resource utilization'}
                 </p>
               </div>
             </div>
@@ -1808,6 +2166,315 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         </div>
       )}
 
+      {/* Direct vLLM image and recipe options */}
+      {selectedRuntime === 'vllm' && (
+        <div className="glass-panel space-y-6">
+          <div>
+            <h3 className="text-lg font-semibold flex items-center gap-2 mb-1">
+              <Rocket className="h-5 w-5" />
+              Launch image
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Choose the vLLM OpenAI server image that will be written to the deployment engine image.
+            </p>
+          </div>
+
+          <RadioGroup
+            value={directVllmImageChoice}
+            onValueChange={(value) => setDirectVllmImageChoice(value as DirectVllmImageChoice)}
+            className="grid gap-3 md:grid-cols-3"
+          >
+            <Label
+              htmlFor="direct-vllm-image-nightly"
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors",
+                directVllmImageChoice === 'nightly' && "border-primary bg-primary/5"
+              )}
+            >
+              <RadioGroupItem id="direct-vllm-image-nightly" value="nightly" className="mt-0.5" />
+              <div className="min-w-0 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">Nightly</span>
+                  <Badge variant="secondary">Default</Badge>
+                </div>
+                <p className="break-all font-mono text-xs text-muted-foreground">
+                  {DIRECT_VLLM_NIGHTLY_IMAGE}
+                </p>
+                <p className="text-xs text-muted-foreground">Newest model support.</p>
+              </div>
+            </Label>
+
+            <Label
+              htmlFor="direct-vllm-image-stable"
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors",
+                directVllmImageChoice === 'stable' && "border-primary bg-primary/5"
+              )}
+            >
+              <RadioGroupItem id="direct-vllm-image-stable" value="stable" className="mt-0.5" />
+              <div className="min-w-0 space-y-1">
+                <span className="font-medium">Stable</span>
+                <p className="break-all font-mono text-xs text-muted-foreground">
+                  {DIRECT_VLLM_STABLE_IMAGE}
+                </p>
+                <p className="text-xs text-muted-foreground">Latest stable vLLM image.</p>
+              </div>
+            </Label>
+
+            <Label
+              htmlFor="direct-vllm-image-custom"
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors",
+                directVllmImageChoice === 'custom' && "border-primary bg-primary/5"
+              )}
+            >
+              <RadioGroupItem id="direct-vllm-image-custom" value="custom" className="mt-0.5" />
+              <div className="min-w-0 space-y-1">
+                <span className="font-medium">Launch image</span>
+                <p className="text-xs text-muted-foreground">Enter a vLLM-compatible launch image.</p>
+              </div>
+            </Label>
+          </RadioGroup>
+
+          {directVllmImageChoice === 'custom' && (
+            <div className="space-y-2">
+              <Label htmlFor="directVllmCustomImage" className="flex items-center gap-2">
+                Launch image
+                <Badge variant="outline">Required</Badge>
+              </Label>
+              <Input
+                id="directVllmCustomImage"
+                placeholder="registry.example.com/vllm-openai:tag"
+                value={directVllmCustomImage}
+                onChange={(e) => setDirectVllmCustomImage(e.target.value)}
+                className={cn(directVllmCustomImageRequired && "border-destructive focus-visible:ring-destructive")}
+              />
+              {directVllmCustomImageRequired ? (
+                <p className="flex items-center gap-1.5 text-xs text-destructive">
+                  <AlertCircle className="h-3.5 w-3.5" />
+                  Enter a vLLM launch image before applying a recipe or deploying.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  This launch image will override any image from an applied recipe.
+                </p>
+              )}
+            </div>
+          )}
+
+          <p className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 font-mono text-xs text-muted-foreground dark:border-white/10 dark:bg-white/[0.03]">
+            {`Selected image: ${directVllmImageRef || 'No launch image entered'}`}
+          </p>
+
+          <div className="overflow-hidden rounded-2xl border border-border/80 bg-gradient-to-br from-emerald-500/10 via-card/80 to-card p-4 shadow-soft dark:border-white/10 dark:from-emerald-500/[0.08] dark:via-white/[0.035] dark:to-white/[0.02]">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex min-w-0 gap-3">
+                <div className="hidden h-10 w-10 shrink-0 place-items-center rounded-2xl border border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 sm:grid">
+                  <Sparkles className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="font-semibold text-foreground">
+                      Official vLLM recipe
+                    </h4>
+                    {resolvedVllmRecipe && (
+                      <Badge variant="success" className="gap-1 border-emerald-500/20">
+                        <CheckCircle2 className="h-3 w-3" />
+                        Applied
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                    Airunway checks the official vLLM recipe catalog for an exact match to this model id and applies recommended launch settings when available.
+                  </p>
+                </div>
+              </div>
+              {vllmRecipesLoaded && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={loadVllmRecipes}
+                  disabled={vllmRecipesLoading}
+                >
+                  {vllmRecipesLoading ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Refreshing
+                    </>
+                  ) : (
+                    'Refresh'
+                  )}
+                </Button>
+              )}
+            </div>
+
+            <div className="mt-4 space-y-4">
+              {vllmRecipesError && !vllmRecipesLoaded ? (
+                <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+                  <div className="font-medium">Could not check official vLLM recipes</div>
+                  <div className="mt-1">{vllmRecipesError}</div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    onClick={loadVllmRecipes}
+                    disabled={vllmRecipesLoading}
+                  >
+                    {vllmRecipesLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Retrying
+                      </>
+                    ) : (
+                      'Retry'
+                    )}
+                  </Button>
+                </div>
+              ) : vllmRecipesLoading && !vllmRecipesLoaded ? (
+                <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-background/40 p-4 text-sm text-muted-foreground dark:border-white/10 dark:bg-white/[0.03]">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+                  <span className="min-w-0 break-words">Checking official vLLM recipes for {model.id}…</span>
+                </div>
+              ) : exactVllmRecipe ? (
+                <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] p-4 shadow-soft-xs dark:bg-emerald-500/[0.07]">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="flex min-w-0 gap-3">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                        <CheckCircle2 className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-emerald-700 dark:text-emerald-300">
+                          Official vLLM recipe found
+                        </div>
+                        <p className="mt-1 break-all text-xs text-muted-foreground">
+                          {exactVllmRecipe.hf_id}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      className="shrink-0"
+                      onClick={() => void handleApplyVllmRecipe()}
+                      disabled={vllmRecipeApplying || directVllmCustomImageRequired}
+                    >
+                      {vllmRecipeApplying ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Applying recipe
+                        </>
+                      ) : (
+                        'Apply recipe'
+                      )}
+                    </Button>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="min-w-0 rounded-lg border border-border/60 bg-background/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
+                      <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Model</span>
+                      <p className="mt-1 break-all text-xs font-medium text-foreground">{exactVllmRecipe.hf_id}</p>
+                    </div>
+                    <div className="min-w-0 rounded-lg border border-border/60 bg-background/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
+                      <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Source</span>
+                      <p className="mt-1 break-all text-xs font-medium text-foreground">{vllmRecipesSource || 'Official vLLM catalog'}</p>
+                    </div>
+                    <div className="min-w-0 rounded-lg border border-border/60 bg-background/40 p-3 dark:border-white/10 dark:bg-white/[0.03] md:col-span-2 xl:col-span-1">
+                      <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Default image</span>
+                      <p className="mt-1 break-all text-xs font-medium text-foreground">
+                        {directVllmImageChoice === 'custom'
+                          ? selectedDirectVllmImageRef || 'Custom image required'
+                          : 'Official recipe image'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : vllmRecipesLoaded ? (
+                <div className="rounded-xl border border-border/70 bg-background/40 p-4 text-sm text-muted-foreground dark:border-white/10 dark:bg-white/[0.03]">
+                  <div className="font-medium text-foreground">No exact official vLLM recipe found for {model.id}</div>
+                  <p className="mt-1">
+                    Airunway will continue with the default Direct vLLM settings.
+                  </p>
+                </div>
+              ) : null}
+
+              {vllmRecipesError && vllmRecipesLoaded && (
+                <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  {vllmRecipesError}
+                </div>
+              )}
+
+              {vllmRecipeWarnings.length > 0 && (
+                <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm text-yellow-800 dark:text-yellow-200">
+                  <div className="mb-2 flex items-center gap-2 font-medium">
+                    <AlertTriangle className="h-4 w-4" />
+                    Recipe warnings
+                  </div>
+                  <ul className="list-disc space-y-1 pl-5">
+                    {vllmRecipeWarnings.map((warning, index) => (
+                      <li key={`${warning}-${index}`}>{warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {resolvedVllmRecipe && (
+                <div className="overflow-hidden rounded-xl border border-emerald-500/25 bg-card/80 shadow-soft-xs dark:bg-white/[0.025]">
+                  <div className="flex flex-col gap-3 border-b border-border/70 bg-emerald-500/[0.05] p-4 dark:border-white/10 dark:bg-emerald-500/[0.06] sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex min-w-0 gap-3">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                        <CheckCircle2 className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-emerald-700 dark:text-emerald-300">
+                          Recipe applied to the deployment form
+                        </div>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          Recommended vLLM launch settings are now loaded and ready to deploy.
+                        </p>
+                      </div>
+                    </div>
+                    <Badge variant="success" className="w-fit shrink-0 border-emerald-500/20">
+                      Ready
+                    </Badge>
+                  </div>
+
+                  <div className="space-y-4 p-4">
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      <RecipeMetric label="Mode">
+                        {resolvedVllmRecipe.mode}
+                      </RecipeMetric>
+                      <RecipeMetric label="GPUs">
+                        {resolvedVllmRecipe.resources.gpu}
+                      </RecipeMetric>
+                      <RecipeMetric label="Image">
+                        {resolvedVllmRecipe.imageRef || directVllmImageRef}
+                      </RecipeMetric>
+                      <RecipeMetric label="Model-server args">
+                        {Object.keys(resolvedVllmRecipe.engineArgs || {}).length}
+                      </RecipeMetric>
+                      <RecipeMetric label="Extra args">
+                        {resolvedVllmRecipe.engineExtraArgs?.length || 0}
+                      </RecipeMetric>
+                      <RecipeMetric label="Environment values">
+                        {Object.keys(resolvedVllmRecipe.env || {}).length}
+                      </RecipeMetric>
+                    </div>
+
+                    <div className="grid gap-3 lg:grid-cols-3">
+                      <RecipeCodePanel title="engine.args" value={resolvedVllmRecipe.engineArgs || {}} />
+                      <RecipeCodePanel title="engine.extraArgs" value={resolvedVllmRecipe.engineExtraArgs || []} />
+                      <RecipeCodePanel title="env" value={resolvedVllmRecipe.env || {}} />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Advanced Options - show for non-KAITO runtimes OR KAITO with vLLM models */}
       {(selectedRuntime !== 'kaito' || isVllmModel) && (
       <div className="glass-panel !p-0 overflow-hidden">
@@ -1917,10 +2584,14 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
           />
         )}
 
-        {/* Manifest Preview - build config with KAITO-specific fields */}
+        {/* Manifest Preview - build config with runtime-specific fields */}
         {(() => {
           // Build preview config with all necessary fields
           let previewConfig = normalizeGatewayAvailability(config, gatewayInfo?.available);
+
+          if (selectedRuntime === 'vllm') {
+            previewConfig = normalizeDirectVllmConfig(previewConfig, previewConfig.imageRef || directVllmImageRef, model.id);
+          }
 
           if (selectedRuntime === 'kaito') {
             // Always include kaitoResourceType for KAITO deployments

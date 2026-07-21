@@ -20,47 +20,47 @@ The selected engine is stored in `status.engine.type` with a reason in `status.e
 
 With the engine resolved, provider selection evaluates CEL rules from each `InferenceProviderConfig`:
 
-**Default selection behavior** (with built-in providers):
+**Default selection behavior** depends on the `InferenceProviderConfig` resources installed in the cluster. With the provider configs bundled in this repository, the shipped rules are:
 
 ```
 IF gpu.count == 0 OR resources.gpu is omitted:
-    → KAITO (only CPU provider), engine auto-selected to llamacpp
+    → KAITO (CPU-capable provider), engine auto-selected to llamacpp when needed
 
 IF engine == "trtllm" OR engine == "sglang":
-    → Dynamo (only provider supporting these engines)
+    → Dynamo
 
 IF engine == "llamacpp":
-    → KAITO (only llamacpp provider)
+    → KAITO
 
 IF mode == "disaggregated":
-    → Dynamo (best disaggregated support)
+    → Dynamo
 
-DEFAULT (GPU + vllm + aggregated):
-    → Dynamo (GPU inference default)
+IF gpu.count > 1 AND engine == "vllm":
+    → KubeRay
+
+IF gpu.count > 0 AND engine == "vllm":
+    → Dynamo
 ```
 
-**Note:** KubeRay is never auto-selected. Users must explicitly set `provider.name: kuberay`.
+**Note:** Provider auto-selection is driven by registered `InferenceProviderConfig.selectionRules`; the core selector does not hard-code KubeRay, llm-d, or Direct vLLM. Providers with empty or no matching rules are explicit-only unless their installed config makes them selectable.
 
 The selection reason is recorded in `status.provider.selectedReason` for observability.
 
 ### Provider Capability Matrix
 
-Capabilities are declared per-engine in each provider's `InferenceProviderConfig`:
-
-| Criteria            | KAITO   | Dynamo        | KubeRay            | llm-d              |
-| ------------------- | ------- | ------------- | ------------------ | ------------------ |
-| **vllm** GPU        | Yes     | **Yes**       | Yes                | Yes                |
-| **vllm** CPU        | No      | No            | No                 | No                 |
-| **vllm** disagg     | No      | **Yes**       | Yes                | Yes                |
-| **sglang** GPU      | No      | **Yes**       | No                 | No                 |
-| **sglang** disagg   | No      | **Yes**       | No                 | No                 |
-| **trtllm** GPU      | No      | **Yes**       | No                 | No                 |
-| **trtllm** disagg   | No      | No            | No                 | No                 |
-| **llamacpp** GPU    | **Yes** | No            | No                 | No                 |
-| **llamacpp** CPU    | **Yes** | No            | No                 | No                 |
-| Self-managed InferencePool | No | **Yes**  | No                 | No                 |
-| Self-managed EPP    | No      | **Yes**       | No                 | No                 |
-| Auto-selection      | Yes     | Yes (default) | No (explicit only) | No (explicit only) |
+| Criteria                   | KAITO   | Dynamo        | KubeRay                | llm-d              | Direct vLLM                    |
+| -------------------------- | ------- | ------------- | ---------------------- | ------------------ | ------------------------------ |
+| CPU inference              | **Yes** | No            | No                     | No                 | No                             |
+| GPU inference              | Yes     | **Yes**       | Yes                    | Yes                | Yes                            |
+| vLLM engine                | Yes     | **Yes**       | Yes                    | Yes                | Yes                            |
+| sglang engine              | No      | **Yes**       | No                     | No                 | No                             |
+| trtllm engine              | No      | **Yes**       | No                     | No                 | No                             |
+| llamacpp engine            | **Yes** | No            | No                     | No                 | No                             |
+| Disaggregated P/D          | No      | **Yes**       | Yes                    | Yes                | No                             |
+| Self-managed InferencePool | No      | **Yes**       | No                     | No                 | No                             |
+| Self-managed EPP           | No      | **Yes**       | No                     | No                 | No                             |
+| Customizable EPP image/config | No   | No            | No                     | **Yes**            | No                             |
+| Auto-selection             | Yes     | Yes           | Via selection rules    | Explicit/config rules only | Explicit only                 |
 
 ## Provider Abstraction
 
@@ -83,6 +83,7 @@ The Web UI backend reads provider information (capabilities, installation steps,
 | KubeRay       | RayService            | ✅ Available | [kuberay.yaml](https://github.com/kaito-project/airunway/blob/main/providers/kuberay/deploy/kuberay.yaml) | Ray-based distributed inference with autoscaling                               |
 | KAITO         | Workspace             | ✅ Available | [kaito.yaml](https://github.com/kaito-project/airunway/blob/main/providers/kaito/deploy/kaito.yaml) | Flexible inference with vLLM (GPU) or llama.cpp (CPU/GPU)                      |
 | llm-d         | none                  | ✅ Available | [llmd.yaml](https://github.com/kaito-project/airunway/blob/main/providers/llmd/deploy/llmd.yaml) | Flexible inference with vLLM (GPU) with KV-cache routing and disaggregated serving |
+| Direct vLLM   | Deployment            | ✅ Available | [vllm.yaml](https://github.com/kaito-project/airunway/blob/main/providers/vllm/deploy/vllm.yaml) | Direct vLLM OpenAI-compatible server deployments using `spec.engine.image`; see [Direct vLLM guide](providers/vllm.md) |
 
 ### KAITO Provider
 

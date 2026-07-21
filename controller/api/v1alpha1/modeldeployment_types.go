@@ -179,7 +179,7 @@ type ModelSpec struct {
 
 // ProviderSpec defines the provider selection
 type ProviderSpec struct {
-	// name is the provider name (e.g., dynamo, kaito, kuberay, llmd)
+	// name is the provider name (e.g., dynamo, kaito, kuberay, llmd, vllm)
 	// If not specified, the provider-selector will choose one
 	// +optional
 	Name string `json:"name,omitempty"`
@@ -197,6 +197,11 @@ type EngineSpec struct {
 	// If not specified, the controller will auto-select based on provider capabilities
 	// +optional
 	Type EngineType `json:"type,omitempty"`
+
+	// image is an engine-specific container image override. For direct vLLM
+	// deployments this is the vLLM OpenAI-compatible server image.
+	// +optional
+	Image string `json:"image,omitempty"`
 
 	// contextLength is the maximum context length
 	// Maps to engine-specific flags (--max-model-len for vllm, etc.)
@@ -226,6 +231,11 @@ type EngineSpec struct {
 	// These are passed directly to the engine and vary by type
 	// +optional
 	Args map[string]string `json:"args,omitempty"`
+
+	// extraArgs contains additional raw engine flags. Use this for flags that
+	// do not have a structured field or map representation yet.
+	// +optional
+	ExtraArgs []string `json:"extraArgs,omitempty"`
 }
 
 // ServingSpec defines the serving mode configuration
@@ -472,6 +482,61 @@ type GatewayStatus struct {
 	GatewayNamespace string `json:"gatewayNamespace,omitempty"`
 }
 
+// ImageStatus contains information about resolved and verified images.
+type ImageStatus struct {
+	// requested is the image reference requested by the user or resolver.
+	// +optional
+	Requested string `json:"requested,omitempty"`
+
+	// resolved is the fully resolved image reference used by the deployment.
+	// +optional
+	Resolved string `json:"resolved,omitempty"`
+
+	// repository is the image repository.
+	// +optional
+	Repository string `json:"repository,omitempty"`
+
+	// tag is the image tag.
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// digest is the immutable image digest when available.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+
+	// source describes how the image was selected: stable, nightly, launch, or custom.
+	// +optional
+	Source string `json:"source,omitempty"`
+
+	// createdAt is the image creation timestamp, when known.
+	// +optional
+	CreatedAt string `json:"createdAt,omitempty"`
+
+	// revision is the upstream source revision associated with the image, when known.
+	// +optional
+	Revision string `json:"revision,omitempty"`
+
+	// age is a human-readable image age, when known.
+	// +optional
+	Age string `json:"age,omitempty"`
+
+	// inNightly indicates whether the selected image is available in the nightly catalog.
+	// +optional
+	InNightly bool `json:"inNightly,omitempty"`
+
+	// verified indicates whether the image has passed controller verification.
+	// +optional
+	Verified bool `json:"verified,omitempty"`
+
+	// verificationMessage contains details from image verification.
+	// +optional
+	VerificationMessage string `json:"verificationMessage,omitempty"`
+
+	// message explains image resolution or verification details.
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
 // ModelDeploymentStatus defines the observed state of ModelDeployment.
 type ModelDeploymentStatus struct {
 	// phase is the current phase of the deployment
@@ -493,6 +558,10 @@ type ModelDeploymentStatus struct {
 	// gateway contains information about the gateway integration
 	// +optional
 	Gateway *GatewayStatus `json:"gateway,omitempty"`
+
+	// image contains information about resolved and verified images.
+	// +optional
+	Image *ImageStatus `json:"image,omitempty"`
 
 	// replicas contains replica count information
 	// +optional
@@ -589,6 +658,18 @@ const (
 	ConditionTypeReady = "Ready"
 	// ConditionTypeGatewayReady indicates the gateway route is active
 	ConditionTypeGatewayReady = "GatewayReady"
+	// ConditionTypeImageResolved indicates the deployment image has been resolved
+	ConditionTypeImageResolved = "ImageResolved"
+	// ConditionTypeImageVerified indicates the deployment image has been verified
+	ConditionTypeImageVerified = "ImageVerified"
+	// ConditionTypeUnsupportedImage indicates the requested image is not supported
+	ConditionTypeUnsupportedImage = "UnsupportedImage"
+	// ConditionTypeRecipeResolved indicates recipe provenance has been resolved
+	ConditionTypeRecipeResolved = "RecipeResolved"
+	// ConditionTypeNightlyAvailable indicates whether a suitable nightly image is available
+	ConditionTypeNightlyAvailable = "NightlyAvailable"
+	// ConditionTypeHardwareCompatible indicates whether hardware is compatible
+	ConditionTypeHardwareCompatible = "HardwareCompatible"
 )
 
 const (

@@ -35,7 +35,7 @@ type ProviderStatusResult struct {
 
 // Kubernetes Deployment condition types
 const (
-	conditionAvailable  = "Available"
+	conditionAvailable   = "Available"
 	conditionProgressing = "Progressing"
 )
 

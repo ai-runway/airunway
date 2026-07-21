@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { kubernetesService } from './kubernetes';
 import { mockServiceMethod } from '../test/helpers';
@@ -72,13 +73,13 @@ describe('KubernetesService - Runtime Status', () => {
     });
   }
 
-  test('uses live KAITO installation status for KAITO runtime entries', async () => {
-    let kaitoStatusChecks = 0;
+  test('uses annotation-driven installation status for KAITO runtime entries', async () => {
+    const providerStatusChecks: any[] = [];
 
     restores.push(
       mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
-      mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => {
-        kaitoStatusChecks += 1;
+      mockServiceMethod(kubernetesService as any, 'checkProviderInstallationStatus', async (...args: any[]) => {
+        providerStatusChecks.push(args);
         return {
           installed: false,
           crdFound: false,
@@ -86,26 +87,79 @@ describe('KubernetesService - Runtime Status', () => {
           message: 'KAITO workspace CRD not found',
         };
       }),
+      mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => {
+        throw new Error('getRuntimesStatus should use annotation-driven provider status checks');
+      }),
     );
     mockProviderConfigs([mockInferenceProviderConfig]);
 
     const runtimes = await kubernetesService.getRuntimesStatus();
     const kaito = runtimes.find((runtime) => runtime.id === 'kaito');
 
-    expect(kaitoStatusChecks).toBe(1);
+    expect(providerStatusChecks).toHaveLength(1);
+    expect(providerStatusChecks[0][0]).toBe('kaito');
+    expect(providerStatusChecks[0][1]).toEqual(mockInferenceProviderConfig.status);
+    expect(providerStatusChecks[0][2]).toBe('KAITO');
+    expect(providerStatusChecks[0][3]).toMatchObject({
+      crds: [{ name: 'workspaces.kaito.sh', displayName: 'KAITO Workspace CRD' }],
+      operatorPods: [{
+        namespace: 'kaito-workspace',
+        selectors: [
+          'app.kubernetes.io/name=kaito',
+          'app=kaito',
+          'control-plane=controller-manager',
+        ],
+      }],
+    });
     expect(kaito).toBeDefined();
+    expect(kaito?.name).toBe('KAITO');
     expect(kaito?.installed).toBe(false);
     expect(kaito?.healthy).toBe(false);
     expect(kaito?.version).toBe('0.10.0');
     expect(kaito?.message).toBe('KAITO workspace CRD not found');
   });
 
-  test('uses live Dynamo installation status for Dynamo runtime entries', async () => {
-    let kaitoStatusChecks = 0;
-    let dynamoStatusChecks = 0;
-    const nonKaitoConfig = {
+  test('uses annotation-driven installation status for Dynamo runtime entries', async () => {
+    const providerStatusChecks: any[] = [];
+    const dynamoHealth = {
+      crds: [
+        {
+          name: 'dynamographdeployments.nvidia.com',
+          displayName: 'DynamoGraphDeployment CRD',
+        },
+      ],
+      operatorPods: [
+        {
+          namespace: 'dynamo-system',
+          selectors: [
+            dynamoOperatorSelector,
+            'app.kubernetes.io/name=dynamo-operator',
+            'control-plane=controller-manager',
+          ],
+        },
+        {
+          selectors: ['app.kubernetes.io/name=dynamo-operator'],
+        },
+      ],
+    };
+    const dynamoConfig = {
       ...mockInferenceProviderConfig,
-      metadata: { ...mockInferenceProviderConfig.metadata, name: 'dynamo' },
+      metadata: {
+        ...mockInferenceProviderConfig.metadata,
+        name: 'dynamo',
+        annotations: {
+          ...mockInferenceProviderConfig.metadata.annotations,
+          'airunway.ai/display-name': 'Dynamo',
+          'airunway.ai/description': 'NVIDIA Dynamo for high-performance GPU inference',
+          'airunway.ai/default-namespace': 'dynamo-system',
+          'airunway.ai/documentation-url': 'https://github.com/kaito-project/airunway/tree/main/docs/providers/dynamo.md',
+          'airunway.ai/capabilities': JSON.stringify({
+            engines: ['vllm', 'sglang', 'trtllm'],
+            servingModes: ['aggregated', 'disaggregated'],
+          }),
+          'airunway.ai/health': JSON.stringify(dynamoHealth),
+        },
+      },
       status: {
         ready: false,
         version: '1.2.3',
@@ -114,37 +168,41 @@ describe('KubernetesService - Runtime Status', () => {
 
     restores.push(
       mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
-      mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => {
-        kaitoStatusChecks += 1;
-        return {
-          installed: true,
-          crdFound: true,
-          operatorRunning: true,
-          message: 'should not be used',
-        };
-      }),
-      mockServiceMethod(kubernetesService, 'checkDynamoInstallationStatus', async () => {
-        dynamoStatusChecks += 1;
+      mockServiceMethod(kubernetesService as any, 'checkProviderInstallationStatus', async (...args: any[]) => {
+        providerStatusChecks.push(args);
         return {
           installed: false,
           crdFound: false,
           operatorRunning: false,
-          message: 'Dynamo CRD not found',
+          message: 'DynamoGraphDeployment CRD not found',
         };
       }),
+      mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => {
+        throw new Error('getRuntimesStatus should not use KAITO-specific status checks');
+      }),
+      mockServiceMethod(kubernetesService, 'checkDynamoInstallationStatus', async () => {
+        throw new Error('getRuntimesStatus should not use Dynamo-specific status checks');
+      }),
     );
-    mockProviderConfigs([nonKaitoConfig]);
+    mockProviderConfigs([dynamoConfig]);
 
     const runtimes = await kubernetesService.getRuntimesStatus();
     const dynamo = runtimes.find((runtime) => runtime.id === 'dynamo');
 
-    expect(kaitoStatusChecks).toBe(0);
-    expect(dynamoStatusChecks).toBe(1);
+    expect(providerStatusChecks).toHaveLength(1);
+    expect(providerStatusChecks[0][0]).toBe('dynamo');
+    expect(providerStatusChecks[0][1]).toEqual(dynamoConfig.status);
+    expect(providerStatusChecks[0][2]).toBe('Dynamo');
+    expect(providerStatusChecks[0][3]).toEqual(dynamoHealth);
     expect(dynamo).toBeDefined();
+    expect(dynamo?.name).toBe('Dynamo');
+    expect(dynamo?.defaultNamespace).toBe('dynamo-system');
+    expect(dynamo?.capabilities?.engines).toEqual(['vllm', 'sglang', 'trtllm']);
+    expect(dynamo?.capabilities?.modes).toEqual(['aggregated', 'disaggregated']);
     expect(dynamo?.installed).toBe(false);
     expect(dynamo?.healthy).toBe(false);
     expect(dynamo?.version).toBe('1.2.3');
-    expect(dynamo?.message).toBe('Dynamo CRD not found');
+    expect(dynamo?.message).toBe('DynamoGraphDeployment CRD not found');
   });
 
   test('treats legacy LLM-D and vLLM provider configs without requiresCRD as CRD-less', async () => {
@@ -192,13 +250,14 @@ describe('KubernetesService - Runtime Status', () => {
   });
 
   test('honors explicit requiresCRD metadata for custom-named CRD-less runtime entries', async () => {
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = mockInferenceProviderConfig.metadata.annotations;
     const customVllmConfig = {
       ...mockInferenceProviderConfig,
       metadata: {
         ...mockInferenceProviderConfig.metadata,
         name: 'custom-vllm-registration',
         annotations: {
-          ...mockInferenceProviderConfig.metadata.annotations,
+          ...annotationsWithoutHealth,
           'airunway.ai/provider-name': 'vLLM',
         },
       },
@@ -240,13 +299,14 @@ describe('KubernetesService - Runtime Status', () => {
     // stripped, and the verdict lives on each engine. The provider id/display
     // name are non-canonical, so the canonical-id fallback cannot mask a
     // buggy aggregation.
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = mockInferenceProviderConfig.metadata.annotations;
     const customConfig = {
       ...mockInferenceProviderConfig,
       metadata: {
         ...mockInferenceProviderConfig.metadata,
         name: 'mycustom-runtime',
         annotations: {
-          ...mockInferenceProviderConfig.metadata.annotations,
+          ...annotationsWithoutHealth,
           'airunway.ai/provider-name': 'My Custom Runtime',
         },
       },
@@ -279,6 +339,47 @@ describe('KubernetesService - Runtime Status', () => {
     expect(custom?.crdFound).toBe(true);
     expect(custom?.operatorRunning).toBe(true);
     expect(custom?.message).toBe('Runtime is ready to use.');
+  });
+
+  test('honors annotation-derived requiresCRD when spec capabilities are absent', async () => {
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = mockInferenceProviderConfig.metadata.annotations;
+    const customConfig = {
+      ...mockInferenceProviderConfig,
+      metadata: {
+        ...mockInferenceProviderConfig.metadata,
+        name: 'annotation-native-runtime',
+        annotations: {
+          ...annotationsWithoutHealth,
+          'airunway.ai/provider-name': 'Annotation Native Runtime',
+          'airunway.ai/capabilities': JSON.stringify({
+            engines: [
+              { name: 'vllm', servingModes: ['aggregated'], gpuSupport: true, requiresCRD: false },
+            ],
+          }),
+        },
+      },
+      spec: {},
+      status: {
+        ready: false,
+        version: '0.1.0',
+      },
+    };
+
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
+    );
+    mockProviderConfigs([customConfig]);
+
+    const runtimes = await kubernetesService.getRuntimesStatus();
+    const custom = runtimes.find((runtime) => runtime.id === 'annotation-native-runtime');
+
+    expect(custom).toBeDefined();
+    expect(custom?.name).toBe('Annotation Native Runtime');
+    expect(custom?.installed).toBe(false);
+    expect(custom?.requiresCRD).toBe(false);
+    expect(custom?.crdFound).toBe(true);
+    expect(custom?.operatorRunning).toBe(false);
+    expect(custom?.message).toBe('Provider is registered but not ready yet.');
   });
 
   test('reports ready providers that do not require runtime CRDs as installed without probing an operator', async () => {
@@ -349,6 +450,64 @@ describe('KubernetesService - Runtime Status', () => {
     expect(llmd?.requiresCRD).toBe(false);
     expect(llmd?.version).toBe('0.1.0');
     expect(llmd?.message).toBe('Provider is registered but not ready yet.');
+  });
+
+  test('runs annotation health probes even when provider status is ready', async () => {
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDExists', async () => false),
+    );
+
+    const status = await kubernetesService.checkProviderInstallationStatus(
+      'custom-provider',
+      { ready: true },
+      'Custom Provider',
+      { crds: [{ name: 'customproviders.example.com', displayName: 'Custom Provider CRD' }] },
+      true,
+    );
+
+    expect(status.installed).toBe(false);
+    expect(status.crdFound).toBe(false);
+    expect(status.operatorRunning).toBe(false);
+    expect(status.requiresCRD).toBe(true);
+    expect(status.message).toBe('Custom Provider CRD not found');
+  });
+
+  test('ignores malformed health CRD display names instead of throwing', async () => {
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDExists', async () => false),
+    );
+
+    const status = await kubernetesService.checkProviderInstallationStatus(
+      'bad-health-provider',
+      { ready: false },
+      'Bad Health Provider',
+      { crds: [{ name: 'badhealth.example.com', displayName: 123 }] } as any,
+      true,
+    );
+
+    expect(status.installed).toBe(false);
+    expect(status.crdFound).toBe(false);
+    expect(status.message).toBe('badhealth.example.com not found');
+  });
+
+
+  test('does not report CRD-only providers installed until provider status is ready', async () => {
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDExists', async () => true),
+    );
+
+    const status = await kubernetesService.checkProviderInstallationStatus(
+      'crd-only-provider',
+      { ready: false },
+      'CRD Only Provider',
+      { crds: [{ name: 'crdonly.example.com', displayName: 'CRD Only CRD' }] },
+      true,
+    );
+
+    expect(status.installed).toBe(false);
+    expect(status.crdFound).toBe(true);
+    expect(status.operatorRunning).toBe(false);
+    expect(status.message).toBe('CRD Only CRD found but CRD Only Provider is not ready');
   });
 
   test('reports KAITO as not fully installed when the CRD exists but no ready operator pod is found', async () => {

@@ -53,6 +53,9 @@ const config = {
           path: '../docs',
           sidebarPath: './sidebars.js',
           routeBasePath: '/',
+          // Internal planning/design docs under docs/plans/ are kept in the repo
+          // for contributors but must not be published as public site pages.
+          exclude: ['plans/**'],
           // Use the function form so the relative `../docs` source path is
           // rewritten to a proper `docs/<file>` URL on github.com.
           editUrl: ({docPath}) =>

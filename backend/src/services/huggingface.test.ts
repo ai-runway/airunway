@@ -176,6 +176,75 @@ describe('HuggingFaceService', () => {
     });
   });
 
+  describe('searchModels', () => {
+    test('requests compatibility metadata alongside safetensors so Laguna models are searchable', async () => {
+      const requestedExpands: string[][] = [];
+
+      mockFetch.mockImplementation((input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        const expands = url.searchParams.getAll('expand[]');
+        requestedExpands.push(expands);
+
+        const hasCompatibilityMetadata = ['config', 'pipeline_tag', 'library_name'].every((field) =>
+          expands.includes(field)
+        );
+        const hasDeployMetadata = ['safetensors', 'gated', 'downloads', 'likes'].every((field) =>
+          expands.includes(field)
+        );
+
+        const models = url.searchParams.get('filter') === 'text-generation'
+          ? [
+              hasCompatibilityMetadata && hasDeployMetadata
+                ? {
+                    _id: '69ea86258ae7e80e6ce4d234',
+                    id: 'poolside/Laguna-XS.2',
+                    modelId: 'poolside/Laguna-XS.2',
+                    downloads: 16792,
+                    likes: 232,
+                    pipeline_tag: 'text-generation',
+                    library_name: 'transformers',
+                    config: { architectures: ['LagunaForCausalLM'], model_type: 'laguna' },
+                    gated: false,
+                    safetensors: { total: 33442617088 },
+                  }
+                : {
+                    _id: '69ea86258ae7e80e6ce4d234',
+                    id: 'poolside/Laguna-XS.2',
+                    modelId: 'poolside/Laguna-XS.2',
+                    gated: false,
+                    safetensors: { total: 33442617088 },
+                  },
+            ]
+          : [];
+
+        return Promise.resolve(
+          new Response(JSON.stringify(models), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      });
+
+      const result = await huggingFaceService.searchModels({ query: 'poolside', limit: 20 });
+
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0].id).toBe('poolside/Laguna-XS.2');
+      expect(result.models[0].architectures).toEqual(['LagunaForCausalLM']);
+      expect(result.models[0].supportedEngines).toEqual(['vllm']);
+      expect(result.models[0].parameterCount).toBe(33442617088);
+      expect(requestedExpands).toHaveLength(2);
+      for (const expands of requestedExpands) {
+        expect(expands).toContain('safetensors');
+        expect(expands).toContain('gated');
+        expect(expands).toContain('config');
+        expect(expands).toContain('pipeline_tag');
+        expect(expands).toContain('library_name');
+        expect(expands).toContain('downloads');
+        expect(expands).toContain('likes');
+      }
+    });
+  });
+
   describe('handleOAuthCallback', () => {
     test('completes full OAuth flow successfully', async () => {
       let callCount = 0;

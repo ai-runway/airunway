@@ -245,10 +245,10 @@ func (t *Transformer) buildAggregatedWorkerGroup(md *airunwayv1alpha1.ModelDeplo
 	}
 
 	workerGroup := map[string]interface{}{
-		"replicas":    replicas,
-		"minReplicas": replicas,
-		"maxReplicas": replicas,
-		"groupName":   "gpu-workers",
+		"replicas":       replicas,
+		"minReplicas":    replicas,
+		"maxReplicas":    replicas,
+		"groupName":      "gpu-workers",
 		"rayStartParams": map[string]interface{}{},
 		"template": map[string]interface{}{
 			"metadata": map[string]interface{}{
@@ -296,10 +296,10 @@ func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelD
 		}
 
 		prefillGroup := map[string]interface{}{
-			"replicas":    int64(prefillSpec.Replicas),
-			"minReplicas": int64(prefillSpec.Replicas),
-			"maxReplicas": int64(prefillSpec.Replicas),
-			"groupName":   "prefill-workers",
+			"replicas":       int64(prefillSpec.Replicas),
+			"minReplicas":    int64(prefillSpec.Replicas),
+			"maxReplicas":    int64(prefillSpec.Replicas),
+			"groupName":      "prefill-workers",
 			"rayStartParams": map[string]interface{}{},
 			"template": map[string]interface{}{
 				"metadata": map[string]interface{}{
@@ -341,10 +341,10 @@ func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelD
 		}
 
 		decodeGroup := map[string]interface{}{
-			"replicas":    int64(decodeSpec.Replicas),
-			"minReplicas": int64(decodeSpec.Replicas),
-			"maxReplicas": int64(decodeSpec.Replicas),
-			"groupName":   "decode-workers",
+			"replicas":       int64(decodeSpec.Replicas),
+			"minReplicas":    int64(decodeSpec.Replicas),
+			"maxReplicas":    int64(decodeSpec.Replicas),
+			"groupName":      "decode-workers",
 			"rayStartParams": map[string]interface{}{},
 			"template": map[string]interface{}{
 				"metadata": map[string]interface{}{
@@ -451,8 +451,11 @@ func (t *Transformer) buildEnvVars(md *airunwayv1alpha1.ModelDeployment) []inter
 
 // getImage returns the container image to use
 func (t *Transformer) getImage(md *airunwayv1alpha1.ModelDeployment) string {
-	if md.Spec.Image != "" {
-		return md.Spec.Image
+	// Honor spec.engine.image (preferred) and the legacy spec.image via
+	// ImageOverride(), matching the other providers so a user setting only
+	// spec.engine.image is not silently ignored.
+	if image := md.Spec.ImageOverride(); image != "" {
+		return image
 	}
 	return DefaultImage
 }

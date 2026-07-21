@@ -91,6 +91,13 @@ class AIConfiguratorService {
    * @param forceRefresh - If true, bypasses the cache and checks again
    */
   async checkStatus(forceRefresh = false): Promise<AIConfiguratorStatus> {
+    if (process.env.AIRUNWAY_DISABLE_AICONFIGURATOR === 'true') {
+      return {
+        available: false,
+        error: 'AI Configurator CLI not found (disabled by AIRUNWAY_DISABLE_AICONFIGURATOR)',
+      };
+    }
+
     // If running in-cluster, AI Configurator is not applicable
     if (checkInCluster()) {
       return {

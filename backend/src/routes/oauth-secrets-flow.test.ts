@@ -94,7 +94,8 @@ describe('OAuth → Secrets → Deploy Flow', () => {
     const saveData = await saveRes.json();
     expect(saveData.success).toBe(true);
     expect(saveData.user.name).toBe('testuser');
-    expect(saveData.results).toHaveLength(4);
+    expect(saveData.results).toHaveLength(5);
+    expect(saveData.results.map((result: { namespace: string }) => result.namespace)).toContain('ray-system');
 
     // Restore fetch and service mocks before next steps that use different mocks.
     // Without this, the fetch mock from Step 5 would intercept requests in later steps

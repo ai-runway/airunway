@@ -80,13 +80,13 @@ describe('Provider Installation Flow', () => {
       ),
       mockServiceMethod(
         kubernetesService,
-        'checkKaitoInstallationStatus',
+        'checkProviderInstallationStatus',
         (async () => ({
           installed: false,
           crdFound: false,
           operatorRunning: false,
           message: 'KAITO workspace CRD not found',
-        })) as typeof kubernetesService.checkKaitoInstallationStatus,
+        })) as typeof kubernetesService.checkProviderInstallationStatus,
       ),
     );
 
@@ -144,13 +144,13 @@ describe('Provider Installation Flow', () => {
       ),
       mockServiceMethod(
         kubernetesService,
-        'checkKaitoInstallationStatus',
+        'checkProviderInstallationStatus',
         (async () => ({
           installed: true,
           crdFound: true,
           operatorRunning: true,
           message: 'KAITO workspace CRD found and KAITO operator pods are ready',
-        })) as typeof kubernetesService.checkKaitoInstallationStatus,
+        })) as typeof kubernetesService.checkProviderInstallationStatus,
       ),
     );
 

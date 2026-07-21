@@ -314,3 +314,62 @@ func TestUpdateStatusNotFound(t *testing.T) {
 		t.Fatal("expected error when config not found")
 	}
 }
+
+func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
+	annotations, err := buildAnnotations()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	requiredKeys := []string{
+		airunwayv1alpha1.AnnotationDisplayName,
+		airunwayv1alpha1.AnnotationDescription,
+		airunwayv1alpha1.AnnotationDefaultNamespace,
+		airunwayv1alpha1.AnnotationDocumentationURL,
+		airunwayv1alpha1.AnnotationCapabilities,
+		airunwayv1alpha1.AnnotationHealth,
+		airunwayv1alpha1.AnnotationInstallation,
+		airunwayv1alpha1.AnnotationDocumentation,
+	}
+	for _, key := range requiredKeys {
+		if annotations[key] == "" {
+			t.Fatalf("expected annotation %s to be set", key)
+		}
+	}
+
+	if annotations[airunwayv1alpha1.AnnotationDisplayName] != "Dynamo" {
+		t.Fatalf("expected Dynamo display name, got %q", annotations[airunwayv1alpha1.AnnotationDisplayName])
+	}
+	if annotations[airunwayv1alpha1.AnnotationDefaultNamespace] != "dynamo-system" {
+		t.Fatalf("expected dynamo-system default namespace, got %q", annotations[airunwayv1alpha1.AnnotationDefaultNamespace])
+	}
+	if annotations[airunwayv1alpha1.AnnotationDocumentationURL] != ProviderDocumentation {
+		t.Fatalf("expected documentation-url annotation %q, got %q", ProviderDocumentation, annotations[airunwayv1alpha1.AnnotationDocumentationURL])
+	}
+
+	var capabilities airunwayv1alpha1.ProviderCapabilities
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationCapabilities]), &capabilities); err != nil {
+		t.Fatalf("failed to decode capabilities annotation: %v", err)
+	}
+	if len(capabilities.Engines) != 3 {
+		t.Fatalf("expected 3 annotated engines, got %+v", capabilities.Engines)
+	}
+
+	var health struct {
+		CRDs []struct {
+			Name string `json:"name"`
+		} `json:"crds"`
+		OperatorPods []struct {
+			Selectors []string `json:"selectors"`
+		} `json:"operatorPods"`
+	}
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
+		t.Fatalf("failed to decode health annotation: %v", err)
+	}
+	if len(health.CRDs) != 1 || health.CRDs[0].Name != "dynamographdeployments.nvidia.com" {
+		t.Fatalf("expected Dynamo CRD health probe, got %+v", health.CRDs)
+	}
+	if len(health.OperatorPods) == 0 || len(health.OperatorPods[0].Selectors) == 0 {
+		t.Fatalf("expected operator pod health probes, got %+v", health.OperatorPods)
+	}
+}
