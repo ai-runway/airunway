@@ -238,18 +238,27 @@ If no labeled Gateway is found, the controller skips gateway reconciliation and 
 
 ### Cross-namespace Gateway
 
-When the Gateway is in a different namespace than the ModelDeployment, the controller automatically patches each Gateway listener to allow HTTPRoutes from the ModelDeployment's namespace using a namespace selector:
+When the Gateway is in a different namespace than the ModelDeployment, the controller automatically patches each Gateway listener to allow HTTPRoutes from the ModelDeployment's namespace using a namespace selector. The selector is a `matchExpressions` In-list so that multiple cross-namespace ModelDeployments can share one Gateway, and it always includes the **Gateway's own namespace** so that routes living alongside the Gateway are never evicted:
 
 ```yaml
 allowedRoutes:
   namespaces:
     from: Selector
     selector:
-      matchLabels:
-        kubernetes.io/metadata.name: <modeldeployment-namespace>
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - <gateway-namespace>          # always retained
+            - <modeldeployment-namespace>  # one entry per cross-namespace deployment
 ```
 
 This is required because Gateway API uses `allowedRoutes` on the listener to control cross-namespace route binding. Without it, the Gateway will reject HTTPRoutes from other namespaces.
+
+When the last cross-namespace ModelDeployment using the Gateway is removed, the controller reverts each listener back to `from: Same` (dropping the selector), which again implicitly allows routes from the Gateway's own namespace.
+
+> [!NOTE]
+> Earlier controller versions wrote a single-namespace `matchLabels` selector and, when converting a listener from the default `from: Same`, could drop the Gateway's own namespace — evicting every HTTPRoute co-located with the Gateway. The controller now always retains the Gateway's namespace in the selector. A Gateway left in the old broken state is repaired the next time a new namespace is added or the last cross-namespace deployment is removed.
 
 **Opting out of Gateway patching:** In security-conscious environments where a Gateway admin manages `allowedRoutes` independently, start the controller with `--patch-gateway-allowed-routes=false`. The controller will skip patching the Gateway globally, and the admin is responsible for configuring the listener to accept HTTPRoutes from ModelDeployment namespaces.
 
