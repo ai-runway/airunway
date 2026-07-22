@@ -26,7 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 var (
@@ -77,13 +77,33 @@ func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager) error {
 // AgentDeploymentCustomValidator validates AgentDeployment resources.
 type AgentDeploymentCustomValidator struct{}
 
+// agentDeploymentMaxNameLength caps AgentDeployment names so every derived
+// workload label value (which uses the name verbatim) stays within
+// Kubernetes' 63-character label-value limit. Without this, an otherwise
+// valid long name is admitted but its rendered Deployment/Job fails to apply.
+const agentDeploymentMaxNameLength = 63
+
 // ValidateCreate validates AgentDeployment on create.
 func (v *AgentDeploymentCustomValidator) ValidateCreate(_ context.Context, obj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(obj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
+	allErrs = append(allErrs, validateAgentDeploymentName(obj)...)
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
 	}
 	return nil, nil
+}
+
+// validateAgentDeploymentName rejects names too long to be reused verbatim as a
+// label value on the rendered workloads.
+func validateAgentDeploymentName(obj *airunwayv1alpha1.AgentDeployment) field.ErrorList {
+	if len(obj.Name) > agentDeploymentMaxNameLength {
+		return field.ErrorList{field.Invalid(
+			field.NewPath("metadata", "name"),
+			obj.Name,
+			fmt.Sprintf("name must be at most %d characters so derived workload labels stay within Kubernetes' 63-character label-value limit", agentDeploymentMaxNameLength),
+		)}
+	}
+	return nil
 }
 
 // ValidateUpdate validates AgentDeployment on update.
@@ -300,7 +320,7 @@ func validatePodSecurityContextValues(m map[string]interface{}, path *field.Path
 		}
 	}
 	if value, found := m["runAsUser"]; found {
-		allErrs = append(allErrs, validateNonNegativeInt64(path.Child("runAsUser"), value)...)
+		allErrs = append(allErrs, validateRunAsUser(path.Child("runAsUser"), value)...)
 	}
 	if value, found := m["runAsGroup"]; found {
 		allErrs = append(allErrs, validateNonNegativeInt64(path.Child("runAsGroup"), value)...)
@@ -353,7 +373,7 @@ func validateContainerSecurityContextValues(m map[string]interface{}, path *fiel
 		}
 	}
 	if value, found := m["runAsUser"]; found {
-		allErrs = append(allErrs, validateNonNegativeInt64(path.Child("runAsUser"), value)...)
+		allErrs = append(allErrs, validateRunAsUser(path.Child("runAsUser"), value)...)
 	}
 	if value, found := m["runAsGroup"]; found {
 		allErrs = append(allErrs, validateNonNegativeInt64(path.Child("runAsGroup"), value)...)
@@ -365,6 +385,19 @@ func validateNonNegativeInt64(path *field.Path, value interface{}) field.ErrorLi
 	number, ok := value.(float64)
 	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number < 0 {
 		return field.ErrorList{field.Invalid(path, value, "must be a non-negative integer")}
+	}
+	return nil
+}
+
+// validateRunAsUser requires a strictly positive UID. Every rendered container
+// keeps runAsNonRoot=true and overrides may not disable it, so runAsUser=0
+// (root) would be admitted here but rejected by the kubelet at pod start.
+func validateRunAsUser(path *field.Path, value interface{}) field.ErrorList {
+	if errs := validateNonNegativeInt64(path, value); len(errs) > 0 {
+		return errs
+	}
+	if number, ok := value.(float64); ok && number == 0 {
+		return field.ErrorList{field.Forbidden(path, "runAsUser cannot be 0 (root); runAsNonRoot is always enforced")}
 	}
 	return nil
 }

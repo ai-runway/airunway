@@ -33,7 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 // --- Pure render-function unit tests (no cluster) --------------------------
@@ -180,6 +180,52 @@ func TestRenderAgentDeployment_KeylessBindingInjectsLiteralAPIKey(t *testing.T) 
 	}
 	if apiKey.Value != keylessCredentialValue {
 		t.Fatalf("OPENAI_API_KEY = %q, want %q", apiKey.Value, keylessCredentialValue)
+	}
+}
+
+func TestModelBindingEnv_MapsFamilyByAPIType(t *testing.T) {
+	cases := []struct {
+		name        string
+		apiType     airunwayv1alpha1.ExternalAPIType
+		wantBaseKey string
+		wantModel   string
+		wantKeyName string
+	}{
+		{"openai", airunwayv1alpha1.ExternalAPITypeOpenAI, "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"},
+		{"custom", airunwayv1alpha1.ExternalAPITypeCustom, "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"},
+		{"unset-deploymentRef", "", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"},
+		{"anthropic", airunwayv1alpha1.ExternalAPITypeAnthropic, "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"},
+		{"azureOpenAI", airunwayv1alpha1.ExternalAPITypeAzureOpenAI, "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL", "AZURE_OPENAI_API_KEY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := airunwayv1alpha1.ModelBindingStatus{
+				APIType:        tc.apiType,
+				BaseURL:        "https://endpoint/v1",
+				ModelName:      "some-model",
+				CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "creds", Key: "api-key"},
+			}
+			env := map[string]corev1.EnvVar{}
+			for _, e := range modelBindingEnv(binding) {
+				env[e.Name] = e
+			}
+			if env[tc.wantBaseKey].Value != "https://endpoint/v1" {
+				t.Errorf("%s = %q, want endpoint URL", tc.wantBaseKey, env[tc.wantBaseKey].Value)
+			}
+			if env[tc.wantModel].Value != "some-model" {
+				t.Errorf("%s = %q, want model", tc.wantModel, env[tc.wantModel].Value)
+			}
+			keyVar, ok := env[tc.wantKeyName]
+			if !ok || keyVar.ValueFrom == nil || keyVar.ValueFrom.SecretKeyRef == nil {
+				t.Errorf("%s must be sourced from the binding secret, got %+v", tc.wantKeyName, keyVar)
+			}
+			// The OpenAI family must NOT leak in for non-OpenAI types.
+			if tc.wantBaseKey != "OPENAI_BASE_URL" {
+				if _, leaked := env["OPENAI_BASE_URL"]; leaked {
+					t.Errorf("OPENAI_BASE_URL must not be set for APIType %q", tc.apiType)
+				}
+			}
+		})
 	}
 }
 

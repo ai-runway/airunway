@@ -27,7 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (

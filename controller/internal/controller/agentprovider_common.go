@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,9 +29,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -43,6 +45,85 @@ const (
 	// in-cluster model endpoints.
 	keylessCredentialValue = "not-required"
 )
+
+// verifyOwnedOrAbsent guards a server-side apply against silently adopting an
+// unrelated, same-named object. It looks up any existing object matching obj's
+// kind/name/namespace and returns an error unless that object is already
+// controlled by owner (or does not exist). Providers must call this before
+// force-applying so an AgentDeployment cannot overwrite a Deployment, Service,
+// Job, ConfigMap, or upstream framework CR it does not own.
+func verifyOwnedOrAbsent(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner metav1.Object, obj client.Object) error {
+	gvk, err := apiutil.GVKForObject(obj, scheme)
+	if err != nil {
+		// Unregistered (e.g. upstream CRD) types resolve their GVK from the
+		// object itself rather than the scheme.
+		gvk = obj.GetObjectKind().GroupVersionKind()
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(gvk)
+	key := k8stypes.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	if err := c.Get(ctx, key, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get existing %s %s for ownership check: %w", gvk.Kind, key, err)
+	}
+	if !metav1.IsControlledBy(existing, owner) {
+		return fmt.Errorf("refusing to adopt %s %s: it is not owned by AgentDeployment %s", gvk.Kind, key, owner.GetName())
+	}
+	return nil
+}
+
+// deleteOwnedObject deletes obj (addressed by its already-set name/namespace and
+// kind) only when it is controlled by owner; a missing or unowned object is a
+// no-op. Providers use it to tear down the resources they rendered when a
+// binding is revoked, without ever touching an unrelated same-named object.
+func deleteOwnedObject(ctx context.Context, c client.Client, owner metav1.Object, obj client.Object) error {
+	key := k8stypes.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	if err := c.Get(ctx, key, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get owned object %s for cleanup: %w", key, err)
+	}
+	if !metav1.IsControlledBy(obj, owner) {
+		return nil
+	}
+	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete owned object %s: %w", key, err)
+	}
+	return nil
+}
+
+// cleanupOwnedCRs tears down the given upstream custom resources a CRD-backed
+// provider rendered for ad when a model binding is revoked, so the previously
+// rendered agent stops running instead of continuing to serve with a stale
+// endpoint. Each object is deleted only when it is actually controlled by ad.
+//
+// The managed no-auth Secret is intentionally left in place: it holds only a
+// keyless placeholder token (not a real credential), deleting it would require
+// re-granting the Secret read access these providers deliberately drop, and it
+// is garbage-collected via its owner reference when the AgentDeployment itself
+// is deleted.
+func cleanupOwnedCRs(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
+	for _, obj := range objs {
+		if err := deleteOwnedObject(ctx, c, ad, obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// unstructuredRef builds a minimal object handle (kind + name + namespace)
+// suitable for a Get/Delete of an upstream custom resource.
+func unstructuredRef(gvk schema.GroupVersionKind, name, namespace string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	u.SetName(name)
+	u.SetNamespace(namespace)
+	return u
+}
 
 // applyProviderOwnedStatus writes ONLY the provider-owned AgentDeployment
 // status fields (phase, runtime, replicas, and the ProviderReady condition)
@@ -112,6 +193,7 @@ func upstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersi
 	if err := c.Get(ctx, k8stypes.NamespacedName{Name: name, Namespace: namespace}, u); err != nil {
 		return false
 	}
+	generation := u.GetGeneration()
 	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if err != nil || !found {
 		return false
@@ -121,11 +203,39 @@ func upstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersi
 		if !ok {
 			continue
 		}
-		if cm["type"] == "Ready" {
-			return cm["status"] == "True"
+		if cm["type"] != "Ready" {
+			continue
 		}
+		if cm["status"] != "True" {
+			return false
+		}
+		// Guard against a stale Ready=True left over from a previous
+		// generation: right after the provider reapplies a changed CR, the
+		// operator may not have re-reconciled yet. When it records an
+		// observedGeneration, require it to have caught up before we promote
+		// AgentDeployment to Running.
+		if observed, present := conditionObservedGeneration(cm); present && observed < generation {
+			return false
+		}
+		return true
 	}
 	return false
+}
+
+// conditionObservedGeneration extracts a status condition's observedGeneration.
+// The unstructured decoder yields JSON numbers as int64/float64, so both are
+// handled. Returns false when the operator does not record it.
+func conditionObservedGeneration(cm map[string]interface{}) (int64, bool) {
+	switch n := cm["observedGeneration"].(type) {
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	default:
+		return 0, false
+	}
 }
 
 // keylessCredentialSecretName returns the deterministic per-agent Secret name

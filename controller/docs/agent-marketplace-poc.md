@@ -1,6 +1,6 @@
 # Agent Marketplace — controller PoC
 
-Proof-of-concept controller for the Agent Marketplace ([#200](https://github.com/kaito-project/airunway/issues/200)). It validates that the `AgentDeployment` / `AgentProviderConfig` API (PR #287) maps cleanly onto real agent frameworks across the two rendering backends, on top of an MVP of the controller logic. This is still a PoC: the manager binary currently registers providers in-tree, while the provider shim modules have already been split into separate out-of-tree packages for the runtime cutover path.
+Proof-of-concept controller for the Agent Marketplace ([#200](https://github.com/ai-runway/airunway/issues/200)). It validates that the `AgentDeployment` / `AgentProviderConfig` API (PR #287) maps cleanly onto real agent frameworks across the two rendering backends, on top of an MVP of the controller logic. This is still a PoC: the manager binary currently registers providers in-tree, while the provider shim modules have already been split into separate out-of-tree packages for the runtime cutover path.
 
 ## Architecture
 
@@ -49,7 +49,7 @@ make test        # or: KUBEBUILDER_ASSETS=$(pwd)/bin/k8s/<ver> go test ./interna
 ```
 
 - Pure render functions assert the exact rendered shapes (kagent Agent/ModelConfig, Orka Provider/Agent, container Deployment/Job/Service/ConfigMap) without a cluster.
-- envtest specs (real API server) prove: framework/binding resolution and refusal of unsupported modes; the SSA field-ownership split (provider status survives a core reconcile and vice versa); crd providers rendering their CRs and reflecting upstream readiness; the container provider tracking Deployment/Job readiness; and `spec.lifecycle: job` rendering a `Job` (no Deployment/Service). Minimal kagent/Orka CRD stubs live under `internal/controller/testdata/crds/` so the crd providers' apply path is exercised without the real operators.
+- envtest specs (real API server) prove: framework/binding resolution and refusal of unsupported modes; the SSA field-ownership split (provider status survives a core reconcile and vice versa); crd providers rendering their CRs and reflecting upstream readiness; the container provider tracking Deployment/Job readiness; and `spec.lifecycle: job` rendering a `Job` (no Deployment/Service). The real upstream kagent/Orka CRDs vendored under `internal/controller/testdata/crds/` back these specs so the crd providers' apply path runs against the operators' actual structural schemas (see [Schema fidelity](#schema-fidelity-automated-high-confidence) below).
 
 ## Live cluster validation (manual, not automated)
 

@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -216,5 +216,57 @@ func TestAgentDeploymentCustomValidator_AllowsUpdateWhenFrameworkUnchanged(t *te
 	_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
 	if err != nil {
 		t.Fatalf("expected update with unchanged framework to pass, got: %v", err)
+	}
+}
+
+func TestValidateAgentProviderOverrides_RejectsRunAsUserZero(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"podSecurityContext": map[string]interface{}{
+				"runAsUser": 0,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.podSecurityContext.runAsUser")
+}
+
+func TestValidateAgentProviderOverrides_AllowsRunAsGroupZero(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
+		"workload": map[string]interface{}{
+			"podSecurityContext": map[string]interface{}{
+				"runAsUser":  1000,
+				"runAsGroup": 0,
+				"fsGroup":    0,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	if len(errs) != 0 {
+		t.Fatalf("expected group IDs of 0 to be allowed, got %v", errs)
+	}
+}
+
+func TestAgentDeploymentCustomValidator_RejectsOverLongName(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	obj := makeMinimalAgentDeployment("kagent")
+	obj.Name = strings.Repeat("a", agentDeploymentMaxNameLength+1)
+
+	_, err := validator.ValidateCreate(context.Background(), obj)
+	if err == nil {
+		t.Fatal("expected name-length validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "metadata.name") {
+		t.Fatalf("expected error to reference metadata.name, got: %v", err)
+	}
+}
+
+func TestAgentDeploymentCustomValidator_AllowsMaxLengthName(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	obj := makeMinimalAgentDeployment("kagent")
+	obj.Name = strings.Repeat("a", agentDeploymentMaxNameLength)
+
+	if _, err := validator.ValidateCreate(context.Background(), obj); err != nil {
+		t.Fatalf("expected a %d-character name to be allowed, got: %v", agentDeploymentMaxNameLength, err)
 	}
 }

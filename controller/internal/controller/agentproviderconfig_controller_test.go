@@ -29,7 +29,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 // stubDiscovery implements just enough of discovery.DiscoveryInterface for the

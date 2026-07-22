@@ -194,9 +194,11 @@ type AgentResourceSpec struct {
 
 // AgentObservabilitySpec configures observability emission for the agent.
 type AgentObservabilitySpec struct {
-	// otlp configures OpenTelemetry export. When set, providers MUST
-	// inject OTEL_EXPORTER_OTLP_* environment variables matching this
-	// configuration into the rendered agent workload.
+	// otlp configures OpenTelemetry export. The container backend injects the
+	// matching OTEL_EXPORTER_OTLP_* environment variables into the rendered
+	// agent workload. CRD-backed providers (e.g. kagent, orka) do NOT currently
+	// propagate it to their upstream operators, so on those backends this field
+	// is accepted but has no effect until native mapping is added.
 	// +optional
 	OTLP *OTLPSpec `json:"otlp,omitempty"`
 }
@@ -262,9 +264,11 @@ type AgentDeploymentSpec struct {
 	Config *runtime.RawExtension `json:"config,omitempty"`
 
 	// resources sets resource requests/limits for the rendered agent
-	// workload. Providers translate this into native scheduling hints
-	// (e.g. container resources on a Deployment, or framework-specific
-	// fields on a native CR).
+	// workload. The container backend maps this onto the agent container's
+	// resource requirements. CRD-backed providers (e.g. kagent, orka) do NOT
+	// currently translate it — their upstream operators own scheduling — so on
+	// those backends this field is accepted but has no effect. Treat it as a
+	// container-backend hint until per-backend mapping is added.
 	// +optional
 	Resources *AgentResourceSpec `json:"resources,omitempty"`
 

@@ -21,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	internalcontroller "github.com/kaito-project/airunway/controller/internal/controller"
+	internalcontroller "github.com/ai-runway/airunway/controller/internal/controller"
 )
 
 // Reconciler is the setup contract shared by agent provider shims.

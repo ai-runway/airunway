@@ -41,7 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -236,8 +236,14 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Consume the core-resolved bindings; do not render until they are ready.
+	// If a previously valid binding is now unresolved (e.g. its credential
+	// Secret was revoked), tear down the owned workloads first so the agent
+	// stops serving with the stale endpoint/credentials instead of lingering.
 	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
 		ad.Status.ModelBinding == nil {
+		if err := r.cleanupOwnedWorkloads(ctx, &ad); err != nil {
+			return r.failWithStatus(ctx, &ad, "BindingCleanupFailed", err)
+		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
 	}
@@ -275,8 +281,12 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 // applyOwned sets the AgentDeployment as controller owner and server-side
-// applies the object under the container field owner.
+// applies the object under the container field owner. It first refuses to adopt
+// a pre-existing same-named object that this AgentDeployment does not own.
 func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
+	if err := verifyOwnedOrAbsent(ctx, r.Client, r.Scheme, ad, obj); err != nil {
+		return err
+	}
 	if err := controllerutil.SetControllerReference(ad, obj, r.Scheme); err != nil {
 		return fmt.Errorf("set owner reference: %w", err)
 	}
@@ -407,12 +417,24 @@ func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool 
 
 // deleteObsolete best-effort deletes owned workloads left over from a previous
 // spec.lifecycle so a lifecycle switch does not leave both kinds running. Each
-// object is looked up by the agent's name in its namespace.
+// object is looked up by the agent's name in its namespace, and is deleted only
+// when it is actually controlled by this AgentDeployment so an unrelated
+// same-named object is never removed.
 func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
 	logger := log.FromContext(ctx)
 	for _, obj := range objs {
 		obj.SetName(ad.Name)
 		obj.SetNamespace(ad.Namespace)
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("get obsolete %T %s/%s: %w", obj, ad.Namespace, ad.Name, err)
+		}
+		if !metav1.IsControlledBy(obj, ad) {
+			return fmt.Errorf("refusing to delete %T %s/%s: it is not owned by AgentDeployment %s",
+				obj, ad.Namespace, ad.Name, ad.Name)
+		}
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "failed to delete obsolete workload from previous lifecycle",
 				"kind", fmt.Sprintf("%T", obj), "name", ad.Name)
@@ -420,6 +442,32 @@ func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *ai
 		}
 	}
 	return nil
+}
+
+// cleanupOwnedWorkloads deletes every workload this container agent owns so a
+// revoked/unresolved binding actually stops the running agent. Unlike
+// deleteObsolete it targets the workloads under their real names (including the
+// suffixed ConfigMap) and silently skips any same-named object this
+// AgentDeployment does not own.
+func (r *ContainerProviderReconciler) cleanupOwnedWorkloads(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
+	owned := []client.Object{
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: ad.Name + "-config", Namespace: ad.Namespace}},
+	}
+	for _, obj := range owned {
+		if err := r.deleteOwned(ctx, ad, obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteOwned deletes obj (addressed by its already-set name/namespace) only
+// when it is controlled by ad; a missing or unowned object is a no-op.
+func (r *ContainerProviderReconciler) deleteOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
+	return deleteOwnedObject(ctx, r.Client, ad, obj)
 }
 
 // containerProviderSettings holds the provider-owned rendering settings the
@@ -527,27 +575,8 @@ func agentPodSpec(
 ) corev1.PodSpec {
 	env := []corev1.EnvVar{
 		{Name: "AIRUNWAY_AGENT_CONFIG", Value: agentConfigMountPath},
-		{Name: "OPENAI_BASE_URL", Value: binding.BaseURL},
-		{Name: "OPENAI_MODEL", Value: binding.ModelName},
 	}
-	if binding.CredentialsRef != nil {
-		env = append(env, corev1.EnvVar{
-			Name: "OPENAI_API_KEY",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: binding.CredentialsRef.Name},
-					Key:                  binding.CredentialsRef.Key,
-				},
-			},
-		})
-	} else {
-		// Keyless in-cluster model endpoints still expect OPENAI_API_KEY to be
-		// present in many framework SDKs; inject a harmless literal token.
-		env = append(env, corev1.EnvVar{
-			Name:  "OPENAI_API_KEY",
-			Value: keylessCredentialValue,
-		})
-	}
+	env = append(env, modelBindingEnv(binding)...)
 	env = append(env, otlpEnv(ad)...)
 
 	containerSecurity := &corev1.SecurityContext{
@@ -613,6 +642,45 @@ func agentResources(ad *airunwayv1alpha1.AgentDeployment) corev1.ResourceRequire
 		req.Limits = ad.Spec.Resources.Limits
 	}
 	return req
+}
+
+// modelBindingEnv renders the resolved model binding as the environment
+// variable family matching its API type, so a container agent receives the
+// runtime contract its SDK expects rather than always OpenAI-shaped variables.
+// OpenAI-compatible endpoints (openai/custom and keyless in-cluster
+// deploymentRef bindings, which carry no APIType) use the OPENAI_* family; the
+// well-known Anthropic and Azure OpenAI families are emitted for those types.
+func modelBindingEnv(binding airunwayv1alpha1.ModelBindingStatus) []corev1.EnvVar {
+	var baseURLKey, modelKey, apiKeyKey string
+	switch binding.APIType {
+	case airunwayv1alpha1.ExternalAPITypeAnthropic:
+		baseURLKey, modelKey, apiKeyKey = "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"
+	case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
+		baseURLKey, modelKey, apiKeyKey = "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_MODEL", "AZURE_OPENAI_API_KEY"
+	default:
+		baseURLKey, modelKey, apiKeyKey = "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"
+	}
+
+	env := []corev1.EnvVar{
+		{Name: baseURLKey, Value: binding.BaseURL},
+		{Name: modelKey, Value: binding.ModelName},
+	}
+	if binding.CredentialsRef != nil {
+		env = append(env, corev1.EnvVar{
+			Name: apiKeyKey,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: binding.CredentialsRef.Name},
+					Key:                  binding.CredentialsRef.Key,
+				},
+			},
+		})
+	} else {
+		// Keyless in-cluster model endpoints still expect an API-key variable to
+		// be present in many framework SDKs; inject a harmless literal token.
+		env = append(env, corev1.EnvVar{Name: apiKeyKey, Value: keylessCredentialValue})
+	}
+	return env
 }
 
 // otlpEnv translates spec.observability.otlp into the standard OTLP exporter

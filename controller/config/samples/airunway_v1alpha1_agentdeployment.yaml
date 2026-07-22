@@ -16,13 +16,9 @@ spec:
     systemPrompt: |
       You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
       networking issues. Prefer minimal-blast-radius actions.
-  resources:
-    requests:
-      cpu: "200m"
-      memory: "256Mi"
-    limits:
-      cpu: "1"
-      memory: "1Gi"
+  # Note: spec.resources is honored by the container backend only. kagent is a
+  # crd-backed provider whose upstream operator owns scheduling, so resource
+  # requests/limits are intentionally omitted here (they would be ignored).
 ---
 # Example: bind OpenClaw to an external OpenAI-compatible API.
 apiVersion: airunway.ai/v1alpha1

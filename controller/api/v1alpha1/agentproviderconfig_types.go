@@ -88,9 +88,13 @@ type AgentProviderCapabilities struct {
 	// backend identifies the rendering strategy this provider uses
 	// (crd-native vs container-based). It is required because the core
 	// controller cannot determine how to render an agent workload
-	// without it, and it backs the Backend printer column. See
-	// AgentProviderBackend for values.
+	// without it, and it backs the Backend printer column. It is immutable:
+	// changing it would hand already-admitted agents to a different reconciler
+	// while the original keeps filtering by framework name, so both would
+	// render and force-own the same resources. See AgentProviderBackend for
+	// values.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="backend is immutable"
 	Backend AgentProviderBackend `json:"backend"`
 
 	// requiresOperator indicates the framework relies on an upstream

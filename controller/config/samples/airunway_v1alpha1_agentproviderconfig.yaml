@@ -2,6 +2,12 @@
 # Demonstrates a non-Kubernetes-native framework whose image is supplied by
 # the catalog entry and rendered into Deployment+Service by the container
 # provider.
+#
+# IMPORTANT: a catalog "image" must honor the container contract — serve HTTP on
+# the agent port (default 8080), read /etc/airunway/agent.json, and call the
+# model via the injected OPENAI_* env. The raw upstream OpenClaw image does NOT
+# (it uses its own config format and serves :18789), so the catalog references a
+# thin contract-compatible wrapper image instead of the upstream image directly.
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
@@ -12,8 +18,8 @@ metadata:
         {
           "name": "openclaw-personal-assistant",
           "title": "Personal AI assistant (OpenClaw)",
-          "description": "OpenClaw running as a personal automation agent. Bind to any OpenAI-compatible model managed by AI Runway.",
-          "image": "ghcr.io/openclaw/openclaw:latest",
+          "description": "OpenClaw running as a personal automation agent via a container-contract wrapper. Bind to any OpenAI-compatible model managed by AI Runway.",
+          "image": "ghcr.io/ai-runway/openclaw-agent:latest",
           "tags": ["personal", "automation"]
         }
       ]
@@ -114,8 +120,8 @@ metadata:
         {
           "name": "hermes-assistant",
           "title": "Hermes assistant",
-          "description": "Hermes running as a fast container-based task assistant, bound to any OpenAI-compatible model managed by AI Runway.",
-          "image": "ghcr.io/hermes/hermes-agent:latest",
+          "description": "Hermes running as a fast container-based task assistant via a container-contract wrapper, bound to any OpenAI-compatible model managed by AI Runway.",
+          "image": "ghcr.io/ai-runway/hermes-agent:latest",
           "tags": ["automation"]
         }
       ]

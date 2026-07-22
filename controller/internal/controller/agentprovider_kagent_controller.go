@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -93,7 +93,7 @@ type kagentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=kagent.dev,resources=agents;modelconfigs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;update;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
 func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -112,9 +112,22 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Consume the core-resolved bindings. Do not render until core reports the
 	// bindings are resolved, so we never build a ModelConfig from a half-
-	// resolved endpoint.
+	// resolved endpoint. If a previously valid binding is now unresolved, tear
+	// down the rendered Agent/ModelConfig/Secret so it stops using stale
+	// credentials before reporting Pending.
 	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
 		ad.Status.ModelBinding == nil {
+		if err := cleanupOwnedCRs(ctx, r.Client, &ad,
+			unstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
+			unstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
+		); err != nil {
+			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+				metav1.ConditionFalse, "BindingCleanupFailed", err.Error())
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
 	}
@@ -135,6 +148,14 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	agent := renderKagentAgent(&ad, cfg, modelConfig.GetName())
 
 	for _, obj := range []*unstructured.Unstructured{modelConfig, agent} {
+		if err := verifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
+			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+				metav1.ConditionFalse, "OwnershipConflict", err.Error())
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
+		}
 		if err := controllerutil.SetControllerReference(&ad, obj, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set owner reference on %s: %w", obj.GetKind(), err)
 		}
