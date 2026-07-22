@@ -912,6 +912,71 @@ func TestTransformOverrideBlocksMetadata(t *testing.T) {
 	}
 }
 
+func TestTransformOverrideBlocksPodSpec(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{"spec": {"template": {"spec": {"volumes": [{"name": "host", "hostPath": {"path": "/"}}]}}}}`),
+		},
+	}
+
+	_, err := tr.Transform(context.Background(), md)
+	if err == nil {
+		t.Fatal("expected error when overriding spec.template.spec")
+	}
+	if !strings.Contains(err.Error(), "spec.template.spec") {
+		t.Fatalf("expected error to mention spec.template.spec, got %v", err)
+	}
+}
+
+func TestHasNestedMapPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]interface{}
+		path     []string
+		expected bool
+	}{
+		{
+			name: "path exists",
+			input: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"template": map[string]interface{}{
+						"spec": map[string]interface{}{},
+					},
+				},
+			},
+			path:     []string{"spec", "template", "spec"},
+			expected: true,
+		},
+		{
+			name: "path missing",
+			input: map[string]interface{}{
+				"spec": map[string]interface{}{},
+			},
+			path:     []string{"spec", "template", "spec"},
+			expected: false,
+		},
+		{
+			name: "path blocked by non-map",
+			input: map[string]interface{}{
+				"spec": "not-a-map",
+			},
+			path:     []string{"spec", "template", "spec"},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := hasNestedMapPath(tt.input, tt.path...)
+			if result != tt.expected {
+				t.Fatalf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
 func TestBuildResourceLimits(t *testing.T) {
 	tr := NewTransformer()
 
