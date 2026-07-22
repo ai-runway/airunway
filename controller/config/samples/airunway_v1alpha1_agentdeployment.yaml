@@ -1,0 +1,102 @@
+# Example: bind a Kagent SRE agent to an in-cluster ModelDeployment.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: sre-bot
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: kagent
+  model:
+    deploymentRef:
+      name: llama-3-8b
+  config:
+    systemPrompt: |
+      You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
+      networking issues. Prefer minimal-blast-radius actions.
+  # Note: spec.resources is honored by the container backend only. kagent is a
+  # crd-backed provider whose upstream operator owns scheduling, so resource
+  # requests/limits are intentionally omitted here (they would be ignored).
+---
+# Example: bind OpenClaw to an external OpenAI-compatible API.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: personal-assistant
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: openclaw
+  model:
+    externalAPI:
+      type: openai
+      baseURL: https://api.openai.com/v1
+      modelName: gpt-4o-mini
+      credentialsRef:
+        name: openai-api-key
+        key: api-key
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+  # Security posture is owned by the framework provider: each provider
+  # applies the security context appropriate for its framework when it
+  # renders the agent workload (e.g. OpenClaw needs a writable root
+  # filesystem for session state). It is not set per AgentDeployment.
+---
+# Example: Hermes (container backend) with an explicit BYO image override.
+# Shows spec.config carrying both provider-consumed fields (image) and
+# framework passthrough (systemPrompt), all mounted for the container as
+# /etc/airunway/agent.json.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: hermes-helper
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: hermes
+  model:
+    externalAPI:
+      type: openai
+      baseURL: https://api.openai.com/v1
+      modelName: gpt-4o-mini
+      credentialsRef:
+        name: openai-api-key
+        key: api-key
+  provider:
+    overrides:
+      workload:
+        securityContext:
+          readOnlyRootFilesystem: false
+  config:
+    image: ghcr.io/hermes/hermes-agent:poc
+    systemPrompt: "You are Hermes, a fast and concise task assistant."
+---
+# Example: Orka (crd backend) task swarm bound to an external model.
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: research-swarm
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: orka
+  model:
+    externalAPI:
+      type: openai
+      baseURL: https://api.openai.com/v1
+      modelName: gpt-4o-mini
+      credentialsRef:
+        name: openai-api-key
+        key: api-key
+  config:
+    systemPrompt: "Decompose the task and coordinate specialist agents."

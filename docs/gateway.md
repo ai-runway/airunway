@@ -165,6 +165,8 @@ The `ModelDeployment` status will show gateway information once ready:
 kubectl get modeldeployment qwen3 -o jsonpath='{.status.gateway}'
 ```
 
+The gateway status now includes the selected Gateway identity (`gatewayName`, `gatewayNamespace`) in addition to `endpoint` and `modelName`.
+
 ## Configuration
 
 ### Auto-detection
@@ -422,6 +424,10 @@ The controller resolves the gateway model name using this priority:
 4. **`spec.model.id`** — final fallback
 
 Auto-discovery runs only when the deployment reaches `Running` phase. If the probe fails (timeout, error, no models), it silently falls through to the next level.
+
+### AgentDeployment `deploymentRef` integration
+
+Agent deployments that bind with `spec.model.deploymentRef` reuse this gateway resolution path. When a target `ModelDeployment` has `status.gateway.gatewayName` and `status.gateway.gatewayNamespace`, the agent binding resolves to the in-cluster gateway service URL (`http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`) so requests follow the same BBR/gateway route as `gatewayEndpoint` bindings. If gateway metadata is absent, resolution falls back to the model Service endpoint.
 
 ## Using the Gateway
 

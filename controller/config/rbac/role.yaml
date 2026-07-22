@@ -28,14 +28,49 @@ rules:
   - patch
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - patch
+  - update
+- apiGroups:
   - airunway.ai
   resources:
+  - agentdeployments
   - inferenceproviderconfigs
   verbs:
   - get
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - airunway.ai
+  resources:
+  - agentdeployments/finalizers
+  - modeldeployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - airunway.ai
+  resources:
+  - agentdeployments/status
+  - agentproviderconfigs/status
+  - modeldeployments/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - airunway.ai
+  resources:
+  - agentproviderconfigs
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - airunway.ai
@@ -50,23 +85,21 @@ rules:
   - update
   - watch
 - apiGroups:
-  - airunway.ai
-  resources:
-  - modeldeployments/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - airunway.ai
-  resources:
-  - modeldeployments/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
   - apps
   resources:
   - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
   verbs:
   - create
   - delete
@@ -83,6 +116,19 @@ rules:
   - create
   - get
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  - providers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
@@ -126,6 +172,19 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - kagent.dev
+  resources:
+  - agents
+  - modelconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - networking.istio.io

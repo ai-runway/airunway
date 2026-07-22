@@ -121,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [dynamo, kaito, kuberay, llmd, vllm]
+        provider: [dynamo, kaito, kuberay, llmd, vllm, agent-container, agent-kagent, agent-orka]
 
     steps:
       - name: Checkout repository
@@ -155,7 +155,14 @@ jobs:
       # the one that catches a silent -X no-op — e.g. shimVersion becoming a
       # const, being renamed, or ProviderVersion being retargeted — which (a)/(b)
       # cannot, since the flag is still present in those cases.
+      #
+      # The agent-* shims are excluded: they are PoC shims that reuse the
+      # controller's reconcilers and do not yet implement the reported-version
+      # contract (no shimVersion/ProviderVersion, and nothing writes
+      # AgentProviderConfig.status.version). Reporting their version is a tracked
+      # follow-up; until then they only run `make build`/`make test` below.
       - name: Assert shimVersion injection + git-stamp default
+        if: ${{ !startsWith(matrix.provider, 'agent-') }}
         run: |
           set -euo pipefail
           p=${{ matrix.provider }}

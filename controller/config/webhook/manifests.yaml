@@ -36,6 +36,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-airunway-ai-v1alpha1-agentdeployment
+  failurePolicy: Fail
+  name: vagentdeployment-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - airunway.ai
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - agentdeployments
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-airunway-ai-v1alpha1-modeldeployment
   failurePolicy: Fail
   name: vmodeldeployment-v1alpha1.kb.io

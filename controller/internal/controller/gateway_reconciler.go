@@ -191,6 +191,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	endpoint := r.resolveGatewayEndpoint(ctx, gwConfig)
 	md.Status.Gateway = &airunwayv1alpha1.GatewayStatus{
 		Endpoint:         endpoint,
+		GatewayName:      gwConfig.GatewayName,
 		ModelName:        modelName,
 		GatewayNamespace: gwConfig.GatewayNamespace,
 	}
