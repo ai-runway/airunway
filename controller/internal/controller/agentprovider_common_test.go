@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 func ownershipScheme(t *testing.T) *runtime.Scheme {
@@ -66,7 +67,7 @@ func TestVerifyOwnedOrAbsent(t *testing.T) {
 			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 			ObjectMeta: metav1.ObjectMeta{Name: "agent-config", Namespace: "ns"},
 		}
-		if err := verifyOwnedOrAbsent(context.Background(), c, s, ad, desired); err != nil {
+		if err := agentprovider.VerifyOwnedOrAbsent(context.Background(), c, s, ad, desired); err != nil {
 			t.Fatalf("expected absent object to be allowed, got %v", err)
 		}
 	})
@@ -77,7 +78,7 @@ func TestVerifyOwnedOrAbsent(t *testing.T) {
 			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 			ObjectMeta: metav1.ObjectMeta{Name: "agent-config", Namespace: "ns"},
 		}
-		if err := verifyOwnedOrAbsent(context.Background(), c, s, ad, desired); err != nil {
+		if err := agentprovider.VerifyOwnedOrAbsent(context.Background(), c, s, ad, desired); err != nil {
 			t.Fatalf("expected owned object to be allowed, got %v", err)
 		}
 	})
@@ -88,7 +89,7 @@ func TestVerifyOwnedOrAbsent(t *testing.T) {
 			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 			ObjectMeta: metav1.ObjectMeta{Name: "agent-config", Namespace: "ns"},
 		}
-		if err := verifyOwnedOrAbsent(context.Background(), c, s, ad, desired); err == nil {
+		if err := agentprovider.VerifyOwnedOrAbsent(context.Background(), c, s, ad, desired); err == nil {
 			t.Fatal("expected unowned object to be rejected")
 		}
 	})
@@ -106,7 +107,7 @@ func TestDeleteOwnedObject(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(owned).Build()
 
 		target := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "ns"}}
-		if err := deleteOwnedObject(context.Background(), c, ad, target); err != nil {
+		if err := agentprovider.DeleteOwned(context.Background(), c, ad, target); err != nil {
 			t.Fatalf("delete owned: %v", err)
 		}
 		got := &corev1.Service{}
@@ -121,7 +122,7 @@ func TestDeleteOwnedObject(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(unrelated).Build()
 
 		target := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "ns"}}
-		if err := deleteOwnedObject(context.Background(), c, ad, target); err != nil {
+		if err := agentprovider.DeleteOwned(context.Background(), c, ad, target); err != nil {
 			t.Fatalf("delete unowned should be a no-op, got %v", err)
 		}
 		got := &corev1.Service{}
@@ -133,35 +134,8 @@ func TestDeleteOwnedObject(t *testing.T) {
 	t.Run("absent is a no-op", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		target := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "ns"}}
-		if err := deleteOwnedObject(context.Background(), c, ad, target); err != nil {
+		if err := agentprovider.DeleteOwned(context.Background(), c, ad, target); err != nil {
 			t.Fatalf("delete absent should be a no-op, got %v", err)
 		}
 	})
-}
-
-func TestConditionObservedGeneration(t *testing.T) {
-	cases := []struct {
-		name    string
-		value   interface{}
-		want    int64
-		present bool
-	}{
-		{"int64", int64(3), 3, true},
-		{"float64", float64(4), 4, true},
-		{"int", 5, 5, true},
-		{"absent", nil, 0, false},
-		{"string ignored", "6", 0, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cm := map[string]interface{}{}
-			if tc.value != nil {
-				cm["observedGeneration"] = tc.value
-			}
-			got, present := conditionObservedGeneration(cm)
-			if present != tc.present || got != tc.want {
-				t.Fatalf("conditionObservedGeneration(%v) = (%d,%v), want (%d,%v)", tc.value, got, present, tc.want, tc.present)
-			}
-		})
-	}
 }

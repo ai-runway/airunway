@@ -34,36 +34,37 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 func TestBoundedLabelValue(t *testing.T) {
 	short := "my-agent"
-	if got := boundedLabelValue(short); got != short {
+	if got := agentprovider.BoundedLabelValue(short); got != short {
 		t.Errorf("short name should pass through unchanged, got %q", got)
 	}
 
 	long := strings.Repeat("a", 80)
-	got := boundedLabelValue(long)
-	if len(got) > maxLabelValueLength {
-		t.Errorf("bounded label = %d bytes, want <= %d", len(got), maxLabelValueLength)
+	got := agentprovider.BoundedLabelValue(long)
+	if len(got) > agentprovider.MaxLabelValueLength {
+		t.Errorf("bounded label = %d bytes, want <= %d", len(got), agentprovider.MaxLabelValueLength)
 	}
 
 	// Two distinct long names that share a prefix must not collapse together,
 	// otherwise their workloads would share a selector.
 	other := strings.Repeat("a", 79) + "b"
-	if boundedLabelValue(other) == got {
+	if agentprovider.BoundedLabelValue(other) == got {
 		t.Errorf("distinct long names collided on %q", got)
 	}
 }
 
 func TestBoundedResourceName(t *testing.T) {
-	if got := boundedResourceName("agent", "-config"); got != "agent-config" {
+	if got := agentprovider.BoundedResourceName("agent", "-config"); got != "agent-config" {
 		t.Errorf("short name = %q, want agent-config", got)
 	}
 	long := strings.Repeat("a", 250)
-	got := boundedResourceName(long, "-config")
-	if len(got) > maxResourceNameLength {
-		t.Errorf("bounded name = %d bytes, want <= %d", len(got), maxResourceNameLength)
+	got := agentprovider.BoundedResourceName(long, "-config")
+	if len(got) > agentprovider.MaxResourceNameLength {
+		t.Errorf("bounded name = %d bytes, want <= %d", len(got), agentprovider.MaxResourceNameLength)
 	}
 	if !strings.HasSuffix(got, "-config") {
 		t.Errorf("bounded name lost its suffix: %q", got)
@@ -301,7 +302,7 @@ var _ = Describe("Container provider workload lifecycle", func() {
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: longName, Namespace: "default"}, dep)).To(Succeed())
 		for key, value := range dep.Spec.Template.Labels {
-			Expect(len(value)).To(BeNumerically("<=", maxLabelValueLength), "label %q exceeds the limit", key)
+			Expect(len(value)).To(BeNumerically("<=", agentprovider.MaxLabelValueLength), "label %q exceeds the limit", key)
 		}
 
 		out := &airunwayv1alpha1.AgentDeployment{}

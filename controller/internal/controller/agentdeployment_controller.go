@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 const (
@@ -59,9 +60,8 @@ const (
 	// are re-validated on a slow timer instead.
 	agentCredentialRefreshInterval = 5 * time.Minute
 
-	// agentDeploymentFrameworkIndexKey indexes AgentDeployments by framework
-	// name so provider-config changes can requeue only affected agents.
-	agentDeploymentFrameworkIndexKey = "spec.framework.name"
+	// The by-framework index key now lives on the public provider contract as
+	// agentprovider.FrameworkIndexKey, since every provider needs it too.
 
 	// agentDeploymentModelRefIndexKey indexes AgentDeployments by
 	// namespace/name deploymentRef target so ModelDeployment changes can
@@ -611,7 +611,7 @@ func (r *AgentDeploymentReconciler) mapProviderConfigToAgentDeployments(ctx cont
 		return nil
 	}
 
-	agents := agentsForFramework(ctx, r.Client, apc.Name)
+	agents := agentprovider.AgentsForFramework(ctx, r.Client, apc.Name)
 	reqs := make([]reconcile.Request, 0, len(agents))
 	for i := range agents {
 		reqs = append(reqs, reconcile.Request{
@@ -667,7 +667,7 @@ func (r *AgentDeploymentReconciler) mapModelDeploymentToAgentDeployments(ctx con
 // AgentProviderConfig and ModelDeployment so an AgentDeployment re-reconciles
 // when framework readiness or model binding inputs change.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := ensureFrameworkIndex(mgr); err != nil {
+	if err := agentprovider.EnsureFrameworkIndex(mgr); err != nil {
 		return err
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &airunwayv1alpha1.AgentDeployment{}, agentDeploymentModelRefIndexKey, func(raw client.Object) []string {
@@ -692,7 +692,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
+			ctrlbuilder.WithPredicates(agentprovider.ProviderConfigRelevantChange()),
 		).
 		Watches(
 			&airunwayv1alpha1.ModelDeployment{},

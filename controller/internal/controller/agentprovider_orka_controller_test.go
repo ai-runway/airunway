@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 // --- Pure render-function unit tests (no cluster) --------------------------
@@ -89,13 +90,13 @@ func TestRenderOrkaProvider_KeylessUsesManagedSecretName(t *testing.T) {
 	p := renderOrkaProvider(ad, binding)
 
 	secretName, found, _ := unstructured.NestedString(p.Object, "spec", "secretRef", "name")
-	expectedName := keylessCredentialSecretName(ad.Name)
+	expectedName := agentprovider.KeylessCredentialSecretName(ad.Name)
 	if !found || secretName != expectedName {
 		t.Errorf("secretRef.name = %q (found=%v), want managed secret %q", secretName, found, expectedName)
 	}
 	secretKey, _, _ := unstructured.NestedString(p.Object, "spec", "secretRef", "key")
-	if secretKey != keylessCredentialKey {
-		t.Errorf("secretRef.key = %q, want %q", secretKey, keylessCredentialKey)
+	if secretKey != agentprovider.KeylessCredentialKey {
+		t.Errorf("secretRef.key = %q, want %q", secretKey, agentprovider.KeylessCredentialKey)
 	}
 }
 

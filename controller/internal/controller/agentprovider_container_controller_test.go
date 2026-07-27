@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 // --- Pure render-function unit tests (no cluster) --------------------------
@@ -179,8 +180,8 @@ func TestRenderAgentDeployment_KeylessBindingInjectsLiteralAPIKey(t *testing.T) 
 	if apiKey.ValueFrom != nil {
 		t.Fatalf("OPENAI_API_KEY should be a literal for keyless bindings, got ValueFrom=%+v", apiKey.ValueFrom)
 	}
-	if apiKey.Value != keylessCredentialValue {
-		t.Fatalf("OPENAI_API_KEY = %q, want %q", apiKey.Value, keylessCredentialValue)
+	if apiKey.Value != agentprovider.KeylessCredentialValue {
+		t.Fatalf("OPENAI_API_KEY = %q, want %q", apiKey.Value, agentprovider.KeylessCredentialValue)
 	}
 }
 

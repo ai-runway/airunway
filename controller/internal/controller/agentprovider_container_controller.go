@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 const (
@@ -247,8 +248,8 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Consume the core-resolved binding.
-	switch classifyBinding(&ad) {
-	case bindingUnavailable:
+	switch agentprovider.ClassifyBinding(&ad) {
+	case agentprovider.BindingUnavailable:
 		// No binding: either not resolved yet, or core cleared it because the
 		// request became terminally invalid (e.g. a cross-namespace reference).
 		// Tear down so the agent stops serving with stale endpoint/credentials.
@@ -257,7 +258,7 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
-	case bindingStale:
+	case agentprovider.BindingStale:
 		// Core still publishes a binding but could not re-verify it this pass.
 		// Hold: leave the running workload alone and leave our status as-is,
 		// so a transient blip does not restart a healthy agent. Core's
@@ -293,7 +294,7 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// checksum rides on the pod template so a config-only edit rolls the
 	// workload.
 	configMap := renderAgentConfigMap(&ad)
-	configChecksum, err := hashJSON(configMap.Data)
+	configChecksum, err := agentprovider.HashJSON(configMap.Data)
 	if err != nil {
 		return r.failWithStatus(ctx, &ad, "RenderFailed", err)
 	}
@@ -330,7 +331,7 @@ type renderInputs struct {
 // applies the object under the container field owner. It first refuses to adopt
 // a pre-existing same-named object that this AgentDeployment does not own.
 func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
-	if err := verifyOwnedOrAbsent(ctx, r.Client, r.Scheme, ad, obj); err != nil {
+	if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.Client, r.Scheme, ad, obj); err != nil {
 		return err
 	}
 	if err := controllerutil.SetControllerReference(ad, obj, r.Scheme); err != nil {
@@ -574,7 +575,7 @@ func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool 
 func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
 	for _, obj := range objs {
 		obj.SetNamespace(ad.Namespace)
-		if err := deleteOwnedObject(ctx, r.Client, ad, obj); err != nil {
+		if err := agentprovider.DeleteOwned(ctx, r.Client, ad, obj); err != nil {
 			return fmt.Errorf("delete obsolete workload from previous lifecycle: %w", err)
 		}
 	}
@@ -604,7 +605,7 @@ func (r *ContainerProviderReconciler) cleanupOwnedWorkloads(ctx context.Context,
 // deleteOwned deletes obj (addressed by its already-set name/namespace) only
 // when it is controlled by ad; a missing or unowned object is a no-op.
 func (r *ContainerProviderReconciler) deleteOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
-	return deleteOwnedObject(ctx, r.Client, ad, obj)
+	return agentprovider.DeleteOwned(ctx, r.Client, ad, obj)
 }
 
 // containerProviderSettings holds the provider-owned rendering settings the
@@ -693,7 +694,7 @@ func parseContainerConfig(raw *runtime.RawExtension) (containerConfig, error) {
 // agentConfigMapName is the name of the mounted agent.json ConfigMap, bounded
 // to the Kubernetes object-name limit.
 func agentConfigMapName(ad *airunwayv1alpha1.AgentDeployment) string {
-	return boundedResourceName(ad.Name, "-config")
+	return agentprovider.BoundedResourceName(ad.Name, "-config")
 }
 
 // renderAgentConfigMap mounts the agent's full spec.config as agent.json (the
@@ -829,7 +830,7 @@ func modelBindingEnv(binding airunwayv1alpha1.ModelBindingStatus) []corev1.EnvVa
 	} else {
 		// Keyless in-cluster model endpoints still expect an API-key variable to
 		// be present in many framework SDKs; inject a harmless literal token.
-		env = append(env, corev1.EnvVar{Name: apiKeyKey, Value: keylessCredentialValue})
+		env = append(env, corev1.EnvVar{Name: apiKeyKey, Value: agentprovider.KeylessCredentialValue})
 	}
 	return env
 }
@@ -884,7 +885,7 @@ func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, in renderInputs) (*bat
 	template := agentPodTemplate(ad, in)
 	template.Spec.RestartPolicy = corev1.RestartPolicyNever
 
-	hash, err := hashJSON(template)
+	hash, err := agentprovider.HashJSON(template)
 	if err != nil {
 		return nil, err
 	}
@@ -908,7 +909,7 @@ func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, in renderInputs) (*bat
 // validated as RFC 1035 DNS labels (63 characters), which is stricter than the
 // AgentDeployment name limit, so it is bounded separately.
 func agentServiceName(ad *airunwayv1alpha1.AgentDeployment) string {
-	return boundedDNSLabelName(ad.Name)
+	return agentprovider.BoundedDNSLabelName(ad.Name)
 }
 
 // renderAgentService renders the ClusterIP Service fronting the agent.
@@ -928,13 +929,13 @@ func renderAgentService(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfi
 // be far longer than that, and an oversized selector value makes every rendered
 // workload fail admission.
 func agentSelector(ad *airunwayv1alpha1.AgentDeployment) map[string]string {
-	return map[string]string{"airunway.ai/agent": boundedLabelValue(ad.Name)}
+	return map[string]string{"airunway.ai/agent": agentprovider.BoundedLabelValue(ad.Name)}
 }
 
 func agentLabels(ad *airunwayv1alpha1.AgentDeployment) map[string]string {
 	return map[string]string{
-		"airunway.ai/agent":     boundedLabelValue(ad.Name),
-		"airunway.ai/framework": boundedLabelValue(ad.Spec.Framework.Name),
+		"airunway.ai/agent":     agentprovider.BoundedLabelValue(ad.Name),
+		"airunway.ai/framework": agentprovider.BoundedLabelValue(ad.Spec.Framework.Name),
 	}
 }
 
@@ -960,7 +961,7 @@ func (r *ContainerProviderReconciler) status(
 	providerReady metav1.ConditionStatus,
 	reason, message string,
 ) error {
-	return applyProviderOwnedStatus(ctx, r.Client, ad, ContainerFieldOwner, phase, rt, replicas, providerReady, reason, message)
+	return agentprovider.ApplyOwnedStatus(ctx, r.Client, ad, ContainerFieldOwner, phase, rt, replicas, providerReady, reason, message)
 }
 
 func (r *ContainerProviderReconciler) mapProviderConfigToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -969,7 +970,7 @@ func (r *ContainerProviderReconciler) mapProviderConfigToAgentDeployments(ctx co
 		return nil
 	}
 
-	agents := agentsForFramework(ctx, r.Client, apc.Name)
+	agents := agentprovider.AgentsForFramework(ctx, r.Client, apc.Name)
 	reqs := make([]reconcile.Request, 0, len(agents))
 	for i := range agents {
 		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents[i])})
@@ -979,7 +980,7 @@ func (r *ContainerProviderReconciler) mapProviderConfigToAgentDeployments(ctx co
 
 // SetupWithManager wires the container provider and its owned workloads.
 func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := ensureFrameworkIndex(mgr); err != nil {
+	if err := agentprovider.EnsureFrameworkIndex(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
@@ -991,7 +992,7 @@ func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
+			ctrlbuilder.WithPredicates(agentprovider.ProviderConfigRelevantChange()),
 		).
 		Named("agent-provider-container").
 		Complete(r)

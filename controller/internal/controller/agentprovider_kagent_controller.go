@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 const (
@@ -114,7 +115,7 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// this check a provider config named "kagent" but declaring the container
 	// backend would be rendered by both this provider and the generic container
 	// provider, each force-owning the same ProviderReady condition.
-	crdBacked, err := frameworkUsesCRDBackend(ctx, r.Client, KagentFrameworkName)
+	crdBacked, err := agentprovider.FrameworkUsesBackend(ctx, r.Client, KagentFrameworkName, airunwayv1alpha1.AgentProviderBackendCRD)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -124,13 +125,13 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Consume the core-resolved binding. Never build a ModelConfig from a
 	// half-resolved endpoint.
-	switch classifyBinding(&ad) {
-	case bindingUnavailable:
+	switch agentprovider.ClassifyBinding(&ad) {
+	case agentprovider.BindingUnavailable:
 		// No binding at all: tear down the rendered Agent/ModelConfig so it
 		// stops using a stale endpoint before reporting Pending.
-		if err := cleanupOwnedCRs(ctx, r.Client, &ad,
-			unstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
-			unstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
+		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+			agentprovider.UnstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
+			agentprovider.UnstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
 		); err != nil {
 			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "BindingCleanupFailed", err.Error())
@@ -141,14 +142,14 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
-	case bindingStale:
+	case agentprovider.BindingStale:
 		// Binding published but not re-verified this pass — hold rather than
 		// deleting a healthy agent over a transient failure.
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err = ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
+	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
 	if err != nil {
 		statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -167,7 +168,7 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	agent := renderKagentAgent(&ad, cfg, modelConfig.GetName())
 
 	for _, obj := range []*unstructured.Unstructured{modelConfig, agent} {
-		if err := verifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
+		if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
 			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "OwnershipConflict", err.Error())
 			if statusErr != nil {
@@ -200,7 +201,7 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Reflect the kagent Agent's own readiness back into ProviderReady, rather
 	// than reporting ready the moment the CR is applied.
-	if upstreamCRReady(ctx, r.Client, kagentAgentGVK, agent.GetName(), agent.GetNamespace()) {
+	if agentprovider.UpstreamCRReady(ctx, r.Client, kagentAgentGVK, agent.GetName(), agent.GetNamespace()) {
 		logger.Info("kagent Agent is ready", "agent", agent.GetName())
 		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.applyProviderStatus(ctx, &ad,
 			airunwayv1alpha1.AgentPhaseRunning, runtimeStatus, nil,
@@ -334,7 +335,7 @@ func (r *KagentProviderReconciler) applyProviderStatus(
 	providerReady metav1.ConditionStatus,
 	reason, message string,
 ) error {
-	return applyProviderOwnedStatus(ctx, r.Client, ad, KagentFieldOwner, phase, rt, replicas, providerReady, reason, message)
+	return agentprovider.ApplyOwnedStatus(ctx, r.Client, ad, KagentFieldOwner, phase, rt, replicas, providerReady, reason, message)
 }
 
 func (r *KagentProviderReconciler) mapProviderConfigToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -342,7 +343,7 @@ func (r *KagentProviderReconciler) mapProviderConfigToAgentDeployments(ctx conte
 	if !ok || apc.Name != KagentFrameworkName {
 		return nil
 	}
-	agents := agentsForFramework(ctx, r.Client, KagentFrameworkName)
+	agents := agentprovider.AgentsForFramework(ctx, r.Client, KagentFrameworkName)
 	reqs := make([]reconcile.Request, 0, len(agents))
 	for i := range agents {
 		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents[i])})
@@ -354,7 +355,7 @@ func (r *KagentProviderReconciler) mapProviderConfigToAgentDeployments(ctx conte
 // framework-provider config changes so existing agents are re-rendered when
 // capabilities/defaults change.
 func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := ensureFrameworkIndex(mgr); err != nil {
+	if err := agentprovider.EnsureFrameworkIndex(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
@@ -362,7 +363,7 @@ func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
+			ctrlbuilder.WithPredicates(agentprovider.ProviderConfigRelevantChange()),
 		).
 		Named("agent-provider-kagent").
 		Complete(r)

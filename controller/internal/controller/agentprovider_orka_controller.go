@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 const (
@@ -91,7 +92,7 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Require the crd backend, so a framework registered as a container backend
 	// is not rendered by this provider and the generic container provider at
 	// the same time (both would force-own the same ProviderReady condition).
-	crdBacked, err := frameworkUsesCRDBackend(ctx, r.Client, OrkaFrameworkName)
+	crdBacked, err := agentprovider.FrameworkUsesBackend(ctx, r.Client, OrkaFrameworkName, airunwayv1alpha1.AgentProviderBackendCRD)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -99,13 +100,13 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	switch classifyBinding(&ad) {
-	case bindingUnavailable:
+	switch agentprovider.ClassifyBinding(&ad) {
+	case agentprovider.BindingUnavailable:
 		// No binding at all: tear down the rendered Provider/Agent so it stops
 		// using stale credentials before reporting Pending.
-		if err := cleanupOwnedCRs(ctx, r.Client, &ad,
-			unstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
-			unstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
+		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+			agentprovider.UnstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
+			agentprovider.UnstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
 		); err != nil {
 			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 				metav1.ConditionFalse, "BindingCleanupFailed", err.Error())
@@ -116,14 +117,14 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
-	case bindingStale:
+	case agentprovider.BindingStale:
 		// Binding published but not re-verified this pass — hold rather than
 		// deleting a healthy agent over a transient failure.
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err = ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
+	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
 	if err != nil {
 		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -145,7 +146,7 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	agent := renderOrkaAgent(&ad, cfg, binding, provider.GetName())
 
 	for _, obj := range []*unstructured.Unstructured{provider, agent} {
-		if err := verifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
+		if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
 			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 				metav1.ConditionFalse, "OwnershipConflict", err.Error())
 			if statusErr != nil {
@@ -173,7 +174,7 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		},
 	}
 
-	if upstreamCRReady(ctx, r.Client, orkaAgentGVK, agent.GetName(), agent.GetNamespace()) {
+	if agentprovider.UpstreamCRReady(ctx, r.Client, orkaAgentGVK, agent.GetName(), agent.GetNamespace()) {
 		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.status(ctx, &ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, metav1.ConditionTrue, "AgentReady", "Orka Agent reports ready")
 	}
@@ -197,7 +198,7 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 	// Orka's Provider CRD requires spec.secretRef (name + key). Reconcile
 	// ensures keyless bindings have a managed no-auth Secret; this fallback keeps
 	// render output valid when called directly in unit tests.
-	secretName, secretKey := keylessCredentialSecretName(ad.Name), keylessCredentialKey
+	secretName, secretKey := agentprovider.KeylessCredentialSecretName(ad.Name), agentprovider.KeylessCredentialKey
 	if binding.CredentialsRef != nil {
 		secretName, secretKey = binding.CredentialsRef.Name, binding.CredentialsRef.Key
 	}
@@ -266,7 +267,7 @@ func (r *OrkaProviderReconciler) status(
 	providerReady metav1.ConditionStatus,
 	reason, message string,
 ) error {
-	return applyProviderOwnedStatus(ctx, r.Client, ad, OrkaFieldOwner, phase, rt, nil, providerReady, reason, message)
+	return agentprovider.ApplyOwnedStatus(ctx, r.Client, ad, OrkaFieldOwner, phase, rt, nil, providerReady, reason, message)
 }
 
 func (r *OrkaProviderReconciler) mapProviderConfigToAgentDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -274,7 +275,7 @@ func (r *OrkaProviderReconciler) mapProviderConfigToAgentDeployments(ctx context
 	if !ok || apc.Name != OrkaFrameworkName {
 		return nil
 	}
-	agents := agentsForFramework(ctx, r.Client, OrkaFrameworkName)
+	agents := agentprovider.AgentsForFramework(ctx, r.Client, OrkaFrameworkName)
 	reqs := make([]reconcile.Request, 0, len(agents))
 	for i := range agents {
 		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents[i])})
@@ -284,7 +285,7 @@ func (r *OrkaProviderReconciler) mapProviderConfigToAgentDeployments(ctx context
 
 // SetupWithManager wires the Orka provider.
 func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := ensureFrameworkIndex(mgr); err != nil {
+	if err := agentprovider.EnsureFrameworkIndex(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
@@ -292,7 +293,7 @@ func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
+			ctrlbuilder.WithPredicates(agentprovider.ProviderConfigRelevantChange()),
 		).
 		Named("agent-provider-orka").
 		Complete(r)

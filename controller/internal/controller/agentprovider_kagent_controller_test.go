@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 // --- Pure render-function unit tests (no cluster) --------------------------
@@ -363,11 +364,11 @@ var _ = Describe("Kagent crd provider", func() {
 		reconcileCore("kagent-keyless")
 		reconcileKagent("kagent-keyless")
 
-		secretName := keylessCredentialSecretName("kagent-keyless")
+		secretName := agentprovider.KeylessCredentialSecretName("kagent-keyless")
 		secret := &corev1.Secret{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, secret)).To(Succeed())
-		Expect(secret.Data).To(HaveKey(keylessCredentialKey))
-		Expect(string(secret.Data[keylessCredentialKey])).To(Equal(keylessCredentialValue))
+		Expect(secret.Data).To(HaveKey(agentprovider.KeylessCredentialKey))
+		Expect(string(secret.Data[agentprovider.KeylessCredentialKey])).To(Equal(agentprovider.KeylessCredentialValue))
 		Expect(secret.GetOwnerReferences()).To(HaveLen(1))
 		Expect(secret.GetOwnerReferences()[0].Name).To(Equal("kagent-keyless"))
 
@@ -377,7 +378,7 @@ var _ = Describe("Kagent crd provider", func() {
 		apiKeySecret, _, _ := unstructured.NestedString(modelConfig.Object, "spec", "apiKeySecret")
 		Expect(apiKeySecret).To(Equal(secretName))
 		apiKeySecretKey, _, _ := unstructured.NestedString(modelConfig.Object, "spec", "apiKeySecretKey")
-		Expect(apiKeySecretKey).To(Equal(keylessCredentialKey))
+		Expect(apiKeySecretKey).To(Equal(agentprovider.KeylessCredentialKey))
 	})
 
 	It("reflects the kagent Agent's readiness into ProviderReady", func() {
