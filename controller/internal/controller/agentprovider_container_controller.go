@@ -680,6 +680,13 @@ func parseContainerConfig(raw *runtime.RawExtension) (containerConfig, error) {
 	if err := json.Unmarshal(raw.Raw, &cfg); err != nil {
 		return containerConfig{}, fmt.Errorf("parse spec.config for the container backend: %w", err)
 	}
+	// A port outside the valid TCP range is later copied verbatim into the
+	// container port and Service targetPort, where Kubernetes rejects it and
+	// the agent loops in render failure. Reject it here with a clear reason
+	// instead. Port 0 (unset) is allowed and falls back to the default.
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return containerConfig{}, fmt.Errorf("spec.config.port %d is out of range: must be between 1 and 65535", cfg.Port)
+	}
 	return cfg, nil
 }
 

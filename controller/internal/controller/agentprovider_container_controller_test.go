@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -409,6 +410,12 @@ func TestParseContainerConfig(t *testing.T) {
 	}
 	if got, err := parseContainerConfig(nil); err != nil || got.Image != "" {
 		t.Errorf("nil config should be empty, got %+v", got)
+	}
+	for _, port := range []int32{-1, 70000} {
+		raw := &runtime.RawExtension{Raw: []byte(fmt.Sprintf(`{"image":"img:2","port":%d}`, port))}
+		if _, err := parseContainerConfig(raw); err == nil {
+			t.Errorf("port %d should be rejected, got no error", port)
+		}
 	}
 }
 
