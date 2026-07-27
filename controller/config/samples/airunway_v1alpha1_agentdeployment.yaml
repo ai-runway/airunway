@@ -1,4 +1,46 @@
-# Example: bind a Kagent SRE agent to an in-cluster ModelDeployment.
+# AgentDeployment samples — the ways an agent can be described.
+#
+# An AgentDeployment says three things: which framework runs the agent, which
+# model it talks to, and how that framework should be configured. It never
+# names an endpoint, a served model name or a credential — the core controller
+# resolves spec.model into status.modelBinding, and the framework provider
+# consumes that.
+#
+# spec.model takes EXACTLY ONE of three binding modes (enforced by CEL):
+#
+#   deploymentRef     bind to a ModelDeployment in this cluster. Resolves via
+#                     the gateway when one exists, otherwise straight to the
+#                     model's Service. Keyless — no credential anywhere.
+#   gatewayEndpoint   bind through a Gateway API gateway by served model name.
+#   externalAPI       bind to OpenAI, Anthropic, Azure OpenAI or any
+#                     OpenAI-compatible URL.
+#
+# Which spec fields actually reach the running agent depends on the backend:
+#
+#                          crd (kagent, orka)      container
+#   spec.config            mapped to CR fields     mounted as agent.json
+#   spec.resources         ignored *               applied to the container
+#   spec.observability     ignored *               injected as OTEL_* env
+#   spec.lifecycle         operator's choice       Deployment or Job
+#
+#   * accepted by the API but not translated — the upstream operator owns
+#     scheduling. Do not set them on a crd backend expecting an effect.
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# CANONICAL: an agent bound to a model running in your own cluster.
+#
+# This is the one to run first. Note what ISN'T here: no endpoint, no served
+# model name, no API key, no Secret. Core resolves all of it from the named
+# ModelDeployment, and because in-cluster endpoints are keyless, nothing ever
+# leaves the cluster.
+#
+# Prerequisites: the kagent operator, and the llama-8b-example ModelDeployment
+# from this directory (which needs a GPU and an hf-token Secret).
+#
+# Watch the handoff:
+#   kubectl get agentdeployment sre-bot -o jsonpath='{.status.modelBinding}'
+#   kubectl get modelconfig,agent -l airunway.ai/agent=sre-bot
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
 metadata:
@@ -10,30 +52,90 @@ spec:
   framework:
     name: kagent
   model:
-    # Matches the ModelDeployment sample in this directory, so
-    # `kubectl apply -k config/samples` resolves rather than leaving the agent
-    # stuck at ModelBound=False.
     deploymentRef:
       name: llama-8b-example
   config:
     systemPrompt: |
       You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
       networking issues. Prefer minimal-blast-radius actions.
-  # Note: spec.resources is honored by the container backend only. kagent is a
-  # crd-backed provider whose upstream operator owns scheduling, so resource
-  # requests/limits are intentionally omitted here (they would be ignored).
 ---
-# Example: bind OpenClaw to an external OpenAI-compatible API.
+# ─────────────────────────────────────────────────────────────────────────────
+# Binding through the gateway by served model name.
+#
+# The recommended binding when a gateway fronts your models: the agent gets an
+# OpenAI-native base URL and puts modelName in the request body, and the
+# gateway's body-based router picks the backend. deploymentRef above lowers
+# onto this same path — this spells it out explicitly.
+#
+# Prerequisites: Gateway API CRDs, a Gateway with a published status address,
+# and the kagent operator.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
 metadata:
-  name: personal-assistant
+  name: gateway-bot
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
 spec:
   framework:
-    name: openclaw
+    name: kagent
+  model:
+    gatewayEndpoint:
+      gatewayRef:
+        name: airunway-gateway
+        # namespace defaults to this AgentDeployment's namespace
+      modelName: llama-3-8b
+  config:
+    systemPrompt: "You are a concise assistant."
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# A one-shot agent: run to completion, then stop.
+#
+# spec.lifecycle: job is the difference between "stand up a service" and "run
+# this task". Orka's swarms are the motivating case — decompose, coordinate,
+# finish. The agent reports phase Completed rather than Running.
+#
+# Prerequisite: the Orka operator. Orka needs its Provider CR ready before the
+# Agent goes ready; the provider applies them in that order and requeues.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: research-swarm
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: orka
+  lifecycle: job
+  model:
+    deploymentRef:
+      name: llama-8b-example
+  config:
+    systemPrompt: "Decompose the task and coordinate specialist agents."
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Container backend, external model, with the fields that only work here.
+#
+# spec.resources and spec.observability are honoured by the container provider
+# because it writes the pod spec itself. On a crd backend both are accepted and
+# silently ignored, which is why they are set here and nowhere above.
+#
+# Prerequisites: a Secret named openai-api-key with an api-key key, and a
+# published CrewAI wrapper image (not built yet).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: research-crew
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: crewai
   model:
     externalAPI:
       type: openai
@@ -44,17 +146,91 @@ spec:
         key: api-key
   resources:
     requests:
-      cpu: "200m"
-      memory: "256Mi"
-  # Security posture is owned by the framework provider: each provider
-  # applies the security context appropriate for its framework when it
-  # renders the agent workload (e.g. OpenClaw needs a writable root
-  # filesystem for session state). It is not set per AgentDeployment.
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  observability:
+    otlp:
+      endpoint: http://otel-collector.observability.svc.cluster.local:4318
+      protocol: http/protobuf
+  config:
+    systemPrompt: "Research the topic and produce a written brief."
 ---
-# Example: Hermes (container backend) with an explicit BYO image override.
-# Shows spec.config carrying both provider-consumed fields (image) and
-# framework passthrough (systemPrompt), all mounted for the container as
-# /etc/airunway/agent.json.
+# ─────────────────────────────────────────────────────────────────────────────
+# Adapting to an image that does not fit the defaults.
+#
+# The container contract assumes an HTTP server on :8080. Real framework images
+# vary, so spec.config carries image / command / args / port to adapt without
+# any provider change — LangGraph serves :8000, so the Service targets that.
+#
+# Prerequisite: a published LangGraph wrapper image (not built yet).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: graph-agent
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: langgraph
+  model:
+    deploymentRef:
+      name: llama-8b-example
+  config:
+    image: ghcr.io/ai-runway/langgraph-agent:latest
+    port: 8000
+    command: ["langgraph"]
+    args: ["up", "--host", "0.0.0.0", "--port", "8000"]
+    graph: ./agent.py:graph
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# A non-OpenAI provider.
+#
+# spec.model.externalAPI.type is preserved through to status.modelBinding, so
+# the container provider injects ANTHROPIC_BASE_URL / ANTHROPIC_MODEL /
+# ANTHROPIC_API_KEY instead of the OPENAI_* family. azureOpenAI and custom work
+# the same way.
+#
+# Prerequisite: a Secret named anthropic-api-key with an api-key key.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: claude-assistant
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: openclaw
+  model:
+    externalAPI:
+      type: anthropic
+      baseURL: https://api.anthropic.com/v1
+      modelName: claude-sonnet-4-5
+      credentialsRef:
+        name: anthropic-api-key
+        key: api-key
+  config:
+    systemPrompt: "You are a helpful personal automation assistant."
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Bring your own image.
+#
+# The hermes AgentProviderConfig registers no catalog image, so this deployment
+# supplies one itself. This is the path for an image AI Runway has never heard
+# of: register the framework once as capability metadata, then every agent
+# points at whatever image it needs. spec.config carries both the fields the
+# provider consumes (image) and framework passthrough (systemPrompt) — the
+# whole of spec.config is mounted as /etc/airunway/agent.json either way.
+#
+# Prerequisite: a published image honouring the container contract (not built
+# yet — the upstream Hermes image has retired OPENAI_BASE_URL).
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
 metadata:
@@ -66,40 +242,48 @@ spec:
   framework:
     name: hermes
   model:
-    externalAPI:
-      type: openai
-      baseURL: https://api.openai.com/v1
-      modelName: gpt-4o-mini
-      credentialsRef:
-        name: openai-api-key
-        key: api-key
-  # A writable root filesystem is provider-owned: set
-  # capabilities.writableRootFilesystem on the framework's AgentProviderConfig.
-  # spec.provider.overrides deliberately cannot relax it — the webhook rejects
-  # readOnlyRootFilesystem: false — so a deployment author cannot weaken the
-  # posture their framework declared.
+    deploymentRef:
+      name: llama-8b-example
   config:
-    image: ghcr.io/hermes/hermes-agent:poc
+    image: ghcr.io/ai-runway/hermes-agent:latest
     systemPrompt: "You are Hermes, a fast and concise task assistant."
 ---
-# Example: Orka (crd backend) task swarm bound to an external model.
+# ─────────────────────────────────────────────────────────────────────────────
+# The security escape hatch.
+#
+# Every container-backed agent gets a hardened pod: non-root, no privilege
+# escalation, all capabilities dropped, seccomp RuntimeDefault, read-only root
+# with a writable /tmp. spec.provider.overrides adjusts within that baseline —
+# it is validated against an allow-list and is ONE-WAY. You can pin a specific
+# non-root UID, as here; you cannot set runAsNonRoot: false, runAsUser: 0,
+# allowPrivilegeEscalation: true, drop fewer capabilities, or turn off the
+# read-only root filesystem. A writable root is provider-owned: declare
+# capabilities.writableRootFilesystem on the AgentProviderConfig instead.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
 metadata:
-  name: research-swarm
+  name: pinned-uid-agent
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
 spec:
   framework:
-    name: orka
+    name: crewai
   model:
-    externalAPI:
-      type: openai
-      baseURL: https://api.openai.com/v1
-      modelName: gpt-4o-mini
-      credentialsRef:
-        name: openai-api-key
-        key: api-key
+    deploymentRef:
+      name: llama-8b-example
+  provider:
+    overrides:
+      workload:
+        podSecurityContext:
+          runAsUser: 65532
+          runAsGroup: 65532
+          fsGroup: 65532
+      container:
+        securityContext:
+          runAsUser: 65532
+          capabilities:
+            drop: ["ALL"]
   config:
-    systemPrompt: "Decompose the task and coordinate specialist agents."
+    systemPrompt: "You run under a pinned non-root UID."

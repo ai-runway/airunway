@@ -1,104 +1,86 @@
-# Container-based agent framework: OpenClaw via the generic container provider.
-# Demonstrates a non-Kubernetes-native framework whose image is supplied by
-# the catalog entry and rendered into Deployment+Service by the container
-# provider.
+# AgentProviderConfig samples — one per provider strategy.
 #
-# IMPORTANT: a catalog "image" must honor the container contract — serve HTTP on
-# the agent port (default 8080), read /etc/airunway/agent.json, and call the
-# model via the injected OPENAI_* env. The raw upstream OpenClaw image does NOT
-# (it uses its own config format and serves :18789), so the catalog references a
-# thin contract-compatible wrapper image instead of the upstream image directly.
-apiVersion: airunway.ai/v1alpha1
-kind: AgentProviderConfig
-metadata:
-  name: openclaw
-  annotations:
-    airunway.ai/agent-catalog: |
-      [
-        {
-          "name": "openclaw-personal-assistant",
-          "title": "Personal AI assistant (OpenClaw)",
-          "description": "OpenClaw running as a personal automation agent via a container-contract wrapper. Bind to any OpenAI-compatible model managed by AI Runway.",
-          "image": "ghcr.io/ai-runway/openclaw-agent:latest",
-          "tags": ["personal", "automation"]
-        }
-      ]
-  labels:
-    app.kubernetes.io/name: airunway
-    app.kubernetes.io/managed-by: kustomize
-spec:
-  capabilities:
-    backend: container
-    requiresOperator: false
-    # OpenClaw writes its working directory and session state, so it cannot run
-    # with a read-only root filesystem. This is provider-owned on purpose: the
-    # framework declares what it needs, rather than every deployment author
-    # having to know and re-state it.
-    writableRootFilesystem: true
-    modelBindingModes:
-      - deploymentRef
-      - externalAPI
-    protocols:
-      - openaiTools
+# AgentProviderConfig is cluster-scoped: it registers a framework and declares
+# what that framework supports. Admins create these; users only reference them
+# by name from spec.framework.name on an AgentDeployment.
+#
+# capabilities.backend picks which provider renders the agent, and is immutable:
+#
+#   crd        a framework-specific provider translates the AgentDeployment into
+#              that framework's own custom resources. The framework's operator
+#              must be installed first, and it owns the resulting pods.
+#
+#   container  the generic provider renders a Deployment/Job + Service +
+#              ConfigMap itself. No operator needed — adding a framework here is
+#              catalog data, not code, which is why one provider serves CrewAI,
+#              LangGraph and OpenClaw alike.
 ---
-# CRD-native agent framework: Kagent.
-# Demonstrates a framework whose provider renders the AgentDeployment
-# into a framework-native custom resource (kagent.dev/Agent + ModelConfig).
+# ─────────────────────────────────────────────────────────────────────────────
+# kagent — CRD backend. Kubernetes-native DevOps agents.
+# Prerequisite: helm install kagent-crds + kagent from
+#   oci://ghcr.io/kagent-dev/kagent/helm/
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
   name: kagent
-  annotations:
-    airunway.ai/install-instructions: "Install the Kagent operator in the cluster before deploying agents with this framework."
-    airunway.ai/agent-catalog: |
-      [
-        {
-          "name": "kagent-k8s-sre",
-          "title": "Kubernetes SRE (Kagent)",
-          "description": "Diagnose deployments, pods, and networking. Backed by Kagent's native Agent CR.",
-          "tags": ["devops", "observability"]
-        }
-      ]
   labels:
     app.kubernetes.io/name: airunway
     app.kubernetes.io/managed-by: kustomize
+  annotations:
+    airunway.ai/install-instructions: >-
+      Install the kagent operator before deploying agents with this framework:
+      helm install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds
+      && helm install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "kagent-sre",
+          "title": "Kubernetes SRE assistant",
+          "description": "Diagnoses pod, deployment and networking problems, and suggests minimal-blast-radius fixes.",
+          "tags": ["devops", "sre", "kubernetes"]
+        }
+      ]
 spec:
   capabilities:
     backend: crd
     requiresOperator: true
+    # Readiness gates on this API group being served, so an agent never renders
+    # before its operator exists.
     operatorAPIGroup: kagent.dev
     modelBindingModes:
       - deploymentRef
       - gatewayEndpoint
-      - externalAPI
     protocols:
       - mcp
       - a2a
-      - openaiTools
 ---
-# CRD-native agent framework: Orka (Kubernetes-native agent swarms).
-# Like Kagent this is a crd-backend framework, but its coordinator/specialist
-# agents run as Kubernetes Jobs (a task/one-shot shape) rather than
-# long-running servers — the concrete driver for the spec.lifecycle open
-# question in the design.
+# ─────────────────────────────────────────────────────────────────────────────
+# orka — CRD backend. Agent swarms: decompose a task, coordinate specialists,
+# finish. Short-lived work rather than a long-running server, which is why it
+# drives the spec.lifecycle: job path.
+# Prerequisite: the Orka operator (core.orka.ai).
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
   name: orka
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
   annotations:
-    airunway.ai/install-instructions: "Install the Orka operator in the cluster before deploying agents with this framework."
+    airunway.ai/install-instructions: >-
+      Install the Orka operator (core.orka.ai) before deploying agents with
+      this framework.
     airunway.ai/agent-catalog: |
       [
         {
           "name": "orka-task-swarm",
-          "title": "Task swarm (Orka)",
-          "description": "A coordinator agent decomposes a task and spawns specialist agents in parallel as Kubernetes Jobs, then synthesises the results.",
+          "title": "Task swarm",
+          "description": "Decomposes a task and coordinates specialist agents until it completes.",
           "tags": ["automation", "swarm"]
         }
       ]
-  labels:
-    app.kubernetes.io/name: airunway
-    app.kubernetes.io/managed-by: kustomize
 spec:
   capabilities:
     backend: crd
@@ -111,34 +93,158 @@ spec:
       - mcp
       - openaiTools
 ---
-# Container-based agent framework: Hermes. Served by the SAME generic
-# container provider as OpenClaw/CrewAI/LangGraph — added purely as catalog
-# data (image + recipe), with no new provider code. This is the
-# "extensible by data, not code" property in practice.
+# ─────────────────────────────────────────────────────────────────────────────
+# crewai — container backend. Multi-agent teams.
+#
+# No operator, no provider code: the generic container provider renders it. The
+# only requirement is an image honouring the container contract — read
+# /etc/airunway/agent.json, take the endpoint from OPENAI_* env, serve HTTP.
+#
+# NOTE: the wrapper image below is not published yet. CrewAI is the easiest
+# real target because its library reads OPENAI_BASE_URL / OPENAI_API_KEY from
+# the environment natively, so the wrapper is thin.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
 metadata:
-  name: hermes
+  name: crewai
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
   annotations:
     airunway.ai/agent-catalog: |
       [
         {
-          "name": "hermes-assistant",
-          "title": "Hermes assistant",
-          "description": "Hermes running as a fast container-based task assistant via a container-contract wrapper, bound to any OpenAI-compatible model managed by AI Runway.",
-          "image": "ghcr.io/ai-runway/hermes-agent:latest",
-          "tags": ["automation"]
+          "name": "crewai-research-crew",
+          "title": "Research crew (CrewAI)",
+          "description": "A crew of specialist agents that research a topic and produce a written brief.",
+          "image": "ghcr.io/ai-runway/crewai-agent:latest",
+          "tags": ["research", "multi-agent"]
         }
       ]
-  labels:
-    app.kubernetes.io/name: airunway
-    app.kubernetes.io/managed-by: kustomize
 spec:
   capabilities:
     backend: container
     requiresOperator: false
     modelBindingModes:
-      - externalAPI
       - deploymentRef
+      - gatewayEndpoint
+      - externalAPI
+    protocols:
+      - openaiTools
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# langgraph — container backend. Graph / state-machine agents.
+#
+# Serves on :8000 rather than the default :8080, which spec.config.port handles
+# per-deployment — no provider change needed.
+#
+# NOTE: the wrapper image below is not published yet; LangGraph also needs
+# `langgraph build` to produce a servable image.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: langgraph
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "langgraph-stateful-agent",
+          "title": "Stateful graph agent (LangGraph)",
+          "description": "A graph-structured agent that keeps state across steps.",
+          "image": "ghcr.io/ai-runway/langgraph-agent:latest",
+          "tags": ["graph", "stateful"]
+        }
+      ]
+spec:
+  capabilities:
+    backend: container
+    requiresOperator: false
+    modelBindingModes:
+      - deploymentRef
+      - externalAPI
+    protocols:
+      - openaiTools
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# openclaw — container backend. Personal automation agents.
+#
+# The one framework here that needs a writable root filesystem: it writes its
+# working directory and session state, so it cannot run with the hardened
+# read-only default. That is declared HERE, by the framework, not by each
+# AgentDeployment — a deployment author cannot relax it (the webhook rejects
+# readOnlyRootFilesystem: false), so the posture stays provider-owned.
+#
+# NOTE: the wrapper image below is not published yet. The upstream OpenClaw
+# image does not honour the container contract as-is — it uses its own config
+# format and serves :18789.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: openclaw
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "openclaw-personal-assistant",
+          "title": "Personal AI assistant (OpenClaw)",
+          "description": "OpenClaw running as a personal automation agent. Bind it to any model AI Runway manages.",
+          "image": "ghcr.io/ai-runway/openclaw-agent:latest",
+          "tags": ["personal", "automation"]
+        }
+      ]
+spec:
+  capabilities:
+    backend: container
+    requiresOperator: false
+    writableRootFilesystem: true
+    modelBindingModes:
+      - deploymentRef
+      - externalAPI
+    protocols:
+      - openaiTools
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# hermes — container backend. Fast, concise task assistant.
+#
+# Registered with NO catalog image on purpose. The other container frameworks
+# ship a recipe carrying an image; hermes shows the other half of the contract —
+# a framework registered as pure capability metadata, where each
+# AgentDeployment brings its own image via spec.config.image. That is the
+# bring-your-own-image path, and it is what makes the container backend usable
+# for an image AI Runway has never heard of.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: hermes
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "hermes-task-assistant",
+          "title": "Task assistant (Hermes)",
+          "description": "A fast, concise assistant for short tasks. Bring your own image with spec.config.image.",
+          "tags": ["assistant", "byo-image"]
+        }
+      ]
+spec:
+  capabilities:
+    backend: container
+    requiresOperator: false
+    modelBindingModes:
+      - deploymentRef
+      - externalAPI
     protocols:
       - openaiTools
