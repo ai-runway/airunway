@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	internalcontroller "github.com/ai-runway/airunway/controller/internal/controller"
 )
 
@@ -50,5 +51,30 @@ func NewOrkaReconciler(c client.Client, scheme *runtime.Scheme) Reconciler {
 	return &internalcontroller.OrkaProviderReconciler{
 		Client: c,
 		Scheme: scheme,
+	}
+}
+
+// NewFrameworkVersionReporter returns a reconciler that publishes a shim's
+// build version into the named framework's AgentProviderConfig.status.version,
+// matching the reported-version contract the inference provider shims follow.
+func NewFrameworkVersionReporter(c client.Client, name, framework, version string) Reconciler {
+	return &internalcontroller.AgentProviderVersionReconciler{
+		Client:    c,
+		Name:      name,
+		Framework: framework,
+		Version:   version,
+	}
+}
+
+// NewContainerVersionReporter returns a reconciler that publishes the generic
+// container shim's build version into every container-backed
+// AgentProviderConfig. The container provider is framework-agnostic, so it
+// selects by backend rather than by a single framework name.
+func NewContainerVersionReporter(c client.Client, name, version string) Reconciler {
+	return &internalcontroller.AgentProviderVersionReconciler{
+		Client:  c,
+		Name:    name,
+		Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+		Version: version,
 	}
 }

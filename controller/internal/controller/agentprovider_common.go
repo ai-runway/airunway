@@ -18,7 +18,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,9 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
@@ -44,7 +52,74 @@ const (
 	// keylessCredentialValue is the placeholder token literal for keyless
 	// in-cluster model endpoints.
 	keylessCredentialValue = "not-required"
+
+	// maxLabelValueLength is the Kubernetes limit on a label value. An
+	// AgentDeployment name may be a DNS subdomain of up to 253 characters, so
+	// names cannot be used as label values unmodified.
+	maxLabelValueLength = 63
+	// maxResourceNameLength is the Kubernetes limit on an object name.
+	maxResourceNameLength = 253
+	// maxDNSLabelNameLength is the limit on names validated as an RFC 1035 DNS
+	// label rather than a subdomain — Services, most notably. It is stricter
+	// than maxResourceNameLength.
+	maxDNSLabelNameLength = 63
+	// shortHashLength is how many hex characters of a SHA-256 digest are used
+	// to keep truncated names/labels distinct.
+	shortHashLength = 8
 )
+
+// shortHash returns the first shortHashLength hex characters of the SHA-256 of
+// s. It only ever disambiguates truncated names, never carries meaning.
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:shortHashLength]
+}
+
+// boundedLabelValue returns v unchanged when it already fits in a label value,
+// and otherwise truncates it and appends a short hash of the full value so two
+// distinct long names do not collapse onto the same label. Leaving this
+// unbounded makes every rendered workload for a long-named AgentDeployment fail
+// admission with "must be no more than 63 bytes".
+func boundedLabelValue(v string) string {
+	if len(v) <= maxLabelValueLength {
+		return v
+	}
+	h := shortHash(v)
+	return v[:maxLabelValueLength-len(h)-1] + "-" + h
+}
+
+// boundedResourceName joins base and suffix into an object name that fits the
+// 253-character limit, truncating base and inserting a short hash when needed.
+func boundedResourceName(base, suffix string) string {
+	if len(base)+len(suffix) <= maxResourceNameLength {
+		return base + suffix
+	}
+	h := shortHash(base)
+	keep := maxResourceNameLength - len(suffix) - len(h) - 1
+	return base[:keep] + "-" + h + suffix
+}
+
+// boundedDNSLabelName bounds a name to the 63-character RFC 1035 DNS label
+// limit that Services are validated against.
+func boundedDNSLabelName(base string) string {
+	if len(base) <= maxDNSLabelNameLength {
+		return base
+	}
+	h := shortHash(base)
+	return base[:maxDNSLabelNameLength-len(h)-1] + "-" + h
+}
+
+// hashJSON returns a stable short digest of v's JSON encoding. It backs the
+// pod-template and config checksums that force a rollout when rendered content
+// changes.
+func hashJSON(v any) (string, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("hash object: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])[:16], nil
+}
 
 // verifyOwnedOrAbsent guards a server-side apply against silently adopting an
 // unrelated, same-named object. It looks up any existing object matching obj's
@@ -96,6 +171,45 @@ func deleteOwnedObject(ctx context.Context, c client.Client, owner metav1.Object
 	return nil
 }
 
+// bindingState classifies what a provider should do with the core-resolved
+// model binding.
+type bindingState int
+
+const (
+	// bindingUnavailable means core published no binding at all: either it has
+	// not resolved one yet, or it cleared a previously valid one because the
+	// request became terminally invalid. Anything already rendered must be torn
+	// down so the agent stops serving.
+	bindingUnavailable bindingState = iota
+
+	// bindingStale means a binding is published but core could not re-verify it
+	// on its latest pass — a framework-readiness blip, a ModelDeployment
+	// briefly without an endpoint, a transient Secret lookup error. The right
+	// move is to HOLD: do not re-render against possibly-changed inputs, and do
+	// not tear down a healthy agent over a momentary failure.
+	bindingStale
+
+	// bindingReady means the published binding is current and verified.
+	bindingReady
+)
+
+// classifyBinding distinguishes "core has no binding for this agent" from
+// "core has a binding it could not re-verify right now".
+//
+// Gating teardown on the ModelBound CONDITION alone conflates the two, which is
+// how a single failed discovery call could delete every running agent workload
+// on a framework. The binding itself is the contract; the condition is only a
+// freshness signal about it.
+func classifyBinding(ad *airunwayv1alpha1.AgentDeployment) bindingState {
+	if ad.Status.ModelBinding == nil {
+		return bindingUnavailable
+	}
+	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) {
+		return bindingStale
+	}
+	return bindingReady
+}
+
 // cleanupOwnedCRs tears down the given upstream custom resources a CRD-backed
 // provider rendered for ad when a model binding is revoked, so the previously
 // rendered agent stops running instead of continuing to serve with a stale
@@ -133,6 +247,13 @@ func unstructuredRef(gvk schema.GroupVersionKind, name, namespace string) *unstr
 //
 // Both framework providers (crd and container) share this so the SSA
 // field-ownership contract is implemented in exactly one place.
+//
+// This deliberately does NOT force ownership: conditions are a listType=map
+// keyed by type, so core and each provider own disjoint entries and a conflict
+// means two writers really are fighting over the same field. Forcing would
+// silently steal the field and make the overlap last-writer-wins, which is
+// exactly the thrash this ownership split exists to prevent. A conflict
+// surfaces as a reconcile error instead.
 func applyProviderOwnedStatus(
 	ctx context.Context,
 	c client.Client,
@@ -165,10 +286,7 @@ func applyProviderOwnedStatus(
 		},
 	}
 
-	return c.Status().Patch(ctx, apply, client.Apply,
-		client.FieldOwner(fieldOwner),
-		client.ForceOwnership,
-	)
+	return c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner))
 }
 
 // providerReadyTransition preserves the existing ProviderReady
@@ -241,7 +359,120 @@ func conditionObservedGeneration(cm map[string]interface{}) (int64, bool) {
 // keylessCredentialSecretName returns the deterministic per-agent Secret name
 // used for keyless in-cluster model credentials.
 func keylessCredentialSecretName(agentName string) string {
-	return agentName + keylessCredentialSecretSuffix
+	return boundedResourceName(agentName, keylessCredentialSecretSuffix)
+}
+
+// agentProviderConfigRelevantChange filters AgentProviderConfig watch events
+// down to the changes that can alter how an AgentDeployment renders: a spec
+// change, a readiness flip, or a catalog change. Without it the 60s readiness
+// heartbeat (which only rewrites status.lastHeartbeat) requeues every
+// AgentDeployment in the cluster once a minute, in every provider.
+func agentProviderConfigRelevantChange() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldAPC, okOld := e.ObjectOld.(*airunwayv1alpha1.AgentProviderConfig)
+			newAPC, okNew := e.ObjectNew.(*airunwayv1alpha1.AgentProviderConfig)
+			if !okOld || !okNew {
+				return true
+			}
+			if oldAPC.Generation != newAPC.Generation {
+				return true
+			}
+			if !ptrBoolEqual(oldAPC.Status.Ready, newAPC.Status.Ready) {
+				return true
+			}
+			// The core controller copies status.version into every agent's
+			// status.framework.providerVersion, so a shim upgrade must fan out.
+			// Without this, that field — whose whole purpose is spotting skew
+			// between an agent and its provider — reports the OLD version until
+			// an unrelated change or the ~10h resync, and stays empty forever if
+			// the version write lands after the readiness flip on a fresh install.
+			if oldAPC.Status.Version != newAPC.Status.Version {
+				return true
+			}
+			return oldAPC.Annotations[airunwayv1alpha1.AgentProviderCatalogAnnotation] !=
+				newAPC.Annotations[airunwayv1alpha1.AgentProviderCatalogAnnotation]
+		},
+	}
+}
+
+func ptrBoolEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// frameworkIndex guards one-time registration of the AgentDeployment-by-
+// framework field index. Core and every provider need it, registering the same
+// key twice on one manager is an error, and the standalone provider shims run
+// without the core controller — so registration is shared and idempotent.
+var frameworkIndex struct {
+	once sync.Once
+	err  error
+}
+
+// ensureFrameworkIndex registers the by-framework field index exactly once per
+// process.
+func ensureFrameworkIndex(mgr ctrl.Manager) error {
+	frameworkIndex.once.Do(func() {
+		frameworkIndex.err = mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&airunwayv1alpha1.AgentDeployment{},
+			agentDeploymentFrameworkIndexKey,
+			func(raw client.Object) []string {
+				ad, ok := raw.(*airunwayv1alpha1.AgentDeployment)
+				if !ok || ad.Spec.Framework.Name == "" {
+					return nil
+				}
+				return []string{ad.Spec.Framework.Name}
+			},
+		)
+	})
+	return frameworkIndex.err
+}
+
+// agentsForFramework lists the AgentDeployments bound to a framework, using the
+// shared field index and falling back to a full list when the index is not
+// registered (unit tests that bypass SetupWithManager).
+func agentsForFramework(ctx context.Context, c client.Client, framework string) []airunwayv1alpha1.AgentDeployment {
+	var list airunwayv1alpha1.AgentDeploymentList
+	if err := c.List(ctx, &list, client.MatchingFields{agentDeploymentFrameworkIndexKey: framework}); err != nil {
+		if err := c.List(ctx, &list); err != nil {
+			// Returning nil here silently drops the event: a map function has
+			// no error channel, so nothing retries. Log it, or a readiness flip
+			// vanishes with no trace of why agents never reconciled.
+			log.FromContext(ctx).Error(err, "listing AgentDeployments for framework failed; provider-config event dropped",
+				"framework", framework)
+			return nil
+		}
+	}
+	out := make([]airunwayv1alpha1.AgentDeployment, 0, len(list.Items))
+	for i := range list.Items {
+		if list.Items[i].Spec.Framework.Name == framework {
+			out = append(out, list.Items[i])
+		}
+	}
+	return out
+}
+
+// frameworkUsesCRDBackend reports whether the named framework is registered
+// with the crd backend. The CRD-backed providers gate on this so that a
+// framework registered as a container backend is rendered by exactly one
+// provider; otherwise both would render resources and fight over the
+// provider-owned ProviderReady condition.
+func frameworkUsesCRDBackend(ctx context.Context, c client.Client, framework string) (bool, error) {
+	var apc airunwayv1alpha1.AgentProviderConfig
+	if err := c.Get(ctx, k8stypes.NamespacedName{Name: framework}, &apc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if apc.Spec.Capabilities == nil {
+		return false, nil
+	}
+	return apc.Spec.Capabilities.Backend == airunwayv1alpha1.AgentProviderBackendCRD, nil
 }
 
 // ensureBindingCredentials guarantees a binding has CredentialsRef. When core
@@ -271,8 +502,8 @@ func ensureBindingCredentials(
 			Name:      secretName,
 			Namespace: ad.Namespace,
 			Labels: map[string]string{
-				"airunway.ai/agent":     ad.Name,
-				"airunway.ai/framework": ad.Spec.Framework.Name,
+				"airunway.ai/agent":     boundedLabelValue(ad.Name),
+				"airunway.ai/framework": boundedLabelValue(ad.Spec.Framework.Name),
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -283,8 +514,20 @@ func ensureBindingCredentials(
 	if err := controllerutil.SetControllerReference(ad, secret, scheme); err != nil {
 		return binding, fmt.Errorf("set owner reference on keyless credential secret: %w", err)
 	}
-	if err := c.Patch(ctx, secret, client.Apply, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
-		return binding, fmt.Errorf("apply keyless credential secret %s/%s: %w", secret.Namespace, secret.Name, err)
+	// The Secret name is derived from the agent name, so it can collide with a
+	// pre-existing hand-managed Secret — and adopting one would overwrite its
+	// data AND attach an owner reference that garbage-collects it with the
+	// agent.
+	//
+	// Guard that with SSA conflict detection rather than a read-then-apply
+	// ownership check: a non-forced apply already fails when another field
+	// manager owns the same fields, which is the collision we care about, and
+	// unlike a Get it needs no `secrets` read verb. Framework providers write
+	// managed Secrets but deliberately never read Secrets, so their RBAC stays
+	// at create/update/patch.
+	if err := c.Patch(ctx, secret, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+		return binding, fmt.Errorf("apply keyless credential secret %s/%s (a conflict here means a Secret of this name already exists and is managed by someone else): %w",
+			secret.Namespace, secret.Name, err)
 	}
 
 	binding.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{

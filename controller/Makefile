@@ -9,7 +9,13 @@ export
 # Inject build-time defaults into the controller binary so the values track
 # /versions.env automatically. The Go fallback literals in the source files
 # only apply when bypassing the Makefile (e.g. `go run`, `go test`).
+GIT_SHA      := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY    := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo '-dirty')
+AGENT_PROVIDER_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
+
 LDFLAGS := -X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)
+# Reported version for the in-process agent providers (AgentProviderConfig.status.version).
+LDFLAGS += -X main.agentProviderVersion=$(AGENT_PROVIDER_VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))

@@ -2,6 +2,10 @@
 FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# SHIM_VERSION is the reported shim version tag. Required so a hand-run
+# `docker build` cannot silently ship status.version=agent-orka-provider:dev
+# under a real release tag. The Makefile always passes it via --build-arg.
+ARG SHIM_VERSION
 
 WORKDIR /workspace
 
@@ -25,7 +29,14 @@ COPY providers/agent-orka/ providers/agent-orka/
 RUN cd providers/agent-orka && go mod tidy
 
 # Build
-RUN cd providers/agent-orka && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider cmd/main.go
+RUN test -n "${SHIM_VERSION}" || (echo "ERROR: SHIM_VERSION build arg is required; pass --build-arg SHIM_VERSION=..." >&2; exit 1)
+# MODULE is resolved from go.mod (not hand-typed) so the -X target can never
+# drift from the package path.
+RUN cd providers/agent-orka && MODULE=$(go list -m) && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a \
+      -ldflags="-X ${MODULE}.shimVersion=${SHIM_VERSION}" \
+      -o provider cmd/main.go
 
 # Use distroless as minimal base image to package the provider binary
 FROM gcr.io/distroless/static:nonroot

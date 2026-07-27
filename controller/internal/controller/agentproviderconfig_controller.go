@@ -73,8 +73,17 @@ func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 	if err := r.Get(ctx, req.NamespacedName, &apc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !apc.DeletionTimestamp.IsZero() || apc.Spec.Capabilities == nil {
+	if !apc.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
+	}
+	// A config with no capabilities cannot be evaluated, but returning silently
+	// leaves it with no status at all — every AgentDeployment on the framework
+	// then reports "registered but not reporting ready" forever with nothing on
+	// the provider config explaining why. Publish the reason instead.
+	if apc.Spec.Capabilities == nil {
+		return ctrl.Result{RequeueAfter: agentProviderHeartbeatInterval},
+			r.applyReadiness(ctx, &apc, false, "CapabilitiesMissing",
+				"spec.capabilities is not set, so this framework's backend and binding modes are unknown")
 	}
 
 	ready, reason, msg := r.evaluate(&apc)
@@ -109,6 +118,15 @@ func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProv
 	}
 	served, err := r.groupServed(group)
 	if err != nil {
+		// Discovery failing tells us nothing about whether the operator is
+		// installed — it is an error reading, not a negative result. Flipping
+		// ready=false here would ripple out to every AgentDeployment on this
+		// framework, so a transient API-server blip must not be reported as
+		// "the framework went away". Hold the previous verdict and retry.
+		if prev := apc.Status.Ready; prev != nil {
+			return *prev, "DiscoveryFailedRetaining",
+				fmt.Sprintf("could not query API group %q: %v (retaining previous readiness)", group, err)
+		}
 		return false, "DiscoveryFailed", fmt.Sprintf("could not query API group %q: %v", group, err)
 	}
 	if !served {

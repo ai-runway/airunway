@@ -34,6 +34,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	agentproviders "github.com/ai-runway/airunway/controller/pkg/agentproviders"
+	agentkagent "github.com/ai-runway/airunway/providers/agent-kagent"
 )
 
 var (
@@ -106,6 +107,15 @@ func main() {
 	reconciler := agentproviders.NewKagentReconciler(mgr.GetClient(), mgr.GetScheme())
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentKagentProvider")
+		os.Exit(1)
+	}
+
+	// Publish this shim's build version so AgentProviderConfig.status.version
+	// (and each agent's status.framework.providerVersion) reports which build
+	// is serving the framework.
+	versionReporter := agentproviders.NewFrameworkVersionReporter(mgr.GetClient(), agentkagent.ProviderConfigName, agentkagent.FrameworkName, agentkagent.ProviderVersion)
+	if err := versionReporter.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentProviderVersion")
 		os.Exit(1)
 	}
 

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -93,6 +91,8 @@ type kagentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=kagent.dev,resources=agents;modelconfigs,verbs=get;list;watch;create;update;patch;delete
+// Framework providers WRITE their managed no-auth Secret but never READ any
+// Secret — no `get`. Credential resolution is the core controller's job.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=create;update;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
@@ -110,13 +110,24 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	// Consume the core-resolved bindings. Do not render until core reports the
-	// bindings are resolved, so we never build a ModelConfig from a half-
-	// resolved endpoint. If a previously valid binding is now unresolved, tear
-	// down the rendered Agent/ModelConfig/Secret so it stops using stale
-	// credentials before reporting Pending.
-	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
-		ad.Status.ModelBinding == nil {
+	// Also require the framework to be registered with the crd backend. Without
+	// this check a provider config named "kagent" but declaring the container
+	// backend would be rendered by both this provider and the generic container
+	// provider, each force-owning the same ProviderReady condition.
+	crdBacked, err := frameworkUsesCRDBackend(ctx, r.Client, KagentFrameworkName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !crdBacked {
+		return ctrl.Result{}, nil
+	}
+
+	// Consume the core-resolved binding. Never build a ModelConfig from a
+	// half-resolved endpoint.
+	switch classifyBinding(&ad) {
+	case bindingUnavailable:
+		// No binding at all: tear down the rendered Agent/ModelConfig so it
+		// stops using a stale endpoint before reporting Pending.
 		if err := cleanupOwnedCRs(ctx, r.Client, &ad,
 			unstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
 			unstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
@@ -130,10 +141,14 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
+	case bindingStale:
+		// Binding published but not re-verified this pass — hold rather than
+		// deleting a healthy agent over a transient failure.
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err := ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
+	binding, err = ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
 	if err != nil {
 		statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -142,7 +157,11 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, err
 	}
-	cfg := parseKagentConfig(ad.Spec.Config)
+	cfg, err := parseKagentConfig(ad.Spec.Config)
+	if err != nil {
+		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "InvalidConfig", err.Error())
+	}
 
 	modelConfig := renderKagentModelConfig(&ad, binding)
 	agent := renderKagentAgent(&ad, cfg, modelConfig.GetName())
@@ -195,15 +214,17 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 // parseKagentConfig extracts the kagent-specific fields from the opaque
-// spec.config. A nil or unparseable config yields an empty config (the agent
-// still renders, just without a system prompt).
-func parseKagentConfig(raw *runtime.RawExtension) kagentConfig {
+// spec.config. A malformed config is reported rather than silently rendering an
+// agent with no system prompt.
+func parseKagentConfig(raw *runtime.RawExtension) (kagentConfig, error) {
 	var cfg kagentConfig
 	if raw == nil || len(raw.Raw) == 0 {
-		return cfg
+		return cfg, nil
 	}
-	_ = json.Unmarshal(raw.Raw, &cfg)
-	return cfg
+	if err := json.Unmarshal(raw.Raw, &cfg); err != nil {
+		return kagentConfig{}, fmt.Errorf("parse spec.config for the kagent backend: %w", err)
+	}
+	return cfg, nil
 }
 
 // renderKagentModelConfig builds a kagent ModelConfig from a resolved binding.
@@ -277,13 +298,13 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 		description = fmt.Sprintf("airunway agent %s", ad.Name)
 	}
 
-	runtime := cfg.Runtime
-	if runtime == "" {
-		runtime = "python"
+	adkRuntime := cfg.Runtime
+	if adkRuntime == "" {
+		adkRuntime = "python"
 	}
 	declarative := map[string]interface{}{
 		"modelConfig": modelConfigName,
-		"runtime":     runtime,
+		"runtime":     adkRuntime,
 	}
 	if cfg.SystemPrompt != "" {
 		declarative["systemMessage"] = cfg.SystemPrompt
@@ -321,16 +342,10 @@ func (r *KagentProviderReconciler) mapProviderConfigToAgentDeployments(ctx conte
 	if !ok || apc.Name != KagentFrameworkName {
 		return nil
 	}
-	var list airunwayv1alpha1.AgentDeploymentList
-	if err := r.List(ctx, &list); err != nil {
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range list.Items {
-		if list.Items[i].Spec.Framework.Name != KagentFrameworkName {
-			continue
-		}
-		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	agents := agentsForFramework(ctx, r.Client, KagentFrameworkName)
+	reqs := make([]reconcile.Request, 0, len(agents))
+	for i := range agents {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents[i])})
 	}
 	return reqs
 }
@@ -339,12 +354,15 @@ func (r *KagentProviderReconciler) mapProviderConfigToAgentDeployments(ctx conte
 // framework-provider config changes so existing agents are re-rendered when
 // capabilities/defaults change.
 func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := ensureFrameworkIndex(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
 		).
 		Named("agent-provider-kagent").
 		Complete(r)

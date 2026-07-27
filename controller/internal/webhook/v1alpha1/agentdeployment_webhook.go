@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 
+	apivalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -78,9 +80,7 @@ func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager) error {
 type AgentDeploymentCustomValidator struct{}
 
 // agentDeploymentMaxNameLength caps AgentDeployment names so every derived
-// workload label value (which uses the name verbatim) stays within
-// Kubernetes' 63-character label-value limit. Without this, an otherwise
-// valid long name is admitted but its rendered Deployment/Job fails to apply.
+// workload label value stays within Kubernetes' 63-character label-value limit.
 const agentDeploymentMaxNameLength = 63
 
 // ValidateCreate validates AgentDeployment on create.
@@ -93,14 +93,33 @@ func (v *AgentDeploymentCustomValidator) ValidateCreate(_ context.Context, obj *
 	return nil, nil
 }
 
-// validateAgentDeploymentName rejects names too long to be reused verbatim as a
-// label value on the rendered workloads.
+// validateAgentDeploymentName rejects names that cannot be reused for the
+// resources the providers render from them.
+//
+// The binding constraint is NOT the 253-character object-name limit that the
+// CRD itself allows. The container backend fronts each agent with a Service,
+// and Service names are validated as RFC 1035 DNS *labels*: at most 63
+// characters, lower-case alphanumeric or '-', and they must start with a
+// letter. A name like "my.agent" or "7agent" is a perfectly legal custom
+// resource name, so it is admitted, and then every reconcile fails when the
+// Service apply is rejected — leaving pods running with no Service, no
+// published address, and a permanent Failed status.
+//
+// Validating here means the user is told at kubectl-apply time, in terms of the
+// field they control, instead of discovering it in a controller error loop.
 func validateAgentDeploymentName(obj *airunwayv1alpha1.AgentDeployment) field.ErrorList {
 	if len(obj.Name) > agentDeploymentMaxNameLength {
 		return field.ErrorList{field.Invalid(
 			field.NewPath("metadata", "name"),
 			obj.Name,
 			fmt.Sprintf("name must be at most %d characters so derived workload labels stay within Kubernetes' 63-character label-value limit", agentDeploymentMaxNameLength),
+		)}
+	}
+	if errs := apivalidation.IsDNS1035Label(obj.Name); len(errs) > 0 {
+		return field.ErrorList{field.Invalid(
+			field.NewPath("metadata", "name"),
+			obj.Name,
+			fmt.Sprintf("name must be a valid DNS-1035 label so the rendered Service can reuse it (%s)", strings.Join(errs, "; ")),
 		)}
 	}
 	return nil
@@ -368,8 +387,18 @@ func validateContainerSecurityContextValues(m map[string]interface{}, path *fiel
 		}
 	}
 	if value, found := m["readOnlyRootFilesystem"]; found {
-		if _, ok := value.(bool); !ok {
+		// One-way, like every other knob in this allow-list. Whether an agent
+		// may write to its root filesystem is provider-owned
+		// (AgentProviderConfig.spec.capabilities.writableRootFilesystem),
+		// precisely so a deployment author cannot weaken the posture their
+		// framework declared. Permitting false here reopened that hole: the
+		// override is merged AFTER the hardened default is set, so it wins.
+		b, ok := value.(bool)
+		if !ok {
 			allErrs = append(allErrs, field.Invalid(path.Child("readOnlyRootFilesystem"), value, "readOnlyRootFilesystem must be a boolean"))
+		} else if !b {
+			allErrs = append(allErrs, field.Forbidden(path.Child("readOnlyRootFilesystem"),
+				"readOnlyRootFilesystem cannot be set to false; a writable root filesystem is provider-owned, set capabilities.writableRootFilesystem on the framework's AgentProviderConfig instead"))
 		}
 	}
 	if value, found := m["runAsUser"]; found {

@@ -72,6 +72,14 @@ const (
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+
+	// agentProviderVersion is the version reported by the in-process agent
+	// providers, injected at build time via:
+	//
+	//	-ldflags "-X main.agentProviderVersion=$(VERSION)"
+	//
+	// The "dev" fallback only applies when the Makefile is bypassed.
+	agentProviderVersion = "dev"
 )
 
 func init() {
@@ -410,28 +418,44 @@ func main() {
 	if err := (&controller.AgentDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Credential Secrets are read uncached: a cached read would start a
+		// cluster-wide Secret informer, which needs list/watch on every Secret
+		// in the cluster and would hold them all in memory.
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 		os.Exit(1)
 	}
 
+	// The agent providers are still in-tree, so the combined controller binds
+	// them here. This is the ONLY place a framework provider is named in main:
+	// each entry carries its reconciler, which AgentProviderConfig it serves,
+	// and the version it reports. Moving a provider out-of-tree — the intended
+	// end state, matching providers/* for the inference side — means deleting
+	// its entry, and nothing else in main() changes.
 	if err := controller.RegisterAgentProviders(mgr,
 		controller.AgentProviderRegistration{
-			Name: "KagentProvider",
+			Name:      "agent-kagent",
+			Framework: controller.KagentFrameworkName,
+			Version:   "agent-kagent-provider:" + agentProviderVersion,
 			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
 				return &controller.KagentProviderReconciler{Client: c, Scheme: s}
 			},
 		},
 		controller.AgentProviderRegistration{
-			Name: "ContainerProvider",
+			Name:      "agent-orka",
+			Framework: controller.OrkaFrameworkName,
+			Version:   "agent-orka-provider:" + agentProviderVersion,
 			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-				return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
+				return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
 			},
 		},
 		controller.AgentProviderRegistration{
-			Name: "OrkaProvider",
+			Name:    "agent-container",
+			Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			Version: "agent-container-provider:" + agentProviderVersion,
 			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-				return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
+				return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
 			},
 		},
 	); err != nil {

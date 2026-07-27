@@ -232,7 +232,12 @@ type AgentProviderConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   AgentProviderConfigSpec   `json:"spec,omitempty"`
+	// spec is required. Without it controller-gen omits `required: [spec]` from
+	// the CRD, which lets `kubectl patch --type=json -p '[{"op":"remove",
+	// "path":"/spec"}]'` succeed — and because CEL transition rules only run
+	// when the old value exists, that is enough to bypass the immutability rule
+	// on capabilities.backend and re-create the config with a different backend.
+	Spec   AgentProviderConfigSpec   `json:"spec"`
 	Status AgentProviderConfigStatus `json:"status,omitempty"`
 }
 

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -74,6 +72,8 @@ type orkaAgentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers;agents,verbs=get;list;watch;create;update;patch;delete
+// Framework providers WRITE their managed no-auth Secret but never READ any
+// Secret — no `get`. Credential resolution is the core controller's job.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=create;update;patch
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
@@ -88,10 +88,21 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// If a previously valid binding is now unresolved, tear down the rendered
-	// Provider/Agent/Secret so it stops using stale credentials before Pending.
-	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
-		ad.Status.ModelBinding == nil {
+	// Require the crd backend, so a framework registered as a container backend
+	// is not rendered by this provider and the generic container provider at
+	// the same time (both would force-own the same ProviderReady condition).
+	crdBacked, err := frameworkUsesCRDBackend(ctx, r.Client, OrkaFrameworkName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !crdBacked {
+		return ctrl.Result{}, nil
+	}
+
+	switch classifyBinding(&ad) {
+	case bindingUnavailable:
+		// No binding at all: tear down the rendered Provider/Agent so it stops
+		// using stale credentials before reporting Pending.
 		if err := cleanupOwnedCRs(ctx, r.Client, &ad,
 			unstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
 			unstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
@@ -105,10 +116,14 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
+	case bindingStale:
+		// Binding published but not re-verified this pass — hold rather than
+		// deleting a healthy agent over a transient failure.
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err := ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
+	binding, err = ensureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
 	if err != nil {
 		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -119,7 +134,11 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	var cfg orkaAgentConfig
 	if ad.Spec.Config != nil && len(ad.Spec.Config.Raw) > 0 {
-		_ = json.Unmarshal(ad.Spec.Config.Raw, &cfg)
+		if err := json.Unmarshal(ad.Spec.Config.Raw, &cfg); err != nil {
+			return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+				metav1.ConditionFalse, "InvalidConfig",
+				fmt.Sprintf("parse spec.config for the orka backend: %v", err))
+		}
 	}
 
 	provider := renderOrkaProvider(&ad, binding)
@@ -255,28 +274,25 @@ func (r *OrkaProviderReconciler) mapProviderConfigToAgentDeployments(ctx context
 	if !ok || apc.Name != OrkaFrameworkName {
 		return nil
 	}
-	var list airunwayv1alpha1.AgentDeploymentList
-	if err := r.List(ctx, &list); err != nil {
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range list.Items {
-		if list.Items[i].Spec.Framework.Name != OrkaFrameworkName {
-			continue
-		}
-		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	agents := agentsForFramework(ctx, r.Client, OrkaFrameworkName)
+	reqs := make([]reconcile.Request, 0, len(agents))
+	for i := range agents {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents[i])})
 	}
 	return reqs
 }
 
 // SetupWithManager wires the Orka provider.
 func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := ensureFrameworkIndex(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
 		).
 		Named("agent-provider-orka").
 		Complete(r)

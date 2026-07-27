@@ -26,7 +26,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -38,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -59,6 +57,19 @@ const (
 
 	// agentContainerPort is the port the BYO agent server listens on.
 	agentContainerPort = 8080
+
+	// agentConfigChecksumAnnotation carries a digest of the rendered agent.json
+	// on the pod template. The ConfigMap is mounted by name, so without this a
+	// config-only change updates the ConfigMap but leaves the pod template
+	// byte-identical and no rollout happens — agents that read agent.json at
+	// startup would keep serving the old config indefinitely.
+	agentConfigChecksumAnnotation = "airunway.ai/config-checksum"
+
+	// agentTemplateHashAnnotation records a digest of the pod template the
+	// provider rendered for a Job. A Job's spec.template is immutable, so this
+	// is how a template change is detected and the Job recreated instead of
+	// being patched (which the API server rejects with "field is immutable").
+	agentTemplateHashAnnotation = "airunway.ai/template-hash"
 )
 
 // ContainerProviderReconciler renders any container-backend AgentDeployment
@@ -235,20 +246,30 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	// Consume the core-resolved bindings; do not render until they are ready.
-	// If a previously valid binding is now unresolved (e.g. its credential
-	// Secret was revoked), tear down the owned workloads first so the agent
-	// stops serving with the stale endpoint/credentials instead of lingering.
-	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) ||
-		ad.Status.ModelBinding == nil {
+	// Consume the core-resolved binding.
+	switch classifyBinding(&ad) {
+	case bindingUnavailable:
+		// No binding: either not resolved yet, or core cleared it because the
+		// request became terminally invalid (e.g. a cross-namespace reference).
+		// Tear down so the agent stops serving with stale endpoint/credentials.
 		if err := r.cleanupOwnedWorkloads(ctx, &ad); err != nil {
 			return r.failWithStatus(ctx, &ad, "BindingCleanupFailed", err)
 		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
+	case bindingStale:
+		// Core still publishes a binding but could not re-verify it this pass.
+		// Hold: leave the running workload alone and leave our status as-is,
+		// so a transient blip does not restart a healthy agent. Core's
+		// ModelBound=False already keeps the aggregate Ready false.
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	cfg := parseContainerConfig(ad.Spec.Config)
+	cfg, err := parseContainerConfig(ad.Spec.Config)
+	if err != nil {
+		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "InvalidConfig", err.Error())
+	}
 	if cfg.Image == "" {
 		cfg.Image = settings.image // fall back to the framework's unambiguous catalog image
 	}
@@ -268,16 +289,41 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	binding := *ad.Status.ModelBinding
 
-	// The ConfigMap (mounted agent.json) is shared by both lifecycles.
+	// The ConfigMap (mounted agent.json) is shared by both lifecycles. Its
+	// checksum rides on the pod template so a config-only edit rolls the
+	// workload.
 	configMap := renderAgentConfigMap(&ad)
+	configChecksum, err := hashJSON(configMap.Data)
+	if err != nil {
+		return r.failWithStatus(ctx, &ad, "RenderFailed", err)
+	}
 	if err := r.applyOwned(ctx, &ad, configMap); err != nil {
 		return r.failWithStatus(ctx, &ad, "RenderFailed", err)
 	}
 
-	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
-		return r.reconcileJob(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot, securityOverrides)
+	render := renderInputs{
+		cfg:               cfg,
+		binding:           binding,
+		configMapName:     configMap.Name,
+		configChecksum:    configChecksum,
+		writableRoot:      settings.writableRoot,
+		securityOverrides: securityOverrides,
 	}
-	return r.reconcileDeployment(ctx, &ad, cfg, binding, configMap.Name, settings.writableRoot, securityOverrides)
+	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
+		return r.reconcileJob(ctx, &ad, render)
+	}
+	return r.reconcileDeployment(ctx, &ad, render)
+}
+
+// renderInputs bundles everything the workload renderers need beyond the
+// AgentDeployment itself, so the Deployment and Job paths stay in step.
+type renderInputs struct {
+	cfg               containerConfig
+	binding           airunwayv1alpha1.ModelBindingStatus
+	configMapName     string
+	configChecksum    string
+	writableRoot      bool
+	securityOverrides *containerSecurityOverrides
 }
 
 // applyOwned sets the AgentDeployment as controller owner and server-side
@@ -298,20 +344,16 @@ func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunw
 func (r *ContainerProviderReconciler) reconcileDeployment(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
-	cfg containerConfig,
-	binding airunwayv1alpha1.ModelBindingStatus,
-	configMapName string,
-	writableRoot bool,
-	securityOverrides *containerSecurityOverrides,
+	in renderInputs,
 ) (ctrl.Result, error) {
 	// A prior spec.lifecycle: job leaves a one-shot Job behind. Delete it so the
 	// two lifecycles never run side by side.
-	if err := r.deleteObsolete(ctx, ad, &batchv1.Job{}); err != nil {
+	if err := r.deleteObsolete(ctx, ad, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: ad.Name}}); err != nil {
 		return r.failWithStatus(ctx, ad, "LifecycleCleanupFailed", err)
 	}
 
-	deployment := renderAgentDeployment(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
-	service := renderAgentService(ad, cfg)
+	deployment := renderAgentDeployment(ad, in)
+	service := renderAgentService(ad, in.cfg)
 	for _, obj := range []client.Object{deployment, service} {
 		if err := r.applyOwned(ctx, ad, obj); err != nil {
 			return r.failWithStatus(ctx, ad, "RenderFailed", err)
@@ -322,8 +364,9 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 	if err := r.Get(ctx, k8stypes.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &live); err != nil {
 		return ctrl.Result{}, err
 	}
+	desired := ptr.Deref(live.Spec.Replicas, 1)
 	replicas := &airunwayv1alpha1.AgentReplicaStatus{
-		Desired:   ptr.Deref(live.Spec.Replicas, 1),
+		Desired:   desired,
 		Ready:     live.Status.ReadyReplicas,
 		Available: live.Status.AvailableReplicas,
 	}
@@ -334,7 +377,7 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 		Address: fmt.Sprintf("http://%s.%s.svc.cluster.local", service.Name, service.Namespace),
 	}
 
-	if live.Status.AvailableReplicas > 0 {
+	if deploymentRolledOut(&live, desired) {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
 			metav1.ConditionTrue, "WorkloadReady", "Agent workload has available replicas")
@@ -344,6 +387,38 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 		metav1.ConditionFalse, "WorkloadNotReady", "Waiting for the agent workload to become available")
 }
 
+// deploymentRolledOut reports whether the Deployment's *current* pod template
+// is actually serving. Checking availableReplicas alone is not enough, in two
+// separate ways:
+//
+//   - Right after the provider changes the pod template, the Deployment status
+//     still describes the PREVIOUS generation, so a stale availableReplicas
+//     would promote the new generation to Running before anything rolled.
+//   - Mid-rollout the status describes BOTH ReplicaSets. The default strategy
+//     at replicas=1 is maxSurge=1/maxUnavailable=0, giving replicas=2,
+//     updatedReplicas=1, availableReplicas=1 — where the one available pod is
+//     still the OLD one. Because maxUnavailable is 0 the old pod is never
+//     scaled down until the new one goes available, so a broken new image
+//     (ImagePullBackOff, CrashLoopBackOff) would report Running permanently.
+//
+// Requiring the controller to have observed this generation, every desired
+// replica to be updated, and no old replicas to remain closes both windows.
+func deploymentRolledOut(live *appsv1.Deployment, desired int32) bool {
+	if desired <= 0 {
+		return false
+	}
+	if live.Status.ObservedGeneration < live.Generation {
+		return false
+	}
+	if live.Status.UpdatedReplicas < desired {
+		return false
+	}
+	if live.Status.Replicas != live.Status.UpdatedReplicas {
+		return false
+	}
+	return live.Status.AvailableReplicas >= desired
+}
+
 // reconcileJob renders + applies the one-shot Job and maps its status onto the
 // agent phase. A Job is reported Failed only once it surfaces a true JobFailed
 // condition (i.e. backoffLimit exhausted), Running while active, and Completed
@@ -351,19 +426,38 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 func (r *ContainerProviderReconciler) reconcileJob(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
-	cfg containerConfig,
-	binding airunwayv1alpha1.ModelBindingStatus,
-	configMapName string,
-	writableRoot bool,
-	securityOverrides *containerSecurityOverrides,
+	in renderInputs,
 ) (ctrl.Result, error) {
 	// A prior spec.lifecycle: deployment leaves a Deployment + Service behind.
 	// Delete them so the two lifecycles never run side by side.
-	if err := r.deleteObsolete(ctx, ad, &appsv1.Deployment{}, &corev1.Service{}); err != nil {
+	if err := r.deleteObsolete(ctx, ad,
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ad.Name}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(ad)}},
+	); err != nil {
 		return r.failWithStatus(ctx, ad, "LifecycleCleanupFailed", err)
 	}
 
-	job := renderAgentJob(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
+	job, err := renderAgentJob(ad, in)
+	if err != nil {
+		return r.failWithStatus(ctx, ad, "RenderFailed", err)
+	}
+
+	// A Job's spec.template is immutable, so re-applying it after any change to
+	// the image, command, resources, model binding, or mounted config would be
+	// rejected and leave the agent stuck in RenderFailed forever. Recreate the
+	// Job instead when the rendered template no longer matches.
+	recreating, err := r.recreateJobIfTemplateChanged(ctx, ad, job)
+	if err != nil {
+		return r.failWithStatus(ctx, ad, "JobRecreateFailed", err)
+	}
+	if recreating {
+		// The delete is in flight; come back once it has been collected and
+		// create the Job with the new template then.
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseDeploying, nil, nil,
+			metav1.ConditionFalse, "JobRecreating", "Agent job template changed; recreating the job")
+	}
+
 	if err := r.applyOwned(ctx, ad, job); err != nil {
 		return r.failWithStatus(ctx, ad, "RenderFailed", err)
 	}
@@ -403,6 +497,56 @@ func (r *ContainerProviderReconciler) reconcileJob(
 	}
 }
 
+// recreateJobIfTemplateChanged deletes the existing Job when the template hash
+// the provider recorded on it differs from the freshly rendered one. It reports
+// whether a delete was issued (so the caller waits before creating the
+// replacement). A Job this AgentDeployment does not own is never touched — that
+// surfaces as an ownership error from the subsequent apply.
+func (r *ContainerProviderReconciler) recreateJobIfTemplateChanged(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	desired *batchv1.Job,
+) (bool, error) {
+	var live batchv1.Job
+	key := k8stypes.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
+	if err := r.Get(ctx, key, &live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get existing job %s: %w", key, err)
+	}
+	if !metav1.IsControlledBy(&live, ad) {
+		// Leave it alone; applyOwned reports the ownership conflict.
+		return false, nil
+	}
+	if !live.DeletionTimestamp.IsZero() {
+		// Deletion already in flight from an earlier pass.
+		return true, nil
+	}
+	if live.Annotations[agentTemplateHashAnnotation] == desired.Annotations[agentTemplateHashAnnotation] {
+		return false, nil
+	}
+
+	log.FromContext(ctx).Info("Agent job template changed; recreating job",
+		"job", key.String(),
+		"from", live.Annotations[agentTemplateHashAnnotation],
+		"to", desired.Annotations[agentTemplateHashAnnotation])
+
+	// Foreground propagation so the old pods are gone before the replacement
+	// Job is created under the same name.
+	policy := metav1.DeletePropagationForeground
+	// Precondition on the observed UID: the read above is cache-backed, so
+	// without it a stale cache could delete a Job that already replaced this
+	// one. A conflict means exactly that — re-read on the next pass.
+	if err := r.Delete(ctx, &live, &client.DeleteOptions{
+		PropagationPolicy: &policy,
+		Preconditions:     &metav1.Preconditions{UID: &live.UID},
+	}); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return false, fmt.Errorf("delete job %s for template change: %w", key, err)
+	}
+	return true, nil
+}
+
 // jobConditionTrue reports whether a Job carries the given condition with
 // status True.
 func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool {
@@ -415,30 +559,23 @@ func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool 
 	return false
 }
 
-// deleteObsolete best-effort deletes owned workloads left over from a previous
+// deleteObsolete deletes owned workloads left over from a previous
 // spec.lifecycle so a lifecycle switch does not leave both kinds running. Each
 // object is looked up by the agent's name in its namespace, and is deleted only
-// when it is actually controlled by this AgentDeployment so an unrelated
-// same-named object is never removed.
+// when it is actually controlled by this AgentDeployment.
+//
+// An unrelated same-named object is skipped rather than treated as an error:
+// this runs on every reconcile, so failing here would let any unrelated Job or
+// Deployment that happens to share the agent's name permanently block
+// reconciliation of a workload the provider never conflicts with. Refusing to
+// *adopt* such an object is applyOwned's job.
+// Objects must already carry the name the provider renders them under, since
+// those names are bounded per-kind (Services use a stricter limit).
 func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
-	logger := log.FromContext(ctx)
 	for _, obj := range objs {
-		obj.SetName(ad.Name)
 		obj.SetNamespace(ad.Namespace)
-		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("get obsolete %T %s/%s: %w", obj, ad.Namespace, ad.Name, err)
-		}
-		if !metav1.IsControlledBy(obj, ad) {
-			return fmt.Errorf("refusing to delete %T %s/%s: it is not owned by AgentDeployment %s",
-				obj, ad.Namespace, ad.Name, ad.Name)
-		}
-		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "failed to delete obsolete workload from previous lifecycle",
-				"kind", fmt.Sprintf("%T", obj), "name", ad.Name)
-			return fmt.Errorf("delete obsolete %T %s/%s: %w", obj, ad.Namespace, ad.Name, err)
+		if err := deleteOwnedObject(ctx, r.Client, ad, obj); err != nil {
+			return fmt.Errorf("delete obsolete workload from previous lifecycle: %w", err)
 		}
 	}
 	return nil
@@ -453,8 +590,8 @@ func (r *ContainerProviderReconciler) cleanupOwnedWorkloads(ctx context.Context,
 	owned := []client.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
 		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: ad.Name + "-config", Namespace: ad.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(ad), Namespace: ad.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: agentConfigMapName(ad), Namespace: ad.Namespace}},
 	}
 	for _, obj := range owned {
 		if err := r.deleteOwned(ctx, ad, obj); err != nil {
@@ -532,14 +669,24 @@ func (r *ContainerProviderReconciler) resolveContainerProvider(ctx context.Conte
 }
 
 // parseContainerConfig extracts the container provider's fields from the opaque
-// spec.config.
-func parseContainerConfig(raw *runtime.RawExtension) containerConfig {
+// spec.config. A malformed config is reported rather than silently rendering as
+// an empty config, which would otherwise surface as a confusing "no container
+// image" failure.
+func parseContainerConfig(raw *runtime.RawExtension) (containerConfig, error) {
 	var cfg containerConfig
 	if raw == nil || len(raw.Raw) == 0 {
-		return cfg
+		return cfg, nil
 	}
-	_ = json.Unmarshal(raw.Raw, &cfg)
-	return cfg
+	if err := json.Unmarshal(raw.Raw, &cfg); err != nil {
+		return containerConfig{}, fmt.Errorf("parse spec.config for the container backend: %w", err)
+	}
+	return cfg, nil
+}
+
+// agentConfigMapName is the name of the mounted agent.json ConfigMap, bounded
+// to the Kubernetes object-name limit.
+func agentConfigMapName(ad *airunwayv1alpha1.AgentDeployment) string {
+	return boundedResourceName(ad.Name, "-config")
 }
 
 // renderAgentConfigMap mounts the agent's full spec.config as agent.json (the
@@ -551,7 +698,7 @@ func renderAgentConfigMap(ad *airunwayv1alpha1.AgentDeployment) *corev1.ConfigMa
 	}
 	return &corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{Name: ad.Name + "-config", Namespace: ad.Namespace, Labels: agentLabels(ad)},
+		ObjectMeta: metav1.ObjectMeta{Name: agentConfigMapName(ad), Namespace: ad.Namespace, Labels: agentLabels(ad)},
 		Data:       map[string]string{agentConfigFileName: payload},
 	}
 }
@@ -567,28 +714,25 @@ func renderAgentConfigMap(ad *airunwayv1alpha1.AgentDeployment) *corev1.ConfigMa
 // spec.provider.overrides can further adjust pod/container security context.
 func agentPodSpec(
 	ad *airunwayv1alpha1.AgentDeployment,
-	cfg containerConfig,
-	binding airunwayv1alpha1.ModelBindingStatus,
-	configMapName string,
-	writableRoot bool,
-	securityOverrides *containerSecurityOverrides,
+	in renderInputs,
 ) corev1.PodSpec {
+	cfg := in.cfg
 	env := []corev1.EnvVar{
 		{Name: "AIRUNWAY_AGENT_CONFIG", Value: agentConfigMountPath},
 	}
-	env = append(env, modelBindingEnv(binding)...)
+	env = append(env, modelBindingEnv(in.binding)...)
 	env = append(env, otlpEnv(ad)...)
 
 	containerSecurity := &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false),
-		ReadOnlyRootFilesystem:   ptr.To(!writableRoot),
+		ReadOnlyRootFilesystem:   ptr.To(!in.writableRoot),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
 	podSecurity := &corev1.PodSecurityContext{
 		RunAsNonRoot:   ptr.To(true),
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
-	applyContainerSecurityOverrides(podSecurity, containerSecurity, securityOverrides)
+	applyContainerSecurityOverrides(podSecurity, containerSecurity, in.securityOverrides)
 
 	container := corev1.Container{
 		Name:  "agent",
@@ -619,7 +763,7 @@ func agentPodSpec(
 				Name: "agent-config",
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+						LocalObjectReference: corev1.LocalObjectReference{Name: in.configMapName},
 					},
 				},
 			},
@@ -697,25 +841,27 @@ func otlpEnv(ad *airunwayv1alpha1.AgentDeployment) []corev1.EnvVar {
 	return env
 }
 
+// agentPodTemplate builds the shared pod template, carrying the config
+// checksum so a change to the mounted agent.json rolls the workload.
+func agentPodTemplate(ad *airunwayv1alpha1.AgentDeployment, in renderInputs) corev1.PodTemplateSpec {
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      agentLabels(ad),
+			Annotations: map[string]string{agentConfigChecksumAnnotation: in.configChecksum},
+		},
+		Spec: agentPodSpec(ad, in),
+	}
+}
+
 // renderAgentDeployment renders a long-running Deployment for the agent.
-func renderAgentDeployment(
-	ad *airunwayv1alpha1.AgentDeployment,
-	cfg containerConfig,
-	binding airunwayv1alpha1.ModelBindingStatus,
-	configMapName string,
-	writableRoot bool,
-	securityOverrides *containerSecurityOverrides,
-) *appsv1.Deployment {
+func renderAgentDeployment(ad *airunwayv1alpha1.AgentDeployment, in renderInputs) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To[int32](1),
 			Selector: &metav1.LabelSelector{MatchLabels: agentSelector(ad)},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: agentLabels(ad)},
-				Spec:       agentPodSpec(ad, cfg, binding, configMapName, writableRoot, securityOverrides),
-			},
+			Template: agentPodTemplate(ad, in),
 		},
 	}
 }
@@ -723,34 +869,46 @@ func renderAgentDeployment(
 // renderAgentJob renders a one-shot Job for the agent (spec.lifecycle: job).
 // The pod spec is shared with the Deployment path; only the restart policy
 // differs (Jobs require Never or OnFailure).
-func renderAgentJob(
-	ad *airunwayv1alpha1.AgentDeployment,
-	cfg containerConfig,
-	binding airunwayv1alpha1.ModelBindingStatus,
-	configMapName string,
-	writableRoot bool,
-	securityOverrides *containerSecurityOverrides,
-) *batchv1.Job {
-	pod := agentPodSpec(ad, cfg, binding, configMapName, writableRoot, securityOverrides)
-	pod.RestartPolicy = corev1.RestartPolicyNever
+//
+// The rendered template's hash is recorded on the Job so a later reconcile can
+// tell that the immutable spec.template needs the Job recreated rather than
+// patched.
+func renderAgentJob(ad *airunwayv1alpha1.AgentDeployment, in renderInputs) (*batchv1.Job, error) {
+	template := agentPodTemplate(ad, in)
+	template.Spec.RestartPolicy = corev1.RestartPolicyNever
+
+	hash, err := hashJSON(template)
+	if err != nil {
+		return nil, err
+	}
+
 	return &batchv1.Job{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
-		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
+		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ad.Name,
+			Namespace:   ad.Namespace,
+			Labels:      agentLabels(ad),
+			Annotations: map[string]string{agentTemplateHashAnnotation: hash},
+		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: ptr.To[int32](3),
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: agentLabels(ad)},
-				Spec:       pod,
-			},
+			Template:     template,
 		},
-	}
+	}, nil
+}
+
+// agentServiceName is the name of the Service fronting the agent. Services are
+// validated as RFC 1035 DNS labels (63 characters), which is stricter than the
+// AgentDeployment name limit, so it is bounded separately.
+func agentServiceName(ad *airunwayv1alpha1.AgentDeployment) string {
+	return boundedDNSLabelName(ad.Name)
 }
 
 // renderAgentService renders the ClusterIP Service fronting the agent.
 func renderAgentService(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig) *corev1.Service {
 	return &corev1.Service{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace, Labels: agentLabels(ad)},
+		ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(ad), Namespace: ad.Namespace, Labels: agentLabels(ad)},
 		Spec: corev1.ServiceSpec{
 			Selector: agentSelector(ad),
 			Ports:    []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt32(containerPort(cfg))}},
@@ -758,14 +916,18 @@ func renderAgentService(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfi
 	}
 }
 
+// agentSelector is the immutable pod selector for the agent's workload. Values
+// are bounded to the 63-byte label limit; an AgentDeployment name may legally
+// be far longer than that, and an oversized selector value makes every rendered
+// workload fail admission.
 func agentSelector(ad *airunwayv1alpha1.AgentDeployment) map[string]string {
-	return map[string]string{"airunway.ai/agent": ad.Name}
+	return map[string]string{"airunway.ai/agent": boundedLabelValue(ad.Name)}
 }
 
 func agentLabels(ad *airunwayv1alpha1.AgentDeployment) map[string]string {
 	return map[string]string{
-		"airunway.ai/agent":     ad.Name,
-		"airunway.ai/framework": ad.Spec.Framework.Name,
+		"airunway.ai/agent":     boundedLabelValue(ad.Name),
+		"airunway.ai/framework": boundedLabelValue(ad.Spec.Framework.Name),
 	}
 }
 
@@ -800,22 +962,19 @@ func (r *ContainerProviderReconciler) mapProviderConfigToAgentDeployments(ctx co
 		return nil
 	}
 
-	var list airunwayv1alpha1.AgentDeploymentList
-	if err := r.List(ctx, &list); err != nil {
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range list.Items {
-		if list.Items[i].Spec.Framework.Name != apc.Name {
-			continue
-		}
-		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	agents := agentsForFramework(ctx, r.Client, apc.Name)
+	reqs := make([]reconcile.Request, 0, len(agents))
+	for i := range agents {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents[i])})
 	}
 	return reqs
 }
 
 // SetupWithManager wires the container provider and its owned workloads.
 func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := ensureFrameworkIndex(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentDeployment{}).
 		Owns(&appsv1.Deployment{}).
@@ -825,7 +984,7 @@ func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
 		).
 		Named("agent-provider-container").
 		Complete(r)

@@ -257,9 +257,13 @@ type AgentDeploymentSpec struct {
 	// The shape is defined by the framework provider. Use RawExtension
 	// here so the core controller does not need to learn every
 	// framework's schema; each provider controller parses this field
-	// itself. Providers currently perform best-effort parsing and ignore
-	// unknown keys — there is no enforced JSON-schema validation contract
-	// yet, so malformed config is treated as empty rather than rejected.
+	// itself.
+	//
+	// There is no JSON-schema validation contract yet, so keys a provider
+	// does not recognise are ignored rather than rejected. Config that is
+	// not valid JSON for the provider's shape IS rejected: the provider
+	// reports phase Failed with reason InvalidConfig rather than silently
+	// rendering an empty config.
 	// +optional
 	Config *runtime.RawExtension `json:"config,omitempty"`
 

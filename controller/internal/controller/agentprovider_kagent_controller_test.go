@@ -38,7 +38,10 @@ import (
 
 func TestParseKagentConfig(t *testing.T) {
 	raw := &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"be concise","description":"sre agent"}`)}
-	cfg := parseKagentConfig(raw)
+	cfg, err := parseKagentConfig(raw)
+	if err != nil {
+		t.Fatalf("parseKagentConfig: %v", err)
+	}
 	if cfg.SystemPrompt != "be concise" {
 		t.Errorf("systemPrompt = %q, want %q", cfg.SystemPrompt, "be concise")
 	}
@@ -47,7 +50,7 @@ func TestParseKagentConfig(t *testing.T) {
 	}
 
 	// nil / empty config must not panic and yields an empty config.
-	if got := parseKagentConfig(nil); got.SystemPrompt != "" {
+	if got, err := parseKagentConfig(nil); err != nil || got.SystemPrompt != "" {
 		t.Errorf("nil config should be empty, got %+v", got)
 	}
 }

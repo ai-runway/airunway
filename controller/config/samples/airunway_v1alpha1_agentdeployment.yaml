@@ -10,8 +10,11 @@ spec:
   framework:
     name: kagent
   model:
+    # Matches the ModelDeployment sample in this directory, so
+    # `kubectl apply -k config/samples` resolves rather than leaving the agent
+    # stuck at ModelBound=False.
     deploymentRef:
-      name: llama-3-8b
+      name: llama-8b-example
   config:
     systemPrompt: |
       You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
@@ -70,11 +73,11 @@ spec:
       credentialsRef:
         name: openai-api-key
         key: api-key
-  provider:
-    overrides:
-      workload:
-        securityContext:
-          readOnlyRootFilesystem: false
+  # A writable root filesystem is provider-owned: set
+  # capabilities.writableRootFilesystem on the framework's AgentProviderConfig.
+  # spec.provider.overrides deliberately cannot relax it — the webhook rejects
+  # readOnlyRootFilesystem: false — so a deployment author cannot weaken the
+  # posture their framework declared.
   config:
     image: ghcr.io/hermes/hermes-agent:poc
     systemPrompt: "You are Hermes, a fast and concise task assistant."

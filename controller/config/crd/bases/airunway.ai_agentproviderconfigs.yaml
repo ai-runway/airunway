@@ -55,8 +55,11 @@ spec:
             type: object
           spec:
             description: |-
-              AgentProviderConfigSpec defines the registration for an agent
-              framework provider.
+              spec is required. Without it controller-gen omits `required: [spec]` from
+              the CRD, which lets `kubectl patch --type=json -p '[{"op":"remove",
+              "path":"/spec"}]'` succeed — and because CEL transition rules only run
+              when the old value exists, that is enough to bypass the immutability rule
+              on capabilities.backend and re-create the config with a different backend.
             properties:
               capabilities:
                 description: |-
@@ -228,6 +231,8 @@ spec:
                   surfacing shim drift between the dashboard and the provider.
                 type: string
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

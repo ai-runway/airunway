@@ -30,6 +30,11 @@ spec:
   capabilities:
     backend: container
     requiresOperator: false
+    # OpenClaw writes its working directory and session state, so it cannot run
+    # with a read-only root filesystem. This is provider-owned on purpose: the
+    # framework declares what it needs, rather than every deployment author
+    # having to know and re-state it.
+    writableRootFilesystem: true
     modelBindingModes:
       - deploymentRef
       - externalAPI

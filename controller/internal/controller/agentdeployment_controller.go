@@ -52,6 +52,13 @@ const (
 	// referenced ModelDeployment without an endpoint yet).
 	agentRequeueInterval = 15 * time.Second
 
+	// agentCredentialRefreshInterval bounds how long a revoked credential can
+	// go unnoticed. Credential Secrets are read uncached and deliberately not
+	// watched — a Secret informer would need cluster-wide list/watch and would
+	// hold every Secret in the cluster in memory — so Secret-backed bindings
+	// are re-validated on a slow timer instead.
+	agentCredentialRefreshInterval = 5 * time.Minute
+
 	// agentDeploymentFrameworkIndexKey indexes AgentDeployments by framework
 	// name so provider-config changes can requeue only affected agents.
 	agentDeploymentFrameworkIndexKey = "spec.framework.name"
@@ -74,6 +81,19 @@ const (
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader is an uncached reader used for credential Secret lookups.
+	//
+	// The manager's default client serves typed reads from a cache, and the
+	// cache starts an informer on first use — so reading a Secret through it
+	// would require cluster-wide list/watch on Secrets and would hold every
+	// Secret in the cluster in the controller's memory. This controller only
+	// ever reads one Secret by name, so it reads straight from the API server
+	// and the RBAC below stays limited to `get`.
+	//
+	// Falls back to the cached client when unset so unit tests that construct
+	// the reconciler directly keep working.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentdeployments,verbs=get;list;watch;update;patch
@@ -82,6 +102,15 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+
+// secretReader returns the uncached reader for Secret lookups, falling back to
+// the cached client when APIReader was not wired.
+func (r *AgentDeploymentReconciler) secretReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
 
 // Reconcile resolves framework and model bindings for an AgentDeployment.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -117,12 +146,23 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		binding, modelBound, requeue = r.resolveModelBinding(ctx, &ad, framework.provider, &conds)
 		if requeue {
 			result.RequeueAfter = agentRequeueInterval
+			// Retryable failure (endpoint not published yet, Secret lookup
+			// errored, gateway has no address). Hold the last good binding
+			// rather than clearing it — see retainBinding.
+			binding = retainBinding(binding, &ad)
+		}
+		if modelBound && bindingNeedsRefresh(&ad) {
+			// Credential Secrets are not watched (that would require a
+			// cluster-wide Secret informer), so a revoked credential is only
+			// noticed on the next pass. Bound the staleness.
+			result.RequeueAfter = agentCredentialRefreshInterval
 		}
 	} else {
 		// Cannot validate binding modes without the provider's capabilities.
 		setAgentCondition(&conds, airunwayv1alpha1.AgentConditionTypeModelBound, metav1.ConditionFalse,
 			ad.Generation, "FrameworkNotReady", "Waiting for the framework provider before resolving model bindings")
 		result.RequeueAfter = agentRequeueInterval
+		binding = retainBinding(nil, &ad)
 	}
 
 	// Aggregate readiness. Ready requires the two core preconditions plus the
@@ -147,6 +187,35 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	return result, nil
+}
+
+// retainBinding keeps the previously resolved status.modelBinding across a
+// RETRYABLE resolution failure.
+//
+// status.modelBinding is core-owned and json:omitempty, so applying a nil
+// binding makes the API server DELETE the field. Every provider treats a
+// missing binding as "revoked" and tears down the workloads it rendered. That
+// turns a momentary blip — a discovery error flipping framework readiness, a
+// bound ModelDeployment briefly republishing its endpoint, a transient Secret
+// lookup error — into a full teardown and re-render of every agent on that
+// framework.
+//
+// So a retryable failure holds the last good binding and reports the reason on
+// the ModelBound condition instead. Only TERMINAL invalidity (unsupported
+// binding mode, cross-namespace reference, no recognised mode) clears the
+// binding, because in those cases the agent genuinely must stop.
+func retainBinding(resolved *airunwayv1alpha1.ModelBindingStatus, ad *airunwayv1alpha1.AgentDeployment) *airunwayv1alpha1.ModelBindingStatus {
+	if resolved != nil {
+		return resolved
+	}
+	return ad.Status.ModelBinding
+}
+
+// bindingNeedsRefresh reports whether a resolved binding depends on a
+// Kubernetes Secret, and therefore needs periodic re-validation to notice a
+// revoked credential.
+func bindingNeedsRefresh(ad *airunwayv1alpha1.AgentDeployment) bool {
+	return ad.Spec.Model.ExternalAPI != nil && ad.Spec.Model.ExternalAPI.CredentialsRef != nil
 }
 
 // resolvedFramework carries the outcome of framework resolution.
@@ -277,7 +346,7 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 	var sec corev1.Secret
 	ref := ext.CredentialsRef
 	key := k8stypes.NamespacedName{Name: ref.Name, Namespace: ad.Namespace}
-	if err := r.Get(ctx, key, &sec); err != nil {
+	if err := r.secretReader().Get(ctx, key, &sec); err != nil {
 		if apierrors.IsNotFound(err) {
 			return st, false, true, "CredentialSecretNotFound",
 				fmt.Sprintf("spec.model.externalAPI.credentialsRef references Secret %s/%s which does not exist", ad.Namespace, ref.Name)
@@ -406,10 +475,11 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 		},
 	}
 
-	return r.Status().Patch(ctx, apply, client.Apply,
-		client.FieldOwner(AgentCoreFieldOwner),
-		client.ForceOwnership,
-	)
+	// Not forced: core and each provider own disjoint status fields and
+	// disjoint condition-map entries, so a conflict means a second writer is
+	// genuinely claiming a core-owned field. Forcing would steal it back every
+	// reconcile and turn the documented ownership split into last-writer-wins.
+	return r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(AgentCoreFieldOwner))
 }
 
 // coreOwnedConditions filters a condition list down to the types the core
@@ -541,25 +611,15 @@ func (r *AgentDeploymentReconciler) mapProviderConfigToAgentDeployments(ctx cont
 		return nil
 	}
 
-	var list airunwayv1alpha1.AgentDeploymentList
-	if err := r.List(ctx, &list, client.MatchingFields{agentDeploymentFrameworkIndexKey: apc.Name}); err != nil {
-		// MatchingFields can fail in tests that bypass SetupWithManager and
-		// therefore skip index registration; fall back to a full list.
-		if err := r.List(ctx, &list); err != nil {
-			return nil
-		}
-	}
-
-	var reqs []reconcile.Request
-	for i := range list.Items {
-		if list.Items[i].Spec.Framework.Name == apc.Name {
-			reqs = append(reqs, reconcile.Request{
-				NamespacedName: k8stypes.NamespacedName{
-					Name:      list.Items[i].Name,
-					Namespace: list.Items[i].Namespace,
-				},
-			})
-		}
+	agents := agentsForFramework(ctx, r.Client, apc.Name)
+	reqs := make([]reconcile.Request, 0, len(agents))
+	for i := range agents {
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: k8stypes.NamespacedName{
+				Name:      agents[i].Name,
+				Namespace: agents[i].Namespace,
+			},
+		})
 	}
 	return reqs
 }
@@ -607,13 +667,7 @@ func (r *AgentDeploymentReconciler) mapModelDeploymentToAgentDeployments(ctx con
 // AgentProviderConfig and ModelDeployment so an AgentDeployment re-reconciles
 // when framework readiness or model binding inputs change.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &airunwayv1alpha1.AgentDeployment{}, agentDeploymentFrameworkIndexKey, func(raw client.Object) []string {
-		ad, ok := raw.(*airunwayv1alpha1.AgentDeployment)
-		if !ok || ad.Spec.Framework.Name == "" {
-			return nil
-		}
-		return []string{ad.Spec.Framework.Name}
-	}); err != nil {
+	if err := ensureFrameworkIndex(mgr); err != nil {
 		return err
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &airunwayv1alpha1.AgentDeployment{}, agentDeploymentModelRefIndexKey, func(raw client.Object) []string {
@@ -638,7 +692,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),
-			ctrlbuilder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			ctrlbuilder.WithPredicates(agentProviderConfigRelevantChange()),
 		).
 		Watches(
 			&airunwayv1alpha1.ModelDeployment{},

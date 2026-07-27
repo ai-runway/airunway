@@ -84,7 +84,7 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 		BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 	}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding, "research-config", false, nil)
+	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding: binding, configMapName: "research-config", writableRoot: false, securityOverrides: nil})
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != "ghcr.io/x/crewai:poc" {
@@ -138,7 +138,7 @@ func TestRenderAgentDeployment_WritableRootForFramework(t *testing.T) {
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
 	// writableRoot is a provider-owned decision passed by the reconciler, not a
 	// user-facing spec.config field.
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "openclaw-config", true, nil)
+	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "openclaw-config", writableRoot: true, securityOverrides: nil})
 
 	roFS := dep.Spec.Template.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem
 	if roFS == nil || *roFS {
@@ -163,7 +163,7 @@ func TestRenderAgentDeployment_KeylessBindingInjectsLiteralAPIKey(t *testing.T) 
 		BaseURL:   "http://demo-model.default.svc.cluster.local:80/v1",
 		ModelName: "llama-3.2-1b-instruct",
 	}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "keyless-config", false, nil)
+	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "keyless-config", writableRoot: false, securityOverrides: nil})
 
 	var apiKey *corev1.EnvVar
 	for i := range dep.Spec.Template.Spec.Containers[0].Env {
@@ -262,7 +262,7 @@ func TestRenderAgentDeployment_AppliesSecurityOverrides(t *testing.T) {
 		},
 	}
 
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "override-config", false, overrides)
+	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "override-config", writableRoot: false, securityOverrides: overrides})
 	podSC := dep.Spec.Template.Spec.SecurityContext
 	if podSC == nil || podSC.RunAsUser == nil || *podSC.RunAsUser != runAsUser {
 		t.Fatalf("pod runAsUser override not applied: %+v", podSC)
@@ -338,7 +338,7 @@ func TestRenderAgentDeployment_ResourcesAndOTLP(t *testing.T) {
 		OTLP: &airunwayv1alpha1.OTLPSpec{Endpoint: "http://collector:4318", Protocol: "http/protobuf"},
 	}
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
-	dep := renderAgentDeployment(ad, containerConfig{Image: "img:1"}, binding, "obs-config", false, nil)
+	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "obs-config", writableRoot: false, securityOverrides: nil})
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	if c.Resources.Requests.Cpu().String() != "250m" {
@@ -365,7 +365,7 @@ func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
 	cfg := containerConfig{Image: "img:1", Command: []string{"python", "/serve.py"}, Args: []string{"--verbose"}, Port: 9000}
 
-	dep := renderAgentDeployment(ad, cfg, binding, "smoke-config", false, nil)
+	dep := renderAgentDeployment(ad, renderInputs{cfg: cfg, binding: binding, configMapName: "smoke-config", writableRoot: false, securityOverrides: nil})
 	c := dep.Spec.Template.Spec.Containers[0]
 	if len(c.Command) != 2 || c.Command[0] != "python" || c.Command[1] != "/serve.py" {
 		t.Errorf("command = %v", c.Command)
@@ -394,7 +394,10 @@ func TestContainerPortDefault(t *testing.T) {
 
 func TestParseContainerConfig(t *testing.T) {
 	raw := &runtime.RawExtension{Raw: []byte(`{"image":"img:2","port":8000,"command":["/bin/serve"],"systemPrompt":"x"}`)}
-	cfg := parseContainerConfig(raw)
+	cfg, err := parseContainerConfig(raw)
+	if err != nil {
+		t.Fatalf("parseContainerConfig: %v", err)
+	}
 	if cfg.Image != "img:2" {
 		t.Errorf("parsed = %+v", cfg)
 	}
@@ -404,7 +407,7 @@ func TestParseContainerConfig(t *testing.T) {
 	if len(cfg.Command) != 1 || cfg.Command[0] != "/bin/serve" {
 		t.Errorf("command = %v", cfg.Command)
 	}
-	if got := parseContainerConfig(nil); got.Image != "" {
+	if got, err := parseContainerConfig(nil); err != nil || got.Image != "" {
 		t.Errorf("nil config should be empty, got %+v", got)
 	}
 }
@@ -412,7 +415,10 @@ func TestParseContainerConfig(t *testing.T) {
 func TestRenderAgentJob(t *testing.T) {
 	ad := containerAD("swarm", containerConfig{Image: "img:1"}, nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
-	job := renderAgentJob(ad, containerConfig{Image: "img:1"}, binding, "swarm-config", false, nil)
+	job, err := renderAgentJob(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "swarm-config", writableRoot: false, securityOverrides: nil})
+	if err != nil {
+		t.Fatalf("renderAgentJob: %v", err)
+	}
 
 	if job.Kind != "Job" || job.APIVersion != "batch/v1" {
 		t.Fatalf("GVK = %s/%s", job.APIVersion, job.Kind)
@@ -545,10 +551,26 @@ var _ = Describe("Container provider", func() {
 		// Core-owned fields survive the provider write.
 		Expect(ad.Status.ModelBinding).NotTo(BeNil())
 
-		By("flipping to Running + ProviderReady=True once the Deployment reports available replicas")
+		By("staying Deploying while the Deployment status still describes the previous generation")
 		dep.Status.Replicas = 1
 		dep.Status.ReadyReplicas = 1
 		dep.Status.AvailableReplicas = 1
+		dep.Status.UpdatedReplicas = 0
+		dep.Status.ObservedGeneration = dep.Generation - 1
+		Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+
+		reconcileContainer("c-run")
+		ad = getAgent("c-run")
+		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
+		Expect(prCond(ad).Status).To(Equal(metav1.ConditionFalse))
+
+		By("flipping to Running + ProviderReady=True once the current generation has rolled out")
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run", Namespace: "default"}, dep)).To(Succeed())
+		dep.Status.Replicas = 1
+		dep.Status.ReadyReplicas = 1
+		dep.Status.AvailableReplicas = 1
+		dep.Status.UpdatedReplicas = 1
+		dep.Status.ObservedGeneration = dep.Generation
 		Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
 
 		reconcileContainer("c-run")
