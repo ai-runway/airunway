@@ -90,11 +90,13 @@ spec:
     systemPrompt: "You are a concise assistant."
 ---
 # ─────────────────────────────────────────────────────────────────────────────
-# A one-shot agent: run to completion, then stop.
+# A CRD-backed swarm: decompose a task and coordinate specialists.
 #
-# spec.lifecycle: job is the difference between "stand up a service" and "run
-# this task". Orka's swarms are the motivating case — decompose, coordinate,
-# finish. The agent reports phase Completed rather than Running.
+# Note what is NOT set here: spec.lifecycle. On a crd backend the upstream
+# operator owns execution, so the field would be accepted and ignored. What
+# this renders is an Orka Agent — a reusable configuration object. Creating an
+# Orka Task that references it is what actually runs work, and that is Orka's
+# API, not AI Runway's. See the one-shot sample below for the lifecycle field.
 #
 # Prerequisite: the Orka operator. Orka needs its Provider CR ready before the
 # Agent goes ready; the provider applies them in that order and requeues.
@@ -109,12 +111,39 @@ metadata:
 spec:
   framework:
     name: orka
-  lifecycle: job
   model:
     deploymentRef:
       name: llama-8b-example
   config:
     systemPrompt: "Decompose the task and coordinate specialist agents."
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# A one-shot agent: run to completion, then stop.
+#
+# spec.lifecycle: job is the difference between "stand up a service" and "run
+# this task once". It is honoured by the CONTAINER backend, which renders a Job
+# instead of a Deployment and reports phase Completed rather than Running. CRD
+# backends accept the field and ignore it, because their operator decides how
+# work executes.
+#
+# Prerequisite: a published wrapper image (not built yet).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: airunway.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: nightly-report
+  labels:
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  framework:
+    name: crewai
+  lifecycle: job
+  model:
+    deploymentRef:
+      name: llama-8b-example
+  config:
+    systemPrompt: "Summarise yesterday's incidents into a written report, then exit."
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # Container backend, external model, with the fields that only work here.

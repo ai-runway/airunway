@@ -233,9 +233,10 @@ status:
 
 For `spec.model.deploymentRef`, the core controller resolves the model binding in this order:
 
-1. If `ModelDeployment.status.gateway.gatewayName` and `gatewayNamespace` are present, use the in-cluster gateway service URL `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`.
-2. Else if `ModelDeployment.status.gateway.endpoint` is present, use that endpoint (normalized to an OpenAI-compatible `/v1` base URL).
-3. Else fall back to the model Service endpoint from `ModelDeployment.status.endpoint`.
+1. If `ModelDeployment.status.gateway.endpoint` is present, use that endpoint (normalized to an OpenAI-compatible `/v1` base URL). This is the address the gateway implementation itself published in `Gateway.status.addresses`, so requests follow the same BBR/gateway route as a `gatewayEndpoint` binding.
+2. Else fall back to the model Service endpoint from `ModelDeployment.status.endpoint`.
+
+`status.gateway.gatewayName` and `gatewayNamespace` identify which Gateway was selected, but are **not** used to construct an address. A Gateway resource name is not a Service DNS name — Gateway API does not require an implementation to name its data-plane Service after the Gateway, and implementations differ — so deriving `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local` from them would produce an address that does not resolve on some clusters. The published status address is authoritative.
 
 The resolved `status.modelBinding.modelName` prefers `status.gateway.modelName`, then `spec.model.servedName`, then `spec.model.id`.
 

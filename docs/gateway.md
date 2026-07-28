@@ -427,7 +427,9 @@ Auto-discovery runs only when the deployment reaches `Running` phase. If the pro
 
 ### AgentDeployment `deploymentRef` integration
 
-Agent deployments that bind with `spec.model.deploymentRef` reuse this gateway resolution path. When a target `ModelDeployment` has `status.gateway.gatewayName` and `status.gateway.gatewayNamespace`, the agent binding resolves to the in-cluster gateway service URL (`http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`) so requests follow the same BBR/gateway route as `gatewayEndpoint` bindings. If gateway metadata is absent, resolution falls back to the model Service endpoint.
+Agent deployments that bind with `spec.model.deploymentRef` reuse this gateway resolution path. When a target `ModelDeployment` has published `status.gateway.endpoint`, the agent binding resolves to that address — the one the gateway implementation itself advertised in `Gateway.status.addresses` — so requests follow the same BBR/gateway route as `gatewayEndpoint` bindings. If no gateway endpoint is published, resolution falls back to the model Service endpoint.
+
+`status.gateway.gatewayName` and `gatewayNamespace` record which Gateway was selected, for diagnostics. They are deliberately not used to build an in-cluster Service URL: Gateway API does not require the data-plane Service to be named after the Gateway resource, so `<gatewayName>.<gatewayNamespace>.svc.cluster.local` is not portable across implementations.
 
 ## Using the Gateway
 

@@ -9,6 +9,12 @@ ARG TARGETARCH
 # and produce an image untracked by versions.env.
 ARG GAIE_VERSION
 
+# AGENT_PROVIDER_VERSION is the version the in-process agent providers report
+# into AgentProviderConfig.status.version. Without it every deployed provider
+# publishes "dev", which is exactly the skew the reported-version contract
+# exists to make visible.
+ARG AGENT_PROVIDER_VERSION=dev
+
 WORKDIR /workspace
 
 # Copy the Go Modules manifests
@@ -30,7 +36,7 @@ RUN test -n "${GAIE_VERSION}" || (echo "ERROR: GAIE_VERSION build arg is require
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN cd controller && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a \
-      -ldflags="-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}" \
+      -ldflags="-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION} -X main.agentProviderVersion=${AGENT_PROVIDER_VERSION}" \
       -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary
