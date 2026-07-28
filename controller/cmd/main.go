@@ -159,6 +159,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableProviderSelector bool
+	var enableAgentMarketplace bool
 	var disableCertRotation bool
 	var certServiceName string
 	var gatewayName string
@@ -183,6 +184,9 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableProviderSelector, "enable-provider-selector", true,
 		"If set, the controller will run provider selection for ModelDeployments without explicit provider.name")
+	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", true,
+		"If set, the controller runs the Agent Marketplace controllers (AgentDeployment, AgentProviderConfig, and the in-process framework providers). "+
+			"Disable to turn the feature off without redeploying a different image.")
 	flag.BoolVar(&disableCertRotation, "disable-cert-rotation", false,
 		"Disable automatic generation and rotation of webhook TLS certificates/keys")
 	flag.StringVar(&certServiceName, "cert-service-name", "airunway-webhook-service",
@@ -415,65 +419,72 @@ func main() {
 		}
 	}
 
-	if err := (&controller.AgentDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		// Credential Secrets are read uncached: a cached read would start a
-		// cluster-wide Secret informer, which needs list/watch on every Secret
-		// in the cluster and would hold them all in memory.
-		APIReader: mgr.GetAPIReader(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
-		os.Exit(1)
-	}
+	// The Agent Marketplace controllers are gated so the feature can be turned
+	// off in a running cluster without shipping a different image. They are
+	// inert without AgentDeployment or AgentProviderConfig objects, so the
+	// default is on; the switch exists for the case where that turns out to be
+	// wrong somewhere we cannot reach quickly.
+	if enableAgentMarketplace {
+		if err := (&controller.AgentDeploymentReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			// Credential Secrets are read uncached: a cached read would start a
+			// cluster-wide Secret informer, which needs list/watch on every Secret
+			// in the cluster and would hold them all in memory.
+			APIReader: mgr.GetAPIReader(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
+			os.Exit(1)
+		}
 
-	// The agent providers are still in-tree, so the combined controller binds
-	// them here. This is the ONLY place a framework provider is named in main:
-	// each entry carries its reconciler, which AgentProviderConfig it serves,
-	// and the version it reports. Moving a provider out-of-tree — the intended
-	// end state, matching providers/* for the inference side — means deleting
-	// its entry, and nothing else in main() changes.
-	if err := controller.RegisterAgentProviders(mgr,
-		controller.AgentProviderRegistration{
-			Name:      "agent-kagent",
-			Framework: controller.KagentFrameworkName,
-			Version:   "agent-kagent-provider:" + agentProviderVersion,
-			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-				return &controller.KagentProviderReconciler{Client: c, Scheme: s}
+		// The agent providers are still in-tree, so the combined controller binds
+		// them here. This is the ONLY place a framework provider is named in main:
+		// each entry carries its reconciler, which AgentProviderConfig it serves,
+		// and the version it reports. Moving a provider out-of-tree — the intended
+		// end state, matching providers/* for the inference side — means deleting
+		// its entry, and nothing else in main() changes.
+		if err := controller.RegisterAgentProviders(mgr,
+			controller.AgentProviderRegistration{
+				Name:      "agent-kagent",
+				Framework: controller.KagentFrameworkName,
+				Version:   "agent-kagent-provider:" + agentProviderVersion,
+				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.KagentProviderReconciler{Client: c, Scheme: s}
+				},
 			},
-		},
-		controller.AgentProviderRegistration{
-			Name:      "agent-orka",
-			Framework: controller.OrkaFrameworkName,
-			Version:   "agent-orka-provider:" + agentProviderVersion,
-			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-				return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
+			controller.AgentProviderRegistration{
+				Name:      "agent-orka",
+				Framework: controller.OrkaFrameworkName,
+				Version:   "agent-orka-provider:" + agentProviderVersion,
+				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
+				},
 			},
-		},
-		controller.AgentProviderRegistration{
-			Name:    "agent-container",
-			Backend: airunwayv1alpha1.AgentProviderBackendContainer,
-			Version: "agent-container-provider:" + agentProviderVersion,
-			New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-				return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
+			controller.AgentProviderRegistration{
+				Name:    "agent-container",
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+				Version: "agent-container-provider:" + agentProviderVersion,
+				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
+				},
 			},
-		},
-	); err != nil {
-		setupLog.Error(err, "unable to create agent provider controllers")
-		os.Exit(1)
-	}
+		); err != nil {
+			setupLog.Error(err, "unable to create agent provider controllers")
+			os.Exit(1)
+		}
 
-	agentDiscovery, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
-	if err != nil {
-		setupLog.Error(err, "unable to create discovery client for agent provider readiness")
-		os.Exit(1)
-	}
-	if err := (&controller.AgentProviderConfigReconciler{
-		Client:    mgr.GetClient(),
-		Discovery: agentDiscovery,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentProviderConfig")
-		os.Exit(1)
+		agentDiscovery, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "unable to create discovery client for agent provider readiness")
+			os.Exit(1)
+		}
+		if err := (&controller.AgentProviderConfigReconciler{
+			Client:    mgr.GetClient(),
+			Discovery: agentDiscovery,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentProviderConfig")
+			os.Exit(1)
+		}
 	}
 
 	// +kubebuilder:scaffold:builder

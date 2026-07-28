@@ -53,7 +53,9 @@ make test        # or: KUBEBUILDER_ASSETS=$(pwd)/bin/k8s/<ver> go test ./interna
 
 ## Live cluster validation (manual, not automated)
 
-envtest has no kubelet, so it cannot run the actual agents. End-to-end validation against a real cluster — install the framework operator, apply the samples in `config/samples/`, invoke the agent — is manual. The `crd`/kagent + Azure OpenAI path was validated by hand on a CPU cluster (recorded under `tmp/agent-poc-test/RESULTS.md` in this repo).
+envtest has no kubelet, so it cannot run the actual agents. End-to-end validation against a real cluster — install the framework operator, apply the samples in `config/samples/`, invoke the agent — is manual.
+
+That validation has been done twice. The `crd`/kagent + Azure OpenAI path was exercised by hand on a CPU cluster. The full sweep was then repeated on a GPU cluster (A100, KAITO + vLLM serving an in-cluster model), covering all three binding modes, the container backend, credential revocation, server-side-apply field ownership under churn, and Pod Security Admission. It confirmed the keyless in-cluster binding story end to end and found three bugs — an unbounded binding hold, a missing `runAsUser` default, and a cleanup loop against an unserved CRD kind — all since fixed.
 
 ### Schema fidelity (automated, high-confidence)
 
