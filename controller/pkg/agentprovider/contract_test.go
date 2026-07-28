@@ -198,3 +198,44 @@ func TestDeleteOwnedIgnoresMissingKind(t *testing.T) {
 		t.Fatalf("DeleteOwned on an unserved kind must be a no-op, got: %v", err)
 	}
 }
+
+// TestClassifyBindingGating pins that a ModelBound=True carried over from an
+// earlier generation does not license rendering the CURRENT spec. Without this,
+// a user editing spec.model gets one reconcile where the provider renders the
+// new generation against the previous endpoint or credential.
+func TestClassifyBindingGating(t *testing.T) {
+	ad := func(generation, observed int64) *airunwayv1alpha1.AgentDeployment {
+		return &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Generation: generation},
+			Status: airunwayv1alpha1.AgentDeploymentStatus{
+				ModelBinding: &airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1"},
+				Conditions: []metav1.Condition{{
+					Type:               airunwayv1alpha1.AgentConditionTypeModelBound,
+					Status:             metav1.ConditionTrue,
+					Reason:             "ModelBound",
+					ObservedGeneration: observed,
+				}},
+			},
+		}
+	}
+
+	cases := []struct {
+		name       string
+		generation int64
+		observed   int64
+		want       BindingState
+	}{
+		{"verified for this generation renders", 3, 3, BindingReady},
+		{"verified for a later generation renders", 3, 4, BindingReady},
+		{"stale from a previous generation holds", 3, 2, BindingStale},
+		{"untracked generation is accepted for compatibility", 3, 0, BindingReady},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBinding(ad(tc.generation, tc.observed)); got != tc.want {
+				t.Fatalf("ClassifyBinding(gen=%d, observed=%d) = %v, want %v",
+					tc.generation, tc.observed, got, tc.want)
+			}
+		})
+	}
+}

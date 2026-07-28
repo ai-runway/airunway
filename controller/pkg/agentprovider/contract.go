@@ -167,7 +167,20 @@ func ClassifyBinding(ad *airunwayv1alpha1.AgentDeployment) BindingState {
 	if ad.Status.ModelBinding == nil {
 		return BindingUnavailable
 	}
-	if !meta.IsStatusConditionTrue(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound) {
+	cond := meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		return BindingStale
+	}
+	// A ModelBound=True carried over from an earlier generation says nothing
+	// about the CURRENT spec. Immediately after a user edits spec.model, the
+	// old condition is still True and the old binding still published, so a
+	// provider that trusted the condition alone would render the new
+	// generation against the previous endpoint or credential. Treat it as
+	// stale until core has re-verified — hold, do not tear down.
+	//
+	// ObservedGeneration 0 means the condition predates generation tracking;
+	// accept it rather than stalling agents written by an older controller.
+	if cond.ObservedGeneration != 0 && cond.ObservedGeneration < ad.Generation {
 		return BindingStale
 	}
 	return BindingReady

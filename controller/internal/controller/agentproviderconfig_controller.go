@@ -99,6 +99,17 @@ func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 // provider metadata (such as install instructions annotations).
 func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProviderConfig) (ready bool, reason, msg string) {
 	caps := apc.Spec.Capabilities
+
+	// The catalog annotation is unstructured, so nothing rejects a malformed
+	// one at admission. Validate it here: the container provider parses the
+	// same annotation and fails EVERY reconcile when it cannot, so reporting
+	// Ready=True would claim the framework accepts work while all of it fails.
+	if _, err := apc.CatalogItems(); err != nil {
+		return false, "InvalidCatalog",
+			fmt.Sprintf("the %s annotation could not be parsed, so no agent on this framework can render: %v",
+				airunwayv1alpha1.AgentProviderCatalogAnnotation, err)
+	}
+
 	if caps.Backend == airunwayv1alpha1.AgentProviderBackendContainer {
 		return true, "ProviderRunning", "Container rendering provider is available"
 	}

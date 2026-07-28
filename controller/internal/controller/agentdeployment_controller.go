@@ -168,7 +168,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Aggregate readiness. Ready requires the two core preconditions plus the
 	// provider-owned ProviderReady, so a fresh AgentDeployment is never Ready
 	// until the framework provider has rendered and reported a healthy workload.
-	providerReady := meta.IsStatusConditionTrue(conds, airunwayv1alpha1.AgentConditionTypeProviderReady)
+	providerReady := providerReadyForGeneration(conds, ad.Generation)
 	switch {
 	case frameworkReady && modelBound && providerReady:
 		setAgentCondition(&conds, airunwayv1alpha1.AgentConditionTypeReady, metav1.ConditionTrue,
@@ -187,6 +187,24 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	return result, nil
+}
+
+// providerReadyForGeneration reports whether the provider has declared itself
+// ready FOR THE CURRENT SPEC.
+//
+// Aggregate readiness must not inherit a stale verdict. Immediately after a
+// user edits the spec, the provider's previous ProviderReady=True is still
+// present but describes the old generation — publishing Ready=True from it
+// tells the user their change is live before the provider has even seen it.
+//
+// ObservedGeneration 0 means the condition predates generation tracking; accept
+// it rather than stalling agents written by an older controller.
+func providerReadyForGeneration(conds []metav1.Condition, generation int64) bool {
+	cond := meta.FindStatusCondition(conds, airunwayv1alpha1.AgentConditionTypeProviderReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		return false
+	}
+	return cond.ObservedGeneration == 0 || cond.ObservedGeneration >= generation
 }
 
 // bindingHoldWindow bounds how long a published binding survives a failure it
@@ -248,10 +266,23 @@ func bindingHoldExpired(ad *airunwayv1alpha1.AgentDeployment) bool {
 	return time.Since(cond.LastTransitionTime.Time) > bindingHoldWindow
 }
 
-// bindingNeedsRefresh reports whether a resolved binding depends on a
-// Kubernetes Secret, and therefore needs periodic re-validation to notice a
-// revoked credential.
+// bindingNeedsRefresh reports whether a resolved binding depends on something
+// this controller does not watch, and so needs periodic re-validation.
+//
+// ModelDeployment IS watched, so deploymentRef re-resolves on change. The other
+// two inputs are not:
+//
+//   - a credential Secret — watching Secrets would need a cluster-wide informer
+//     with list/watch on every Secret, which is exactly the RBAC and memory cost
+//     the uncached read exists to avoid;
+//   - a Gateway's published status address, which can change under a resolved
+//     gatewayEndpoint binding and leave the agent pointed at a dead address.
+//
+// A slow timer is the cheap correct answer for both.
 func bindingNeedsRefresh(ad *airunwayv1alpha1.AgentDeployment) bool {
+	if ad.Spec.Model.GatewayEndpoint != nil {
+		return true
+	}
 	return ad.Spec.Model.ExternalAPI != nil && ad.Spec.Model.ExternalAPI.CredentialsRef != nil
 }
 

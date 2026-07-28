@@ -235,6 +235,10 @@ var _ = Describe("Container provider workload lifecycle", func() {
 
 		By("bumping the image, which a plain apply could not do (spec.template is immutable)")
 		setConfig("job-agent", map[string]any{"image": "ghcr.io/x/agent:v2"})
+		// The spec edit bumps .metadata.generation, so ModelBound is stale for
+		// the new generation until core re-verifies it. Providers deliberately
+		// hold in that window rather than render against the old binding.
+		core("job-agent")
 
 		// First pass deletes the old Job and reports the recreate.
 		Expect(container("job-agent")).To(Succeed())
@@ -279,6 +283,7 @@ var _ = Describe("Container provider workload lifecycle", func() {
 
 		By("changing only a config field the provider does not otherwise render")
 		setConfig("cm-agent", map[string]any{"image": "ghcr.io/x/agent:v1", "systemPrompt": "new"})
+		core("cm-agent") // re-verify the binding for the bumped generation
 		Expect(container("cm-agent")).To(Succeed())
 
 		cm := &corev1.ConfigMap{}
