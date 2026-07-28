@@ -288,6 +288,13 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
+		// The kind itself is not served — the framework's operator is not
+		// installed. Nothing of this kind can exist, so there is nothing to
+		// clean up. Treating it as an error instead makes the provider retry
+		// forever and leak the raw discovery message onto ProviderReady.
+		if meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+			return nil
+		}
 		return fmt.Errorf("get owned object %s for cleanup: %w", key, err)
 	}
 	if !metav1.IsControlledBy(obj, owner) {

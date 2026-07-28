@@ -189,8 +189,23 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return result, nil
 }
 
+// bindingHoldWindow bounds how long a published binding survives a failure it
+// cannot re-verify.
+//
+// Holding is right for a blip and wrong forever. The two revocations users
+// actually perform — deleting the bound ModelDeployment, deleting the
+// credential Secret — both surface as retryable NotFound, so an unbounded hold
+// makes them permanently indistinguishable from a momentary failure: the agent
+// keeps running against an endpoint that no longer exists, or a credential that
+// was revoked. After this window the binding is cleared and providers tear
+// down, which is what "revoked" is supposed to mean.
+//
+// Sized well above a rollout or a brief API-server disruption, and well below
+// the point where a stale endpoint stops being a surprise.
+const bindingHoldWindow = 10 * time.Minute
+
 // retainBinding keeps the previously resolved status.modelBinding across a
-// RETRYABLE resolution failure.
+// RETRYABLE resolution failure, for at most bindingHoldWindow.
 //
 // status.modelBinding is core-owned and json:omitempty, so applying a nil
 // binding makes the API server DELETE the field. Every provider treats a
@@ -208,7 +223,29 @@ func retainBinding(resolved *airunwayv1alpha1.ModelBindingStatus, ad *airunwayv1
 	if resolved != nil {
 		return resolved
 	}
+	if ad.Status.ModelBinding == nil {
+		return nil
+	}
+	if bindingHoldExpired(ad) {
+		// The failure has persisted long enough to be a revocation rather than
+		// a blip. Clearing the binding is what makes providers stop the agent.
+		return nil
+	}
 	return ad.Status.ModelBinding
+}
+
+// bindingHoldExpired reports whether ModelBound has been False for longer than
+// bindingHoldWindow.
+//
+// The condition's LastTransitionTime is the clock: meta.SetStatusCondition only
+// moves it when Status actually changes, so it marks when re-verification first
+// started failing rather than when we last looked.
+func bindingHoldExpired(ad *airunwayv1alpha1.AgentDeployment) bool {
+	cond := meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeModelBound)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.LastTransitionTime.IsZero() {
+		return false
+	}
+	return time.Since(cond.LastTransitionTime.Time) > bindingHoldWindow
 }
 
 // bindingNeedsRefresh reports whether a resolved binding depends on a

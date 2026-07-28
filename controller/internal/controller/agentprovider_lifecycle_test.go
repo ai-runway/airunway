@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -413,3 +414,55 @@ var _ = Describe("Container provider workload lifecycle", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "obsolete-agent", Namespace: "default"}, dep)).To(Succeed())
 	})
 })
+
+// TestBindingHoldExpiry pins the bound on how long a published binding survives
+// a failure it cannot re-verify.
+//
+// Found on a real cluster: deleting the bound ModelDeployment left the binding
+// populated 11 minutes later, pointing at a Service that no longer existed,
+// with the agent still advertised as ready. NotFound is classed retryable, so
+// an unbounded hold made a genuine revocation indistinguishable from a blip.
+func TestBindingHoldExpiry(t *testing.T) {
+	withModelBound := func(status metav1.ConditionStatus, age time.Duration) *airunwayv1alpha1.AgentDeployment {
+		return &airunwayv1alpha1.AgentDeployment{
+			Status: airunwayv1alpha1.AgentDeploymentStatus{
+				ModelBinding: &airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1"},
+				Conditions: []metav1.Condition{{
+					Type:               airunwayv1alpha1.AgentConditionTypeModelBound,
+					Status:             status,
+					Reason:             "ModelDeploymentNotFound",
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-age)),
+				}},
+			},
+		}
+	}
+
+	t.Run("a fresh failure holds the binding", func(t *testing.T) {
+		ad := withModelBound(metav1.ConditionFalse, 30*time.Second)
+		if got := retainBinding(nil, ad); got == nil {
+			t.Fatal("a momentary failure must not clear the binding — that is the bug this whole path exists to prevent")
+		}
+	})
+
+	t.Run("a sustained failure eventually clears it", func(t *testing.T) {
+		ad := withModelBound(metav1.ConditionFalse, bindingHoldWindow+time.Minute)
+		if got := retainBinding(nil, ad); got != nil {
+			t.Fatal("after the hold window the binding must be cleared, so providers tear the agent down")
+		}
+	})
+
+	t.Run("a healthy binding is never cleared", func(t *testing.T) {
+		ad := withModelBound(metav1.ConditionTrue, 24*time.Hour)
+		if got := retainBinding(nil, ad); got == nil {
+			t.Fatal("ModelBound=True must never expire")
+		}
+	})
+
+	t.Run("a freshly resolved binding always wins", func(t *testing.T) {
+		ad := withModelBound(metav1.ConditionFalse, 24*time.Hour)
+		fresh := &airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://new/v1"}
+		if got := retainBinding(fresh, ad); got != fresh {
+			t.Fatal("a successful resolution must replace whatever was held")
+		}
+	})
+}

@@ -17,10 +17,14 @@ limitations under the License.
 package agentprovider
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
@@ -171,5 +175,26 @@ func TestHashJSONIsStable(t *testing.T) {
 	}
 	if changed, _ := HashJSON(map[string]string{"a": "1", "b": "3"}); changed == first {
 		t.Fatal("HashJSON did not change when content changed — a config edit would not roll the workload")
+	}
+}
+
+// TestDeleteOwnedIgnoresMissingKind covers the case where a framework's
+// operator is not installed: the CRD is not served, so nothing of that kind can
+// exist and there is nothing to clean up. Treating the discovery error as a
+// real failure made the provider retry forever and leak "no matches for kind"
+// onto ProviderReady. Found on a real cluster — 63 occurrences in six hours.
+func TestDeleteOwnedIgnoresMissingKind(t *testing.T) {
+	scheme := runtime.NewScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	obj := UnstructuredRef(
+		schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "Provider"},
+		"ghost-agent-provider", "default")
+	owner := &airunwayv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "ghost-agent", Namespace: "default"},
+	}
+
+	if err := DeleteOwned(context.Background(), c, owner, obj); err != nil {
+		t.Fatalf("DeleteOwned on an unserved kind must be a no-op, got: %v", err)
 	}
 }

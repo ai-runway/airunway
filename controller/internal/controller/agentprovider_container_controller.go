@@ -737,7 +737,21 @@ func agentPodSpec(
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
 	podSecurity := &corev1.PodSecurityContext{
-		RunAsNonRoot:   ptr.To(true),
+		RunAsNonRoot: ptr.To(true),
+		// runAsNonRoot alone is not enough. When an image declares a NAMED user
+		// (USER nobody), the kubelet cannot prove that name is non-root without
+		// resolving it, so it refuses the container outright:
+		//
+		//   container has runAsNonRoot and image has non-numeric user (nobody),
+		//   cannot verify user is non-root
+		//
+		// Most stock non-root images do exactly that, so without a numeric
+		// default the container backend cannot run them at all. 65532 is the
+		// conventional distroless/nonroot UID. An image needing a different one
+		// can override it through spec.provider.overrides.
+		RunAsUser:      ptr.To[int64](65532),
+		RunAsGroup:     ptr.To[int64](65532),
+		FSGroup:        ptr.To[int64](65532),
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 	applyContainerSecurityOverrides(podSecurity, containerSecurity, in.securityOverrides)
