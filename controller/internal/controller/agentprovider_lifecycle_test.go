@@ -466,3 +466,93 @@ func TestBindingHoldExpiry(t *testing.T) {
 		}
 	})
 }
+
+// TestWorkloadNotReadyDetail covers the case a real cluster surfaced: in a
+// namespace enforcing Pod Security Admission, rendered pods can be REJECTED
+// rather than merely slow. The Deployment then sits at 0 replicas and the real
+// cause lives on a ReplicaSet event nobody thinks to check, while the agent
+// reports a bland "waiting to become available".
+func TestWorkloadNotReadyDetail(t *testing.T) {
+	t.Run("a plain slow rollout stays generic", func(t *testing.T) {
+		reason, msg := workloadNotReadyDetail(&appsv1.Deployment{})
+		if reason != "WorkloadNotReady" {
+			t.Errorf("reason = %q, want WorkloadNotReady", reason)
+		}
+		if !strings.Contains(msg, "become available") {
+			t.Errorf("unexpected message: %q", msg)
+		}
+	})
+
+	t.Run("a rejection surfaces the real cause", func(t *testing.T) {
+		dep := &appsv1.Deployment{Status: appsv1.DeploymentStatus{
+			Conditions: []appsv1.DeploymentCondition{{
+				Type:   appsv1.DeploymentReplicaFailure,
+				Status: corev1.ConditionTrue,
+				Reason: "FailedCreate",
+				Message: `pods "sre-bot-x" is forbidden: violates PodSecurity ` +
+					`"restricted:latest": allowPrivilegeEscalation != false`,
+			}},
+		}}
+		reason, msg := workloadNotReadyDetail(dep)
+		if reason != "WorkloadRejected" {
+			t.Errorf("reason = %q, want WorkloadRejected", reason)
+		}
+		for _, want := range []string{"FailedCreate", "PodSecurity", "restricted"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message should carry %q so the cause is diagnosable from the agent alone; got: %q", want, msg)
+			}
+		}
+	})
+
+	t.Run("a resolved ReplicaFailure is not reported", func(t *testing.T) {
+		dep := &appsv1.Deployment{Status: appsv1.DeploymentStatus{
+			Conditions: []appsv1.DeploymentCondition{{
+				Type:   appsv1.DeploymentReplicaFailure,
+				Status: corev1.ConditionFalse,
+			}},
+		}}
+		if reason, _ := workloadNotReadyDetail(dep); reason != "WorkloadNotReady" {
+			t.Errorf("a cleared ReplicaFailure must not be reported as a rejection, got %q", reason)
+		}
+	})
+}
+
+// TestFrameworkNotReadyDetail covers the other half of the same problem: the
+// AgentProviderConfig knows the operator is missing AND how to install it, but
+// the agent used to say only "registered but not reporting ready".
+func TestFrameworkNotReadyDetail(t *testing.T) {
+	t.Run("carries the provider's reason and install hint", func(t *testing.T) {
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "orka",
+				Annotations: map[string]string{
+					airunwayv1alpha1.AgentProviderInstallInstructionsAnnotation: "helm install orka ...",
+				},
+			},
+			Status: airunwayv1alpha1.AgentProviderConfigStatus{
+				Conditions: []metav1.Condition{{
+					Type:    "Ready",
+					Status:  metav1.ConditionFalse,
+					Reason:  "OperatorNotInstalled",
+					Message: `operator API group "core.orka.ai" is not installed in the cluster`,
+				}},
+			},
+		}
+		reason, msg := frameworkNotReadyDetail(apc, "orka")
+		if reason != "OperatorNotInstalled" {
+			t.Errorf("reason = %q, want the provider's own reason", reason)
+		}
+		for _, want := range []string{"core.orka.ai", "helm install orka"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message should carry %q so the user can act without reading a cluster-scoped object; got: %q", want, msg)
+			}
+		}
+	})
+
+	t.Run("falls back when the provider has published nothing", func(t *testing.T) {
+		apc := &airunwayv1alpha1.AgentProviderConfig{ObjectMeta: metav1.ObjectMeta{Name: "kagent"}}
+		if reason, _ := frameworkNotReadyDetail(apc, "kagent"); reason != "FrameworkNotReady" {
+			t.Errorf("reason = %q, want the generic fallback", reason)
+		}
+	})
+}

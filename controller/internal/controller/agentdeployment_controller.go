@@ -255,6 +255,27 @@ func bindingNeedsRefresh(ad *airunwayv1alpha1.AgentDeployment) bool {
 	return ad.Spec.Model.ExternalAPI != nil && ad.Spec.Model.ExternalAPI.CredentialsRef != nil
 }
 
+// frameworkNotReadyDetail turns an unready AgentProviderConfig into a reason
+// and message an operator can act on from the AgentDeployment alone.
+//
+// It prefers the provider's own Ready condition, which already carries the
+// specific cause (OperatorNotInstalled, CapabilitiesMissing, DiscoveryFailed)
+// and, where the provider config supplies one, the install instructions. It
+// falls back to a generic message when the provider has published nothing yet.
+func frameworkNotReadyDetail(apc *airunwayv1alpha1.AgentProviderConfig, name string) (reason, message string) {
+	cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
+	if cond == nil || cond.Reason == "" {
+		return "FrameworkNotReady",
+			fmt.Sprintf("Framework provider %q is registered but not reporting ready", name)
+	}
+
+	message = fmt.Sprintf("Framework provider %q is not ready: %s", name, cond.Message)
+	if install := apc.InstallInstructions(); install != "" && !strings.Contains(cond.Message, install) {
+		message = fmt.Sprintf("%s. Install instructions: %s", message, install)
+	}
+	return cond.Reason, message
+}
+
 // resolvedFramework carries the outcome of framework resolution.
 type resolvedFramework struct {
 	// provider is the resolved AgentProviderConfig; nil when unresolved.
@@ -287,9 +308,15 @@ func (r *AgentDeploymentReconciler) resolveFramework(
 	}
 
 	if apc.Status.Ready == nil || !*apc.Status.Ready {
+		// Carry the provider's own reason and install hint onto the agent.
+		// Without this the agent says only "registered but not reporting
+		// ready", and the operator has no way to know the actual cause is
+		// "the framework's operator isn't installed" — let alone how to
+		// install it — because that lives on a cluster-scoped object they may
+		// not think to look at, or have access to read.
+		reason, message := frameworkNotReadyDetail(&apc, name)
 		setAgentCondition(conds, airunwayv1alpha1.AgentConditionTypeFrameworkReady, metav1.ConditionFalse,
-			ad.Generation, "FrameworkNotReady",
-			fmt.Sprintf("Framework provider %q is registered but not reporting ready", name))
+			ad.Generation, reason, message)
 		// Still publish the resolved framework name so the deployer can see
 		// which provider it is waiting on.
 		return resolvedFramework{

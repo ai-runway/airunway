@@ -383,9 +383,30 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
 			metav1.ConditionTrue, "WorkloadReady", "Agent workload has available replicas")
 	}
+	reason, message := workloadNotReadyDetail(&live)
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, r.status(ctx, ad,
 		airunwayv1alpha1.AgentPhaseDeploying, rt, replicas,
-		metav1.ConditionFalse, "WorkloadNotReady", "Waiting for the agent workload to become available")
+		metav1.ConditionFalse, reason, message)
+}
+
+// workloadNotReadyDetail explains why a Deployment has not rolled out yet.
+//
+// "Waiting for the agent workload to become available" is true but useless when
+// the pods are being actively REJECTED rather than merely starting slowly. The
+// clearest case is Pod Security Admission: in a namespace enforcing a stricter
+// profile than the rendered pod satisfies, the Deployment sits at 0 replicas and
+// the real message lives on a ReplicaSet event the user has no reason to look
+// for. The Deployment controller surfaces that as a ReplicaFailure condition, so
+// pass it through verbatim.
+func workloadNotReadyDetail(live *appsv1.Deployment) (reason, message string) {
+	for i := range live.Status.Conditions {
+		c := live.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return "WorkloadRejected",
+				fmt.Sprintf("The agent workload could not create pods (%s): %s", c.Reason, c.Message)
+		}
+	}
+	return "WorkloadNotReady", "Waiting for the agent workload to become available"
 }
 
 // deploymentRolledOut reports whether the Deployment's *current* pod template
