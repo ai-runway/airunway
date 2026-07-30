@@ -232,9 +232,14 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
+	// Read once and share: the marketplace reconciler refuses credential-bearing
+	// bindings when the webhook is off, so a second, drifting copy of this test
+	// would silently decide whether a security control is enforced.
+	webhooksEnabled := os.Getenv("ENABLE_WEBHOOKS") != "false"
+
 	// Ensure bootstrap certs exist so the webhook server can start.
 	// The cert-rotator will overwrite these with properly signed certificates.
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if webhooksEnabled {
 		if err := ensureBootstrapCerts(certDir); err != nil {
 			setupLog.Error(err, "unable to create bootstrap certificates")
 			os.Exit(1)
@@ -305,7 +310,7 @@ func main() {
 
 	// Set up cert rotation for webhook TLS certificates.
 	setupFinished := make(chan struct{})
-	if !disableCertRotation && os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if !disableCertRotation && webhooksEnabled {
 		setupLog.Info("setting up cert rotation")
 
 		podNamespace := os.Getenv("POD_NAMESPACE")
@@ -407,8 +412,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelDeployment")
 		os.Exit(1)
 	}
-	// nolint:goconst
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if webhooksEnabled {
 		if err := webhookv1alpha1.SetupModelDeploymentWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "ModelDeployment")
 			os.Exit(1)
@@ -432,6 +436,10 @@ func main() {
 			// cluster-wide Secret informer, which needs list/watch on every Secret
 			// in the cluster and would hold them all in memory.
 			APIReader: mgr.GetAPIReader(),
+			// Without the webhook nothing authorizes the requesting user against
+			// the Secret they referenced, so the reconciler refuses those bindings
+			// instead of resolving a credential on an unchecked request.
+			CredentialAdmissionActive: webhooksEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 			os.Exit(1)

@@ -25,6 +25,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	authnv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -144,19 +145,41 @@ func TestCredentialAccessSkipsWhenNoSecretReferenced(t *testing.T) {
 	}
 }
 
-// On update the reference is only re-authorized when it CHANGES. Re-checking an
-// unchanged reference would make routine edits fail for anyone who did not
-// personally create the agent.
+// Every update carrying a reference is authorized, not only those that change
+// it. An earlier version skipped unchanged references and that left the entire
+// escalation reachable through update.
 func TestCredentialAccessOnUpdate(t *testing.T) {
-	t.Run("unchanged reference is not re-authorized", func(t *testing.T) {
+	t.Run("unchanged reference is STILL authorized", func(t *testing.T) {
+		// The regression test for the update bypass: keep the reference
+		// identical and repoint the image at your own. Nothing about the
+		// credentialsRef changed, but the credential now lands in a different
+		// container, so the updater must be authorized against it.
 		reviewer := &fakeReviewer{allowed: false}
 		v := &AgentDeploymentCustomValidator{SecretAccess: reviewer}
-		old, updated := agentWithSecret("openai-api-key"), agentWithSecret("openai-api-key")
-		if _, err := v.ValidateUpdate(requestAs("carol"), old, updated); err != nil {
-			t.Fatalf("an unchanged reference must not be re-authorized: %v", err)
+
+		old := agentWithSecret("prod-db-password")
+		updated := agentWithSecret("prod-db-password")
+		updated.Spec.Config = &runtime.RawExtension{
+			Raw: []byte(`{"image":"ghcr.io/mallory/exfil:latest"}`),
 		}
-		if len(reviewer.asked) != 0 {
-			t.Errorf("expected no authorization call, got %v", reviewer.asked)
+
+		if _, err := v.ValidateUpdate(requestAs("mallory"), old, updated); err == nil {
+			t.Fatal("retaining a reference while changing the image must be rejected — this is the update bypass")
+		}
+		if len(reviewer.asked) != 1 || !strings.HasSuffix(reviewer.asked[0], "prod-db-password") {
+			t.Errorf("the retained secret must be authorized on update, got %v", reviewer.asked)
+		}
+	})
+
+	t.Run("an authorized user may still edit", func(t *testing.T) {
+		reviewer := &fakeReviewer{allowed: true}
+		v := &AgentDeploymentCustomValidator{SecretAccess: reviewer}
+		old, updated := agentWithSecret("openai-api-key"), agentWithSecret("openai-api-key")
+		if _, err := v.ValidateUpdate(requestAs("alice"), old, updated); err != nil {
+			t.Fatalf("a user who can read the Secret must still be able to edit: %v", err)
+		}
+		if len(reviewer.asked) != 1 {
+			t.Errorf("expected exactly one authorization call, got %v", reviewer.asked)
 		}
 	})
 
@@ -165,10 +188,24 @@ func TestCredentialAccessOnUpdate(t *testing.T) {
 		v := &AgentDeploymentCustomValidator{SecretAccess: reviewer}
 		old, updated := agentWithSecret("openai-api-key"), agentWithSecret("prod-db-password")
 		if _, err := v.ValidateUpdate(requestAs("mallory"), old, updated); err == nil {
-			t.Fatal("repointing at a Secret the user cannot read must be rejected — otherwise the check is bypassable by editing")
+			t.Fatal("repointing at a Secret the user cannot read must be rejected")
 		}
 		if len(reviewer.asked) != 1 || !strings.HasSuffix(reviewer.asked[0], "prod-db-password") {
 			t.Errorf("the NEW secret must be authorized, got %v", reviewer.asked)
+		}
+	})
+
+	t.Run("dropping the reference needs no authorization", func(t *testing.T) {
+		reviewer := &fakeReviewer{allowed: false}
+		v := &AgentDeploymentCustomValidator{SecretAccess: reviewer}
+		old := agentWithSecret("prod-db-password")
+		updated := agentWithSecret("prod-db-password")
+		updated.Spec.Model.ExternalAPI.CredentialsRef = nil
+		if _, err := v.ValidateUpdate(requestAs("bob"), old, updated); err != nil {
+			t.Fatalf("removing the credential reference consumes no credential: %v", err)
+		}
+		if len(reviewer.asked) != 0 {
+			t.Errorf("expected no authorization call, got %v", reviewer.asked)
 		}
 	})
 }

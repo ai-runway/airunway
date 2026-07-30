@@ -101,6 +101,12 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 	if pod.SecurityContext.SeccompProfile == nil || pod.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Error("pod seccompProfile must be RuntimeDefault")
 	}
+	// The image is author-chosen, so the pod must not carry the namespace's
+	// default ServiceAccount token: that would let someone who can create an
+	// AgentDeployment, but not a Pod, act as that ServiceAccount.
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Error("automountServiceAccountToken must be explicitly false — an author-chosen image must not inherit the default ServiceAccount token")
+	}
 	// Container: drop ALL caps, no privilege escalation, read-only root by default.
 	if c.SecurityContext == nil || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
 		t.Error("allowPrivilegeEscalation must be false")
@@ -499,7 +505,7 @@ var _ = Describe("Container provider", func() {
 	}
 
 	reconcileCore := func(name string) {
-		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
 	}

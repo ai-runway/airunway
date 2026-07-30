@@ -255,7 +255,7 @@ var _ = Describe("Kagent crd provider", func() {
 	}
 
 	reconcileCore := func(name string) {
-		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
 	}

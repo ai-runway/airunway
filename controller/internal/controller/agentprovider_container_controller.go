@@ -800,7 +800,15 @@ func agentPodSpec(
 
 	return corev1.PodSpec{
 		SecurityContext: podSecurity,
-		Containers:      []corev1.Container{container},
+		// The image here is chosen by whoever wrote the AgentDeployment, so the
+		// pod must not carry an API credential the author did not already hold.
+		// Left unset, Kubernetes mounts the namespace's default ServiceAccount
+		// token, which would let someone who can create an AgentDeployment — but
+		// not a Pod — run code as that ServiceAccount and inherit whatever it can
+		// do. Agents talk to a model endpoint, not to the API server, so nothing
+		// here needs a token.
+		AutomountServiceAccountToken: ptr.To(false),
+		Containers:                   []corev1.Container{container},
 		Volumes: []corev1.Volume{
 			{
 				Name: "agent-config",

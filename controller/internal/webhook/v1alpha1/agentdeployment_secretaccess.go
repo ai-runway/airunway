@@ -81,18 +81,25 @@ func (r *sarReviewer) CanGetSecret(ctx context.Context, req admission.Request, n
 // makes the reference a delegation of access the caller already holds, rather
 // than an escalation.
 //
-// Checked on create, and on update only when the reference changes: re-checking
-// an unchanged reference would make routine edits fail for anyone who did not
-// personally create the agent.
+// Checked on *every* create and update that carries a reference — not only when
+// the reference itself changes. An earlier version skipped unchanged references
+// so that routine edits would not fail for anyone who had not personally created
+// the agent, and that left the whole escalation open through update: keep the
+// reference identical and repoint `spec.config.image` at your own image, or
+// `externalAPI.baseURL` at your own endpoint, and the controller injects the
+// existing credential into attacker-controlled code.
+//
+// Since no cheap, durable line separates the fields that can weaponise a
+// credential from the ones that cannot, authorization is required for any edit
+// while a reference is present. Being unable to edit a credential-bearing agent
+// without read access to its credential is the intended policy, not a
+// regression.
 func (v *AgentDeploymentCustomValidator) validateCredentialAccess(
 	ctx context.Context,
-	oldObj, newObj *airunwayv1alpha1.AgentDeployment,
+	newObj *airunwayv1alpha1.AgentDeployment,
 ) field.ErrorList {
 	ref := credentialsRefOf(newObj)
 	if ref == nil {
-		return nil
-	}
-	if oldObj != nil && sameCredentialsRef(credentialsRefOf(oldObj), ref) {
 		return nil
 	}
 
@@ -137,11 +144,4 @@ func credentialsRefOf(ad *airunwayv1alpha1.AgentDeployment) *airunwayv1alpha1.Se
 		return nil
 	}
 	return ad.Spec.Model.ExternalAPI.CredentialsRef
-}
-
-func sameCredentialsRef(a, b *airunwayv1alpha1.SecretKeyRef) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.Name == b.Name && a.Key == b.Key
 }

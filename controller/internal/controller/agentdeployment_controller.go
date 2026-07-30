@@ -94,6 +94,14 @@ type AgentDeploymentReconciler struct {
 	// Falls back to the cached client when unset so unit tests that construct
 	// the reconciler directly keep working.
 	APIReader client.Reader
+
+	// CredentialAdmissionActive reports whether the validating webhook — the only
+	// place the requesting user is authorized against a referenced Secret — is
+	// running. When false the reconciler refuses credential-bearing bindings
+	// rather than resolving a Secret nobody checked the requester could read.
+	//
+	// Defaults to false so a caller that forgets to set it fails closed.
+	CredentialAdmissionActive bool
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentdeployments,verbs=get;list;watch;update;patch
@@ -436,6 +444,22 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 	st.CredentialsRef = ext.CredentialsRef
 	if ext.CredentialsRef == nil {
 		return st, true, false, "", ""
+	}
+
+	// The admission webhook is the only place the *requesting user* is checked
+	// against the Secret they referenced. With webhooks disabled that check does
+	// not run at all, so resolving the credential here would reinstate the
+	// escalation the webhook exists to prevent: anyone able to create an
+	// AgentDeployment could name any Secret in the namespace and have it injected
+	// into an image of their choosing.
+	//
+	// Keyless bindings are unaffected — only credential-bearing ones are refused,
+	// so a webhook-less development cluster still runs everything else.
+	if !r.CredentialAdmissionActive {
+		return st, false, false, "CredentialAuthorizationUnavailable",
+			"credential-bearing bindings are refused because the validating webhook is disabled, " +
+				"and it is the only place the requesting user is authorized against the referenced Secret; " +
+				"enable the webhook, or use a binding with no credentialsRef"
 	}
 
 	var sec corev1.Secret

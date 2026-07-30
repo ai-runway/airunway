@@ -96,7 +96,7 @@ const agentDeploymentMaxNameLength = 63
 func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(obj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
 	allErrs = append(allErrs, validateAgentDeploymentName(obj)...)
-	allErrs = append(allErrs, v.validateCredentialAccess(ctx, nil, obj)...)
+	allErrs = append(allErrs, v.validateCredentialAccess(ctx, obj)...)
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
 	}
@@ -142,7 +142,7 @@ func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, old
 
 func (v *AgentDeploymentCustomValidator) validateUpdate(ctx context.Context, oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(newObj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
-	allErrs = append(allErrs, v.validateCredentialAccess(ctx, oldObj, newObj)...)
+	allErrs = append(allErrs, v.validateCredentialAccess(ctx, newObj)...)
 	if oldObj != nil && oldObj.Spec.Framework.Name != newObj.Spec.Framework.Name {
 		allErrs = append(allErrs, field.Forbidden(
 			field.NewPath("spec", "framework", "name"),

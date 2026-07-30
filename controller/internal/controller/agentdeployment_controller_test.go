@@ -85,7 +85,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 	}
 
 	reconcileOnce := func(name string) {
-		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
 		_, err := r.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
 		})
@@ -152,6 +152,44 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(mb).NotTo(BeNil())
 			Expect(mb.Status).To(Equal(metav1.ConditionFalse))
 			Expect(mb.Reason).To(Equal("CredentialSecretNotFound"))
+			Expect(out.Status.ModelBinding).To(BeNil())
+		})
+
+		It("refuses credential-bearing bindings when the admission webhook is disabled", func() {
+			// The webhook is the only place the requesting user is authorized
+			// against the Secret. With it off, resolving the credential anyway
+			// would reinstate the escalation it exists to prevent — so the
+			// binding must fail rather than quietly succeed unchecked.
+			createReadyProvider("kagent-no-admission", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeExternalAPI)
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "creds-no-admission", Namespace: "default"},
+				Data:       map[string][]byte{"token": []byte("s3cret")},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sec) })
+
+			ad := newAgent("agent-no-admission", "kagent-no-admission")
+			ad.Spec.Model.ExternalAPI.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
+				Name: "creds-no-admission",
+				Key:  "token",
+			}
+			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+
+			// Same reconciler, admission authorization unavailable.
+			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: false}
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "agent-no-admission", Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			out := get("agent-no-admission")
+			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
+			Expect(mb).NotTo(BeNil())
+			Expect(mb.Status).To(Equal(metav1.ConditionFalse))
+			Expect(mb.Reason).To(Equal("CredentialAuthorizationUnavailable"))
+			// The Secret exists and is readable by the controller; it is still
+			// not resolved, because nobody checked the requester could read it.
 			Expect(out.Status.ModelBinding).To(BeNil())
 		})
 
@@ -324,7 +362,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(k8sClient.Create(ctx, other)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, other) })
 
-			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
 			reqs := r.mapModelDeploymentToAgentDeployments(ctx, md)
 			Expect(reqs).To(HaveLen(1))
 			Expect(reqs[0].NamespacedName).To(Equal(types.NamespacedName{
