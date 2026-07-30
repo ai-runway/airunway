@@ -70,23 +70,33 @@ var (
 // SetupAgentDeploymentWebhookWithManager registers the validating webhook for AgentDeployment.
 func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, &airunwayv1alpha1.AgentDeployment{}).
-		WithValidator(&AgentDeploymentCustomValidator{}).
+		WithValidator(&AgentDeploymentCustomValidator{
+			SecretAccess: &sarReviewer{client: mgr.GetClient()},
+		}).
 		Complete()
 }
 
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:webhook:path=/validate-airunway-ai-v1alpha1-agentdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=airunway.ai,resources=agentdeployments,verbs=create;update,versions=v1alpha1,name=vagentdeployment-v1alpha1.kb.io,admissionReviewVersions=v1
 
 // AgentDeploymentCustomValidator validates AgentDeployment resources.
-type AgentDeploymentCustomValidator struct{}
+type AgentDeploymentCustomValidator struct {
+	// SecretAccess authorizes the requesting user against a referenced Secret,
+	// so an AgentDeployment cannot borrow the controller's privilege to read
+	// one the author cannot. Nil disables the check, which is only appropriate
+	// in unit tests; the manager always wires it.
+	SecretAccess secretAccessReviewer
+}
 
 // agentDeploymentMaxNameLength caps AgentDeployment names so every derived
 // workload label value stays within Kubernetes' 63-character label-value limit.
 const agentDeploymentMaxNameLength = 63
 
 // ValidateCreate validates AgentDeployment on create.
-func (v *AgentDeploymentCustomValidator) ValidateCreate(_ context.Context, obj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
+func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(obj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
 	allErrs = append(allErrs, validateAgentDeploymentName(obj)...)
+	allErrs = append(allErrs, v.validateCredentialAccess(ctx, nil, obj)...)
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
 	}
@@ -126,12 +136,13 @@ func validateAgentDeploymentName(obj *airunwayv1alpha1.AgentDeployment) field.Er
 }
 
 // ValidateUpdate validates AgentDeployment on update.
-func (v *AgentDeploymentCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
-	return v.validateUpdate(oldObj, newObj)
+func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
+	return v.validateUpdate(ctx, oldObj, newObj)
 }
 
-func (v *AgentDeploymentCustomValidator) validateUpdate(oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
+func (v *AgentDeploymentCustomValidator) validateUpdate(ctx context.Context, oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(newObj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
+	allErrs = append(allErrs, v.validateCredentialAccess(ctx, oldObj, newObj)...)
 	if oldObj != nil && oldObj.Spec.Framework.Name != newObj.Spec.Framework.Name {
 		allErrs = append(allErrs, field.Forbidden(
 			field.NewPath("spec", "framework", "name"),
