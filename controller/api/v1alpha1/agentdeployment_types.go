@@ -55,10 +55,19 @@ const (
 type AgentFrameworkRef struct {
 	// name is the framework identifier, e.g. "kagent", "openclaw",
 	// "crewai", "langgraph". Must match an AgentProviderConfig.metadata.name.
+	//
+	// Immutable. Each framework's provider owns the resources it renders, keyed
+	// by framework, so changing this hands the object to a different provider:
+	// the previous one stops reconciling it without deleting what it created,
+	// and the new one renders a second workload alongside the orphan. Enforced
+	// here by the API server rather than only in the validating webhook, so it
+	// also holds when webhooks are disabled and for objects admitted before the
+	// webhook existed. To switch frameworks, create a new AgentDeployment.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.framework.name is immutable; create a new AgentDeployment to switch frameworks"
 	Name string `json:"name"`
 }
 

@@ -66,6 +66,11 @@ const (
 	// startup would keep serving the old config indefinitely.
 	agentConfigChecksumAnnotation = "airunway.ai/config-checksum"
 
+	// defaultAgentRunAsUser is the conventional distroless/nonroot UID. It is
+	// both the numeric default the kubelet needs (see agentPodSpec) and the value
+	// the security floor falls back to when an override asks for root.
+	defaultAgentRunAsUser int64 = 65532
+
 	// agentTemplateHashAnnotation records a digest of the pod template the
 	// provider rendered for a Job. A Job's spec.template is immutable, so this
 	// is how a template change is detected and the Job recreated instead of
@@ -185,14 +190,86 @@ func applyContainerSecurityOverrides(
 	podSecurity *corev1.PodSecurityContext,
 	containerSecurity *corev1.SecurityContext,
 	overrides *containerSecurityOverrides,
+	writableRoot bool,
 ) {
-	if overrides == nil {
+	if overrides != nil {
+		podMerged := mergePodSecurityContext(podSecurity, overrides.PodSecurityContext)
+		containerMerged := mergeSecurityContext(containerSecurity, overrides.SecurityContext)
+		*podSecurity = *podMerged
+		*containerSecurity = *containerMerged
+	}
+	clampSecurityFloor(podSecurity, containerSecurity, writableRoot)
+}
+
+// clampSecurityFloor re-asserts the hardening the overrides are not allowed to
+// weaken, after the merge that could have weakened it.
+//
+// The webhook rejects these values too, and that is the better error — it tells
+// the author at apply time, in terms of the field they set. But the webhook is
+// optional: `ENABLE_WEBHOOKS=false` is a supported mode, and a resource admitted
+// before the webhook existed is never re-validated. Leaving the floor to
+// admission alone means `runAsNonRoot: false`, `runAsUser: 0`,
+// `allowPrivilegeEscalation: true`, `readOnlyRootFilesystem: false` or
+// `seccompProfile: Unconfined` reach the rendered pod in those cases, because the
+// override is merged *after* the hardened default and therefore wins.
+//
+// So the render path enforces it independently. Validation is for the error
+// message; this is for the guarantee.
+func clampSecurityFloor(
+	podSecurity *corev1.PodSecurityContext,
+	containerSecurity *corev1.SecurityContext,
+	writableRoot bool,
+) {
+	// Root is never negotiable, at either level.
+	if podSecurity != nil {
+		podSecurity.RunAsNonRoot = ptr.To(true)
+		if podSecurity.RunAsUser != nil && *podSecurity.RunAsUser == 0 {
+			podSecurity.RunAsUser = ptr.To[int64](defaultAgentRunAsUser)
+		}
+		podSecurity.SeccompProfile = clampSeccomp(podSecurity.SeccompProfile)
+	}
+	if containerSecurity == nil {
 		return
 	}
-	podMerged := mergePodSecurityContext(podSecurity, overrides.PodSecurityContext)
-	containerMerged := mergeSecurityContext(containerSecurity, overrides.SecurityContext)
-	*podSecurity = *podMerged
-	*containerSecurity = *containerMerged
+	containerSecurity.RunAsNonRoot = ptr.To(true)
+	if containerSecurity.RunAsUser != nil && *containerSecurity.RunAsUser == 0 {
+		containerSecurity.RunAsUser = ptr.To[int64](defaultAgentRunAsUser)
+	}
+	containerSecurity.AllowPrivilegeEscalation = ptr.To(false)
+	// Whether the root filesystem is writable is provider-owned, declared by
+	// AgentProviderConfig.spec.capabilities.writableRootFilesystem — precisely so
+	// a deployment author cannot weaken what their framework declared.
+	containerSecurity.ReadOnlyRootFilesystem = ptr.To(!writableRoot)
+	containerSecurity.SeccompProfile = clampSeccomp(containerSecurity.SeccompProfile)
+	containerSecurity.Capabilities = clampCapabilities(containerSecurity.Capabilities)
+}
+
+// clampCapabilities guarantees ALL is dropped and nothing is added back, while
+// leaving any additional drops in place — matching what the webhook asks for
+// (drop must *include* ALL) rather than flattening a legitimate
+// ["ALL", "NET_RAW"] down to ["ALL"].
+func clampCapabilities(c *corev1.Capabilities) *corev1.Capabilities {
+	if c == nil {
+		return &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+	}
+	out := &corev1.Capabilities{Drop: append([]corev1.Capability(nil), c.Drop...)}
+	for _, d := range out.Drop {
+		if d == "ALL" {
+			return out
+		}
+	}
+	// Adding capabilities is never permitted, so c.Add is dropped entirely.
+	return &corev1.Capabilities{Drop: append([]corev1.Capability{"ALL"}, out.Drop...)}
+}
+
+// clampSeccomp refuses Unconfined, which would opt the pod out of the syscall
+// filter entirely. Localhost profiles are left alone: they are a cluster-admin
+// artefact, not something an agent author can forge.
+func clampSeccomp(p *corev1.SeccompProfile) *corev1.SeccompProfile {
+	if p == nil || p.Type == corev1.SeccompProfileTypeUnconfined {
+		return &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+	}
+	return p
 }
 
 // containerConfig is the container-backend spec.config contract. The full
@@ -770,12 +847,12 @@ func agentPodSpec(
 		// default the container backend cannot run them at all. 65532 is the
 		// conventional distroless/nonroot UID. An image needing a different one
 		// can override it through spec.provider.overrides.
-		RunAsUser:      ptr.To[int64](65532),
-		RunAsGroup:     ptr.To[int64](65532),
-		FSGroup:        ptr.To[int64](65532),
+		RunAsUser:      ptr.To[int64](defaultAgentRunAsUser),
+		RunAsGroup:     ptr.To[int64](defaultAgentRunAsUser),
+		FSGroup:        ptr.To[int64](defaultAgentRunAsUser),
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
-	applyContainerSecurityOverrides(podSecurity, containerSecurity, in.securityOverrides)
+	applyContainerSecurityOverrides(podSecurity, containerSecurity, in.securityOverrides, in.writableRoot)
 
 	container := corev1.Container{
 		Name:  "agent",

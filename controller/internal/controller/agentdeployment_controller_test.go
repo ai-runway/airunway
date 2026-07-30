@@ -155,6 +155,31 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(out.Status.ModelBinding).To(BeNil())
 		})
 
+		It("rejects a framework change at the API server, with no webhook involved", func() {
+			// This envtest has no validating webhook installed, so if the update
+			// is rejected here it is the CRD's CEL transition rule doing it —
+			// which is the point: framework immutability has to hold in
+			// ENABLE_WEBHOOKS=false installs too. Without it, the old provider
+			// abandons its resources without deleting them and the new one
+			// renders a second workload beside the orphan.
+			createReadyProvider("kagent-immutable", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeExternalAPI)
+			createReadyProvider("crewai-immutable", airunwayv1alpha1.AgentProviderBackendContainer,
+				airunwayv1alpha1.ModelBindingModeExternalAPI)
+
+			ad := newAgent("agent-immutable", "kagent-immutable")
+			ad.Spec.Framework.Name = "crewai-immutable"
+			err := k8sClient.Update(ctx, ad)
+			Expect(err).To(HaveOccurred(), "the API server must reject a framework change without a webhook")
+			Expect(err.Error()).To(ContainSubstring("immutable"))
+
+			// An unrelated spec edit must still be allowed, or the rule would
+			// make the resource read-only.
+			fresh := get("agent-immutable")
+			fresh.Spec.Model.ExternalAPI.ModelName = "another-model"
+			Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
+		})
+
 		It("refuses credential-bearing bindings when the admission webhook is disabled", func() {
 			// The webhook is the only place the requesting user is authorized
 			// against the Secret. With it off, resolving the credential anyway

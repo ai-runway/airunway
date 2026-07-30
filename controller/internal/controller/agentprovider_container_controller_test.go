@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -271,22 +272,52 @@ func TestRenderAgentDeployment_AppliesSecurityOverrides(t *testing.T) {
 	}
 
 	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "override-config", writableRoot: false, securityOverrides: overrides})
+
+	// Overrides that do not weaken the posture are applied as given.
 	podSC := dep.Spec.Template.Spec.SecurityContext
 	if podSC == nil || podSC.RunAsUser == nil || *podSC.RunAsUser != runAsUser {
 		t.Fatalf("pod runAsUser override not applied: %+v", podSC)
+	}
+	if podSC.RunAsGroup == nil || *podSC.RunAsGroup != runAsGroup {
+		t.Fatalf("pod runAsGroup override not applied: %+v", podSC)
+	}
+	if podSC.FSGroup == nil || *podSC.FSGroup != fsGroup {
+		t.Fatalf("pod fsGroup override not applied: %+v", podSC)
 	}
 	if podSC.SeccompProfile == nil || podSC.SeccompProfile.Type != corev1.SeccompProfileTypeLocalhost {
 		t.Fatalf("pod seccomp override not applied: %+v", podSC.SeccompProfile)
 	}
 	containerSC := dep.Spec.Template.Spec.Containers[0].SecurityContext
-	if containerSC == nil || containerSC.ReadOnlyRootFilesystem == nil || *containerSC.ReadOnlyRootFilesystem != readOnly {
-		t.Fatalf("container readOnlyRootFilesystem override not applied: %+v", containerSC)
+	if containerSC == nil || containerSC.RunAsUser == nil || *containerSC.RunAsUser != runAsUser {
+		t.Fatalf("container runAsUser override not applied: %+v", containerSC)
 	}
-	if containerSC.AllowPrivilegeEscalation == nil || *containerSC.AllowPrivilegeEscalation != allowPrivilegeEscalation {
-		t.Fatalf("container allowPrivilegeEscalation override not applied: %+v", containerSC)
+
+	// Overrides that WOULD weaken it are clamped by the render path, not merged.
+	// The webhook rejects each of these too, but ENABLE_WEBHOOKS=false is a
+	// supported mode, so the floor cannot depend on admission having run.
+	// (readOnly=false, allowPrivilegeEscalation=true and a drop list omitting
+	// ALL are all requested above.)
+	if containerSC.ReadOnlyRootFilesystem == nil || *containerSC.ReadOnlyRootFilesystem == readOnly {
+		t.Errorf("readOnlyRootFilesystem must be clamped back to true, got %v", containerSC.ReadOnlyRootFilesystem)
 	}
-	if containerSC.Capabilities == nil || len(containerSC.Capabilities.Drop) != 1 || containerSC.Capabilities.Drop[0] != "NET_RAW" {
-		t.Fatalf("container capabilities.drop override not applied: %+v", containerSC.Capabilities)
+	if containerSC.AllowPrivilegeEscalation == nil || *containerSC.AllowPrivilegeEscalation == allowPrivilegeEscalation {
+		t.Errorf("allowPrivilegeEscalation must be clamped back to false, got %v", containerSC.AllowPrivilegeEscalation)
+	}
+	// The extra drop survives; ALL is added rather than replacing it.
+	var hasAll, hasNetRaw bool
+	for _, d := range containerSC.Capabilities.Drop {
+		switch d {
+		case "ALL":
+			hasAll = true
+		case "NET_RAW":
+			hasNetRaw = true
+		}
+	}
+	if !hasAll {
+		t.Errorf("capabilities.drop must include ALL, got %v", containerSC.Capabilities.Drop)
+	}
+	if !hasNetRaw {
+		t.Errorf("an additional drop must be preserved, got %v", containerSC.Capabilities.Drop)
 	}
 }
 
@@ -701,3 +732,94 @@ var _ = Describe("Container provider", func() {
 		Expect(prCond(ad2).Reason).To(Equal("JobCompleted"))
 	})
 })
+
+// TestSecurityFloorSurvivesHostileOverrides is the regression test for the
+// webhook-off hole. The validating webhook rejects each of these values, but
+// ENABLE_WEBHOOKS=false is a supported mode and resources admitted before the
+// webhook existed are never re-validated — so the render path has to hold the
+// floor on its own. Every field here is one the merge would otherwise let an
+// AgentDeployment author win, because overrides are merged after the defaults.
+func TestSecurityFloorSurvivesHostileOverrides(t *testing.T) {
+	hostile := &containerSecurityOverrides{
+		PodSecurityContext: &corev1.PodSecurityContext{
+			RunAsNonRoot:   ptr.To(false),
+			RunAsUser:      ptr.To[int64](0),
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             ptr.To(false),
+			RunAsUser:                ptr.To[int64](0),
+			AllowPrivilegeEscalation: ptr.To(true),
+			ReadOnlyRootFilesystem:   ptr.To(false),
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+			Capabilities:             &corev1.Capabilities{Drop: nil},
+		},
+	}
+
+	pod := &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true), RunAsUser: ptr.To[int64](defaultAgentRunAsUser)}
+	ctr := &corev1.SecurityContext{RunAsNonRoot: ptr.To(true), ReadOnlyRootFilesystem: ptr.To(true)}
+
+	applyContainerSecurityOverrides(pod, ctr, hostile, false /* writableRoot */)
+
+	if pod.RunAsNonRoot == nil || !*pod.RunAsNonRoot {
+		t.Error("pod runAsNonRoot must stay true")
+	}
+	if pod.RunAsUser == nil || *pod.RunAsUser == 0 {
+		t.Errorf("pod runAsUser must not be root, got %v", pod.RunAsUser)
+	}
+	if pod.SeccompProfile == nil || pod.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod seccompProfile must not be Unconfined, got %v", pod.SeccompProfile)
+	}
+	if ctr.RunAsNonRoot == nil || !*ctr.RunAsNonRoot {
+		t.Error("container runAsNonRoot must stay true")
+	}
+	if ctr.RunAsUser == nil || *ctr.RunAsUser == 0 {
+		t.Errorf("container runAsUser must not be root, got %v", ctr.RunAsUser)
+	}
+	if ctr.AllowPrivilegeEscalation == nil || *ctr.AllowPrivilegeEscalation {
+		t.Error("allowPrivilegeEscalation must stay false")
+	}
+	if ctr.ReadOnlyRootFilesystem == nil || !*ctr.ReadOnlyRootFilesystem {
+		t.Error("readOnlyRootFilesystem must stay true when the provider did not declare a writable root")
+	}
+	if ctr.SeccompProfile == nil || ctr.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("container seccompProfile must not be Unconfined, got %v", ctr.SeccompProfile)
+	}
+	if ctr.Capabilities == nil || len(ctr.Capabilities.Drop) != 1 || ctr.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("capabilities must still drop ALL, got %v", ctr.Capabilities)
+	}
+}
+
+// The floor must not override what the provider legitimately declared, or a
+// framework that genuinely needs a writable root could never run.
+func TestSecurityFloorHonoursProviderWritableRoot(t *testing.T) {
+	pod := &corev1.PodSecurityContext{}
+	ctr := &corev1.SecurityContext{}
+	applyContainerSecurityOverrides(pod, ctr, nil, true /* writableRoot */)
+	if ctr.ReadOnlyRootFilesystem == nil || *ctr.ReadOnlyRootFilesystem {
+		t.Error("a provider declaring writableRootFilesystem must get a writable root")
+	}
+	// Everything else is still clamped.
+	if ctr.AllowPrivilegeEscalation == nil || *ctr.AllowPrivilegeEscalation {
+		t.Error("allowPrivilegeEscalation must be false even with a writable root")
+	}
+}
+
+// A localhost seccomp profile is a cluster-admin artefact, not something an
+// agent author can forge, so it must be preserved rather than flattened.
+func TestSecurityFloorPreservesLocalhostSeccomp(t *testing.T) {
+	pod := &corev1.PodSecurityContext{}
+	ctr := &corev1.SecurityContext{}
+	overrides := &containerSecurityOverrides{
+		SecurityContext: &corev1.SecurityContext{
+			SeccompProfile: &corev1.SeccompProfile{
+				Type:             corev1.SeccompProfileTypeLocalhost,
+				LocalhostProfile: ptr.To("operator/agent.json"),
+			},
+		},
+	}
+	applyContainerSecurityOverrides(pod, ctr, overrides, false)
+	if ctr.SeccompProfile == nil || ctr.SeccompProfile.Type != corev1.SeccompProfileTypeLocalhost {
+		t.Errorf("localhost seccomp profile must be preserved, got %v", ctr.SeccompProfile)
+	}
+}

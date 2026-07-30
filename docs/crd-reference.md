@@ -219,7 +219,7 @@ spec:
     protocols: [mcp, a2a, openaiTools]
 status:
   ready: true
-  version: "kagent-provider:v0.1.0"
+  version: "agent-kagent-provider:v0.1.0"
 ```
 
 ### AgentProviderConfig annotations
