@@ -110,6 +110,15 @@ type AgentProviderCapabilities struct {
 	// the provider ready only once this API group is served in the
 	// cluster, so agents are never rendered before the operator is
 	// installed. Ignored for container backends, which have no operator.
+	//
+	// May also pin a version as "group/version" (e.g. "kagent.dev/v1alpha2"),
+	// which is what a renderer targeting a specific version should use. A
+	// group-only value cannot distinguish an operator serving the version the
+	// renderer needs from one serving only an older, incompatible version — the
+	// framework would report Ready, agents would bind to it, and every render
+	// would then fail with "no matches for kind ... in version ...". Pinning the
+	// version moves that from a permanent per-agent error loop to a clear
+	// OperatorNotInstalled on the framework itself.
 	// +optional
 	OperatorAPIGroup string `json:"operatorAPIGroup,omitempty"`
 

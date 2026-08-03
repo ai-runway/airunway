@@ -40,10 +40,29 @@ type stubDiscovery struct {
 	groups []string
 }
 
+// ServerGroups accepts either a bare group ("kagent.dev") or "group/version"
+// ("kagent.dev/v1alpha2"), so a test can describe a cluster that serves a group
+// at one version but not another.
 func (s *stubDiscovery) ServerGroups() (*metav1.APIGroupList, error) {
-	list := &metav1.APIGroupList{}
+	byGroup := map[string][]metav1.GroupVersionForDiscovery{}
+	var order []string
 	for _, g := range s.groups {
-		list.Groups = append(list.Groups, metav1.APIGroup{Name: g})
+		name, version, hasVersion := strings.Cut(g, "/")
+		if _, seen := byGroup[name]; !seen {
+			order = append(order, name)
+		}
+		if hasVersion {
+			byGroup[name] = append(byGroup[name], metav1.GroupVersionForDiscovery{
+				GroupVersion: name + "/" + version,
+				Version:      version,
+			})
+		} else if _, seen := byGroup[name]; !seen {
+			byGroup[name] = nil
+		}
+	}
+	list := &metav1.APIGroupList{}
+	for _, name := range order {
+		list.Groups = append(list.Groups, metav1.APIGroup{Name: name, Versions: byGroup[name]})
 	}
 	return list, nil
 }
@@ -112,6 +131,51 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).To(Equal("OperatorNotInstalled"))
+	})
+
+	It("holds a crd backend not-ready when the group is served but not at the pinned version", func() {
+		// The kagent renderer emits kagent.dev/v1alpha2. A cluster running only
+		// v1alpha1 satisfies a group-only check, so the framework would report
+		// Ready, agents would bind, and every render would then fail on a kind
+		// the cluster does not serve — a permanent per-agent error loop instead
+		// of one clear signal on the framework.
+		create("cap-crd-skew", airunwayv1alpha1.AgentProviderCapabilities{
+			Backend:          airunwayv1alpha1.AgentProviderBackendCRD,
+			OperatorAPIGroup: "kagent.dev/v1alpha2",
+		})
+		reconcileWith("cap-crd-skew", "kagent.dev/v1alpha1")
+
+		apc := get("cap-crd-skew")
+		Expect(apc.Status.Ready).NotTo(BeNil())
+		Expect(*apc.Status.Ready).To(BeFalse(), "an operator serving only v1alpha1 must not satisfy a v1alpha2 renderer")
+		cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("OperatorNotInstalled"))
+		Expect(cond.Message).To(ContainSubstring("kagent.dev/v1alpha2"))
+	})
+
+	It("marks a crd backend ready when the pinned version is served", func() {
+		create("cap-crd-pinned", airunwayv1alpha1.AgentProviderCapabilities{
+			Backend:          airunwayv1alpha1.AgentProviderBackendCRD,
+			OperatorAPIGroup: "kagent.dev/v1alpha2",
+		})
+		reconcileWith("cap-crd-pinned", "kagent.dev/v1alpha1", "kagent.dev/v1alpha2")
+
+		apc := get("cap-crd-pinned")
+		Expect(apc.Status.Ready).NotTo(BeNil())
+		Expect(*apc.Status.Ready).To(BeTrue())
+	})
+
+	It("still accepts a bare group, so existing configs keep working", func() {
+		create("cap-crd-bare", airunwayv1alpha1.AgentProviderCapabilities{
+			Backend:          airunwayv1alpha1.AgentProviderBackendCRD,
+			OperatorAPIGroup: "core.orka.ai",
+		})
+		reconcileWith("cap-crd-bare", "core.orka.ai")
+
+		apc := get("cap-crd-bare")
+		Expect(apc.Status.Ready).NotTo(BeNil())
+		Expect(*apc.Status.Ready).To(BeTrue(), "a group-only value must behave exactly as before")
 	})
 
 	It("holds not-ready when requiresOperator is true but operatorAPIGroup is missing", func() {

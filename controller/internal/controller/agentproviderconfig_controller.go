@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -141,26 +142,53 @@ func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProv
 		return false, "DiscoveryFailed", fmt.Sprintf("could not query API group %q: %v", group, err)
 	}
 	if !served {
-		msg := fmt.Sprintf("operator API group %q is not installed in the cluster", group)
+		// Worded to cover both cases: the group is absent entirely, or it is
+		// served but not at the version this framework pinned. "API %q is not
+		// served" is true either way, and naming the exact group/version tells
+		// the operator which one to install.
+		msg := fmt.Sprintf("operator API %q is not served in the cluster", group)
 		if install := apc.InstallInstructions(); install != "" {
 			msg = fmt.Sprintf("%s. Install instructions: %s", msg, install)
 		}
 		return false, "OperatorNotInstalled",
 			msg
 	}
-	return true, "OperatorInstalled", fmt.Sprintf("operator API group %q is present", group)
+	return true, "OperatorInstalled", fmt.Sprintf("operator API %q is served", group)
 }
 
-// groupServed reports whether an API group is registered in the cluster.
-func (r *AgentProviderConfigReconciler) groupServed(group string) (bool, error) {
+// groupServed reports whether the cluster serves the operator API that a
+// framework renders into.
+//
+// The value may be a bare group ("kagent.dev") or a group with a pinned version
+// ("kagent.dev/v1alpha2"). A bare group only proves *some* version of the
+// operator is installed, which is not the same question: the kagent renderer
+// emits kagent.dev/v1alpha2, so a cluster serving only v1alpha1 satisfies a
+// group-only check, the framework reports Ready, agents bind, and every render
+// then fails on a kind the cluster does not serve. Pinning the version turns
+// that permanent per-agent error loop into one OperatorNotInstalled on the
+// framework, which is where the operator's absence actually belongs.
+func (r *AgentProviderConfigReconciler) groupServed(groupVersion string) (bool, error) {
+	group, version, pinned := strings.Cut(groupVersion, "/")
+
 	groups, err := r.Discovery.ServerGroups()
 	if err != nil {
 		return false, err
 	}
 	for _, g := range groups.Groups {
-		if g.Name == group {
+		if g.Name != group {
+			continue
+		}
+		if !pinned {
 			return true, nil
 		}
+		for _, v := range g.Versions {
+			if v.Version == version {
+				return true, nil
+			}
+		}
+		// The group is served but not at the pinned version — an operator is
+		// installed, just not one this renderer can target.
+		return false, nil
 	}
 	return false, nil
 }

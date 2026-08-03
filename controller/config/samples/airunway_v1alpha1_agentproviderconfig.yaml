@@ -45,9 +45,11 @@ spec:
   capabilities:
     backend: crd
     requiresOperator: true
-    # Readiness gates on this API group being served, so an agent never renders
-    # before its operator exists.
-    operatorAPIGroup: kagent.dev
+    # Readiness gates on this API being served, so an agent never renders before
+    # its operator exists. The version is pinned because the kagent renderer
+    # emits kagent.dev/v1alpha2 specifically: a cluster running only v1alpha1
+    # would satisfy a group-only check, report Ready, and then fail every render.
+    operatorAPIGroup: kagent.dev/v1alpha2
     modelBindingModes:
       - deploymentRef
       - gatewayEndpoint
@@ -85,7 +87,9 @@ spec:
   capabilities:
     backend: crd
     requiresOperator: true
-    operatorAPIGroup: core.orka.ai
+    # Pinned for the same reason as kagent above: the Orka renderer emits
+    # core.orka.ai/v1alpha1.
+    operatorAPIGroup: core.orka.ai/v1alpha1
     modelBindingModes:
       - deploymentRef
       - externalAPI

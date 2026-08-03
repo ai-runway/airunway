@@ -93,10 +93,22 @@ spec:
                     description: |-
                       name is the framework identifier, e.g. "kagent", "openclaw",
                       "crewai", "langgraph". Must match an AgentProviderConfig.metadata.name.
+
+                      Immutable. Each framework's provider owns the resources it renders, keyed
+                      by framework, so changing this hands the object to a different provider:
+                      the previous one stops reconciling it without deleting what it created,
+                      and the new one renders a second workload alongside the orphan. Enforced
+                      here by the API server rather than only in the validating webhook, so it
+                      also holds when webhooks are disabled and for objects admitted before the
+                      webhook existed. To switch frameworks, create a new AgentDeployment.
                     maxLength: 63
                     minLength: 1
                     pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                     type: string
+                    x-kubernetes-validations:
+                    - message: spec.framework.name is immutable; create a new AgentDeployment
+                        to switch frameworks
+                      rule: self == oldSelf
                 required:
                 - name
                 type: object
@@ -613,6 +625,15 @@ spec:
                       the provider ready only once this API group is served in the
                       cluster, so agents are never rendered before the operator is
                       installed. Ignored for container backends, which have no operator.
+
+                      May also pin a version as "group/version" (e.g. "kagent.dev/v1alpha2"),
+                      which is what a renderer targeting a specific version should use. A
+                      group-only value cannot distinguish an operator serving the version the
+                      renderer needs from one serving only an older, incompatible version — the
+                      framework would report Ready, agents would bind to it, and every render
+                      would then fail with "no matches for kind ... in version ...". Pinning the
+                      version moves that from a permanent per-agent error loop to a clear
+                      OperatorNotInstalled on the framework itself.
                     type: string
                   protocols:
                     description: |-
@@ -2136,6 +2157,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - batch
   resources:

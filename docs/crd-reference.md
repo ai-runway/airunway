@@ -214,7 +214,7 @@ spec:
   capabilities:
     backend: crd
     requiresOperator: true
-    operatorAPIGroup: kagent.dev
+    operatorAPIGroup: kagent.dev/v1alpha2
     modelBindingModes: [deploymentRef, gatewayEndpoint, externalAPI]
     protocols: [mcp, a2a, openaiTools]
 status:
