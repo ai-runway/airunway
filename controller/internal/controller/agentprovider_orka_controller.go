@@ -97,6 +97,20 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 	if !crdBacked {
+		// See the equivalent branch in the kagent provider: the framework is
+		// gone or now uses a different backend, so anything rendered here is
+		// orphaned and must be torn down rather than left running unmanaged.
+		// DeleteOwned skips objects that are absent, of an unserved kind, or not
+		// controlled by this AgentDeployment, so this is safe for agents this
+		// provider never rendered.
+		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+			agentprovider.UnstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
+			agentprovider.UnstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		// No status write: ProviderReady belongs to the framework's current
+		// provider now.
 		return ctrl.Result{}, nil
 	}
 

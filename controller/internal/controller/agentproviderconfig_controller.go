@@ -101,16 +101,23 @@ func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProviderConfig) (ready bool, reason, msg string) {
 	caps := apc.Spec.Capabilities
 
-	// The catalog annotation is unstructured, so nothing rejects a malformed
-	// one at admission. Validate it here: the container provider parses the
-	// same annotation and fails EVERY reconcile when it cannot, so reporting
-	// Ready=True would claim the framework accepts work while all of it fails.
-	if _, err := apc.CatalogItems(); err != nil {
-		return false, "InvalidCatalog",
-			fmt.Sprintf("the %s annotation could not be parsed, so no agent on this framework can render: %v",
-				airunwayv1alpha1.AgentProviderCatalogAnnotation, err)
-	}
-
+	// Catalog validity is deliberately NOT a readiness gate.
+	//
+	// An earlier version failed readiness on a malformed catalog annotation,
+	// because the container provider then returned an error from every
+	// reconcile. That was the wrong end to fix. readiness=false sets
+	// FrameworkReady=False on every agent, which stops core resolving their
+	// bindings, which makes the providers tear the workloads down — so one typo
+	// in marketplace UI metadata destroyed every running agent on the framework,
+	// including agents that set spec.config.image and never read the catalog at
+	// all. CRD backends were hit hardest: kagent and Orka never consume the
+	// catalog when rendering, so nothing about their agents was actually broken.
+	//
+	// The provider now defers the parse failure instead (see
+	// resolveContainerProvider), so only agents that genuinely need a catalog
+	// image fail, and they fail with the parse error in their own status. That
+	// removes the inconsistency this gate existed to close, from the side that
+	// does not take healthy agents down with it.
 	if caps.Backend == airunwayv1alpha1.AgentProviderBackendContainer {
 		return true, "ProviderRunning", "Container rendering provider is available"
 	}

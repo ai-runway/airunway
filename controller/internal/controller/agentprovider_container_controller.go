@@ -263,8 +263,18 @@ func clampCapabilities(c *corev1.Capabilities) *corev1.Capabilities {
 }
 
 // clampSeccomp refuses Unconfined, which would opt the pod out of the syscall
-// filter entirely. Localhost profiles are left alone: they are a cluster-admin
-// artefact, not something an agent author can forge.
+// filter entirely.
+//
+// Localhost profiles are left alone, and this is the one hole in "an override
+// can harden but never weaken". An agent author cannot *forge* a node-local
+// profile — it has to exist under the kubelet's seccomp root, which needs node
+// access or something like the Security Profiles Operator — but they can
+// *reference* one, and a profile placed there for another workload may permit
+// more than RuntimeDefault does. Blocking Localhost outright would also remove
+// the legitimate case it exists for: clusters that ship hardened custom
+// profiles. Closing this properly means making the allowed profiles
+// provider-owned, the way writableRootFilesystem already is; recorded as a gap
+// rather than guessed at here.
 func clampSeccomp(p *corev1.SeccompProfile) *corev1.SeccompProfile {
 	if p == nil || p.Type == corev1.SeccompProfileTypeUnconfined {
 		return &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
@@ -321,6 +331,21 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 	if !settings.isContainer {
+		// Either this framework was never container-backed, or it was and has
+		// since been deleted or re-registered onto a CRD backend. In the second
+		// case the Deployment/Job, Service and ConfigMap rendered here are now
+		// orphaned — nothing reconciles them, and the CRD provider is already
+		// rendering a second workload beside them. Tear ours down before
+		// standing aside.
+		//
+		// For agents that were never ours this is a no-op: each delete does a
+		// cached read first and skips objects that are absent or not controlled
+		// by this AgentDeployment.
+		if err := r.cleanupOwnedWorkloads(ctx, &ad); err != nil {
+			return ctrl.Result{}, err
+		}
+		// No status write: ProviderReady belongs to the framework's provider,
+		// which is no longer this one.
 		return ctrl.Result{}, nil
 	}
 
@@ -746,10 +771,17 @@ func (r *ContainerProviderReconciler) resolveContainerProvider(ctx context.Conte
 	s := containerProviderSettings{isContainer: true}
 	s.writableRoot = apc.Spec.Capabilities.WritableRootFilesystem != nil && *apc.Spec.Capabilities.WritableRootFilesystem
 
+	// A malformed catalog is deferred, not fatal. The catalog exists only to
+	// *default* the image, so an agent that sets spec.config.image needs nothing
+	// from it — failing the whole reconcile here would take out every agent on
+	// the framework because one piece of marketplace UI metadata has a typo.
+	// Agents that do rely on the catalog get this text in their MissingImage
+	// status instead, which names the framework and the parse error.
 	catalog, err := apc.CatalogItems()
 	if err != nil {
-		return containerProviderSettings{}, fmt.Errorf("parse %s annotation on AgentProviderConfig %q: %w",
+		s.imageErr = fmt.Sprintf("the %s annotation on AgentProviderConfig %q could not be parsed, so no catalog image is available: %v",
 			airunwayv1alpha1.AgentProviderCatalogAnnotation, apc.Name, err)
+		return s, nil
 	}
 
 	var images []string

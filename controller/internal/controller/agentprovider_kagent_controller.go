@@ -120,6 +120,24 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 	if !crdBacked {
+		// The framework is gone, has no capabilities, or has been re-registered
+		// with a different backend. Anything this provider already rendered for
+		// the agent is now orphaned — nothing will reconcile it again, and if
+		// the framework moved to the container backend that provider is already
+		// rendering a second workload alongside it. Tear ours down before
+		// standing aside, rather than leaving it serving unmanaged.
+		//
+		// Safe for agents this provider never rendered: DeleteOwned skips
+		// objects that are absent, of an unserved kind, or not controlled by
+		// this AgentDeployment.
+		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+			agentprovider.UnstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
+			agentprovider.UnstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Deliberately no status write: ProviderReady now belongs to whichever
+		// provider owns this framework, and two writers would fight over it.
 		return ctrl.Result{}, nil
 	}
 

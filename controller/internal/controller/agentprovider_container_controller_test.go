@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -823,3 +824,138 @@ func TestSecurityFloorPreservesLocalhostSeccomp(t *testing.T) {
 		t.Errorf("localhost seccomp profile must be preserved, got %v", ctr.SeccompProfile)
 	}
 }
+
+var _ = Describe("Container provider: catalog and backend-switch handling", func() {
+	ctx := context.Background()
+
+	malformedCatalogProvider := func(name string) {
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+				Annotations: map[string]string{
+					// Valid YAML, invalid catalog JSON — exactly the typo case.
+					airunwayv1alpha1.AgentProviderCatalogAnnotation: `[{"name": "broken",`,
+				},
+			},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend:           airunwayv1alpha1.AgentProviderBackendContainer,
+					ModelBindingModes: []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+		apc.Status.Ready = ptrBool(true)
+		Expect(k8sClient.Status().Update(ctx, apc)).To(Succeed())
+	}
+
+	agentOn := func(name, framework, image string) {
+		cfg := map[string]any{"systemPrompt": "hi"}
+		if image != "" {
+			cfg["image"] = image
+		}
+		raw, _ := json.Marshal(cfg)
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: framework},
+				Config:    &runtime.RawExtension{Raw: raw},
+				Model: airunwayv1alpha1.ModelBinding{
+					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+	}
+
+	core := func(name string) {
+		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+	}
+	container := func(name string) error {
+		r := &ContainerProviderReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		return err
+	}
+
+	It("renders an agent with an explicit image despite a malformed catalog", func() {
+		// A typo in marketplace UI metadata must not take down an agent that
+		// never reads the catalog. This previously failed twice over: readiness
+		// went false (tearing down every agent on the framework) and the
+		// provider returned an error from every reconcile.
+		malformedCatalogProvider("crewai-badcat")
+		agentOn("c-explicit", "crewai-badcat", "ghcr.io/x/crewai:poc")
+
+		core("c-explicit")
+		Expect(container("c-explicit")).To(Succeed(), "a malformed catalog must not fail the reconcile")
+
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-explicit", Namespace: "default"}, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/x/crewai:poc"))
+	})
+
+	It("fails only the agent that actually needed the catalog, naming the parse error", func() {
+		malformedCatalogProvider("crewai-badcat2")
+		agentOn("c-needs-catalog", "crewai-badcat2", "") // no explicit image
+
+		core("c-needs-catalog")
+		Expect(container("c-needs-catalog")).To(Succeed())
+
+		out := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-needs-catalog", Namespace: "default"}, out)).To(Succeed())
+		cond := meta.FindStatusCondition(out.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("MissingImage"))
+		Expect(cond.Message).To(ContainSubstring("could not be parsed"),
+			"the agent that needs the catalog should be told the catalog is broken")
+	})
+
+	It("tears down its workload when the framework registration goes away", func() {
+		// spec.capabilities.backend is immutable, so a framework can only move
+		// to another backend by being deleted and recreated. The leak window is
+		// the delete: without cleanup here the Deployment/Service/ConfigMap keep
+		// running unmanaged, and once the framework is recreated on a CRD
+		// backend that provider renders a second workload beside them.
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "switch-fw"},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend:           airunwayv1alpha1.AgentProviderBackendContainer,
+					ModelBindingModes: []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+		apc.Status.Ready = ptrBool(true)
+		Expect(k8sClient.Status().Update(ctx, apc)).To(Succeed())
+
+		agentOn("c-switch", "switch-fw", "ghcr.io/x/crewai:poc")
+		core("c-switch")
+		Expect(container("c-switch")).To(Succeed())
+
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch", Namespace: "default"}, dep)).To(Succeed())
+
+		By("deleting the framework registration")
+		Expect(k8sClient.Delete(ctx, apc)).To(Succeed())
+
+		Expect(container("c-switch")).To(Succeed())
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch", Namespace: "default"}, dep)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"the orphaned Deployment must be removed, not left running unmanaged")
+
+		By("also removing the Service and ConfigMap")
+		svc := &corev1.Service{}
+		Expect(apierrors.IsNotFound(
+			k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch", Namespace: "default"}, svc))).To(BeTrue())
+		cm := &corev1.ConfigMap{}
+		Expect(apierrors.IsNotFound(
+			k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch-config", Namespace: "default"}, cm))).To(BeTrue())
+	})
+})

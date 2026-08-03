@@ -561,3 +561,28 @@ func TestFrameworkNotReadyDetail(t *testing.T) {
 		}
 	})
 }
+
+// Gateway API publishes IPAddress status values unbracketed, so an IPv6 gateway
+// yields "2001:db8::1". Without bracketing that becomes "http://2001:db8::1/v1",
+// where the first colon reads as a port separator and the URL will not parse —
+// every agent bound through that gateway gets an endpoint it cannot dial.
+func TestNormalizeOpenAIBaseURLHandlesIPv6(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"2001:db8::1", "http://[2001:db8::1]/v1"},
+		{"::1", "http://[::1]/v1"},
+		{"http://2001:db8::1", "http://[2001:db8::1]/v1"},
+		{"[2001:db8::1]", "http://[2001:db8::1]/v1"}, // already bracketed
+		{"http://[2001:db8::1]:8080", "http://[2001:db8::1]:8080/v1"},
+		// IPv4 and hostnames must be untouched, including host:port, which has
+		// exactly one colon and must not be mistaken for an IPv6 literal.
+		{"1.2.3.4", "http://1.2.3.4/v1"},
+		{"demo.default.svc.cluster.local:80", "http://demo.default.svc.cluster.local:80/v1"},
+		{"https://api.openai.com/v1", "https://api.openai.com/v1"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := normalizeOpenAIBaseURL(c.in); got != c.want {
+			t.Errorf("normalizeOpenAIBaseURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

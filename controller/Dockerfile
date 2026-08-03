@@ -10,10 +10,12 @@ ARG TARGETARCH
 ARG GAIE_VERSION
 
 # AGENT_PROVIDER_VERSION is the version the in-process agent providers report
-# into AgentProviderConfig.status.version. Without it every deployed provider
-# publishes "dev", which is exactly the skew the reported-version contract
-# exists to make visible.
-ARG AGENT_PROVIDER_VERSION=dev
+# into AgentProviderConfig.status.version. Deliberately no default, matching
+# GAIE_VERSION above and the three shim Dockerfiles: defaulting to "dev" made a
+# hand-run build publish a plausible-looking version under a release tag, which
+# is precisely the skew the reported-version contract exists to make visible.
+# `make controller-docker-build` and the release workflow both pass it.
+ARG AGENT_PROVIDER_VERSION
 
 WORKDIR /workspace
 

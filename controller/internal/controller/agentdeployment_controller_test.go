@@ -155,6 +155,46 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(out.Status.ModelBinding).To(BeNil())
 		})
 
+		It("rejects a non-DNS-1035 name at the API server, with no webhook involved", func() {
+			// The webhook gives a friendlier message, but it is optional. Without
+			// this CEL rule a name like "my.agent" or "7agent" is a legal CR name
+			// that is admitted, then makes every Service apply fail — pods running
+			// with no Service and no published address, forever.
+			for _, bad := range []string{"my.agent", "7agent", "Agent-Upper", "trailing-"} {
+				ad := &airunwayv1alpha1.AgentDeployment{
+					ObjectMeta: metav1.ObjectMeta{Name: bad, Namespace: "default"},
+					Spec: airunwayv1alpha1.AgentDeploymentSpec{
+						Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent"},
+						Model: airunwayv1alpha1.ModelBinding{
+							ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+								Type:    airunwayv1alpha1.ExternalAPITypeOpenAI,
+								BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+							},
+						},
+					},
+				}
+				err := k8sClient.Create(ctx, ad)
+				Expect(err).To(HaveOccurred(), "name %q must be rejected by the API server", bad)
+				Expect(err.Error()).To(ContainSubstring("RFC 1035"))
+			}
+
+			// A legal name must still be accepted, or the rule is too strict.
+			ok := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "a-legal-agent-1", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "kagent"},
+					Model: airunwayv1alpha1.ModelBinding{
+						ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+							Type:    airunwayv1alpha1.ExternalAPITypeOpenAI,
+							BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ok)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, ok) })
+		})
+
 		It("rejects a framework change at the API server, with no webhook involved", func() {
 			// This envtest has no validating webhook installed, so if the update
 			// is rejected here it is the CRD's CEL transition rule doing it —

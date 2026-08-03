@@ -681,13 +681,37 @@ func normalizeOpenAIBaseURL(endpoint string) string {
 	if endpoint == "" {
 		return ""
 	}
-	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+	for _, scheme := range []string{"http://", "https://"} {
+		if !strings.HasPrefix(endpoint, scheme) {
+			continue
+		}
+		endpoint = scheme + bracketBareIPv6(strings.TrimPrefix(endpoint, scheme))
 		if strings.HasSuffix(endpoint, "/v1") {
 			return endpoint
 		}
 		return endpoint + "/v1"
 	}
-	return "http://" + endpoint + "/v1"
+	return "http://" + bracketBareIPv6(endpoint) + "/v1"
+}
+
+// bracketBareIPv6 wraps a bare IPv6 literal so it is a valid URL host.
+//
+// Gateway API publishes `IPAddress` status values unbracketed — "2001:db8::1",
+// not "[2001:db8::1]" — but RFC 3986 requires the brackets. Without them the
+// first colon reads as a port separator and "http://2001:db8::1/v1" is not a
+// parseable URL, so every agent bound through that gateway gets an endpoint it
+// cannot dial.
+//
+// A host:port has exactly one colon, so two or more means an IPv6 literal;
+// anything already bracketed, or carrying a path, is left alone.
+func bracketBareIPv6(host string) string {
+	if host == "" || strings.HasPrefix(host, "[") || strings.Contains(host, "/") {
+		return host
+	}
+	if strings.Count(host, ":") < 2 {
+		return host
+	}
+	return "[" + host + "]"
 }
 
 func gatewayStatusAddress(gw *unstructured.Unstructured) string {

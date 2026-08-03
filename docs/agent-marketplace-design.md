@@ -43,7 +43,9 @@ The model side (`ModelDeployment` + `InferenceProviderConfig` + `providers/*`) a
 
 **Decision:** move `AgentProviderConfig.spec.catalog` out of `spec` into an annotation (e.g. `airunway.ai/agent-catalog`) carrying the catalog as a JSON document. Keep `GetCatalogItem` / `CatalogItemNames` helpers but source them from the parsed annotation.
 
-**Trade-offs:** annotations are unstructured (no CRD schema validation) and capped at ~256KB total per object. Mitigate with (a) a documented JSON shape + a small typed parser, and (b) optional webhook validation of the annotation payload so authors still get errors early. **(a) landed; (b) did not**, but the gap is smaller than it looks: there is still no `AgentProviderConfig` webhook, so a malformed catalog is admitted rather than rejected at apply time — however `AgentProviderConfigReconciler.evaluate` parses the annotation for **every** backend before deciding readiness, so the framework goes `Ready=False` with reason `InvalidCatalog` and an error naming the parse failure. The author finds out from the provider config's own status rather than from a kubectl error, and no agent binds to a framework whose catalog cannot be read.
+**Trade-offs:** annotations are unstructured (no CRD schema validation) and capped at ~256KB total per object. Mitigate with (a) a documented JSON shape + a small typed parser, and (b) optional webhook validation of the annotation payload so authors still get errors early. **(a) landed; (b) did not** — there is no `AgentProviderConfig` webhook, so a malformed catalog is admitted rather than rejected at apply time.
+
+Catalog validity is deliberately **not** a readiness gate. An earlier revision did gate on it, and that was worse than the problem: `status.ready=false` propagates to `FrameworkReady=False` on every agent, which stops core resolving their bindings, which makes the providers tear the workloads down — so one typo in marketplace UI metadata destroyed every running agent on the framework, including agents that set `spec.config.image` and never read the catalog, and CRD-backed agents where the catalog is never consulted at all. The container provider now defers the parse failure instead, so only an agent that actually needs a catalog image fails, and it fails with the parse error in its own status.
 
 ### 3. Lift agent providers out-of-tree behind a provider interface  **decided**
 
@@ -76,13 +78,109 @@ This reframes [8] and note 5 as consistent: [8] removed an *unstructured, always
 
 **Implemented guardrail:** user-facing security-context overrides are accepted only through a validated allow-list, and unknown/dangerous keys are rejected by webhook validation.
 
+## Decisions taken during implementation review
+
+Decisions 1–5 are API-shape calls from the original design review. The rest were
+forced by building it, and several are trade-offs rather than obvious fixes —
+recorded here so they can be argued with instead of rediscovered.
+
+### 6. Admission is a better error, never the only enforcement point
+
+**Why it came up:** `ENABLE_WEBHOOKS=false` is a supported mode, and an object
+admitted before a webhook existed is never re-validated. Anything enforced only
+in admission is therefore unenforced in real installs.
+
+**Decision:** every invariant that matters is enforced where it cannot be
+bypassed, with the webhook kept as the *friendlier* error rather than the
+guarantee.
+
+| Invariant | Enforced by | Webhook still does |
+|---|---|---|
+| `spec.framework.name` immutable | CRD CEL transition rule | nothing extra |
+| `metadata.name` is an RFC 1035 label | CRD CEL rule | clearer message |
+| Security floor (non-root, no privilege escalation, read-only root, seccomp, dropped caps) | clamped in the render path | rejects at apply time |
+| Requester may read a referenced Secret | webhook **only** — so the reconciler refuses credential-bearing bindings when the webhook is off | the check itself |
+
+The last row is the exception that proves the rule: authorization needs the
+requesting user's identity, which only exists during admission. Rather than
+enforce a weaker version elsewhere, the reconciler **fails closed** and reports
+`CredentialAuthorizationUnavailable`. Keyless bindings are unaffected, so a
+webhook-less development cluster still runs everything else.
+
+### 7. Referencing a Secret is authorized against the requester, on every edit
+
+**Why:** the controller validates a referenced Secret with its own privilege and
+injects it into a container whose image the same author chose. Without a check,
+`create agentdeployments` alone was enough to read any Secret in the namespace —
+a textbook confused deputy.
+
+**Decision:** the webhook issues a `SubjectAccessReview` for the requesting user
+against `get` on that Secret, and rejects if denied.
+
+**The non-obvious part:** this runs on *every* create and update that carries a
+reference, not only when the reference changes. A first version skipped unchanged
+references so routine edits would not fail for non-authors; review showed that
+left the whole escalation open — keep the reference identical and repoint
+`spec.config.image` at your own image. Being unable to edit a credential-bearing
+agent without read access to its credential is the intended policy.
+
+### 8. Agent pods carry no ServiceAccount token
+
+The image is author-chosen, so the default token would let someone who can create
+an AgentDeployment — but not a Pod — execute code as the namespace's default
+ServiceAccount. Agents talk to a model endpoint, not the API server, so
+`automountServiceAccountToken: false`.
+
+### 9. A lost binding is held for 10 minutes, then torn down
+
+**The trade-off, and the one most worth challenging.** Tearing down eagerly meant
+a single failed lookup destroyed healthy agents; holding indefinitely meant a
+deleted ModelDeployment left an agent advertising a dead endpoint (observed on
+the GPU cluster: 11 minutes later, still pointing at a Service that no longer
+existed). The window is keyed off the `ModelBound` condition's
+`LastTransitionTime`. **10 minutes is a judgement call, not a derived number.**
+
+### 10. Catalog validity is not a readiness gate
+
+Reversed mid-review. See decision 2 — gating readiness on it destroyed every
+running agent on a framework over a typo in UI metadata, including agents that
+never read the catalog.
+
+### 11. Losing a framework registration tears down what that provider rendered
+
+`spec.capabilities.backend` is immutable, so a framework can only change backend
+by being deleted and recreated. The delete is the leak window: without cleanup
+the rendered workload keeps running unmanaged, and once the framework returns on
+another backend a second workload appears beside it. Each provider now removes
+what it owns before standing aside, and writes no status — `ProviderReady`
+belongs to whichever provider owns the framework now.
+
+### 12. Operator readiness gates on API *version*, not just group
+
+`operatorAPIGroup` may carry `group/version` (e.g. `kagent.dev/v1alpha2`). A
+group-only check cannot tell an operator serving the version the renderer needs
+from one serving an older, incompatible version — the framework would report
+Ready, agents would bind, and every render would fail on an unserved kind. Bare
+group values still work unchanged.
+
+### 13. Gateway addresses come from published status, never derived DNS
+
+Three review comments asked for `deploymentRef` to resolve to
+`http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`. **Declined, and
+the docs were corrected instead.** A Gateway resource name is not a Service DNS
+name — Gateway API does not require an implementation to name its data-plane
+Service after the Gateway, so that address does not resolve on some clusters.
+`resolveGatewayEndpoint` reads `Gateway.status.addresses`, the address the
+implementation itself publishes. `gatewayName`/`gatewayNamespace` are recorded
+for diagnostics only. IPv6 literals from that status are bracketed before use.
+
 ## Task breakdown
 
 Ordered; blocked items are called out. Do **not** start blocked tasks until their dependencies land.
 
 | # | Task | Depends on | Status |
 |---|------|-----------|--------|
-| T1 | Catalog → annotation on `AgentProviderConfig` (parser + helpers + optional webhook validation + manifests regen) | — | **partial** — parser, helpers and manifests landed; the annotation-validating *webhook* did **not**, so a malformed catalog is still admitted rather than rejected at apply time. It no longer fails silently, though: `evaluate` parses it for every backend and reports `Ready=False`/`InvalidCatalog` on the provider config, so the failure surfaces once on the framework instead of on every dependent agent. |
+| T1 | Catalog → annotation on `AgentProviderConfig` (parser + helpers + optional webhook validation + manifests regen) | — | **partial** — parser, helpers and manifests landed; the annotation-validating *webhook* did **not**, so a malformed catalog is admitted rather than rejected at apply time and surfaces only on an agent that needs a catalog image (`MissingImage`, carrying the parse error). Deliberately not a readiness gate — see decision 2. |
 | T2 | Resolve `deploymentRef` via `servedName` + gateway endpoint (lower it to the `gatewayEndpoint` path; direct-Service fallback when no gateway) | — | done |
 | T3 | Collapse `spec.models[]` → single `spec.model`; drop the `name: default` slot key; update config references, tests, demo manifests | T2 | done |
 | T4 | Extract agent providers to `providers/agent-*` own-module dirs behind a shared provider interface (kagent, orka, container) | — (do after T1/T2 to avoid churn) | **packaging only** — `providers/agent-*` exist as separate modules and binaries, but the reconcilers still live in `controller/internal/controller/` and are re-exported through `controller/pkg/agentproviders` to work around Go's `internal` rule. Rendering has not moved out of core, core's ClusterRole still carries `kagent.dev` and `core.orka.ai`, and the shims ship no RBAC or deploy manifests. Decision 3's "each provider module renders and reconciles its downstream CRs/workloads" is **not** met. |
@@ -100,6 +198,7 @@ frameworks are Kagent, OpenClaw, CrewAI and LangGraph.
 | **Frameworks shipped ≠ frameworks designed** | Kagent ✅. **Orka** ships a full CRD-to-CRD provider but appears nowhere in the design — it was chosen to exercise the doc's own open question on Job-backed one-shot agents (`spec.lifecycle`). **CrewAI and LangGraph** now have `AgentProviderConfig` entries and deployment samples (CrewAI: `research-crew`, `nightly-report`, `pinned-uid-agent`; LangGraph: `graph-agent`), so the gap is narrowed to the missing contract-compatible **image** — see the row below. |
 | **OpenClaw and Hermes samples are undeployable** | Both catalogs reference wrapper images (`ghcr.io/ai-runway/openclaw-agent`, `.../hermes-agent`) that have no Dockerfile, build target or source in this repo. The upstream OpenClaw image does not honour the container contract, which is why a wrapper is referenced — but the wrapper does not exist. |
 | **Provider readiness is asserted by core, not reported by providers** | `AgentProviderConfigReconciler.evaluate` returns ready unconditionally for `backend: container`. That is true only while the container provider runs inside the core binary. Once the shims run standalone, core will report a framework ready whose provider is not running, and the readiness apply uses `ForceOwnership` so a shim could not correct it. Contrast the inference side, which self-registers and heartbeats from the provider process. |
+| **`Localhost` seccomp profiles are not provider-owned** | Every other security-context override is one-way: the render path clamps it back if it would weaken the posture. `seccompProfile.type: Localhost` is the exception. An agent author cannot create a node-local profile (that needs node access or the Security Profiles Operator), but they can reference one, and a profile placed for another workload may permit more than `RuntimeDefault`. Forbidding `Localhost` would remove the legitimate hardening case, so the fix is to make the permitted profiles provider-owned — the pattern `capabilities.writableRootFilesystem` already uses. Not built. |
 | **Egress `NetworkPolicy` not built** | The formal design doc calls the auto-derived egress `NetworkPolicy` *"the one thing AI Runway actively materializes"*, with an `airunway.ai/egress: unrestricted` escape-hatch annotation. Neither exists — `grep -i networkpolicy` over all Go returns nothing. Listed as a follow-up in `controller/docs/agent-marketplace-poc.md`. This is the largest unbuilt item in the formal doc. |
 | **`spec.protocols` absent; provider `protocols` unenforced** | `protocols` exists only as a declared provider capability with no enforcement — `HasProtocol` has no non-test caller, unlike its sibling `HasBindingMode` which *is* enforced. MCP deferral is explicitly sanctioned by a design-doc comment; A2A is not. (`spec.security` is **not** a gap — the current formal doc specifies no `spec.security`; see decision 5.) |
 | **`InstallationInfo` not reused** | The design says to reuse the existing shape "where possible". Inference providers get structured `helmRepos`/`helmCharts`/`steps`; agent frameworks get a single plain-text sentence, so there is no UI-driven install flow for them. |

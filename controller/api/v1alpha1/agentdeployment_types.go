@@ -286,6 +286,12 @@ type AgentDeploymentSpec struct {
 	Resources *AgentResourceSpec `json:"resources,omitempty"`
 
 	// observability configures observability emission (OTLP export).
+	//
+	// Honoured by the container backend only. CRD-backed providers (e.g.
+	// kagent, orka) do NOT currently translate it — their upstream operators own
+	// the agent's runtime environment — so on those backends this field is
+	// accepted but has no effect, exactly like resources above. Treat it as a
+	// container-backend hint until per-backend mapping is added.
 	// +optional
 	Observability *AgentObservabilitySpec `json:"observability,omitempty"`
 }
@@ -473,12 +479,21 @@ type AgentDeploymentStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a valid RFC 1035 DNS label (lower-case alphanumerics or '-', starting with a letter) because the container backend fronts each agent with a Service of the same name"
 
 // AgentDeployment is the Schema for the agentdeployments API.
 //
 // An AgentDeployment describes one agent instance: which framework
 // reconciles it, which model it talks to, and the framework-specific
 // configuration that defines its behaviour.
+//
+// The name is constrained more tightly than a custom resource name normally is.
+// The container backend fronts each agent with a Service, and Service names are
+// validated as RFC 1035 DNS *labels* — so "my.agent" or "7agent" are perfectly
+// legal CR names that make every Service apply fail, leaving pods running with
+// no Service and no published address. The webhook reports this with a better
+// message, but the rule is enforced here too so it also holds when webhooks are
+// disabled and for objects admitted before the webhook existed.
 type AgentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
