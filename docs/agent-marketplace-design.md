@@ -17,7 +17,7 @@ The model side (`ModelDeployment` + `InferenceProviderConfig` + `providers/*`) a
 - Catalog: `AgentProviderConfig` catalog is **annotation-level** (`airunway.ai/agent-catalog`), parsed by `CatalogItems()`. It is no longer a spec field — see decision 2. *(This bullet described the pre-T1 state; corrected after T1 landed.)*
 - Providers: agent provider **reconcilers are still in-tree** (`controller/internal/controller/agentprovider_{kagent,orka,container}_*.go`) even though `providers/agent-*/` modules and binaries now exist — those shims re-export the in-tree reconcilers via `controller/pkg/agentproviders`. Model providers are genuinely **out-of-tree own-module dirs** (`providers/*/` each with `go.mod` + `cmd/main.go` + `Dockerfile` + controller/transformer). `providers/README.md` states the intention is for *all* providers to live out-of-tree.
 - Provider readiness: `AgentProviderConfigReconciler` sets `status.ready` itself — no hand-patching required.
-- Reusable model-side patterns: `ModelDeployment.spec.model.servedName` (`modeldeployment_types.go:164-168`) and `ModelDeployment.spec.provider.overrides *runtime.RawExtension` (`modeldeployment_types.go:191`).
+- Reusable model-side patterns: `ModelDeployment.spec.model.servedName` (`modeldeployment_types.go:213`) and `ModelDeployment.spec.provider.overrides *runtime.RawExtension` (`modeldeployment_types.go:236`).
 
 ## Decisions
 
@@ -96,8 +96,8 @@ guarantee.
 
 | Invariant | Enforced by | Webhook still does |
 |---|---|---|
-| `spec.framework.name` immutable | CRD CEL transition rule | nothing extra |
-| `metadata.name` is an RFC 1035 label | CRD CEL rule | clearer message |
+| `spec.framework.name` immutable | CRD CEL transition rule | same verdict, friendlier message |
+| `metadata.name` matches the RFC 1035 *pattern* | CRD CEL rule | clearer message, plus the 63-char cap |
 | Security floor (non-root, no privilege escalation, read-only root, seccomp, dropped caps) | clamped in the render path | rejects at apply time |
 | Requester may read a referenced Secret | webhook **only** — so the reconciler refuses credential-bearing bindings when the webhook is off | the check itself |
 
@@ -124,7 +124,7 @@ left the whole escalation open — keep the reference identical and repoint
 `spec.config.image` at your own image. Being unable to edit a credential-bearing
 agent without read access to its credential is the intended policy.
 
-### 8. Agent pods carry no ServiceAccount token
+### 8. Container-backed agent pods carry no ServiceAccount token
 
 The image is author-chosen, so the default token would let someone who can create
 an AgentDeployment — but not a Pod — execute code as the namespace's default
@@ -184,7 +184,7 @@ Ordered; blocked items are called out. Do **not** start blocked tasks until thei
 | T2 | Resolve `deploymentRef` via `servedName` + gateway endpoint (lower it to the `gatewayEndpoint` path; direct-Service fallback when no gateway) | — | done |
 | T3 | Collapse `spec.models[]` → single `spec.model`; drop the `name: default` slot key; update config references, tests, demo manifests | T2 | done |
 | T4 | Extract agent providers to `providers/agent-*` own-module dirs behind a shared provider interface (kagent, orka, container) | — (do after T1/T2 to avoid churn) | **packaging only** — `providers/agent-*` exist as separate modules and binaries, but the reconcilers still live in `controller/internal/controller/` and are re-exported through `controller/pkg/agentproviders` to work around Go's `internal` rule. Rendering has not moved out of core, core's ClusterRole still carries `kagent.dev` and `core.orka.ai`, and the shims ship no RBAC or deploy manifests. Decision 3's "each provider module renders and reconciles its downstream CRs/workloads" is **not** met. |
-| T5 | Install-instructions annotation + `OperatorNotInstalled` condition surfaced to UI | T4 | done |
+| T5 | Install-instructions annotation + `OperatorNotInstalled` condition | T4 | **partial** — the annotation and the condition land on CR status, and the message is carried onto each agent's `FrameworkReady`. Nothing in `backend/`, `frontend/` or `plugins/headlamp/` reads agent CRDs yet, so there is no UI surface — see the marketplace-metadata gap below. |
 | T6 | Add `spec.provider.overrides` `RawExtension` + webhook allow-list validation for security-context overrides | T4 | done |
 | T7 | Docs: update `docs/crd-reference.md` + `docs/gateway.md` for the binding convergence and catalog move | T1–T3 | done |
 
@@ -196,7 +196,7 @@ frameworks are Kagent, OpenClaw, CrewAI and LangGraph.
 | Gap | State |
 |---|---|
 | **Frameworks shipped ≠ frameworks designed** | Kagent ✅. **Orka** ships a full CRD-to-CRD provider but appears nowhere in the design — it was chosen to exercise the doc's own open question on Job-backed one-shot agents (`spec.lifecycle`). **CrewAI and LangGraph** now have `AgentProviderConfig` entries and deployment samples (CrewAI: `research-crew`, `nightly-report`, `pinned-uid-agent`; LangGraph: `graph-agent`), so the gap is narrowed to the missing contract-compatible **image** — see the row below. |
-| **OpenClaw and Hermes samples are undeployable** | Both catalogs reference wrapper images (`ghcr.io/ai-runway/openclaw-agent`, `.../hermes-agent`) that have no Dockerfile, build target or source in this repo. The upstream OpenClaw image does not honour the container contract, which is why a wrapper is referenced — but the wrapper does not exist. |
+| **OpenClaw and Hermes samples are undeployable** | OpenClaw's *catalog* references a wrapper image (`ghcr.io/ai-runway/openclaw-agent`); Hermes registers no catalog image at all, and its *deployment sample* supplies `ghcr.io/ai-runway/hermes-agent:latest`. Neither image exists that have no Dockerfile, build target or source in this repo. The upstream OpenClaw image does not honour the container contract, which is why a wrapper is referenced — but the wrapper does not exist. |
 | **Provider readiness is asserted by core, not reported by providers** | `AgentProviderConfigReconciler.evaluate` returns ready unconditionally for `backend: container`. That is true only while the container provider runs inside the core binary. Once the shims run standalone, core will report a framework ready whose provider is not running, and the readiness apply uses `ForceOwnership` so a shim could not correct it. Contrast the inference side, which self-registers and heartbeats from the provider process. |
 | **`Localhost` seccomp profiles are not provider-owned** | Every other security-context override is one-way: the render path clamps it back if it would weaken the posture. `seccompProfile.type: Localhost` is the exception. An agent author cannot create a node-local profile (that needs node access or the Security Profiles Operator), but they can reference one, and a profile placed for another workload may permit more than `RuntimeDefault`. Forbidding `Localhost` would remove the legitimate hardening case, so the fix is to make the permitted profiles provider-owned — the pattern `capabilities.writableRootFilesystem` already uses. Not built. |
 | **Egress `NetworkPolicy` not built** | The formal design doc calls the auto-derived egress `NetworkPolicy` *"the one thing AI Runway actively materializes"*, with an `airunway.ai/egress: unrestricted` escape-hatch annotation. Neither exists — `grep -i networkpolicy` over all Go returns nothing. Listed as a follow-up in `controller/docs/agent-marketplace-poc.md`. This is the largest unbuilt item in the formal doc. |

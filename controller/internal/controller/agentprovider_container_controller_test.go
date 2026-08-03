@@ -959,3 +959,37 @@ var _ = Describe("Container provider: catalog and backend-switch handling", func
 			k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch-config", Namespace: "default"}, cm))).To(BeTrue())
 	})
 })
+
+// A hardening override must survive the clamp. The webhook accepts
+// readOnlyRootFilesystem: true, so pinning the value to the provider capability
+// in both directions silently discarded it — the one direction the "can harden,
+// never weaken" rule is supposed to permit.
+func TestSecurityFloorAllowsHardeningAboveProviderDefault(t *testing.T) {
+	overrides := &containerSecurityOverrides{
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)},
+	}
+	pod := &corev1.PodSecurityContext{}
+	ctr := &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(false)} // provider default for writableRoot
+
+	applyContainerSecurityOverrides(pod, ctr, overrides, true /* writableRoot */)
+
+	if ctr.ReadOnlyRootFilesystem == nil || !*ctr.ReadOnlyRootFilesystem {
+		t.Error("an author hardening a writable-root framework must keep readOnlyRootFilesystem: true")
+	}
+}
+
+// The other direction is still forced: a framework that never declared a
+// writable root cannot have read-only turned off, webhook or no webhook.
+func TestSecurityFloorStillForcesReadOnlyWhenNotDeclared(t *testing.T) {
+	overrides := &containerSecurityOverrides{
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(false)},
+	}
+	pod := &corev1.PodSecurityContext{}
+	ctr := &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)}
+
+	applyContainerSecurityOverrides(pod, ctr, overrides, false /* writableRoot */)
+
+	if ctr.ReadOnlyRootFilesystem == nil || !*ctr.ReadOnlyRootFilesystem {
+		t.Error("readOnlyRootFilesystem must stay true when the provider did not declare a writable root")
+	}
+}

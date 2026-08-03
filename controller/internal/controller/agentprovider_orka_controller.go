@@ -73,9 +73,14 @@ type orkaAgentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers;agents,verbs=get;list;watch;create;update;patch;delete
-// Framework providers WRITE their managed no-auth Secret but never READ any
-// Secret — no `get`. Credential resolution is the core controller's job.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;update;patch
+// Credential resolution is the core controller's job; providers never read a
+// credential they did not create. The `get` here is an existence-and-ownership
+// check before writing the managed no-auth Secret — without it, an unforced
+// server-side apply silently ADOPTS a same-named Secret a user already owns
+// (SSA only conflicts on fields another manager owns AND this apply changes;
+// adding a key, labels and an ownerReference is all "added"), which then
+// garbage-collects their Secret when the AgentDeployment is deleted.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
 func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -109,9 +114,10 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		); err != nil {
 			return ctrl.Result{}, err
 		}
-		// No status write: ProviderReady belongs to the framework's current
-		// provider now.
-		return ctrl.Result{}, nil
+		// See the kagent provider: release the provider-owned status and its SSA
+		// ownership so the status is not left stale and a successor provider can
+		// take over.
+		return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, &ad, OrkaFieldOwner)
 	}
 
 	switch agentprovider.ClassifyBinding(&ad) {

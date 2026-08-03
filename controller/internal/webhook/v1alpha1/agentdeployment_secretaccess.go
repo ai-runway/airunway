@@ -28,10 +28,14 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
-// secretAccessReviewer answers "may this user read that Secret?" on behalf of
-// the admission webhook. It is an interface so tests can drive both answers
-// without an API server.
-type secretAccessReviewer interface {
+// SecretAccessReviewer answers "may this user read that Secret?" on behalf of
+// the admission webhook.
+//
+// Exported because AgentDeploymentCustomValidator.SecretAccess is exported: an
+// exported field whose type is unexported cannot be set from another package,
+// which forced callers (including tests) to leave it nil — and a nil reviewer
+// used to mean "skip the check entirely".
+type SecretAccessReviewer interface {
 	CanGetSecret(ctx context.Context, user admission.Request, namespace, name string) (allowed bool, reason string, err error)
 }
 
@@ -105,10 +109,15 @@ func (v *AgentDeploymentCustomValidator) validateCredentialAccess(
 
 	path := field.NewPath("spec", "model", "externalAPI", "credentialsRef", "name")
 
-	// No reviewer wired (unit tests constructing the validator directly) means
-	// there is nothing to enforce against; the manager always wires one.
+	// An unwired reviewer is a configuration bug, not a reason to skip. This
+	// used to return nil "because the manager always wires one" — which meant
+	// deleting the wiring in SetupAgentDeploymentWebhookWithManager silently
+	// disabled the entire check and no test failed. Fail closed instead, so a
+	// missing reviewer is loud at the first credential-bearing request rather
+	// than reopening the escalation quietly.
 	if v.SecretAccess == nil {
-		return nil
+		return field.ErrorList{field.InternalError(path,
+			fmt.Errorf("no Secret authorizer is configured, so this reference cannot be authorized; this is a controller wiring bug"))}
 	}
 
 	req, err := admission.RequestFromContext(ctx)

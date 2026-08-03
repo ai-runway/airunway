@@ -313,10 +313,59 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 	if !metav1.IsControlledBy(obj, owner) {
 		return nil
 	}
-	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+	// Propagation must be explicit. batch/v1 Job is the one kind here whose
+	// server-side default is OrphanDependents, kept for backwards compatibility:
+	// deleting it without a policy strips the ownerReferences from its pods and
+	// removes only the Job. The pods keep running, and having lost their owner
+	// they are no longer collected when the AgentDeployment itself goes away.
+	//
+	// That turns teardown into a leak in exactly the case it exists for: when a
+	// credential is revoked, this helper is what is supposed to stop the agent
+	// still holding it. Deployment, Service and ConfigMap already default to
+	// Background, so stating it costs nothing and closes the Job case.
+	policy := metav1.DeletePropagationBackground
+	if err := c.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete owned object %s: %w", key, err)
 	}
 	return nil
+}
+
+// ReleaseOwnedStatus relinquishes every provider-owned status field, for a
+// provider that is standing aside because the framework is no longer its to
+// serve.
+//
+// Simply returning without writing is not enough, and does two wrong things.
+// First, the last status the provider wrote survives: an agent whose workload
+// has just been torn down keeps reporting phase Running, a runtime.workloadRef
+// pointing at a deleted Deployment, and replicas 1/1 ready.
+//
+// Second — and worse — server-side apply ownership is per-field and sticky. A
+// provider that stops applying keeps owning phase, runtime, replicas and the
+// ProviderReady condition indefinitely. Because ApplyOwnedStatus deliberately
+// does not force, a successor provider taking the framework over then fails
+// every reconcile with a conflict against a manager that will never write
+// again. Standing aside silently would deadlock the handover it exists to
+// enable.
+//
+// It writes a terminal Pending/ProviderReady=False status and omits runtime and
+// replicas, which drops those two fields and releases their ownership — an
+// entirely empty status cannot be applied, because the conversion to
+// unstructured discards it and the API server rejects a null status.
+//
+// Residual: phase and the ProviderReady condition are still written, so their
+// ownership stays with this manager. A successor provider for the same framework
+// name would need ForceOwnership to claim those two. That case needs the
+// framework to be deleted and recreated on a different backend under a name a
+// different provider serves, so it is narrow — but it is not closed, and the
+// visible half (an agent reporting Running with a workloadRef to a deleted
+// object) is.
+func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, fieldOwner string) error {
+	return ApplyOwnedStatus(ctx, c, ad, fieldOwner,
+		airunwayv1alpha1.AgentPhasePending,
+		nil, // drop runtime.workloadRef — it points at something just deleted
+		nil, // drop replicas — nothing is running
+		metav1.ConditionFalse, "FrameworkNoLongerServed",
+		"this framework is no longer registered to this provider's backend; the workload it rendered has been removed")
 }
 
 // CleanupOwned tears down the resources a provider rendered for ad, so a
@@ -422,11 +471,25 @@ func KeylessCredentialSecretName(agentName string) string {
 // holding a placeholder token and returns the binding with CredentialsRef set.
 // A binding that already has credentials is returned untouched.
 //
-// The apply is not forced: the Secret name derives from the agent name, so it
-// can collide with a hand-managed Secret, and adopting one would overwrite its
-// data and attach an owner reference that garbage-collects it. SSA conflict
-// detection catches that without needing any Secret read verb — providers write
-// managed Secrets but never read Secrets.
+// The Secret name derives from the agent name, so it can collide with one a
+// user already manages. Adopting that Secret would inject a key into it and
+// attach a controller owner reference, so deleting the AgentDeployment would
+// garbage-collect someone else's Secret — and note the manager has no `delete`
+// on Secrets, so an owner reference is a way to acquire deletion it was never
+// granted.
+//
+// An earlier version relied on the unforced apply to prevent this, on the
+// reasoning that SSA would report a conflict. **That is false**, and was
+// demonstrated against a real API server: SSA raises a conflict only for fields
+// another manager already owns *and* whose value the apply changes. Adding a new
+// data key, new labels and a new ownerReferences entry to an unowned Secret is
+// all "added", so the apply succeeds silently and the Secret is adopted.
+//
+// So ownership is checked explicitly before writing. This costs `get` on Secrets
+// in the provider's RBAC, which design-doc §5 had hoped to avoid — but a
+// component that may create a Secret and not read one cannot do create-if-absent
+// safely, which is precisely the bug. Providers still never read a *credential*
+// they did not create; the read here is an existence-and-ownership check.
 func EnsureBindingCredentials(
 	ctx context.Context,
 	c client.Client,
@@ -461,8 +524,15 @@ func EnsureBindingCredentials(
 	if err := controllerutil.SetControllerReference(ad, secret, scheme); err != nil {
 		return binding, fmt.Errorf("set owner reference on keyless credential secret: %w", err)
 	}
+	// Refuse rather than adopt. VerifyOwnedOrAbsent returns an error when a
+	// Secret of this name exists and is not controlled by this AgentDeployment,
+	// which surfaces as a provider-not-ready reason the operator can act on —
+	// rename the agent, or remove the colliding Secret.
+	if err := VerifyOwnedOrAbsent(ctx, c, scheme, ad, secret.DeepCopy()); err != nil {
+		return binding, err
+	}
 	if err := c.Patch(ctx, secret, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
-		return binding, fmt.Errorf("apply keyless credential secret %s/%s (a conflict here means a Secret of this name already exists and is managed by someone else): %w",
+		return binding, fmt.Errorf("apply keyless credential secret %s/%s: %w",
 			secret.Namespace, secret.Name, err)
 	}
 

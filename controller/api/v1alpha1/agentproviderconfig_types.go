@@ -198,7 +198,16 @@ type AgentProviderConfigSpec struct {
 	Capabilities *AgentProviderCapabilities `json:"capabilities"`
 }
 
-// AgentProviderConfigStatus is written by the framework provider.
+// AgentProviderConfigStatus reports whether a framework is ready to accept
+// AgentDeployments.
+//
+// Provider-reported readiness is the intended end state, but it is not what
+// happens today: `ready`, `lastHeartbeat` and the Ready condition are written by
+// the core readiness reconciler (field owner `airunway-agents-provider-readiness`),
+// and `version` by a per-provider version reporter. Core therefore infers health
+// from backend metadata and operator CRD presence rather than from the process
+// that actually renders agents — so a framework can report ready while its shim
+// is absent. Tracked as a known gap; see docs/agent-marketplace-design.md.
 type AgentProviderConfigStatus struct {
 	// ready indicates whether the framework provider controller is
 	// healthy and willing to accept AgentDeployments. The dashboard
@@ -234,9 +243,17 @@ type AgentProviderConfigStatus struct {
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=".spec.capabilities.backend"
 // +kubebuilder:printcolumn:name="Version",type=string,JSONPath=".status.version"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') && size(self.metadata.name) <= 63",message="metadata.name must be a lower-case DNS label of at most 63 characters, because AgentDeployment.spec.framework.name references it and is constrained to exactly that shape"
 
 // AgentProviderConfig registers an agent framework with AI Runway. It is
 // the agent-marketplace analogue of InferenceProviderConfig.
+//
+// The name is constrained to match what AgentDeployment.spec.framework.name
+// accepts. Cluster-scoped resources otherwise permit DNS-1123 subdomains — dots
+// and up to 253 characters — so without this a framework called "my.framework"
+// registers happily, reports Ready, shows a green marketplace tile, and then
+// every AgentDeployment naming it is rejected by the API server. The failure
+// would surface on the user's object rather than on the misnamed registration.
 type AgentProviderConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -227,7 +227,7 @@ status:
 | Annotation | Type | Description |
 |---|---|---|
 | `airunway.ai/agent-catalog` | JSON string | Catalog entries shown in the agent marketplace UI. Value must be a JSON array of items with unique `name` and non-empty `title`. |
-| `airunway.ai/install-instructions` | string | Plain-text install guidance shown when `status.conditions[type=Ready].reason` is `OperatorNotInstalled`. |
+| `airunway.ai/install-instructions` | string | Plain-text install guidance. Appended to the provider config's `Ready` message for `OperatorNotInstalled` and `OperatorAPIGroupMissing`, and onto each dependent AgentDeployment's `FrameworkReady` message for any not-ready reason. |
 
 ## AgentDeployment model binding behavior
 

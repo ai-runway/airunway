@@ -85,7 +85,7 @@ type AgentDeploymentCustomValidator struct {
 	// so an AgentDeployment cannot borrow the controller's privilege to read
 	// one the author cannot. Nil disables the check, which is only appropriate
 	// in unit tests; the manager always wires it.
-	SecretAccess secretAccessReviewer
+	SecretAccess SecretAccessReviewer
 }
 
 // agentDeploymentMaxNameLength caps AgentDeployment names so every derived

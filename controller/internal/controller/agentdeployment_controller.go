@@ -491,6 +491,17 @@ func (r *AgentDeploymentReconciler) resolveGatewayEndpointBinding(
 		ns = ad.Namespace
 	}
 
+	// Same guard as deploymentRef above, for the same reason: the controller
+	// reads the Gateway with cluster-wide access, so without this an
+	// AgentDeployment in one namespace could name a Gateway in another and have
+	// its address resolved and published into status on their behalf. Leaving
+	// the check on only two of the three binding modes made the third the
+	// obvious way around it.
+	if ns != ad.Namespace {
+		return st, false, false, "CrossNamespaceRefNotAllowed",
+			fmt.Sprintf("spec.model.gatewayEndpoint references Gateway %s/%s in another namespace; cross-namespace references require an AgentReferenceGrant (not yet supported)", ns, gw.GatewayRef.Name)
+	}
+
 	st.ModelName = gw.ModelName
 	var gateway unstructured.Unstructured
 	gateway.SetAPIVersion("gateway.networking.k8s.io/v1")

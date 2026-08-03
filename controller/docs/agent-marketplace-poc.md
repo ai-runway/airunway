@@ -25,7 +25,7 @@ Both crd providers reflect the upstream operator's own readiness (`status.condit
 
 ## Model binding modes
 
-`externalAPI` (OpenAI/Anthropic/Azure OpenAI/custom), `deploymentRef` (an in-cluster `ModelDeployment`, resolved to its service or gateway endpoint), and `gatewayEndpoint`. The core controller validates each binding's mode against the provider's declared `capabilities.modelBindingModes` and refuses unsupported combinations. The resolved binding is injected into container agents as `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY`, and into crd agents via the framework's native model config.
+`externalAPI` (OpenAI/Anthropic/Azure OpenAI/custom), `deploymentRef` (an in-cluster `ModelDeployment`, resolved to its service or gateway endpoint), and `gatewayEndpoint`. The core controller validates each binding's mode against the provider's declared `capabilities.modelBindingModes` and refuses unsupported combinations. The resolved binding is injected into container agents as the environment family matching `status.modelBinding.apiType` — `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` for openai, custom and keyless in-cluster bindings, and the `ANTHROPIC_*` / `AZURE_OPENAI_*` equivalents for those types — and into crd agents via the framework's native model config.
 
 ## `spec.config` — the framework contract
 

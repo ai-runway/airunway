@@ -527,10 +527,12 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: metadata.name must be a valid RFC 1035 DNS label (lower-case alphanumerics
-            or '-', starting with a letter) because the container backend fronts each
-            agent with a Service of the same name
-          rule: self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')
+        - message: metadata.name must be a valid RFC 1035 DNS label — at most 63 characters,
+            lower-case alphanumerics or '-', starting with a letter — because the
+            container backend fronts each agent with a Service of the same name and
+            the CRD backends derive upstream resource names from it
+          rule: self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name)
+            <= 63
     served: true
     storage: true
     subresources:
@@ -572,6 +574,13 @@ spec:
         description: |-
           AgentProviderConfig registers an agent framework with AI Runway. It is
           the agent-marketplace analogue of InferenceProviderConfig.
+
+          The name is constrained to match what AgentDeployment.spec.framework.name
+          accepts. Cluster-scoped resources otherwise permit DNS-1123 subdomains — dots
+          and up to 253 characters — so without this a framework called "my.framework"
+          registers happily, reports Ready, shows a green marketplace tile, and then
+          every AgentDeployment naming it is rejected by the API server. The failure
+          would surface on the user's object rather than on the misnamed registration.
         properties:
           apiVersion:
             description: |-
@@ -693,7 +702,17 @@ spec:
             - capabilities
             type: object
           status:
-            description: AgentProviderConfigStatus is written by the framework provider.
+            description: |-
+              AgentProviderConfigStatus reports whether a framework is ready to accept
+              AgentDeployments.
+
+              Provider-reported readiness is the intended end state, but it is not what
+              happens today: `ready`, `lastHeartbeat` and the Ready condition are written by
+              the core readiness reconciler (field owner `airunway-agents-provider-readiness`),
+              and `version` by a per-provider version reporter. Core therefore infers health
+              from backend metadata and operator CRD presence rather than from the process
+              that actually renders agents — so a framework can report ready while its shim
+              is absent. Tracked as a known gap; see docs/agent-marketplace-design.md.
             properties:
               conditions:
                 description: conditions follow the standard Kubernetes condition pattern.
@@ -780,6 +799,12 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be a lower-case DNS label of at most 63 characters,
+            because AgentDeployment.spec.framework.name references it and is constrained
+            to exactly that shape
+          rule: self.metadata.name.matches('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') && size(self.metadata.name)
+            <= 63
     served: true
     storage: true
     subresources:

@@ -92,9 +92,14 @@ type kagentConfig struct {
 }
 
 // +kubebuilder:rbac:groups=kagent.dev,resources=agents;modelconfigs,verbs=get;list;watch;create;update;patch;delete
-// Framework providers WRITE their managed no-auth Secret but never READ any
-// Secret — no `get`. Credential resolution is the core controller's job.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;update;patch
+// Credential resolution is the core controller's job; providers never read a
+// credential they did not create. The `get` here is an existence-and-ownership
+// check before writing the managed no-auth Secret — without it, an unforced
+// server-side apply silently ADOPTS a same-named Secret a user already owns
+// (SSA only conflicts on fields another manager owns AND this apply changes;
+// adding a key, labels and an ownerReference is all "added"), which then
+// garbage-collects their Secret when the AgentDeployment is deleted.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
 func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -136,9 +141,12 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Deliberately no status write: ProviderReady now belongs to whichever
-		// provider owns this framework, and two writers would fight over it.
-		return ctrl.Result{}, nil
+		// Release the provider-owned status rather than leaving it stale, and
+		// with it the SSA ownership — otherwise this agent keeps reporting
+		// Running with a workloadRef to something deleted, and a successor
+		// provider deadlocks on a conflict against a manager that will never
+		// write again.
+		return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, &ad, KagentFieldOwner)
 	}
 
 	// Consume the core-resolved binding. Never build a ModelConfig from a

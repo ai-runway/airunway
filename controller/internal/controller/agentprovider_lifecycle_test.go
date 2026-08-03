@@ -29,6 +29,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -297,8 +298,15 @@ var _ = Describe("Container provider workload lifecycle", func() {
 		Expect(updated.Generation).To(BeNumerically(">", dep.Generation))
 	})
 
-	It("renders workloads for an AgentDeployment whose name exceeds the label limit", func() {
-		longName := strings.Repeat("a", 80)
+	It("renders workloads for an AgentDeployment at the maximum permitted name length", func() {
+		// The maximum the CEL rule now admits. Note this spec can no longer prove
+		// anything about the bounding helpers: at 63 characters they pass their
+		// input through byte-identically, and a longer name cannot be created
+		// through the API any more. The helpers' long-input behaviour — which
+		// still matters for objects admitted before the rule existed — is
+		// covered by TestDerivedNamesStayBoundedForPreRuleNames below, which
+		// calls them directly.
+		longName := strings.Repeat("a", 63)
 		provider("long-fw")
 		agent(longName, "long-fw", map[string]any{"image": "ghcr.io/x/agent:v1"}, "")
 
@@ -583,6 +591,99 @@ func TestNormalizeOpenAIBaseURLHandlesIPv6(t *testing.T) {
 	for _, c := range cases {
 		if got := normalizeOpenAIBaseURL(c.in); got != c.want {
 			t.Errorf("normalizeOpenAIBaseURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+var _ = Describe("Provider status ownership on stand-aside", func() {
+	ctx := context.Background()
+
+	It("releases the provider-owned status and its SSA ownership", func() {
+		// Needs a real API server: SSA field ownership is what is under test, and
+		// the fake client does not implement it.
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "release-fw"},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend:           airunwayv1alpha1.AgentProviderBackendContainer,
+					ModelBindingModes: []airunwayv1alpha1.ModelBindingMode{airunwayv1alpha1.ModelBindingModeExternalAPI},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "release-agent", Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "release-fw"},
+				Model: airunwayv1alpha1.ModelBinding{
+					ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+						Type:    airunwayv1alpha1.ExternalAPITypeOpenAI,
+						BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+		By("a provider publishing a healthy status")
+		Expect(agentprovider.ApplyOwnedStatus(ctx, k8sClient, ad, ContainerFieldOwner,
+			airunwayv1alpha1.AgentPhaseRunning,
+			&airunwayv1alpha1.AgentRuntimeStatus{Address: "http://release-agent.default.svc.cluster.local"},
+			&airunwayv1alpha1.AgentReplicaStatus{Desired: 1, Ready: 1, Available: 1},
+			metav1.ConditionTrue, "WorkloadReady", "ready")).To(Succeed())
+
+		live := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
+		Expect(live.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
+		Expect(live.Status.Replicas).NotTo(BeNil())
+
+		By("standing aside")
+		Expect(agentprovider.ReleaseOwnedStatus(ctx, k8sClient, live, ContainerFieldOwner)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
+		Expect(live.Status.Phase).NotTo(Equal(airunwayv1alpha1.AgentPhaseRunning),
+			"a torn-down agent must not keep reporting Running")
+		Expect(live.Status.Runtime).To(BeNil(), "runtime.workloadRef pointed at a deleted workload")
+		Expect(live.Status.Replicas).To(BeNil(), "nothing is running, so replicas must not be reported")
+
+		cond := meta.FindStatusCondition(live.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("FrameworkNoLongerServed"))
+	})
+})
+
+// TestDerivedNamesStayBoundedForPreRuleNames covers what the envtest spec no
+// longer can. The CRD's CEL rule caps metadata.name at 63, so an over-long name
+// cannot be created through the API — but objects admitted before that rule
+// existed keep their names, and every derived name must still be legal.
+//
+// These are called directly rather than through a reconcile precisely because
+// the API server would now reject the input.
+func TestDerivedNamesStayBoundedForPreRuleNames(t *testing.T) {
+	ad := &airunwayv1alpha1.AgentDeployment{}
+	ad.Name = strings.Repeat("a", 253) // the object-name limit a pre-rule cluster allowed
+	ad.Namespace = "default"
+	ad.Spec.Framework.Name = "crewai"
+
+	if got := agentServiceName(ad); len(got) > agentprovider.MaxDNSLabelNameLength {
+		t.Errorf("Service name = %d bytes, want <= %d (Services are RFC 1035 labels)",
+			len(got), agentprovider.MaxDNSLabelNameLength)
+	}
+	if got := agentConfigMapName(ad); len(got) > agentprovider.MaxResourceNameLength {
+		t.Errorf("ConfigMap name = %d bytes, want <= %d", len(got), agentprovider.MaxResourceNameLength)
+	}
+	for key, value := range agentLabels(ad) {
+		if len(value) > agentprovider.MaxLabelValueLength {
+			t.Errorf("label %q = %d bytes, want <= %d", key, len(value), agentprovider.MaxLabelValueLength)
+		}
+	}
+	for key, value := range agentSelector(ad) {
+		if len(value) > agentprovider.MaxLabelValueLength {
+			t.Errorf("selector %q = %d bytes, want <= %d", key, len(value), agentprovider.MaxLabelValueLength)
 		}
 	}
 }

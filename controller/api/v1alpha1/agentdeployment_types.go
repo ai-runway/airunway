@@ -479,7 +479,7 @@ type AgentDeploymentStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a valid RFC 1035 DNS label (lower-case alphanumerics or '-', starting with a letter) because the container backend fronts each agent with a Service of the same name"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name) <= 63",message="metadata.name must be a valid RFC 1035 DNS label — at most 63 characters, lower-case alphanumerics or '-', starting with a letter — because the container backend fronts each agent with a Service of the same name and the CRD backends derive upstream resource names from it"
 
 // AgentDeployment is the Schema for the agentdeployments API.
 //

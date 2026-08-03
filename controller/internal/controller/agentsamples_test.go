@@ -18,7 +18,10 @@ package controller
 
 import (
 	"context"
+	admissionv1 "k8s.io/api/admission/v1"
+	authnv1 "k8s.io/api/authentication/v1"
 	"os"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,7 +47,17 @@ var _ = Describe("Agent samples", func() {
 	}
 
 	It("apply cleanly against the real CRDs and pass the webhook", func() {
-		validator := &webhookv1alpha1.AgentDeploymentCustomValidator{}
+		// Two samples carry a credentialsRef. Wiring a permissive reviewer and an
+		// admission context means those actually traverse the authorization path
+		// instead of short-circuiting on a nil reviewer — the test claimed to run
+		// samples "through the webhook" while skipping it for exactly the samples
+		// where it matters.
+		validator := &webhookv1alpha1.AgentDeploymentCustomValidator{SecretAccess: allowAllSecrets{}}
+		admitCtx := admission.NewContextWithRequest(ctx, admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				UserInfo: authnv1.UserInfo{Username: "sample-validator"},
+			},
+		})
 		applied := 0
 
 		// AgentProviderConfig is cluster-scoped and the sample names overlap
@@ -82,7 +95,7 @@ var _ = Describe("Agent samples", func() {
 				}
 				ad := &airunwayv1alpha1.AgentDeployment{}
 				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(u), ad)).To(Succeed())
-				_, err := validator.ValidateCreate(ctx, ad)
+				_, err := validator.ValidateCreate(admitCtx, ad)
 				Expect(err).NotTo(HaveOccurred(),
 					"AgentDeployment %s was rejected by the validating webhook", ad.Name)
 			}
@@ -119,3 +132,13 @@ var _ = Describe("Agent samples", func() {
 		}
 	})
 })
+
+// allowAllSecrets lets the sample-validation spec exercise the credential path
+// without an API server. It answers yes; the point here is that the samples are
+// structurally valid, not that authorization works — that is covered by the
+// dedicated tests in the webhook package.
+type allowAllSecrets struct{}
+
+func (allowAllSecrets) CanGetSecret(context.Context, admission.Request, string, string) (bool, string, error) {
+	return true, "sample validation", nil
+}

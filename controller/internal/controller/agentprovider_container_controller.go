@@ -236,10 +236,21 @@ func clampSecurityFloor(
 		containerSecurity.RunAsUser = ptr.To[int64](defaultAgentRunAsUser)
 	}
 	containerSecurity.AllowPrivilegeEscalation = ptr.To(false)
-	// Whether the root filesystem is writable is provider-owned, declared by
-	// AgentProviderConfig.spec.capabilities.writableRootFilesystem — precisely so
-	// a deployment author cannot weaken what their framework declared.
-	containerSecurity.ReadOnlyRootFilesystem = ptr.To(!writableRoot)
+	// Whether the root filesystem *may* be writable is provider-owned, declared
+	// by AgentProviderConfig.spec.capabilities.writableRootFilesystem — so an
+	// author cannot weaken what their framework declared.
+	//
+	// This is a floor, not a pin. A framework that did not declare a writable
+	// root gets read-only forced on regardless of what the author asked for. A
+	// framework that did gets it off by default, but an author may still turn it
+	// back on: hardening is always allowed, and pinning here would have silently
+	// discarded a `readOnlyRootFilesystem: true` override that the webhook
+	// explicitly accepts.
+	if !writableRoot {
+		containerSecurity.ReadOnlyRootFilesystem = ptr.To(true)
+	} else if containerSecurity.ReadOnlyRootFilesystem == nil {
+		containerSecurity.ReadOnlyRootFilesystem = ptr.To(false)
+	}
 	containerSecurity.SeccompProfile = clampSeccomp(containerSecurity.SeccompProfile)
 	containerSecurity.Capabilities = clampCapabilities(containerSecurity.Capabilities)
 }
@@ -344,9 +355,10 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if err := r.cleanupOwnedWorkloads(ctx, &ad); err != nil {
 			return ctrl.Result{}, err
 		}
-		// No status write: ProviderReady belongs to the framework's provider,
-		// which is no longer this one.
-		return ctrl.Result{}, nil
+		// See the kagent provider: release the provider-owned status and its SSA
+		// ownership so the status is not left stale and a successor provider can
+		// take over.
+		return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, &ad, ContainerFieldOwner)
 	}
 
 	// Consume the core-resolved binding.
