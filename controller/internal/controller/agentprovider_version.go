@@ -65,14 +65,30 @@ func AgentProviderVersionFieldOwner(name string) string {
 
 // serves reports whether this reporter publishes a version for the given
 // provider config.
+//
+// Every selector that is set must match. Checking them independently — returning
+// on the first one — meant an AgentProviderConfig named "kagent" but declaring
+// the container backend was served by two reporters at once: the kagent one
+// because the name matched, and the container one because the backend did. Both
+// then applied a different status.version under a different field owner, so the
+// second lost an SSA conflict on every reconcile, forever.
+//
+// This is the same collision the provider reconcilers already guard against with
+// FrameworkUsesBackend; the version reporters simply never got the equivalent
+// gate.
 func (r *AgentProviderVersionReconciler) serves(apc *airunwayv1alpha1.AgentProviderConfig) bool {
-	if r.Framework != "" {
-		return apc.Name == r.Framework
+	if r.Framework == "" && r.Backend == "" {
+		return false
+	}
+	if r.Framework != "" && apc.Name != r.Framework {
+		return false
 	}
 	if r.Backend != "" {
-		return apc.Spec.Capabilities != nil && apc.Spec.Capabilities.Backend == r.Backend
+		if apc.Spec.Capabilities == nil || apc.Spec.Capabilities.Backend != r.Backend {
+			return false
+		}
 	}
-	return false
+	return true
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch

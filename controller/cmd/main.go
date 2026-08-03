@@ -455,6 +455,7 @@ func main() {
 			controller.AgentProviderRegistration{
 				Name:      "agent-kagent",
 				Framework: controller.KagentFrameworkName,
+				Backend:   airunwayv1alpha1.AgentProviderBackendCRD,
 				Version:   "agent-kagent-provider:" + agentProviderVersion,
 				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
 					return &controller.KagentProviderReconciler{Client: c, Scheme: s}
@@ -463,6 +464,7 @@ func main() {
 			controller.AgentProviderRegistration{
 				Name:      "agent-orka",
 				Framework: controller.OrkaFrameworkName,
+				Backend:   airunwayv1alpha1.AgentProviderBackendCRD,
 				Version:   "agent-orka-provider:" + agentProviderVersion,
 				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
 					return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
