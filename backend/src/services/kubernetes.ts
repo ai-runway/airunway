@@ -1208,22 +1208,18 @@ class KubernetesService {
         break;
     }
 
-    if (statusReady) {
-      return {
-        installed: true,
-        crdFound: true,
-        operatorRunning: true,
-        requiresCRD: true,
-        message: `${displayName} is installed and running`,
-      };
-    }
-
+    // This provider says it needs an upstream runtime (requiresCRD) but gave us
+    // nothing to probe — no built-in check and no health metadata describing its
+    // API or its pods. `statusReady` only tells us AI Runway's own integration
+    // is alive; promoting that into installed/crdFound/operatorRunning is
+    // exactly the false "installed" report from issue #244. Say we don't know
+    // instead, which still leaves the install action available to the user.
     return {
       installed: false,
       crdFound: false,
       operatorRunning: false,
       requiresCRD: true,
-      message: `${displayName} is registered but not ready`,
+      message: `${displayName} has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.`,
     };
   }
 

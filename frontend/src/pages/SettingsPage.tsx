@@ -132,7 +132,7 @@ type ShimStatusSource = {
 }
 
 type IntegrationStatus = {
-  label: 'Connected' | 'Not heartbeating' | 'Not registered'
+  label: 'Connected' | 'Not responding' | 'Not set up'
   tone: 'success' | 'warning' | 'unknown'
   description: string
 }
@@ -141,7 +141,7 @@ const formatHeartbeatAge = (heartbeat?: string): string | null => {
   if (!heartbeat) return null
   const ts = Date.parse(heartbeat)
   if (Number.isNaN(ts)) return null
-  // Clamp future heartbeats (clock skew between cluster and browser) to "now"
+  // Clamp future timestamps (clock skew between cluster and browser) to "now"
   // so the UI never shows a negative age. formatRelativeTime then handles the
   // human-readable formatting, keeping it consistent with the rest of the app.
   const safe = Math.min(Date.now(), ts)
@@ -151,9 +151,9 @@ const formatHeartbeatAge = (heartbeat?: string): string | null => {
 const describeIntegrationStatus = (source: ShimStatusSource | undefined | null): IntegrationStatus => {
   if (!source?.shimRegistered) {
     return {
-      label: 'Not registered',
+      label: 'Not set up',
       tone: 'unknown',
-      description: 'No AI Runway provider integration is registered for this runtime.',
+      description: "AI Runway has not been set up to work with this runtime yet.",
     }
   }
   if (source.shimConnected) {
@@ -162,17 +162,17 @@ const describeIntegrationStatus = (source: ShimStatusSource | undefined | null):
       label: 'Connected',
       tone: 'success',
       description: age
-        ? `AI Runway is connected to the provider (last heartbeat ${age}).`
-        : 'AI Runway is connected to the provider.',
+        ? `AI Runway is connected to this runtime (last checked in ${age}).`
+        : 'AI Runway is connected to this runtime.',
     }
   }
   const age = formatHeartbeatAge(source.shimLastHeartbeat)
   return {
-    label: 'Not heartbeating',
+    label: 'Not responding',
     tone: 'warning',
     description: age
-      ? `The AI Runway integration registered for this runtime but has not reported a recent heartbeat (last seen ${age}).`
-      : 'The AI Runway integration registered for this runtime but has not reported a heartbeat yet.',
+      ? `AI Runway is set up for this runtime but has not heard from it recently (last checked in ${age}).`
+      : 'AI Runway is set up for this runtime but has not heard from it yet.',
   }
 }
 
@@ -768,8 +768,9 @@ export function SettingsPage() {
                   {selectedRuntimeRequiresCRD ? (
                     <>
                       <p className="text-xs text-muted-foreground">
-                        Status of the underlying {installationStatus?.providerName || currentRuntime?.name || 'runtime'} operator
-                        and CRDs in the cluster. Use the install button below to deploy them if missing.
+                        Whether {installationStatus?.providerName || currentRuntime?.name || 'this runtime'} itself is set up
+                        in your cluster. AI Runway needs it before it can run models on it — use the install button below
+                        if any part is missing.
                       </p>
                       <div className="grid grid-cols-2 gap-4 text-sm">
                         <div className="flex items-center justify-between rounded-lg bg-muted p-3">

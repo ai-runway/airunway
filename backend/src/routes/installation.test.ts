@@ -408,11 +408,19 @@ describe('Installation Provider Routes', () => {
       const data = await res.json();
       expect(data.providerId).toBe('custom-llmd-registration');
       expect(data.providerName).toBe('LLM-D');
-      expect(data.installed).toBe(true);
+      // The point of this test: an explicit requiresCRD: true is honoured even
+      // for a custom-named registration of an otherwise CRD-less engine.
       expect(data.requiresCRD).toBe(true);
+      // Issue #244: nothing to probe with, so a live heartbeat must not be
+      // reported as the runtime being installed.
+      expect(data.installed).toBe(false);
+      expect(data.crdFound).toBe(false);
+      expect(data.operatorRunning).toBe(false);
+      expect(data.message).toContain('cannot be confirmed');
+      // ...and the install action stays available, which is what the issue asked
+      // for: show it as not installed AND offer to install it.
       expect(data.installable).toBe(true);
       expect(data.helmCommands.length).toBeGreaterThan(0);
-      expect(data.message).toBe('LLM-D is installed and running');
     });
 
     test('honors per-engine requiresCRD: false on the migrated schema for custom providers', async () => {
@@ -447,13 +455,17 @@ describe('Installation Provider Routes', () => {
 
     test('includes AI Runway integration (shim) status derived from the provider config heartbeat', async () => {
       const recentHeartbeat = new Date().toISOString();
-      const configWithHeartbeat = {
+      // Strip the health/capabilities annotations so this exercises the mocked
+      // KAITO probe below. With them present, checkProviderInstallationStatus
+      // takes the annotation-driven path (or the !requiresCRD early return,
+      // which reports crdFound: true unconditionally) and the mock never runs.
+      const configWithHeartbeat = withoutHealthAnnotation({
         ...mockInferenceProviderConfig,
         status: {
           ...mockInferenceProviderConfig.status,
           lastHeartbeat: recentHeartbeat,
         },
-      };
+      });
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => configWithHeartbeat),

@@ -436,7 +436,7 @@ describe('SettingsPage', () => {
     expect(detailIntegration).toHaveTextContent('Connected')
   })
 
-  it('issue #244: shows AI Runway integration as Not heartbeating when the shim has not reported recently', () => {
+  it('issue #244: shows AI Runway integration as Not responding when the integration has not reported recently', () => {
     mockRuntimes = [
       {
         id: 'kuberay',
@@ -460,7 +460,7 @@ describe('SettingsPage', () => {
 
     const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
-    expect(integrationRow).toHaveTextContent('Not heartbeating')
+    expect(integrationRow).toHaveTextContent('Not responding')
   })
 
   it('shows providers that do not require runtime operators without CRD controls', () => {

@@ -285,13 +285,22 @@ describe('KubernetesService - Runtime Status', () => {
 
     expect(vllm).toBeDefined();
     expect(vllm?.name).toBe('vLLM');
-    expect(vllm?.installed).toBe(true);
-    expect(vllm?.healthy).toBe(true);
-    expect(vllm?.crdFound).toBe(true);
-    expect(vllm?.operatorRunning).toBe(true);
+    // The point of this test: an explicit requiresCRD: true is honoured even for
+    // a custom-named registration of an otherwise CRD-less engine.
     expect(vllm?.requiresCRD).toBe(true);
     expect(vllm?.version).toBe('0.8.0');
-    expect(vllm?.message).toBe('vLLM is installed and running');
+    // Issue #244: this registration declares it needs an upstream runtime but
+    // ships nothing to probe with, so a live heartbeat must not be promoted into
+    // "installed". Previously all three of these reported true purely because
+    // status.ready was true.
+    expect(vllm?.installed).toBe(false);
+    expect(vllm?.crdFound).toBe(false);
+    expect(vllm?.operatorRunning).toBe(false);
+    expect(vllm?.healthy).toBe(false);
+    expect(vllm?.message).toContain('cannot be confirmed');
+    // The integration itself is still reported as present and responding, so the
+    // UI can distinguish "AI Runway is fine" from "the runtime is missing".
+    expect(vllm?.shimRegistered).toBe(true);
   });
 
   test('honors per-engine requiresCRD: false on the migrated schema for custom-named runtime entries', async () => {
