@@ -67,15 +67,15 @@ export const providers = [
 export const ctaLinks = [
   {
     label: 'GitHub',
-    href: 'https://github.com/kaito-project/airunway',
+    href: 'https://github.com/ai-runway/airunway',
   },
   {
     label: 'Issues',
-    href: 'https://github.com/kaito-project/airunway/issues',
+    href: 'https://github.com/ai-runway/airunway/issues',
   },
   {
     label: 'Releases',
-    href: 'https://github.com/kaito-project/airunway/releases',
+    href: 'https://github.com/ai-runway/airunway/releases',
   },
 ];
 

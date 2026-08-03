@@ -72,7 +72,7 @@ export function CostEstimate({
             setUnsupportedProvider(true)
           }
         }
-      } catch (error) {
+      } catch {
         // Error is expected when cloud pricing API is unavailable
         setPricingError('Unable to fetch pricing from cloud provider API')
         setNodePoolCosts([])

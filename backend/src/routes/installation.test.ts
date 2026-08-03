@@ -4,6 +4,7 @@ import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
 import { helmService } from '../services/helm';
 import { huggingFaceService } from '../services/huggingface';
+import type { HelmChart } from '../services/helm';
 import { mockServiceMethod } from '../test/helpers';
 import {
   mockInferenceProviderConfig,
@@ -168,6 +169,7 @@ describe('Installation Provider Routes', () => {
 
   function createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd() {
     const config = createNoCrdProviderConfigWithHelmMetadata();
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = config.metadata.annotations;
 
     return {
       ...config,
@@ -175,7 +177,7 @@ describe('Installation Provider Routes', () => {
         ...config.metadata,
         name: 'custom-llmd-registration',
         annotations: {
-          ...config.metadata.annotations,
+          ...annotationsWithoutHealth,
           'airunway.io/provider-name': 'LLM-D',
         },
       },
@@ -196,13 +198,14 @@ describe('Installation Provider Routes', () => {
     // display name are non-canonical, so the canonical fallback in
     // providerRequiresRuntimeCRD cannot mask a buggy aggregation.
     const baseInstallation = JSON.parse(mockInferenceProviderConfig.metadata.annotations['airunway.ai/installation']);
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = mockInferenceProviderConfig.metadata.annotations;
     return {
       ...mockInferenceProviderConfig,
       metadata: {
         ...mockInferenceProviderConfig.metadata,
         name: 'mycustom-runtime',
         annotations: {
-          ...mockInferenceProviderConfig.metadata.annotations,
+          ...annotationsWithoutHealth,
           'airunway.io/provider-name': 'My Custom Runtime',
           'airunway.ai/installation': JSON.stringify(baseInstallation),
         },
@@ -229,16 +232,27 @@ describe('Installation Provider Routes', () => {
     restores.length = 0;
   });
 
+  function withoutHealthAnnotation<T extends { metadata: { annotations: Record<string, string> } }>(config: T): T {
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = config.metadata.annotations;
+    return {
+      ...config,
+      metadata: {
+        ...config.metadata,
+        annotations: annotationsWithoutHealth,
+      },
+    };
+  }
+
   // ==========================================================================
   // GET /api/installation/providers/:providerId/status
   // ==========================================================================
 
   describe('GET /api/installation/providers/:providerId/status', () => {
-    test('uses live KAITO installation status instead of provider config readiness', async () => {
+    test('falls back to legacy KAITO installation status when health metadata is absent', async () => {
       let kaitoStatusChecks = 0;
 
       restores.push(
-        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => withoutHealthAnnotation(mockInferenceProviderConfig)),
         mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => {
           kaitoStatusChecks += 1;
           return {
@@ -269,16 +283,16 @@ describe('Installation Provider Routes', () => {
       expect(data.helmCommands.some((command: string) => command.includes('--skip-crds'))).toBe(true);
     });
 
-    test('uses live Dynamo installation status for non-KAITO providers', async () => {
+    test('falls back to legacy Dynamo installation status when health metadata is absent', async () => {
       let kaitoStatusChecks = 0;
       let dynamoStatusChecks = 0;
-      const nonKaitoConfig = {
+      const nonKaitoConfig = withoutHealthAnnotation({
         ...createDynamoProviderConfig(),
         status: {
           ready: false,
           version: '1.2.3',
         },
-      };
+      });
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => nonKaitoConfig),
@@ -467,7 +481,7 @@ describe('Installation Provider Routes', () => {
 
     test('surfaces shim refuse-fast message when UpstreamReady=False is fresh', async () => {
       const freshHeartbeat = new Date(Date.now() - 30_000).toISOString();
-      const configWithRefuseFast = {
+      const configWithRefuseFast = withoutHealthAnnotation({
         ...mockInferenceProviderConfig,
         status: {
           ready: false,
@@ -482,7 +496,7 @@ describe('Installation Provider Routes', () => {
             },
           ],
         },
-      };
+      });
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => configWithRefuseFast),
@@ -718,13 +732,13 @@ describe('Installation Provider Routes', () => {
     });
 
     test('returns 200 on successful install', async () => {
-      let installCharts: any[] = [];
+      let installCharts: HelmChart[] = [];
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'installProvider', async (_repos, charts) => {
-          installCharts = charts as any[];
+          installCharts = charts;
           return {
             success: true,
             results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
@@ -745,14 +759,14 @@ describe('Installation Provider Routes', () => {
     });
 
     test('uses CRD-safe chart install behavior for Dynamo', async () => {
-      let installCharts: any[] = [];
+      let installCharts: HelmChart[] = [];
       const dynamoConfig = createDynamoProviderConfig();
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => dynamoConfig),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'installProvider', async (_repos, charts) => {
-          installCharts = charts as any[];
+          installCharts = charts;
           return {
             success: true,
             results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
@@ -772,14 +786,14 @@ describe('Installation Provider Routes', () => {
     });
 
     test('keeps standard chart install behavior for non-KAITO non-Dynamo providers', async () => {
-      let installCharts: any[] = [];
+      let installCharts: HelmChart[] = [];
       const kuberayConfig = createKubeRayProviderConfig();
 
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => kuberayConfig),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'installProvider', async (_repos, charts) => {
-          installCharts = charts as any[];
+          installCharts = charts;
           return {
             success: true,
             results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
@@ -1006,6 +1020,7 @@ describe('Gateway Installation Routes', () => {
     restores.forEach((r) => r());
     restores.length = 0;
   });
+
 
   // ==========================================================================
   // GET /api/installation/gateway/status

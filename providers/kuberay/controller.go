@@ -40,7 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -309,6 +309,10 @@ func (r *KubeRayProviderReconciler) syncStatus(ctx context.Context, md *airunway
 	md.Status.Phase = statusResult.Phase
 	if statusResult.Message != "" {
 		md.Status.Message = statusResult.Message
+	} else if statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
+		// The translator reports no message for a healthy RayService; replace the
+		// stale "waiting for pods" message so status reflects the Running phase.
+		md.Status.Message = "RayService created, pods are ready"
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint

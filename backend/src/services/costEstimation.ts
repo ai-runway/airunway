@@ -1,14 +1,10 @@
 import type {
   CostBreakdown,
-  CostEstimate,
   CostEstimateRequest,
   NodePoolCostEstimate,
 } from '@airunway/shared';
 import type { NodePoolInfo } from '@airunway/shared';
 import { logger } from '../lib/logger';
-
-/** Hours per month assuming 24/7 operation */
-const DEFAULT_HOURS_PER_MONTH = 730;
 
 /**
  * GPU model info for normalization (moved from static JSON)

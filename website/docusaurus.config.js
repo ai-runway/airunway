@@ -14,11 +14,11 @@ const config = {
     v4: true,
   },
 
-  url: 'https://kaito-project.github.io',
+  url: 'https://ai-runway.github.io',
   baseUrl: '/airunway/',
   trailingSlash: false,
 
-  organizationName: 'kaito-project',
+  organizationName: 'ai-runway',
   projectName: 'airunway',
 
   // Strict by default — broken links should fail CI, not slip into prod.
@@ -53,10 +53,13 @@ const config = {
           path: '../docs',
           sidebarPath: './sidebars.js',
           routeBasePath: '/',
+          // Internal planning/design docs under docs/plans/ are kept in the repo
+          // for contributors but must not be published as public site pages.
+          exclude: ['plans/**'],
           // Use the function form so the relative `../docs` source path is
           // rewritten to a proper `docs/<file>` URL on github.com.
           editUrl: ({docPath}) =>
-            `https://github.com/kaito-project/airunway/edit/main/docs/${docPath}`,
+            `https://github.com/ai-runway/airunway/edit/main/docs/${docPath}`,
         },
         blog: false,
         theme: {
@@ -89,12 +92,12 @@ const config = {
             label: 'Docs',
           },
           {
-            href: 'https://github.com/kaito-project/airunway/releases',
+            href: 'https://github.com/ai-runway/airunway/releases',
             label: 'Releases',
             position: 'left',
           },
           {
-            href: 'https://github.com/kaito-project/airunway',
+            href: 'https://github.com/ai-runway/airunway',
             position: 'right',
             className: 'header-github-link',
             'aria-label': 'GitHub repository',
@@ -118,15 +121,15 @@ const config = {
             items: [
               {
                 label: 'GitHub',
-                href: 'https://github.com/kaito-project/airunway',
+                href: 'https://github.com/ai-runway/airunway',
               },
               {
                 label: 'Issues',
-                href: 'https://github.com/kaito-project/airunway/issues',
+                href: 'https://github.com/ai-runway/airunway/issues',
               },
               {
                 label: 'Discussions',
-                href: 'https://github.com/kaito-project/airunway/discussions',
+                href: 'https://github.com/ai-runway/airunway/discussions',
               },
             ],
           },

@@ -227,3 +227,203 @@ func TestEngineNames_Nil(t *testing.T) {
 		t.Fatalf("expected nil engine names on nil receiver, got %v", names)
 	}
 }
+
+func TestEngineCapability_SupportsAPIFormat(t *testing.T) {
+	ec := &EngineCapability{
+		Name: EngineTypeVLLM,
+		APIFormats: []APIFormat{
+			APIFormatOpenAIChat,
+			APIFormatOpenAIResponses,
+			APIFormatAnthropicMessages,
+		},
+	}
+	if !ec.SupportsAPIFormat(APIFormatOpenAIChat) {
+		t.Error("expected vllm to support openai-chat")
+	}
+	if !ec.SupportsAPIFormat(APIFormatOpenAIResponses) {
+		t.Error("expected vllm to support openai-responses")
+	}
+	if !ec.SupportsAPIFormat(APIFormatAnthropicMessages) {
+		t.Error("expected vllm to support anthropic-messages")
+	}
+}
+
+func TestEngineCapability_SupportsAPIFormat_EmptyDefaultsToChat(t *testing.T) {
+	ec := &EngineCapability{
+		Name:       EngineTypeVLLM,
+		APIFormats: []APIFormat{},
+	}
+	if !ec.SupportsAPIFormat(APIFormatOpenAIChat) {
+		t.Error("expected empty APIFormats to default to supporting openai-chat")
+	}
+	if ec.SupportsAPIFormat(APIFormatOpenAIResponses) {
+		t.Error("expected empty APIFormats to NOT support openai-responses")
+	}
+	if ec.SupportsAPIFormat(APIFormatAnthropicMessages) {
+		t.Error("expected empty APIFormats to NOT support anthropic-messages")
+	}
+}
+
+func TestEngineCapability_SupportsAPIFormat_NilFormats(t *testing.T) {
+	ec := &EngineCapability{Name: EngineTypeVLLM}
+	if !ec.SupportsAPIFormat(APIFormatOpenAIChat) {
+		t.Error("expected nil APIFormats to default to supporting openai-chat")
+	}
+	if ec.SupportsAPIFormat(APIFormatAnthropicMessages) {
+		t.Error("expected nil APIFormats to NOT support anthropic-messages")
+	}
+}
+
+func TestEngineCapability_SupportsAPIFormat_Nil(t *testing.T) {
+	var ec *EngineCapability
+	if ec.SupportsAPIFormat(APIFormatOpenAIChat) {
+		t.Error("expected nil receiver to return false")
+	}
+}
+
+func TestEngineCapability_EffectiveAPIFormats(t *testing.T) {
+	ec := &EngineCapability{
+		Name: EngineTypeVLLM,
+		APIFormats: []APIFormat{
+			APIFormatOpenAIChat,
+			APIFormatAnthropicMessages,
+		},
+	}
+	formats := ec.EffectiveAPIFormats()
+	if len(formats) != 2 {
+		t.Fatalf("expected 2 formats, got %d", len(formats))
+	}
+	if formats[0] != APIFormatOpenAIChat {
+		t.Errorf("expected first format openai-chat, got %s", formats[0])
+	}
+	if formats[1] != APIFormatAnthropicMessages {
+		t.Errorf("expected second format anthropic-messages, got %s", formats[1])
+	}
+}
+
+func TestEngineCapability_EffectiveAPIFormats_EmptyMaterializesChat(t *testing.T) {
+	ec := &EngineCapability{Name: EngineTypeVLLM}
+	formats := ec.EffectiveAPIFormats()
+	if len(formats) != 1 {
+		t.Fatalf("expected 1 default format, got %d", len(formats))
+	}
+	if formats[0] != APIFormatOpenAIChat {
+		t.Errorf("expected default format openai-chat, got %s", formats[0])
+	}
+}
+
+func TestEngineCapability_EffectiveAPIFormats_Nil(t *testing.T) {
+	var ec *EngineCapability
+	formats := ec.EffectiveAPIFormats()
+	if formats != nil {
+		t.Fatalf("expected nil on nil receiver, got %v", formats)
+	}
+}
+
+func TestProviderCapabilities_SupportsAPIFormat(t *testing.T) {
+	caps := &ProviderCapabilities{
+		Engines: []EngineCapability{
+			{
+				Name: EngineTypeVLLM,
+				APIFormats: []APIFormat{
+					APIFormatOpenAIChat,
+					APIFormatOpenAIResponses,
+					APIFormatAnthropicMessages,
+				},
+			},
+			{
+				Name: EngineTypeLlamaCpp,
+				APIFormats: []APIFormat{
+					APIFormatOpenAIChat,
+				},
+			},
+		},
+	}
+
+	if !caps.SupportsAPIFormat(EngineTypeVLLM, APIFormatAnthropicMessages) {
+		t.Error("expected vllm to support anthropic-messages via ProviderCapabilities")
+	}
+	if caps.SupportsAPIFormat(EngineTypeLlamaCpp, APIFormatAnthropicMessages) {
+		t.Error("expected llamacpp to NOT support anthropic-messages")
+	}
+	if caps.SupportsAPIFormat(EngineTypeSGLang, APIFormatOpenAIChat) {
+		t.Error("expected missing engine to not support any format")
+	}
+}
+
+func TestProviderCapabilities_EffectiveAPIFormats(t *testing.T) {
+	caps := &ProviderCapabilities{
+		Engines: []EngineCapability{
+			{Name: EngineTypeVLLM},
+		},
+	}
+	formats := caps.EffectiveAPIFormats(EngineTypeVLLM)
+	if len(formats) != 1 || formats[0] != APIFormatOpenAIChat {
+		t.Errorf("expected [openai-chat] default, got %v", formats)
+	}
+	formats = caps.EffectiveAPIFormats(EngineTypeSGLang)
+	if formats != nil {
+		t.Errorf("expected nil for missing engine, got %v", formats)
+	}
+}
+
+func TestValidateAPIFormatsForEngine(t *testing.T) {
+	if err := ValidateAPIFormatsForEngine(EngineTypeVLLM, []APIFormat{
+		APIFormatOpenAIChat, APIFormatOpenAIResponses, APIFormatAnthropicMessages,
+	}); err != nil {
+		t.Errorf("expected no error for valid vllm formats, got %v", err)
+	}
+
+	if err := ValidateAPIFormatsForEngine(EngineTypeSGLang, []APIFormat{
+		APIFormatOpenAIChat, APIFormatAnthropicMessages,
+	}); err != nil {
+		t.Errorf("expected no error for valid sglang formats, got %v", err)
+	}
+
+	if err := ValidateAPIFormatsForEngine(EngineTypeLlamaCpp, []APIFormat{
+		APIFormatOpenAIChat,
+	}); err != nil {
+		t.Errorf("expected no error for valid llamacpp formats, got %v", err)
+	}
+
+	if err := ValidateAPIFormatsForEngine(EngineTypeTRTLLM, []APIFormat{
+		APIFormatOpenAIChat, APIFormatOpenAIResponses,
+	}); err != nil {
+		t.Errorf("expected no error for valid trtllm formats, got %v", err)
+	}
+
+	// Empty formats should pass (no invalid entries)
+	if err := ValidateAPIFormatsForEngine(EngineTypeVLLM, []APIFormat{}); err != nil {
+		t.Errorf("expected no error for empty formats, got %v", err)
+	}
+}
+
+func TestValidateAPIFormatsForEngine_Invalid(t *testing.T) {
+	err := ValidateAPIFormatsForEngine(EngineTypeTRTLLM, []APIFormat{
+		APIFormatOpenAIChat, APIFormatAnthropicMessages,
+	})
+	if err == nil {
+		t.Error("expected error for trtllm with anthropic-messages")
+	}
+
+	err = ValidateAPIFormatsForEngine(EngineTypeSGLang, []APIFormat{
+		APIFormatOpenAIResponses,
+	})
+	if err == nil {
+		t.Error("expected error for sglang with openai-responses")
+	}
+
+	err = ValidateAPIFormatsForEngine(EngineTypeLlamaCpp, []APIFormat{
+		APIFormatOpenAIChat, APIFormatAnthropicMessages,
+	})
+	if err == nil {
+		t.Error("expected error for llamacpp with anthropic-messages")
+	}
+}
+
+func TestValidateAPIFormatsForEngine_UnknownEngine(t *testing.T) {
+	err := ValidateAPIFormatsForEngine(EngineType("unknown"), []APIFormat{APIFormatOpenAIChat})
+	if err == nil {
+		t.Error("expected error for unknown engine type")
+	}
+}

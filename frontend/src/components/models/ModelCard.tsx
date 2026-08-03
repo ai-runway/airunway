@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { useGpuThroughput } from '@/hooks/useGpuOperator'
 import { useInView } from '@/hooks/useInView'
 import { buildThroughputParamsForGpu } from '@/lib/gpu-throughput-params'
+import { getEngineDisplayName } from '@/lib/deploymentDisplay'
 
 interface ModelCardProps {
   model: Model
@@ -150,7 +151,7 @@ export function ModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel, gp
               variant="secondary"
               className="text-xs font-medium rounded-full"
             >
-              {engine.toUpperCase()}
+              {getEngineDisplayName(engine)}
             </Badge>
           ))}
         </div>

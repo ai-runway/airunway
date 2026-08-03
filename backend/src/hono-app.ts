@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { compress } from 'hono/compress';
+import { trimTrailingSlash } from 'hono/trailing-slash';
 import { HTTPException } from 'hono/http-exception';
 
 import { authService } from './services/auth';
@@ -20,6 +21,7 @@ import {
   health,
   models,
   settings,
+  providers,
   deployments,
   installation,
   oauth,
@@ -30,6 +32,7 @@ import {
   aiconfigurator,
   costs,
   gateway,
+  vllmRecipes,
 } from './routes';
 
 // Load static files at startup
@@ -105,6 +108,11 @@ const app = new Hono<AppEnv>();
 
 // Global middleware
 app.use('*', compress());
+// Treat a trailing slash as equivalent to no slash: Hono routes strictly, so
+// "/api/vllm/recipes/" would otherwise 404 while "/api/vllm/recipes" works.
+// This only acts on a would-be 404 GET/HEAD, 301-redirecting to the no-slash
+// path, so it never changes the outcome of an already-matched route.
+app.use('*', trimTrailingSlash());
 app.use(
   '*',
   cors({
@@ -123,19 +131,24 @@ app.use('*', async (c, next) => {
 // Auth Middleware
 // ============================================================================
 
-// Routes that don't require authentication
-// Keep this list minimal — only routes needed before login
-const PUBLIC_ROUTES = [
-  '/api/cluster/status',
-  '/api/settings',      // Settings is public (read-only auth config needed by frontend)
-  '/api/oauth',         // OAuth routes must be public for initial authentication
-];
-
-// Public routes that must match exactly (no sub-path matching)
+// Routes that don't require authentication. Keep this list minimal — only
+// routes needed before login, and avoid prefix-whitelisting provider detail
+// endpoints because they include install metadata and chart values.
 const PUBLIC_ROUTES_EXACT = [
   '/api/health',
   '/api/health/',
   '/api/health/version',
+  '/api/cluster/status',
+  '/api/settings',
+  '/api/settings/',
+  '/api/settings/providers',
+  '/api/settings/providers/',
+  '/api/providers',
+  '/api/providers/',
+];
+
+const PUBLIC_ROUTE_PREFIXES = [
+  '/api/oauth', // OAuth routes must be public for initial authentication
 ];
 
 // Auth middleware for protected API routes
@@ -151,8 +164,8 @@ app.use('/api/*', async (c, next) => {
     return next();
   }
 
-  // Skip auth for prefix-match public routes (cluster/status, settings, oauth)
-  if (PUBLIC_ROUTES.some(route => path === route || path.startsWith(route + '/'))) {
+  // Skip auth for prefix-match public routes (OAuth callback/token flow).
+  if (PUBLIC_ROUTE_PREFIXES.some(route => path === route || path.startsWith(route + '/'))) {
     return next();
   }
 
@@ -193,6 +206,7 @@ app.route('/api/health', health);
 app.route('/api/cluster', health);
 app.route('/api/models', models);
 app.route('/api/settings', settings);
+app.route('/api/providers', providers);
 app.route('/api/deployments', deployments);
 app.route('/api/installation', installation);
 app.route('/api/oauth', oauth);
@@ -203,6 +217,7 @@ app.route('/api/aikit', aikit);
 app.route('/api/aiconfigurator', aiconfigurator);
 app.route('/api/costs', costs);
 app.route('/api/gateway', gateway);
+app.route('/api/vllm/recipes', vllmRecipes);
 
 // Static file serving middleware - uses Bun.file() for zero-copy serving
 app.use('*', async (c, next) => {

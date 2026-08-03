@@ -100,6 +100,31 @@ export const handlers = [
     return HttpResponse.json(mockClusterStatus)
   }),
 
+  // vLLM Recipes API
+  http.get(`${API_BASE}/vllm/recipes`, () => {
+    return HttpResponse.json({ recipes: [], total: 0, source: 'mock' })
+  }),
+
+  http.post(`${API_BASE}/vllm/recipes/resolve`, async ({ request }) => {
+    const body = await request.json() as { modelId?: string }
+    return HttpResponse.json({
+      provider: 'vllm',
+      engine: 'vllm',
+      mode: 'aggregated',
+      imageRef: 'vllm/vllm-openai:cu130-nightly',
+      resources: { gpu: 1 },
+      engineArgs: {},
+      engineExtraArgs: [],
+      env: {},
+      annotations: {},
+      recipeProvenance: {
+        source: 'mock',
+        id: body.modelId || 'test/model',
+      },
+      warnings: [],
+    })
+  }),
+
   // Settings API
   http.get(`${API_BASE}/settings`, () => {
     return HttpResponse.json(mockSettings)
@@ -113,11 +138,11 @@ export const handlers = [
     })
   }),
 
-  http.get(`${API_BASE}/settings/providers`, () => {
+  http.get(`${API_BASE}/providers`, () => {
     return HttpResponse.json({ providers: mockSettings.providers })
   }),
 
-  http.get(`${API_BASE}/settings/providers/:id`, ({ params }) => {
+  http.get(`${API_BASE}/providers/:id`, ({ params }) => {
     const runtimeEntry = mockSettings.providers.find(entry => entry.id === params.id)
     if (!runtimeEntry) {
       return HttpResponse.json({ error: { message: 'Runtime catalog entry not found' } }, { status: 404 })

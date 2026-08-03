@@ -136,7 +136,7 @@ describe('AikitService', () => {
 
     it('rejects invalid model source', () => {
       const request = {
-        modelSource: 'invalid' as any,
+        modelSource: 'invalid' as AikitBuildRequest['modelSource'],
       };
 
       const result = aikitService.validateBuildRequest(request);

@@ -1,8 +1,5 @@
 import { Hono } from 'hono';
 import { autoscalerService } from '../services/autoscaler';
-import { kubernetesService } from '../services/kubernetes';
-import { zValidator } from '@hono/zod-validator';
-import { z } from 'zod';
 import logger from '../lib/logger';
 
 const autoscaler = new Hono()

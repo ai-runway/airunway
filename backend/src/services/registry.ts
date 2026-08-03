@@ -2,6 +2,7 @@ import * as k8s from '@kubernetes/client-node';
 import { loadKubeConfig, makeApiClient } from '../lib/kubeconfig';
 import logger from '../lib/logger';
 import { withRetry } from '../lib/retry';
+import { getK8sErrorStatusCode } from '../lib/k8s-errors';
 
 /**
  * In-cluster registry configuration
@@ -125,8 +126,8 @@ class RegistryService {
         { operationName: 'getRegistryDeployment', maxRetries: 1 }
       );
       return response;
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode === 404) {
         return null;
       }
@@ -147,8 +148,8 @@ class RegistryService {
         { operationName: 'getRegistryService', maxRetries: 1 }
       );
       return response;
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode === 404) {
         return null;
       }
@@ -163,8 +164,8 @@ class RegistryService {
     try {
       await this.coreV1Api.readNamespace({ name: REGISTRY_CONFIG.namespace });
       logger.debug({ namespace: REGISTRY_CONFIG.namespace }, 'Namespace already exists');
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode === 404) {
         logger.info({ namespace: REGISTRY_CONFIG.namespace }, 'Creating namespace');
         await this.coreV1Api.createNamespace({
@@ -242,7 +243,7 @@ class RegistryService {
                 livenessProbe: {
                   httpGet: {
                     path: '/v2/',
-                    port: REGISTRY_CONFIG.port as any,
+                    port: REGISTRY_CONFIG.port,
                   },
                   initialDelaySeconds: 5,
                   periodSeconds: 10,
@@ -250,7 +251,7 @@ class RegistryService {
                 readinessProbe: {
                   httpGet: {
                     path: '/v2/',
-                    port: REGISTRY_CONFIG.port as any,
+                    port: REGISTRY_CONFIG.port,
                   },
                   initialDelaySeconds: 2,
                   periodSeconds: 5,
@@ -310,7 +311,7 @@ class RegistryService {
           {
             name: 'registry',
             port: REGISTRY_CONFIG.port,
-            targetPort: REGISTRY_CONFIG.port as any,
+            targetPort: REGISTRY_CONFIG.port,
             nodePort: REGISTRY_CONFIG.nodePort,
             protocol: 'TCP',
           },
@@ -409,8 +410,8 @@ class RegistryService {
         name: REGISTRY_CONFIG.name,
         namespace: REGISTRY_CONFIG.namespace,
       });
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode !== 404) {
         throw error;
       }
@@ -422,8 +423,8 @@ class RegistryService {
         name: REGISTRY_CONFIG.name,
         namespace: REGISTRY_CONFIG.namespace,
       });
-    } catch (error: any) {
-      const statusCode = error?.statusCode || error?.response?.statusCode;
+    } catch (error) {
+      const statusCode = getK8sErrorStatusCode(error);
       if (statusCode !== 404) {
         throw error;
       }

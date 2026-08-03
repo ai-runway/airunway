@@ -50,10 +50,12 @@ See [controller-architecture.md](controller-architecture.md) for controller inte
 | `model.source` | string | No | `huggingface` | `huggingface` or `custom` |
 | `model.servedName` | string | No | Model ID basename | API-facing model name |
 | `engine.type` | string | No | Auto-selected | `vllm`, `sglang`, `trtllm`, or `llamacpp`. If omitted, auto-selected from provider capabilities |
+| `engine.image` | string | No | Provider default | Engine-specific image override; preferred for Direct vLLM/custom vLLM images |
 | `engine.contextLength` | int | No | Model default | Max context length |
 | `engine.trustRemoteCode` | bool | No | `false` | Allow remote code (vLLM/SGLang only) |
-| `engine.args` | map[string]string | No | `{}` | Engine-specific CLI flags |
-| `provider.name` | string | No | Auto-selected | `dynamo`, `kaito`, or `kuberay`, or `llmd` |
+| `engine.args` | map[string]string | No | `{}` | Engine-specific named arguments/CLI flags |
+| `engine.extraArgs` | []string | No | `[]` | Additional raw engine flags |
+| `provider.name` | string | No | Auto-selected | `dynamo`, `kaito`, `kuberay`, `llmd`, or `vllm` |
 | `provider.overrides` | object | No | `{}` | Provider-specific escape hatch |
 | `serving.mode` | string | No | `aggregated` | `aggregated` or `disaggregated` |
 | `scaling.replicas` | int | No | `1` | Replicas (aggregated mode) |
@@ -63,7 +65,7 @@ See [controller-architecture.md](controller-architecture.md) for controller inte
 | `resources.gpu.type` | string | No | `nvidia.com/gpu` | GPU resource name |
 | `resources.memory` | string | No | — | Memory request |
 | `resources.cpu` | string | No | — | CPU request |
-| `image` | string | No | Provider default | Custom container image |
+| `image` | string | No | Provider default | Legacy provider-level custom image override; prefer `engine.image` for Direct vLLM |
 | `env` | []EnvVar | No | `[]` | Environment variables |
 | `podTemplate.metadata.labels` | map | No | `{}` | Labels for pods |
 | `podTemplate.metadata.annotations` | map | No | `{}` | Annotations for pods |
@@ -82,8 +84,7 @@ When updating a `ModelDeployment`, changes are handled based on field type:
 - `model.id`, `model.source`, `engine.type` (once set), `provider.name`, `serving.mode`
 
 **Config fields** — changed in-place without recreation:
-
-- `model.servedName`, `scaling.*`, `env`, `resources`, `engine.args`, `engine.contextLength`, `image`, `secrets.*`, `podTemplate.metadata`, `nodeSelector`, `tolerations`, `provider.overrides`
+- `model.servedName`, `scaling.*`, `env`, `resources`, `engine.image`, `engine.args`, `engine.extraArgs`, `engine.contextLength`, legacy `image`, `secrets.*`, `podTemplate.metadata`, `nodeSelector`, `tolerations`, `provider.overrides`
 
 ### API Versioning
 
@@ -842,7 +843,7 @@ Create a new deployment.
 {
   "name": "qwen-deployment",
   "namespace": "airunway-system",
-  "provider": "dynamo",
+  "provider": "vllm",
   "modelId": "Qwen/Qwen3-0.6B",
   "engine": "vllm",
   "mode": "aggregated",
@@ -850,18 +851,25 @@ Create a new deployment.
   "hfTokenSecret": "hf-token-secret",
   "enforceEager": true,
   "enablePrefixCaching": false,
-  "trustRemoteCode": false
+  "trustRemoteCode": false,
+  "imageRef": "vllm/vllm-openai:cu130-nightly",
+  "engineArgs": {
+    "trust-remote-code": ""
+  },
+  "engineExtraArgs": []
 }
 ```
 
-**Required Fields:**
-
+**Key Fields:**
 - `name` - Kubernetes resource name
 - `namespace` - Target namespace
-- `provider` - Runtime provider (`dynamo`, `kuberay`, or `kaito`)
+- `provider` - Runtime provider (`dynamo`, `kuberay`, `kaito`, `llmd`, or `vllm`). Omit to let the controller auto-select.
 - `modelId` - HuggingFace model ID
-- `engine` - Inference engine (`vllm`, `sglang`, or `trtllm` for Dynamo; `vllm` for KubeRay; not used for KAITO)
+- `engine` - Inference engine (`vllm`, `sglang`, `trtllm`, or `llamacpp`). Providers support different subsets; Direct vLLM and llm-d use `vllm`.
 - `hfTokenSecret` - Name of the Kubernetes secret containing HuggingFace token
+- `imageRef` - Optional custom image. For provider/runtime `vllm`, maps to `spec.engine.image`; for other providers, maps to legacy top-level `spec.image`.
+- `engineArgs` - Optional object mapped to `spec.engine.args`.
+- `engineExtraArgs` - Optional string array mapped to `spec.engine.extraArgs`.
 
 **Response:**
 
@@ -870,7 +878,7 @@ Create a new deployment.
   "message": "Deployment created successfully",
   "name": "qwen-deployment",
   "namespace": "airunway-system",
-  "provider": "dynamo"
+  "provider": "vllm"
 }
 ```
 
@@ -965,24 +973,37 @@ Get installation and health status of all runtimes.
       "healthy": true,
       "version": "0.6.0",
       "message": "KAITO is installed and running"
+    },
+    {
+      "id": "llmd",
+      "name": "llm-d",
+      "installed": false,
+      "healthy": false,
+      "message": "Provider config not found"
+    },
+    {
+      "id": "vllm",
+      "name": "Direct vLLM",
+      "installed": false,
+      "healthy": false,
+      "message": "Provider config not found"
     }
   ]
 }
 ```
 
 **Fields:**
-
-- `id` - Runtime identifier (`dynamo`, `kuberay`, or `kaito`)
+- `id` - Runtime identifier (`dynamo`, `kuberay`, `kaito`, `llmd`, or `vllm`)
 - `name` - Display name
-- `installed` - Whether the CRD is installed
-- `healthy` - Whether the operator pods are running
+- `installed` - Whether the runtime/provider is ready to use
+- `healthy` - Whether runtime health checks pass
 - `version` - Detected version (if available)
 - `message` - Status message
 
 **Notes:**
 
 - Used by the frontend to show available runtimes in the deployment wizard
-- Checks CRD existence and operator pod status for each provider
+- Checks provider configuration and available health signals for each provider/runtime; Direct vLLM is registered by the repo-local `providers/vllm` shim
 
 ### DELETE /deployments/:name
 
@@ -1234,6 +1255,7 @@ Get the status of HuggingFace token secrets across namespaces.
   "configured": true,
   "namespaces": [
     { "name": "dynamo-system", "exists": true },
+    { "name": "ray-system", "exists": true },
     { "name": "kuberay-system", "exists": true },
     { "name": "default", "exists": true }
   ],
@@ -1270,6 +1292,7 @@ Save HuggingFace access token as Kubernetes secrets in all required namespaces.
   },
   "results": [
     { "namespace": "dynamo-system", "success": true },
+    { "namespace": "ray-system", "success": true },
     { "namespace": "kuberay-system", "success": true },
     { "namespace": "default", "success": true }
   ]
@@ -1288,6 +1311,7 @@ Delete HuggingFace token secrets from all namespaces.
   "message": "HuggingFace secrets deleted successfully",
   "results": [
     { "namespace": "dynamo-system", "success": true },
+    { "namespace": "ray-system", "success": true },
     { "namespace": "kuberay-system", "success": true },
     { "namespace": "default", "success": true }
   ]

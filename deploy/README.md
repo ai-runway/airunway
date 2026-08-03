@@ -14,7 +14,7 @@ kubectl apply -f controller.yaml
 
 # 2. Install one or more provider shims (required — registers providers with AI Runway)
 # See "Available provider shims" below for the full list
-kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/providers/<provider>/deploy/<provider>.yaml
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/providers/<provider>/deploy/<provider>.yaml
 
 # 3. Install dashboard UI (optional)
 kubectl apply -f dashboard.yaml

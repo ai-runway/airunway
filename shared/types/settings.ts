@@ -2,11 +2,62 @@
  * Settings and Provider types
  */
 
+export interface ProviderEngineCapability {
+  name: string;
+  servingModes?: string[];
+  gpuSupport?: boolean;
+  cpuSupport?: boolean;
+  requiresCRD?: boolean;
+  gateway?: Record<string, unknown>;
+}
+
+export interface ProviderCapabilities {
+  engines: string[];
+  engineCapabilities?: ProviderEngineCapability[];
+  modes: string[];
+  modelSources: string[];
+  routerModes: string[];
+  features: Record<string, boolean>;
+}
+
+export interface ProviderDeploymentDefaults {
+  defaultEngine?: string;
+  defaultMode?: string;
+  defaultResources?: Record<string, unknown>;
+}
+
+export interface ProviderHealthConfig {
+  crds?: Array<string | { name: string; displayName?: string }>;
+  operatorPods?: Array<{
+    namespace?: string;
+    selectors: string[];
+  }>;
+  /** @deprecated Use operatorPods instead. Kept for compatibility with older provider annotations. */
+  operator?: {
+    namespace?: string;
+    podSelectors?: string[];
+    fallbackPodSelectors?: string[];
+    crossNamespacePodSelectors?: string[];
+  };
+  status?: {
+    readyPath?: string;
+    conditions?: string[];
+  };
+}
+
 export interface ProviderInfo {
   id: string;
   name: string;
   description: string;
   defaultNamespace: string;
+  documentationUrl?: string;
+  icon?: string;
+  warnings?: string[];
+  installable?: boolean;
+  requiresCRD?: boolean;
+  capabilities?: ProviderCapabilities;
+  deploymentDefaults?: ProviderDeploymentDefaults;
+  health?: ProviderHealthConfig;
 }
 
 export interface CRDConfig {
@@ -34,6 +85,10 @@ export interface HelmChart {
   namespace: string;
   createNamespace?: boolean;
   values?: Record<string, unknown>;
+  skipCrds?: boolean;
+  fetchUrl?: string;
+  preCrdUrls?: string[];
+  preInstallMissingCrds?: boolean;
 }
 
 export interface ProviderDetails extends ProviderInfo {
@@ -75,30 +130,41 @@ export interface Settings {
  * Used to show installation and health status of each runtime
  */
 export interface RuntimeStatus {
-  id: string;           // 'dynamo' | 'kuberay'
-  name: string;         // Display name
-  installed: boolean;   // Underlying runtime (CRD + operator) is ready to use
-  healthy: boolean;     // Underlying runtime service is running
-  crdFound?: boolean;   // Underlying provider API is available
-  operatorRunning?: boolean; // Underlying runtime service pods are ready
+  id: string;
+  name: string;
+  description?: string;
+  defaultNamespace?: string;
+  documentationUrl?: string;
+  icon?: string;
+  warnings?: string[];
+  installable?: boolean;
   requiresCRD?: boolean; // Whether the provider depends on an upstream runtime operator/CRD
-  version?: string;     // Detected version
-  message?: string;     // Status message
+  capabilities?: ProviderCapabilities;
+  deploymentDefaults?: ProviderDeploymentDefaults;
+  health?: ProviderHealthConfig;
+  installed: boolean;
+  healthy: boolean;
+  crdFound?: boolean;
+  operatorRunning?: boolean;
+  version?: string;
+  message?: string;
   /**
-   * shimRegistered: true when the AI Runway provider integration ("shim")
-   * has registered an InferenceProviderConfig in the cluster. This is true
-   * for any runtime that appears in this list; included explicitly so the
-   * UI can distinguish the integration's presence from the underlying
-   * runtime's installation state.
+   * True when AI Runway's own integration for this runtime has registered an
+   * InferenceProviderConfig in the cluster. True for anything appearing in this
+   * list; stated explicitly so the UI can distinguish the integration being
+   * present from the underlying runtime being installed.
    */
   shimRegistered?: boolean;
   /**
-   * shimConnected: true when the AI Runway provider integration is
-   * actively heartbeating (status.ready=true AND a recent lastHeartbeat).
-   * Distinct from {@link installed}, which reflects the underlying runtime.
+   * True when AI Runway's integration for this runtime is responding. Derived
+   * from the same provider-health verdict that drives {@link message}, so a
+   * single staleness policy applies (PROVIDER_HEALTH_STALENESS_MS, 3 minutes by
+   * default). An integration that has never reported a check-in counts as
+   * responding rather than stale. Distinct from {@link installed}, which
+   * describes the underlying runtime.
    */
   shimConnected?: boolean;
-  /** ISO timestamp of the last shim heartbeat, if reported. */
+  /** ISO timestamp of the last check-in from the integration, if reported. */
   shimLastHeartbeat?: string;
 }
 

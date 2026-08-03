@@ -91,6 +91,13 @@ class AIConfiguratorService {
    * @param forceRefresh - If true, bypasses the cache and checks again
    */
   async checkStatus(forceRefresh = false): Promise<AIConfiguratorStatus> {
+    if (process.env.AIRUNWAY_DISABLE_AICONFIGURATOR === 'true') {
+      return {
+        available: false,
+        error: 'AI Configurator CLI not found (disabled by AIRUNWAY_DISABLE_AICONFIGURATOR)',
+      };
+    }
+
     // If running in-cluster, AI Configurator is not applicable
     if (checkInCluster()) {
       return {
@@ -336,7 +343,7 @@ class AIConfiguratorService {
   /**
    * Extract a user-friendly error message from stderr/stdout
    */
-  private extractErrorMessage(stderr: string, stdout: string): string {
+  private extractErrorMessage(stderr: string, _stdout: string): string {
     // Look for HuggingFace auth errors first (gated models)
     if (stderr.includes('401: Unauthorized') || stderr.includes('gated model')) {
       return 'This is a gated model. Please authenticate with HuggingFace first (huggingface-cli login) or use a non-gated model.';

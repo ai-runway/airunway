@@ -10,3 +10,4 @@ export * from './autoscaler';
 export * from './aiconfigurator';
 export * from './costs';
 export * from './aikit';
+export * from './vllmRecipes';

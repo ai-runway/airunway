@@ -1,4 +1,4 @@
-module github.com/kaito-project/airunway/controller
+module github.com/ai-runway/airunway/controller
 
 go 1.25.3
 

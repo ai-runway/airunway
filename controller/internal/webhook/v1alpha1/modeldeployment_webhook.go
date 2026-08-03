@@ -32,8 +32,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
-	"github.com/kaito-project/airunway/controller/internal/validation"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/validation"
 )
 
 const (
@@ -261,6 +261,28 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 	var allErrs field.ErrorList
 	spec := &obj.Spec
 	specPath := field.NewPath("spec")
+
+	// Validate image override fields are not conflicting.
+	if err := spec.ValidateImageFields(); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			specPath.Child("engine", "image"),
+			spec.Engine.Image,
+			err.Error(),
+		))
+	}
+
+	// Reject a launch flag set in both spec.engine.args and spec.engine.extraArgs
+	// at admission, so the conflict fails the apply/patch synchronously instead of
+	// being admitted and then surfacing asynchronously as a Failed reconcile. The
+	// provider transforms re-check this as a backstop. Provider-agnostic: the
+	// provider is frequently auto-selected and unknown at admission time.
+	if err := spec.ValidateEngineArgs(); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			specPath.Child("engine", "extraArgs"),
+			spec.Engine.ExtraArgs,
+			err.Error(),
+		))
+	}
 
 	// Validate model.id is required for huggingface source
 	if spec.Model.Source == airunwayv1alpha1.ModelSourceHuggingFace || spec.Model.Source == "" {
@@ -541,11 +563,20 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 		))
 	}
 
-	// provider.name is an identity field (once set)
+	// provider.name is an identity field (once set). It can be pinned two ways:
+	// explicitly in spec.provider.name, or recorded in status by auto-selection
+	// (the controller writes its choice to status, never to the user's spec). When
+	// spec.provider.name was empty, fall back to the status-recorded provider as
+	// the "old" value, so overriding an auto-selected provider is rejected here at
+	// admission instead of being admitted and then failing asynchronously during
+	// reconciliation (the controller re-validates this too as a backstop).
 	oldProvider := ""
 	newProvider := ""
 	if oldSpec.Provider != nil {
 		oldProvider = oldSpec.Provider.Name
+	}
+	if oldProvider == "" && oldObj.Status.Provider != nil {
+		oldProvider = oldObj.Status.Provider.Name
 	}
 	if newSpec.Provider != nil {
 		newProvider = newSpec.Provider.Name

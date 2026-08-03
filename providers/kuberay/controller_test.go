@@ -2,10 +2,11 @@ package kuberay
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -610,6 +611,7 @@ func TestSyncStatusRunning(t *testing.T) {
 	r := NewKubeRayProviderReconciler(c, scheme)
 
 	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Status.Message = "RayService created, waiting for pods to be ready"
 	desired := &unstructured.Unstructured{}
 	setRayServiceGVK(desired)
 	desired.SetName("test")
@@ -621,6 +623,13 @@ func TestSyncStatusRunning(t *testing.T) {
 	}
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
 		t.Errorf("expected Running, got %s", md.Status.Phase)
+	}
+	// Issue #289: a Running deployment must not keep the "waiting for pods" message.
+	if strings.Contains(md.Status.Message, "waiting for pods") {
+		t.Errorf("status message still claims waiting for pods while Running: %q", md.Status.Message)
+	}
+	if md.Status.Message == "" {
+		t.Errorf("expected a non-empty status message in Running phase")
 	}
 }
 

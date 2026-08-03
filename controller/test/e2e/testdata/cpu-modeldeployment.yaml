@@ -6,5 +6,5 @@ spec:
   model:
     source: custom
   resources:
-    cpu: "4"
+    cpu: "1"
   image: "ghcr.io/kaito-project/aikit/llama3.2:1b"

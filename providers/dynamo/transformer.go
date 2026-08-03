@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -908,9 +908,10 @@ func (t *Transformer) getImage(md *airunwayv1alpha1.ModelDeployment) string {
 		return defaultMockerImage
 	}
 
-	// Use custom image if specified
-	if md.Spec.Image != "" {
-		return md.Spec.Image
+	// Use custom image if specified. spec.engine.image is preferred over the
+	// legacy top-level spec.image field.
+	if image := md.Spec.ImageOverride(); image != "" {
+		return image
 	}
 
 	// Use default image for engine type

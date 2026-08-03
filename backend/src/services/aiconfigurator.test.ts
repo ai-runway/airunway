@@ -1,5 +1,8 @@
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect } from 'bun:test';
 import { aiConfiguratorService } from './aiconfigurator';
+
+process.env.AIRUNWAY_DISABLE_AICONFIGURATOR = 'true';
+aiConfiguratorService.invalidateStatusCache();
 
 describe('AIConfiguratorService', () => {
   describe('checkStatus', () => {

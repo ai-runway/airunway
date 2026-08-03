@@ -37,15 +37,25 @@ export default [
       ...reactHooks.configs.recommended.rules,
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
 
-      // Pre-existing debt: this codebase predates any ESLint config (the v8→v10
-      // bump first introduced one) and the react-hooks v4→v7 bump enabled new
-      // React-Compiler rules. `recommended` therefore surfaces ~26 historical
-      // violations — none in newly-written code. Demote them to warnings so lint
-      // is green and CI-usable today while still surfacing the backlog for
-      // incremental burndown. Promote back to "error" once each is cleared.
-      '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-unused-vars': 'warn',
-      '@typescript-eslint/no-empty-object-type': 'warn',
+      // Enforced as errors: these were cleaned up across the codebase, so they
+      // stay green and must not regress. `no-unused-vars` allows intentionally
+      // unused identifiers when prefixed with `_` (e.g. positional params).
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-empty-object-type': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+
+      // Pre-existing debt (NOT in scope for this config's cleanup): react-hooks
+      // v7 enabled new experimental React-Compiler rules that surface historical
+      // violations in older components. Demote to warnings so lint is green and
+      // CI-usable today while still surfacing the backlog for incremental
+      // burndown. Promote back to "error" once each is cleared.
       'react-hooks/set-state-in-effect': 'warn',
       'react-hooks/purity': 'warn',
       'react-hooks/preserve-manual-memoization': 'warn',

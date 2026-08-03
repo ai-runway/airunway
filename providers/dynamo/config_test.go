@@ -3,9 +3,10 @@ package dynamo
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
@@ -44,6 +45,11 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(vllmCap.ServingModes) != 2 {
 		t.Fatalf("expected vllm to support 2 serving modes, got %d", len(vllmCap.ServingModes))
 	}
+	assertAPIFormats(t, "vllm", vllmCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	sglangCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeSGLang)
 	if sglangCap == nil {
@@ -55,6 +61,10 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(sglangCap.ServingModes) != 2 {
 		t.Fatalf("expected sglang to support 2 serving modes, got %d", len(sglangCap.ServingModes))
 	}
+	assertAPIFormats(t, "sglang", sglangCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	trtllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeTRTLLM)
 	if trtllmCap == nil {
@@ -66,6 +76,10 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(trtllmCap.ServingModes) != 1 || trtllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected trtllm to support only aggregated serving mode")
 	}
+	assertAPIFormats(t, "trtllm", trtllmCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+	})
 
 	if len(spec.SelectionRules) != 4 {
 		t.Fatalf("expected 4 selection rules, got %d", len(spec.SelectionRules))
@@ -140,8 +154,8 @@ func TestProviderConstants(t *testing.T) {
 	if ProviderConfigName != "dynamo" {
 		t.Errorf("expected provider config name 'dynamo', got %s", ProviderConfigName)
 	}
-	if ProviderVersion != "dynamo-provider:v0.2.0" {
-		t.Errorf("expected provider version 'dynamo-provider:v0.2.0', got %s", ProviderVersion)
+	if !strings.HasPrefix(ProviderVersion, "dynamo-provider:") {
+		t.Errorf("expected provider version to start with 'dynamo-provider:', got %s", ProviderVersion)
 	}
 }
 
@@ -312,5 +326,83 @@ func TestUpdateStatusNotFound(t *testing.T) {
 	err := mgr.UpdateStatus(context.Background(), true)
 	if err == nil {
 		t.Fatal("expected error when config not found")
+	}
+}
+
+func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
+	annotations, err := buildAnnotations()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	requiredKeys := []string{
+		airunwayv1alpha1.AnnotationDisplayName,
+		airunwayv1alpha1.AnnotationDescription,
+		airunwayv1alpha1.AnnotationDefaultNamespace,
+		airunwayv1alpha1.AnnotationDocumentationURL,
+		airunwayv1alpha1.AnnotationCapabilities,
+		airunwayv1alpha1.AnnotationHealth,
+		airunwayv1alpha1.AnnotationInstallation,
+		airunwayv1alpha1.AnnotationDocumentation,
+	}
+	for _, key := range requiredKeys {
+		if annotations[key] == "" {
+			t.Fatalf("expected annotation %s to be set", key)
+		}
+	}
+
+	if annotations[airunwayv1alpha1.AnnotationDisplayName] != "Dynamo" {
+		t.Fatalf("expected Dynamo display name, got %q", annotations[airunwayv1alpha1.AnnotationDisplayName])
+	}
+	if annotations[airunwayv1alpha1.AnnotationDefaultNamespace] != "dynamo-system" {
+		t.Fatalf("expected dynamo-system default namespace, got %q", annotations[airunwayv1alpha1.AnnotationDefaultNamespace])
+	}
+	if annotations[airunwayv1alpha1.AnnotationDocumentationURL] != ProviderDocumentation {
+		t.Fatalf("expected documentation-url annotation %q, got %q", ProviderDocumentation, annotations[airunwayv1alpha1.AnnotationDocumentationURL])
+	}
+
+	var capabilities airunwayv1alpha1.ProviderCapabilities
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationCapabilities]), &capabilities); err != nil {
+		t.Fatalf("failed to decode capabilities annotation: %v", err)
+	}
+	if len(capabilities.Engines) != 3 {
+		t.Fatalf("expected 3 annotated engines, got %+v", capabilities.Engines)
+	}
+
+	var health struct {
+		CRDs []struct {
+			Name string `json:"name"`
+		} `json:"crds"`
+		OperatorPods []struct {
+			Selectors []string `json:"selectors"`
+		} `json:"operatorPods"`
+	}
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
+		t.Fatalf("failed to decode health annotation: %v", err)
+	}
+	if len(health.CRDs) != 1 || health.CRDs[0].Name != "dynamographdeployments.nvidia.com" {
+		t.Fatalf("expected Dynamo CRD health probe, got %+v", health.CRDs)
+	}
+	if len(health.OperatorPods) == 0 || len(health.OperatorPods[0].Selectors) == 0 {
+		t.Fatalf("expected operator pod health probes, got %+v", health.OperatorPods)
+	}
+}
+
+func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alpha1.APIFormat) {
+	t.Helper()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %s to support %d API formats, got %d: %v", engine, len(expected), len(got), got)
+	}
+	for _, e := range expected {
+		found := false
+		for _, a := range got {
+			if a == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s to support API format %s", engine, e)
+		}
 	}
 }

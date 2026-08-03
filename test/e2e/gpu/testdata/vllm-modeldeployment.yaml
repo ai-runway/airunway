@@ -1,0 +1,26 @@
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen3-0-6b-vllm
+  namespace: default
+spec:
+  model:
+    id: Qwen/Qwen3-0.6B
+    source: huggingface
+    # vLLM honors servedName -> --served-model-name. It MUST equal gateway.modelName
+    # below, because the gateway routes on the request body "model" field AND the
+    # vLLM backend validates that same value against its served name. Without this,
+    # vLLM would default its served name to "Qwen/Qwen3-0.6B" and collide with the
+    # Dynamo arm on the shared gateway.
+    servedName: vllm-qwen3-06b
+  provider:
+    name: vllm
+  engine:
+    type: vllm
+  resources:
+    gpu:
+      count: 1
+  scaling:
+    replicas: 1
+  gateway:
+    modelName: vllm-qwen3-06b

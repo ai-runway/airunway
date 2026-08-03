@@ -450,7 +450,11 @@ describe('HelmService - Release Status Detection', () => {
 });
 
 describe('HelmService - Managed Chart CRDs', () => {
-  const service = helmService as any;
+  // execute / executeKubectl are private; reach in just for tests to stub them.
+  const service = helmService as unknown as {
+    execute: (args: string[]) => Promise<unknown>;
+    executeKubectl: (args: string[]) => Promise<unknown>;
+  };
   const originalExecute = service.execute;
   const originalExecuteKubectl = service.executeKubectl;
 

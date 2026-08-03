@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -197,6 +197,32 @@ func TestTransformLlamaCpp(t *testing.T) {
 	port, _ := ports[0].(map[string]interface{})
 	if port["containerPort"] != int64(defaultLlamaCppPort) {
 		t.Errorf("expected port %d, got %v", defaultLlamaCppPort, port["containerPort"])
+	}
+}
+
+func TestTransformLlamaCppUsesEngineImageOverride(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeLlamaCpp
+	md.Spec.Image = "legacy-image:latest"
+	md.Spec.Engine.Image = "engine-image:latest"
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ws := resources[0]
+	inference, _, _ := unstructured.NestedMap(ws.Object, "inference")
+	template, ok := inference["template"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected inference.template to be a map")
+	}
+	spec, _ := template["spec"].(map[string]interface{})
+	containers, _ := spec["containers"].([]interface{})
+	container, _ := containers[0].(map[string]interface{})
+	if container["image"] != "engine-image:latest" {
+		t.Errorf("expected engine image override, got %v", container["image"])
 	}
 }
 

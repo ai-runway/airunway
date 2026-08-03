@@ -1,0 +1,35 @@
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen3-0-6b-dynamo
+  namespace: default
+spec:
+  model:
+    id: Qwen/Qwen3-0.6B
+    source: huggingface
+    # Dynamo serves under the HF id, so gateway.modelName must equal it.
+    # The storage block is required: assertDynamoPVC asserts a Bound
+    # model-cache PVC. storageClassName is azurefile-premium because the volume
+    # defaults to ReadWriteMany, which Azure Disk classes (the cluster default)
+    # cannot serve — only the file.csi azurefile-premium class can. The harness
+    # overrides storageClassName at apply-time from GPU_E2E_STORAGE_CLASS.
+    storage:
+      volumes:
+        - name: model-cache
+          purpose: modelCache
+          mountPath: /model-cache
+          size: 2Gi
+          storageClassName: azurefile-premium
+  provider:
+    name: dynamo
+  engine:
+    type: vllm
+    contextLength: 4096
+    trustRemoteCode: false
+  resources:
+    gpu:
+      count: 1
+  scaling:
+    replicas: 1
+  gateway:
+    modelName: Qwen/Qwen3-0.6B

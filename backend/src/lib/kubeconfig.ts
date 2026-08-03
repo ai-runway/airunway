@@ -1,4 +1,5 @@
 import * as k8s from '@kubernetes/client-node';
+import type * as https from 'node:https';
 import logger from './logger';
 
 /**
@@ -23,10 +24,19 @@ export function loadKubeConfig(): k8s.KubeConfig {
   if (process.env.AUTH_ENABLED?.toLowerCase() === 'true' || process.env.AUTH_ENABLED === '1') {
     const currentUser = kc.getCurrentUser();
     if (currentUser) {
-      (currentUser as any).certData = undefined;
-      (currentUser as any).certFile = undefined;
-      (currentUser as any).keyData = undefined;
-      (currentUser as any).keyFile = undefined;
+      // The k8s User fields are declared `readonly`, but we must clear the
+      // client certificates before any API client is created. Cast to a
+      // writable view of just those fields instead of using `any`.
+      const writableUser = currentUser as {
+        certData?: string;
+        certFile?: string;
+        keyData?: string;
+        keyFile?: string;
+      };
+      writableUser.certData = undefined;
+      writableUser.certFile = undefined;
+      writableUser.keyData = undefined;
+      writableUser.keyFile = undefined;
       logger.debug('Stripped client certificates from kubeconfig (AUTH_ENABLED)');
     }
   }
@@ -92,7 +102,7 @@ export async function kubeConfigToBunTls(kc: k8s.KubeConfig): Promise<BunTlsOpti
     servername?: string;
     rejectUnauthorized?: boolean;
   } = {};
-  await kc.applyToHTTPSOptions(httpsOptions as any);
+  await kc.applyToHTTPSOptions(httpsOptions as https.RequestOptions);
 
   const tls: BunTlsOptions = {};
   if (httpsOptions.ca) tls.ca = httpsOptions.ca;

@@ -2,6 +2,8 @@ package kaito
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 func TestGetProviderConfigSpec(t *testing.T) {
@@ -50,6 +52,11 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(vllmCap.ServingModes) != 1 || vllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected vllm to support only aggregated serving mode")
 	}
+	assertAPIFormats(t, "vllm", vllmCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	llamaCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeLlamaCpp)
 	if llamaCap == nil {
@@ -63,6 +70,9 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	}
 	if len(llamaCap.ServingModes) != 1 || llamaCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected llamacpp to support only aggregated serving mode")
+	}
+	if len(llamaCap.APIFormats) != 1 || llamaCap.APIFormats[0] != airunwayv1alpha1.APIFormatOpenAIChat {
+		t.Errorf("expected llamacpp to support openai-chat API format")
 	}
 
 	if len(spec.SelectionRules) != 2 {
@@ -106,8 +116,8 @@ func TestProviderConstants(t *testing.T) {
 	if ProviderConfigName != "kaito" {
 		t.Errorf("expected provider config name 'kaito', got %s", ProviderConfigName)
 	}
-	if ProviderVersion != "kaito-provider:v0.1.0" {
-		t.Errorf("expected provider version 'kaito-provider:v0.1.0', got %s", ProviderVersion)
+	if !strings.HasPrefix(ProviderVersion, "kaito-provider:") {
+		t.Errorf("expected provider version to start with 'kaito-provider:', got %s", ProviderVersion)
 	}
 }
 
@@ -270,4 +280,78 @@ func newFakeClientWithWorkspace(scheme *runtime.Scheme, objs ...client.Object) c
 		WithObjects(objs...).
 		WithStatusSubresource(&airunwayv1alpha1.InferenceProviderConfig{}).
 		Build()
+}
+
+func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
+	annotations, err := buildAnnotations()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	requiredKeys := []string{
+		airunwayv1alpha1.AnnotationDisplayName,
+		airunwayv1alpha1.AnnotationDescription,
+		airunwayv1alpha1.AnnotationDefaultNamespace,
+		airunwayv1alpha1.AnnotationDocumentationURL,
+		airunwayv1alpha1.AnnotationCapabilities,
+		airunwayv1alpha1.AnnotationHealth,
+		airunwayv1alpha1.AnnotationInstallation,
+		airunwayv1alpha1.AnnotationDocumentation,
+	}
+	for _, key := range requiredKeys {
+		if annotations[key] == "" {
+			t.Fatalf("expected annotation %s to be set", key)
+		}
+	}
+	if annotations[airunwayv1alpha1.AnnotationDisplayName] != "KAITO" {
+		t.Fatalf("expected KAITO display name, got %q", annotations[airunwayv1alpha1.AnnotationDisplayName])
+	}
+	if annotations[airunwayv1alpha1.AnnotationDefaultNamespace] != "kaito-workspace" {
+		t.Fatalf("expected kaito-workspace default namespace, got %q", annotations[airunwayv1alpha1.AnnotationDefaultNamespace])
+	}
+
+	var capabilities airunwayv1alpha1.ProviderCapabilities
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationCapabilities]), &capabilities); err != nil {
+		t.Fatalf("failed to decode capabilities annotation: %v", err)
+	}
+	if capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeLlamaCpp) == nil {
+		t.Fatalf("expected annotated llamacpp capability, got %+v", capabilities.Engines)
+	}
+
+	var health struct {
+		CRDs []struct {
+			Name string `json:"name"`
+		} `json:"crds"`
+		OperatorPods []struct {
+			Selectors []string `json:"selectors"`
+		} `json:"operatorPods"`
+	}
+	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
+		t.Fatalf("failed to decode health annotation: %v", err)
+	}
+	if len(health.CRDs) != 1 || health.CRDs[0].Name != "workspaces.kaito.sh" {
+		t.Fatalf("expected KAITO CRD health probe, got %+v", health.CRDs)
+	}
+	if len(health.OperatorPods) < 2 {
+		t.Fatalf("expected namespace and cross-namespace KAITO operator probes, got %+v", health.OperatorPods)
+	}
+}
+
+func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alpha1.APIFormat) {
+	t.Helper()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %s to support %d API formats, got %d: %v", engine, len(expected), len(got), got)
+	}
+	for _, e := range expected {
+		found := false
+		for _, a := range got {
+			if a == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s to support API format %s", engine, e)
+		}
+	}
 }

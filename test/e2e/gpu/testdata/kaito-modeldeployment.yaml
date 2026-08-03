@@ -1,0 +1,24 @@
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen3-0-6b-kaito
+  namespace: default
+spec:
+  model:
+    # KAITO maps model.id directly to inference.preset.name. "Qwen/Qwen3-0.6B" is a
+    # valid preset on the installed KAITO version; it lowercases the served name to
+    # "qwen3-0.6b" (which is why gateway.modelName below is qwen3-0.6b — KAITO forces
+    # that served name and ignores spec.model.servedName).
+    id: Qwen/Qwen3-0.6B
+    source: huggingface
+  provider:
+    name: kaito
+  engine:
+    type: vllm
+  resources:
+    gpu:
+      count: 1
+  scaling:
+    replicas: 1
+  gateway:
+    modelName: qwen3-0.6b

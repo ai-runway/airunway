@@ -645,7 +645,7 @@ export function SettingsPage() {
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
-                      {runtimeDescription(runtime.id, runtime.name)}
+                      {runtime.description || runtimeDescription(runtime.id, runtime.name)}
                     </p>
                   </div>
                   <div>

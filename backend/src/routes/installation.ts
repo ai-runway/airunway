@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { kubernetesService, computeShimStatus } from '../services/kubernetes';
+import { kubernetesService } from '../services/kubernetes';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { helmService } from '../services/helm';
@@ -16,18 +16,7 @@ import {
 } from '../services/gpuPerformance';
 import type { GpuThroughputEstimate, NodePoolInfo } from '@airunway/shared';
 import logger from '../lib/logger';
-import { aggregateRequiresCRDFromCapabilities, getAnnotatedProviderDisplayName, getProviderDisplayName, providerRequiresRuntimeCRD } from '../lib/providers';
-
-interface ProviderHelmChartDetails {
-  name: string;
-  chart: string;
-  namespace: string;
-  version?: string;
-  createNamespace?: boolean;
-  values?: Record<string, unknown>;
-  preInstallMissingCrds?: boolean;
-  skipCrds?: boolean;
-}
+import { extractProviderDetails, type ProviderHelmChartDetails } from '../lib/providers';
 
 /** Default context length (tokens) assumed when a model doesn't specify one. */
 const DEFAULT_CONTEXT_LEN = 4096;
@@ -135,76 +124,6 @@ function selectGpuForEstimate(
     }
   }
   return best;
-}
-
-/**
- * Parse the installation annotation (JSON) from an InferenceProviderConfig CRD object.
- */
-function parseInstallationAnnotation(config: any): any {
-  const raw = config.metadata?.annotations?.['airunway.ai/installation'];
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    logger.warn({
-      provider: config.metadata?.name,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    }, 'Failed to parse installation annotation');
-    return {};
-  }
-}
-
-/**
- * Extract provider details from an InferenceProviderConfig CRD object.
- * Installation and documentation metadata are read from metadata.annotations,
- * not from spec (which only contains controller-reconciled fields).
- */
-function extractProviderDetails(config: any) {
-  const name = config.metadata?.name || 'unknown';
-  const annotations = config.metadata?.annotations;
-  const displayName = getProviderDisplayName(name, annotations);
-  const annotatedDisplayName = getAnnotatedProviderDisplayName(annotations);
-  const installation = parseInstallationAnnotation(config);
-  const capabilities = config.spec?.capabilities || {};
-
-  return {
-    id: name,
-    name: displayName,
-    description: installation.description || '',
-    defaultNamespace: installation.defaultNamespace || 'default',
-    requiresCRD: providerRequiresRuntimeCRD(name, aggregateRequiresCRDFromCapabilities(capabilities), annotatedDisplayName),
-    crdConfig: {
-      // The real CRD apiGroup isn't stored on the InferenceProviderConfig, so we
-      // can't derive it here; emit an empty string to satisfy the CRDConfig type.
-      apiGroup: '',
-    },
-    helmRepos: (installation.helmRepos || []).map((r: any) => ({
-      name: r.name,
-      url: r.url,
-    })),
-    helmCharts: (installation.helmCharts || []).map((c: any): ProviderHelmChartDetails => {
-      const values = c.values && typeof c.values === 'object' && !Array.isArray(c.values)
-        ? c.values as Record<string, unknown>
-        : undefined;
-      if (c.values !== undefined && values === undefined) {
-        logger.warn({ provider: name, chart: c.name }, 'Ignoring malformed Helm chart values in provider installation metadata');
-      }
-
-      return {
-        name: c.name,
-        chart: c.chart,
-        version: c.version,
-        namespace: c.namespace,
-        createNamespace: c.createNamespace,
-        values,
-      };
-    }),
-    installationSteps: (installation.steps || []).map((s: any) => ({
-      title: s.title,
-      command: s.command,
-      description: s.description,
-    })),
-  };
 }
 
 function shouldPreInstallMissingCrds(providerId: string, chart: ProviderHelmChartDetails) {
@@ -480,6 +399,7 @@ const installation = new Hono()
       providerId,
       status,
       provider.name,
+      provider.health,
       provider.requiresCRD,
     );
     // Layer the shim's heartbeat-aware health view on top of the live
@@ -488,7 +408,6 @@ const installation = new Hono()
     // condition reporting unhealthy (the refuse-fast path). Structural fields
     // (installed/operatorRunning) stay sourced from installationStatus since
     // that reflects what's actually in the cluster regardless of shim state.
-    const shim = computeShimStatus(status);
     const health = getProviderHealth(providerId, config);
     const baseMessage = hasInstallMetadata || provider.requiresCRD === false
       ? installationStatus.message
@@ -508,9 +427,13 @@ const installation = new Hono()
       installable,
       installationSteps: provider.installationSteps,
       helmCommands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
-      shimRegistered: shim.shimRegistered,
-      shimConnected: shim.shimConnected,
-      shimLastHeartbeat: shim.shimLastHeartbeat,
+      // Reported alongside — never folded into — the install fields above, so
+      // the UI can never imply the runtime is installed just because AI
+      // Runway's integration is alive (issue #244). Derived from the same
+      // health verdict that drives `message`, so one staleness policy applies.
+      shimRegistered: true,
+      shimConnected: health.healthy,
+      shimLastHeartbeat: health.lastHeartbeat,
     });
   })
   .get('/providers/:providerId/commands', async (c) => {
@@ -643,7 +566,6 @@ const installation = new Hono()
       throw new HTTPException(404, { message: `Provider not found: ${providerId}` });
     }
 
-    const crdConfig = config.spec?.capabilities || {};
     logger.info({ providerId }, `Removing CRDs for ${providerId}`);
 
     // The CRD name is typically plural.apiGroup — but since we don't store that in

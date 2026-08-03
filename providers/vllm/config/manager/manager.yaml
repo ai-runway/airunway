@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airunway-vllm-provider
+  namespace: airunway-system
+  labels:
+    control-plane: vllm-provider
+    app.kubernetes.io/name: airunway
+    app.kubernetes.io/component: vllm-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: vllm-provider
+      app.kubernetes.io/name: airunway
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: vllm-provider
+        app.kubernetes.io/name: airunway
+        app.kubernetes.io/component: vllm-provider
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - command:
+        - /provider
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        image: IMAGE_PLACEHOLDER
+        name: manager
+        ports:
+        - containerPort: 8443
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      serviceAccountName: airunway-vllm-provider
+      terminationGracePeriodSeconds: 10

@@ -2,6 +2,17 @@
 FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# LLMD_VERSION is the llm-d inference scheduler tag pinned in /versions.env.
+# It is injected into the provider binary via -ldflags so the in-image default
+# tracks versions.env. The build fails fast below if it is unset, so a hand-run
+# `docker build` cannot silently fall back to the Go source literal in config.go
+# and produce an image untracked by versions.env.
+ARG LLMD_VERSION
+# SHIM_VERSION is the reported shim version tag. Required so a hand-run
+# `docker build` cannot silently ship status.version=llmd-provider:dev under
+# a real release tag. The Makefile and release workflow always pass it via
+# --build-arg.
+ARG SHIM_VERSION
 
 WORKDIR /workspace
 
@@ -25,7 +36,18 @@ COPY providers/llmd/ providers/llmd/
 RUN cd providers/llmd && go mod tidy
 
 # Build
-RUN cd providers/llmd && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider cmd/main.go
+# Require LLMD_VERSION and SHIM_VERSION so hand-run `docker build` cannot
+# silently drift from versions.env or ship status.version=llmd-provider:dev.
+# Builds should pass both via --build-arg (the Makefile and release workflow do).
+RUN test -n "${LLMD_VERSION}" || (echo "ERROR: LLMD_VERSION build arg is required (see versions.env); pass --build-arg LLMD_VERSION=..." >&2; exit 1)
+RUN test -n "${SHIM_VERSION}" || (echo "ERROR: SHIM_VERSION build arg is required; pass --build-arg SHIM_VERSION=..." >&2; exit 1)
+# MODULE is resolved from go.mod (not hand-typed) so every -X target can never
+# drift from the package path.
+RUN cd providers/llmd && MODULE=$(go list -m) && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a \
+      -ldflags="-X ${MODULE}.LLMDSchedulerImage=ghcr.io/llm-d/llm-d-inference-scheduler:v${LLMD_VERSION} -X ${MODULE}.shimVersion=${SHIM_VERSION}" \
+      -o provider cmd/main.go
 
 # Use distroless as minimal base image to package the provider binary
 FROM gcr.io/distroless/static:nonroot

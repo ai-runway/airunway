@@ -10,7 +10,7 @@ import {
   getEngineArchitectures,
 } from './modelCompatibility';
 import { parseParameterCountFromName } from '@airunway/shared';
-import type { Engine, HfApiModelResult } from '@airunway/shared';
+import type { HfApiModelResult } from '@airunway/shared';
 
 describe('inferArchitectureFromModelId', () => {
   test('infers LlamaForCausalLM for llama models', () => {
@@ -71,6 +71,11 @@ describe('getSupportedEngines', () => {
     const engines = getSupportedEngines(['JambaForCausalLM']);
     expect(engines).toContain('vllm');
     expect(engines).not.toContain('trtllm');
+  });
+
+  test('returns only vllm for Laguna architecture', () => {
+    const engines = getSupportedEngines(['LagunaForCausalLM']);
+    expect(engines).toEqual(['vllm']);
   });
 
   test('returns empty array for unknown architecture', () => {
@@ -230,6 +235,24 @@ describe('processHfModel', () => {
     expect(result.supportedEngines).toHaveLength(0);
   });
 
+  test('processes Laguna as vllm-only compatible model', () => {
+    const model: HfApiModelResult = {
+      id: 'poolside/Laguna-XS.2',
+      downloads: 100,
+      likes: 10,
+      pipeline_tag: 'text-generation',
+      library_name: 'transformers',
+      config: { architectures: ['LagunaForCausalLM'] },
+      gated: false,
+    };
+
+    const result = processHfModel(model);
+    expect(result.compatible).toBe(true);
+    expect(result.architectures).toEqual(['LagunaForCausalLM']);
+    expect(result.supportedEngines).toEqual(['vllm']);
+    expect(result.incompatibilityReason).toBeUndefined();
+  });
+
   test('processes gated model without metadata by inferring architecture', () => {
     const model: HfApiModelResult = {
       id: 'meta-llama/Llama-3.1-8B-Instruct',
@@ -275,7 +298,7 @@ describe('processHfModel', () => {
   test('handles auto-gated models', () => {
     const model: HfApiModelResult = {
       id: 'test/auto-gated',
-      gated: 'auto' as any,
+      gated: 'auto',
     };
 
     const result = processHfModel(model);
@@ -374,6 +397,7 @@ describe('getEngineArchitectures', () => {
     const archs = getEngineArchitectures('vllm');
     expect(archs).toContain('LlamaForCausalLM');
     expect(archs).toContain('MistralForCausalLM');
+    expect(archs).toContain('LagunaForCausalLM');
     expect(archs.length).toBeGreaterThan(10);
   });
 

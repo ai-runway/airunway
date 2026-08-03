@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 const (
@@ -305,6 +305,10 @@ func (r *LLMDProviderReconciler) syncStatus(ctx context.Context, md *airunwayv1a
 	md.Status.Phase = statusResult.Phase
 	if statusResult.Message != "" {
 		md.Status.Message = statusResult.Message
+	} else if statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
+		// The translator reports no message for a healthy Deployment; replace the
+		// stale "waiting for pods" message so status reflects the Running phase.
+		md.Status.Message = "Deployments created, pods are ready"
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint

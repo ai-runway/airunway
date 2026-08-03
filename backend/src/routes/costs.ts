@@ -131,7 +131,6 @@ export const costsRoutes = new Hono()
           );
 
           if (result.success && result.price) {
-            const totalGpus = gpuCount * replicas;
             const hourlyPrice = result.price.hourlyPrice * replicas; // Full VM cost per replica
             const monthlyPrice = hourlyPrice * 730;
 

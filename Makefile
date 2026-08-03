@@ -1,15 +1,15 @@
-.PHONY: install dev dev-frontend dev-backend build compile lint test clean help providers-test verify-versions test-verify-versions
+.PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend clean help providers-test gpu-e2e gpu-e2e-check verify-versions test-verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
 .PHONY: model-downloader-docker-build setup-gateway cleanup-gateway
 
 # Controller image
-CONTROLLER_IMG ?= ghcr.io/kaito-project/airunway/controller:latest
+CONTROLLER_IMG ?= ghcr.io/ai-runway/airunway/controller:latest
 
 # Dashboard image
-DASHBOARD_IMG ?= ghcr.io/kaito-project/airunway/dashboard:latest
+DASHBOARD_IMG ?= ghcr.io/ai-runway/airunway/dashboard:latest
 
 # Model downloader image
-MODEL_DOWNLOADER_IMG ?= ghcr.io/kaito-project/airunway/model-downloader:latest
+MODEL_DOWNLOADER_IMG ?= ghcr.io/ai-runway/airunway/model-downloader:latest
 
 # Image build settings
 PLATFORM ?= linux/amd64
@@ -41,6 +41,7 @@ help:
 	@echo "  compile-windows        Cross-compile for Windows (x64)"
 	@echo "  lint                   Run linters"
 	@echo "  test                   Run tests"
+	@echo "  test-coverage          Run tests with coverage (frontend + backend)"
 	@echo "  clean                  Remove build artifacts and node_modules"
 	@echo ""
 	@echo "Controller Targets:"
@@ -58,6 +59,8 @@ help:
 	@echo ""
 	@echo "Provider Targets:"
 	@echo "  providers-test         Run all provider tests"
+	@echo "  gpu-e2e                Run GPU e2e suite on a GPU cluster (GPU_E2E_ARGS=...)"
+	@echo "  gpu-e2e-check          Cluster-free checks for the GPU e2e module (gofmt, vet, compile, unit tests)"
 	@echo ""
 	@echo "Cluster Setup Targets:"
 	@echo "  setup-gateway          Install Gateway API CRDs, Istio, BBR, and the inference Gateway"
@@ -125,6 +128,18 @@ lint:
 test: verify-versions
 	bun run test
 
+# Testing with coverage (CI entrypoint). Coverage prints to stdout;
+# GitHub step-summary formatting lives in the workflow, not here.
+# Uses `cd <ws> && bun run test:coverage` (not `bun run --filter`) so output
+# stays unprefixed and the coverage tables render cleanly in the CI summary.
+test-coverage: verify-versions test-coverage-backend test-coverage-frontend
+
+test-coverage-backend:
+	cd backend && bun run test:coverage
+
+test-coverage-frontend:
+	cd frontend && bun run test:coverage
+
 # Clean build artifacts
 clean:
 	rm -rf node_modules frontend/node_modules backend/node_modules shared/node_modules
@@ -184,7 +199,33 @@ providers-test: verify-versions
 	cd providers/kaito && go test ./...
 	cd providers/kuberay && go test ./...
 	cd providers/llmd && go test ./...
+	cd providers/vllm && go test ./...
 	@echo "✅ Provider tests completed"
+
+# Run the GPU end-to-end suite against a pre-existing GPU cluster.
+# All logic lives in scripts/gpu-e2e.sh; pass flags via GPU_E2E_ARGS.
+# Example: make gpu-e2e GPU_E2E_ARGS="--provider all --registry quay.io/surajd"
+gpu-e2e:
+	@bash scripts/gpu-e2e.sh $(GPU_E2E_ARGS)
+
+# Cluster-free validation of the GPU e2e module (test/e2e/gpu). Runs in CI on a
+# plain runner: it never touches a cluster. Three guarantees:
+#   1. gofmt   — the module stays formatted.
+#   2. vet + compile under -tags=e2e — the cluster-coupled suite keeps building
+#      even though CI never runs it (catches selector/API drift at PR time).
+#   3. unit tests for the cluster-free packages (sched, e2eutil) — the
+#      classifier, response parser, and storage-class injector are exercised
+#      for real. These carry no build tag, so `go test` picks them up directly.
+gpu-e2e-check:
+	@echo "▶ gofmt"
+	@test -z "$$(gofmt -l test/e2e/gpu)" || { echo "❌ gofmt: run 'gofmt -w test/e2e/gpu'"; gofmt -l test/e2e/gpu; exit 1; }
+	@echo "▶ go vet (-tags=e2e)"
+	go vet -C test/e2e/gpu -tags=e2e ./...
+	@echo "▶ compile e2e suite (-tags=e2e)"
+	go test -C test/e2e/gpu -tags=e2e -c -o /dev/null ./
+	@echo "▶ unit tests (cluster-free packages)"
+	go test -C test/e2e/gpu ./sched/ ./e2eutil/
+	@echo "✅ GPU e2e module checks passed"
 
 # Generate deploy manifests for controller and dashboard
 generate-deploy-manifests:
@@ -266,6 +307,8 @@ cleanup-gateway:
 GAIE_VERSION_RE := $(subst .,\.,$(GAIE_VERSION))
 DYNAMO_VERSION_RE := $(subst .,\.,$(DYNAMO_VERSION))
 KAITO_VERSION_RE := $(subst .,\.,$(KAITO_VERSION))
+VLLM_VERSION_RE := $(subst .,\.,$(VLLM_VERSION))
+LLMD_VERSION_RE := $(subst .,\.,$(LLMD_VERSION))
 
 verify-versions:
 	@# 1. controller/go.mod must pin GAIE_VERSION
@@ -283,7 +326,13 @@ verify-versions:
 	@# 5. providers/kaito/config.go install Command --version arg must match KAITO_VERSION
 	@grep -qE -- '--version $(KAITO_VERSION_RE) ' providers/kaito/config.go || \
 	  { echo "❌ providers/kaito/config.go install Command --version != $(KAITO_VERSION) (from versions.env)"; exit 1; }
-	@# 6. generated TS must be in sync with versions.env.
+	@# 6. providers/vllm/transformer.go fallback literal must match VLLM_VERSION
+	@grep -qE '^var VLLMVersion = "$(VLLM_VERSION_RE)"$$' providers/vllm/transformer.go || \
+	  { echo "❌ providers/vllm/transformer.go VLLMVersion fallback != $(VLLM_VERSION) (from versions.env)"; exit 1; }
+	@# 7. providers/llmd/config.go fallback literal must match LLMD_VERSION
+	@grep -qE '^var LLMDSchedulerImage = "ghcr\.io/llm-d/llm-d-inference-scheduler:v$(LLMD_VERSION_RE)"$$' providers/llmd/config.go || \
+	  { echo "❌ providers/llmd/config.go LLMDSchedulerImage tag != $(LLMD_VERSION) (from versions.env)"; exit 1; }
+	@# 8. generated TS must be in sync with versions.env.
 	@#    Generate to a temp file and diff against the working-tree copy so
 	@#    that synced uncommitted edits pass (the local-dev case) while
 	@#    stale committed files still fail (the CI case — CI's working
@@ -301,7 +350,9 @@ verify-versions:
 	    echo "❌ shared/types/versions.generated.ts is stale — run 'cd shared && bun run generate-versions' and commit the result"; \
 	    exit 1; \
 	  }
-	@echo "✅ versions in sync (GAIE_VERSION=$(GAIE_VERSION), DYNAMO_VERSION=$(DYNAMO_VERSION), KAITO_VERSION=$(KAITO_VERSION))"
+	@# Print the versions straight from versions.env so this summary stays in
+	@# sync automatically as keys are added (no hardcoded list to maintain).
+	@printf '✅ versions in sync (%s)\n' "$$(awk -F= '/^[A-Z][A-Z0-9_]*=/ { printf "%s%s=%s", sep, $$1, $$2; sep=", " }' versions.env)"
 
 # Test the verify-versions guard itself by deliberately breaking each
 # input it inspects and asserting the target exits non-zero.

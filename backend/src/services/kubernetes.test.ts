@@ -1,6 +1,32 @@
 import { describe, test, expect } from 'bun:test';
+import type { V1Pod } from '@kubernetes/client-node';
 import { extractCRDVersionFromAnnotations, kubernetesService, toPodStatus, type ClusterGpuCapacity, type NodeGpuInfo, type GPUAvailability, type GPUOperatorStatus } from './kubernetes';
-import { toDeploymentStatus, type ClusterStatus, type PodStatus, type DeploymentStatus, type PodPhase, type ModelDeployment } from '@airunway/shared';
+import { toDeploymentStatus, type ClusterStatus, type PodStatus, type ModelDeployment } from '@airunway/shared';
+
+// Shape of the arguments the Kubernetes client passes to the API methods these
+// tests stub. Only the fields the tests read are modeled.
+interface K8sCallArg {
+  name?: string;
+  namespace?: string;
+  labelSelector?: string;
+  fieldSelector?: string;
+  container?: string;
+}
+
+// Writable view of the private KubernetesService internals these tests reach
+// into to install stubs. Methods are typed loosely as the tests only need to
+// swap them for fakes and restore them afterwards.
+type MockableKubernetesService = {
+  coreV1Api: Record<string, (arg: K8sCallArg) => Promise<unknown>>;
+  apiExtensionsApi: Record<string, (arg: K8sCallArg) => Promise<unknown>>;
+  customObjectsApi: Record<string, (arg: K8sCallArg) => Promise<unknown>>;
+  getGatewayStatus: () => Promise<unknown>;
+  createUserKubeConfig: (token: string) => unknown;
+  kc: unknown;
+};
+
+const asMockable = (): MockableKubernetesService =>
+  kubernetesService as unknown as MockableKubernetesService;
 
 
 describe('KubernetesService - CRD Version Annotation Extraction', () => {
@@ -53,13 +79,13 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 
 
   test('checks Gateway CRD status with a single read per CRD', async () => {
-    const service = kubernetesService as any;
+    const service = asMockable();
     const originalApiExtensionsApi = service.apiExtensionsApi;
     const originalGetGatewayStatus = service.getGatewayStatus;
     const readCalls: string[] = [];
 
     service.apiExtensionsApi = {
-      readCustomResourceDefinition: async (arg: any) => {
+      readCustomResourceDefinition: async (arg: K8sCallArg) => {
         const crdName = arg.name as string;
         readCalls.push(crdName);
 
@@ -111,7 +137,7 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 
 describe('KubernetesService - deployment pod lookup', () => {
   test('aggregates and de-duplicates pods across exact supported selectors', async () => {
-    const service = kubernetesService as any;
+    const service = asMockable();
     const originalCoreV1Api = service.coreV1Api;
     const selectors: string[] = [];
 
@@ -126,7 +152,7 @@ describe('KubernetesService - deployment pod lookup', () => {
     });
 
     service.coreV1Api = {
-      listNamespacedPod: async (arg: any) => {
+      listNamespacedPod: async (arg: K8sCallArg) => {
         const labelSelector = arg.labelSelector as string;
         selectors.push(labelSelector);
 
@@ -192,7 +218,7 @@ describe('KubernetesService - deployment pod lookup', () => {
   });
 
   test('uses broad app selector only as a last-resort fallback', async () => {
-    const service = kubernetesService as any;
+    const service = asMockable();
     const originalCoreV1Api = service.coreV1Api;
     const selectors: string[] = [];
 
@@ -207,7 +233,7 @@ describe('KubernetesService - deployment pod lookup', () => {
     });
 
     service.coreV1Api = {
-      listNamespacedPod: async (arg: any) => {
+      listNamespacedPod: async (arg: K8sCallArg) => {
         const labelSelector = arg.labelSelector as string;
         selectors.push(labelSelector);
 
@@ -241,12 +267,12 @@ describe('KubernetesService - deployment pod lookup', () => {
 
 describe('KubernetesService - pod logs', () => {
   test('defaults multi-container pod logs to the primary main container using pod list permission', async () => {
-    const service = kubernetesService as any;
+    const service = asMockable();
     const originalCoreV1Api = service.coreV1Api;
     let requestedContainer: string | undefined;
 
     service.coreV1Api = {
-      listNamespacedPod: async (arg: any) => {
+      listNamespacedPod: async (arg: K8sCallArg) => {
         expect(arg.namespace).toBe('default');
         expect(arg.fieldSelector).toBe('metadata.name=demo-worker');
         return {
@@ -268,7 +294,7 @@ describe('KubernetesService - pod logs', () => {
           ],
         };
       },
-      readNamespacedPodLog: async (arg: any) => {
+      readNamespacedPodLog: async (arg: K8sCallArg) => {
         requestedContainer = arg.container as string | undefined;
         return 'worker logs';
       },
@@ -285,12 +311,12 @@ describe('KubernetesService - pod logs', () => {
   });
 
   test('prefers generated model containers before ready sidecars', async () => {
-    const service = kubernetesService as any;
+    const service = asMockable();
     const originalCoreV1Api = service.coreV1Api;
     let requestedContainer: string | undefined;
 
     service.coreV1Api = {
-      listNamespacedPod: async (arg: any) => {
+      listNamespacedPod: async (arg: K8sCallArg) => {
         expect(arg.fieldSelector).toBe('metadata.name=demo-model');
         return {
           items: [
@@ -311,7 +337,7 @@ describe('KubernetesService - pod logs', () => {
           ],
         };
       },
-      readNamespacedPodLog: async (arg: any) => {
+      readNamespacedPodLog: async (arg: K8sCallArg) => {
         requestedContainer = arg.container as string | undefined;
         return 'model logs';
       },
@@ -330,7 +356,7 @@ describe('KubernetesService - pod logs', () => {
 
 describe('KubernetesService - service proxy', () => {
   test('uses caller token kubeconfig for proxied GET and streaming POST requests', async () => {
-    const service = kubernetesService as any;
+    const service = asMockable();
     const originalKubeConfig = service.kc;
     const originalCreateUserKubeConfig = service.createUserKubeConfig;
     const originalFetch = globalThis.fetch;
@@ -339,7 +365,7 @@ describe('KubernetesService - service proxy', () => {
 
     const fakeKubeConfig = (authHeader: string) => ({
       getCurrentCluster: () => ({ server: 'https://cluster.example', skipTLSVerify: false }),
-      applyToFetchOptions: async (requestOptions: any) => {
+      applyToFetchOptions: async (requestOptions: { headers?: Record<string, string> }) => {
         return {
           ...requestOptions,
           headers: {
@@ -356,8 +382,8 @@ describe('KubernetesService - service proxy', () => {
       createUserKubeConfigCalls.push(userToken);
       return fakeKubeConfig(`Bearer ${userToken}`);
     };
-    globalThis.fetch = (async (input: any, init?: any) => {
-      fetchCalls.push({ url: String(input), init });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push({ url: String(input), init: init as RequestInit & { userToken?: string } });
       return new Response(fetchCalls.length === 1 ? 'models' : 'stream', {
         status: 200,
         statusText: 'OK',
@@ -632,7 +658,7 @@ describe('KubernetesService - Type Definitions', () => {
             },
           ],
         },
-      } as any);
+      } satisfies V1Pod);
 
       expect(pod.phase).toBe('Pending');
       expect(pod.ready).toBe(false);

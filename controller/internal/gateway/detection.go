@@ -47,7 +47,7 @@ const (
 // Single source of truth: /versions.env at the repo root. The build-time value
 // is injected via:
 //
-//	-ldflags "-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)"
+//	-ldflags "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)"
 //
 // (see controller/Makefile). The string literal below is a fallback for
 // `go run` / `go test` invocations that bypass the Makefile. To use a

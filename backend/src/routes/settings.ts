@@ -1,8 +1,11 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
+import { HTTPException } from 'hono/http-exception';
 import { configService } from '../services/config';
 import { authService } from '../services/auth';
+import { kubernetesService } from '../services/kubernetes';
+import { extractProviderDetails, extractProviderInfo } from '../lib/providers';
 import logger from '../lib/logger';
 
 const updateSettingsSchema = z.object({
@@ -15,13 +18,34 @@ const settings = new Hono()
   .get('/', async (c) => {
     logger.debug('Fetching settings');
     const config = await configService.getConfig();
+    const providerConfigs = await kubernetesService.listInferenceProviderConfigs();
 
     return c.json({
       config,
+      providers: providerConfigs.map(extractProviderInfo),
       auth: {
         enabled: authService.isAuthEnabled(),
       },
     });
+  })
+  .get('/providers', async (c) => {
+    logger.debug('Fetching provider list');
+    const providerConfigs = await kubernetesService.listInferenceProviderConfigs();
+
+    return c.json({
+      providers: providerConfigs.map(extractProviderInfo),
+    });
+  })
+  .get('/providers/:id', async (c) => {
+    const id = c.req.param('id');
+    logger.debug({ id }, 'Fetching provider details');
+
+    const config = await kubernetesService.getInferenceProviderConfig(id);
+    if (!config) {
+      throw new HTTPException(404, { message: `Provider not found: ${id}` });
+    }
+
+    return c.json(extractProviderDetails(config));
   })
   .put('/', zValidator('json', updateSettingsSchema), async (c) => {
     // Settings PUT requires authentication when auth is enabled
