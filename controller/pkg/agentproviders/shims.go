@@ -57,11 +57,19 @@ func NewOrkaReconciler(c client.Client, scheme *runtime.Scheme) Reconciler {
 // NewFrameworkVersionReporter returns a reconciler that publishes a shim's
 // build version into the named framework's AgentProviderConfig.status.version,
 // matching the reported-version contract the inference provider shims follow.
-func NewFrameworkVersionReporter(c client.Client, name, framework, version string) Reconciler {
+//
+// backend is required, not inferred. Selecting on the framework name alone means
+// a config named "kagent" that declares the container backend is claimed by both
+// this reporter and the generic container reporter, and the two then apply
+// different versions to status.version under different SSA field owners — so one
+// of them loses a conflict on every reconcile, forever. Naming both narrows this
+// reporter to the framework/backend pair it actually serves.
+func NewFrameworkVersionReporter(c client.Client, name, framework string, backend airunwayv1alpha1.AgentProviderBackend, version string) Reconciler {
 	return &internalcontroller.AgentProviderVersionReconciler{
 		Client:    c,
 		Name:      name,
 		Framework: framework,
+		Backend:   backend,
 		Version:   version,
 	}
 }

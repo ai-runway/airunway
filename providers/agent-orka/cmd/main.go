@@ -113,7 +113,7 @@ func main() {
 	// Publish this shim's build version so AgentProviderConfig.status.version
 	// (and each agent's status.framework.providerVersion) reports which build
 	// is serving the framework.
-	versionReporter := agentproviders.NewFrameworkVersionReporter(mgr.GetClient(), agentorka.ProviderConfigName, agentorka.FrameworkName, agentorka.ProviderVersion)
+	versionReporter := agentproviders.NewFrameworkVersionReporter(mgr.GetClient(), agentorka.ProviderConfigName, agentorka.FrameworkName, airunwayv1alpha1.AgentProviderBackendCRD, agentorka.ProviderVersion)
 	if err := versionReporter.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentProviderVersion")
 		os.Exit(1)

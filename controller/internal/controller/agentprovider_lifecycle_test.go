@@ -649,10 +649,24 @@ var _ = Describe("Provider status ownership on stand-aside", func() {
 		Expect(live.Status.Runtime).To(BeNil(), "runtime.workloadRef pointed at a deleted workload")
 		Expect(live.Status.Replicas).To(BeNil(), "nothing is running, so replicas must not be reported")
 
-		cond := meta.FindStatusCondition(live.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
-		Expect(cond).NotTo(BeNil())
-		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-		Expect(cond.Reason).To(Equal("FrameworkNoLongerServed"))
+		Expect(meta.FindStatusCondition(live.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)).
+			To(BeNil(), "ProviderReady must be released, or a successor provider deadlocks on it")
+
+		By("a successor provider claiming those fields with a non-forced apply")
+		// This is the property that matters and that the previous version of this
+		// spec did not cover: releasing ownership is what stops the handover
+		// deadlocking. ApplyOwnedStatus deliberately does not force, so if the
+		// previous manager still owned these fields this call would conflict on
+		// every reconcile, forever.
+		Expect(agentprovider.ApplyOwnedStatus(ctx, k8sClient, live, KagentFieldOwner,
+			airunwayv1alpha1.AgentPhasePending, nil, nil,
+			metav1.ConditionFalse, "WaitingForBindings", "taking over")).To(Succeed(),
+			"the previous owner must have released these fields")
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
+		succ := meta.FindStatusCondition(live.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(succ).NotTo(BeNil())
+		Expect(succ.Reason).To(Equal("WaitingForBindings"))
 	})
 })
 

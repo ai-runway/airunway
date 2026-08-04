@@ -347,25 +347,43 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 // again. Standing aside silently would deadlock the handover it exists to
 // enable.
 //
-// It writes a terminal Pending/ProviderReady=False status and omits runtime and
-// replicas, which drops those two fields and releases their ownership — an
-// entirely empty status cannot be applied, because the conversion to
-// unstructured discards it and the API server rejects a null status.
+// The apply carries phase alone. Everything else the provider owns — runtime,
+// replicas and the ProviderReady condition — is absent, so SSA drops those
+// fields and releases them.
 //
-// Residual: phase and the ProviderReady condition are still written, so their
-// ownership stays with this manager. A successor provider for the same framework
-// name would need ForceOwnership to claim those two. That case needs the
-// framework to be deleted and recreated on a different backend under a name a
-// different provider serves, so it is narrow — but it is not closed, and the
-// visible half (an agent reporting Running with a workloadRef to a deleted
-// object) is.
+// The shape is forced by two measured constraints. An entirely empty status is
+// rejected with `status: Invalid value: "null"`, both as a typed
+// AgentDeployment (converting the zero AgentDeploymentStatus drops the key) and
+// as unstructured with a literal `status: {}`. And keeping the ProviderReady
+// condition, as an earlier version did, deadlocks the handover for real — a
+// successor's non-forced apply fails with:
+//
+//	Apply failed with 2 conflicts: conflicts with "airunway-agents-container"
+//	- .status.conditions[type="ProviderReady"].message
+//	- .status.conditions[type="ProviderReady"].reason
+//
+// Only reason and message conflict, because phase and the condition's status
+// happened to match; that is luck, not design. Releasing the condition is what
+// makes the takeover work. Phase stays owned, which is harmless: a successor
+// writing the same Pending value co-owns it without conflict, and any later
+// phase it writes is a value this manager no longer maintains.
+//
+// It is built unstructured because a typed apply cannot express "status with
+// phase and no conditions" — the zero-valued condition slice is indistinguishable
+// from one the caller wants removed.
 func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, fieldOwner string) error {
-	return ApplyOwnedStatus(ctx, c, ad, fieldOwner,
-		airunwayv1alpha1.AgentPhasePending,
-		nil, // drop runtime.workloadRef — it points at something just deleted
-		nil, // drop replicas — nothing is running
-		metav1.ConditionFalse, "FrameworkNoLongerServed",
-		"this framework is no longer registered to this provider's backend; the workload it rendered has been removed")
+	apply := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": airunwayv1alpha1.GroupVersion.String(),
+		"kind":       "AgentDeployment",
+		"metadata": map[string]any{
+			"name":      ad.Name,
+			"namespace": ad.Namespace,
+		},
+		"status": map[string]any{
+			"phase": string(airunwayv1alpha1.AgentPhasePending),
+		},
+	}}
+	return c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner))
 }
 
 // CleanupOwned tears down the resources a provider rendered for ad, so a
