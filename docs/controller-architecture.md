@@ -261,12 +261,14 @@ provider:
   name: dynamo
   overrides:
     routerMode: "kv"          # kv | round-robin | none (default: round-robin)
-    frontend:
-      replicas: 2
-      resources:
-        cpu: "4"
-        memory: "8Gi"
+    epp:
+      image: "my-registry/epp:v1"
 ```
+
+> The validating webhook rejects `replicas` and `resources` **anywhere** inside
+> `provider.overrides` (including nested, e.g. `frontend.replicas`), because raw overrides
+> are merged after admission has checked `spec.resources` / `spec.scaling` ceilings. Use
+> `spec.resources` and `spec.scaling` for sizing.
 
 **KubeRay overrides:**
 ```yaml
@@ -282,7 +284,44 @@ provider:
         num-cpus: "0"
 ```
 
-KAITO currently has no supported overrides. Unknown keys trigger warnings; invalid types cause reconciliation failure.
+**KAITO overrides:**
+```yaml
+provider:
+  name: kaito
+  overrides:
+    inference:
+      preset:
+        name: "phi-3-mini-4k-instruct"
+```
+
+KAITO places `resource` and `inference` at the object root rather than under `spec`, so those
+are the keys its overrides accept. Invalid types cause reconciliation failure.
+
+> Do not use overrides for sizing. `resource.count` is how `spec.scaling.replicas` is
+> rendered, and unlike `spec.scaling.replicas` it is not subject to the admission ceiling —
+> setting it here bypasses the limit the warning above describes.
+
+> **Overrides are no longer silently dropped.** Two different checks now apply:
+>
+> - An unsupported **root** key is rejected by the provider before any write, surfacing as
+>   `ResourceCreated=False` with reason `TransformFailed`. The accepted root keys differ by
+>   provider: `spec` for Dynamo, llm-d and vLLM (Dynamo additionally accepts its documented
+>   `routerMode`/`frontend`/`epp`), and `resource`/`inference` for KAITO, whose Workspace does
+>   not nest them under `spec`. **KubeRay does not read `spec.provider.overrides` at all**, so
+>   overrides are ignored there — see the note below.
+> - A key nested under the accepted root (**`spec`**, or `resource`/`inference` for KAITO)
+>   that the installed upstream CRD does not declare is
+>   rejected by the API server, because provider writes use `fieldValidation=Strict` — see
+>   [Upstream compatibility](providers.md#upstream-compatibility). That surfaces as
+>   `IncompatibleUpstream`.
+>
+> Previously both were pruned by the API server, so an override that never took effect
+> looked like it worked. The escape hatch reaches fields the upstream CRD *has* but the
+> unified API does not expose — it cannot invent fields the upstream does not support.
+
+> **Note:** the KubeRay overrides above are not currently implemented — `providers/kuberay`
+> does not read `spec.provider.overrides`. Documented here as intent, not behaviour. Note
+> also that the `resources` key shown would be rejected by the webhook as above.
 
 ## Validation Webhook
 

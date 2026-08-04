@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -54,6 +55,83 @@ const (
 	// FinalizerTimeout is the timeout for finalizer cleanup
 	FinalizerTimeout = 5 * time.Minute
 )
+
+// strictFieldValidation makes the API server reject fields the target schema does not
+// declare, instead of silently pruning them — see issue #308 and the "Upstream
+// compatibility" section of docs/providers.md.
+//
+// This provider renders built-in apps/v1 and v1 types via server-side apply, where the
+// field manager ALREADY rejects unknown fields during typed conversion regardless of this
+// option (verified: an SSA apply with validation explicitly ignored still fails with
+// "field not declared in schema"). So here this mainly adds duplicate-key detection and
+// keeps one uniform rule across all five providers; the providers that write third-party
+// CRDs are the ones it genuinely protects.
+var strictFieldValidation = client.FieldValidation(metav1.FieldValidationStrict)
+
+// statusSafeRejectionDetail returns a form of err that is stable across identical calls, for
+// storing in status.
+//
+// Server-side apply reports only the FIRST unknown field it encounters, and with more than
+// one it picks a different field each time. Two independent confirmations:
+//   - mechanism: structured-merge-diff's typed/validate.go appends one error and returns out
+//     of the map walk, and value/mapunstructured.go iterates a plain Go map, so the field
+//     chosen is whichever the randomised iteration reached first;
+//   - observed: against a live API server, three unknown fields on one Deployment produced
+//     three different messages across twelve identical apply calls. Putting that straight into
+//
+// status.message — or into a condition Message, which is status too — would rewrite status on
+// every reconcile, and since the ModelDeployment watch has no GenerationChangedPredicate each
+// write re-enqueues the object: an unbounded loop.
+//
+// Custom-resource strict decoding does not have this problem: apimachinery sorts the unknown
+// field paths and lists them all, so those messages pass through unchanged.
+//
+// Applied on the generic-failure path too: a server-side apply TYPE mismatch carries the same
+// wrapper without the unknown-field needle, so it lands there rather than in the rejection
+// branch — and structured-merge-diff accumulates type errors without sorting them, so their
+// concatenation order follows map iteration and is just as volatile.
+//
+// The full error is always logged; only the stored copy is normalised.
+func statusSafeRejectionDetail(err error) string {
+	msg := err.Error()
+	// These are the two wrappers apimachinery's structuredmerge can produce on the APPLY
+	// path. It has two more ("failed to convert new/live object … to smd typed") carrying the
+	// same payload on the non-apply Update path, which this provider never takes — add them
+	// here if that ever changes, or the volatile detail gets through and the loop returns.
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return "the offending field and the exact reason are in the controller logs"
+	}
+	return msg
+}
+
+// isUpstreamSchemaRejection reports whether err is the API server refusing a field the
+// installed upstream does not declare, as opposed to any other rejection.
+//
+// Matching on the message rather than the status class is deliberate, because the class
+// varies by write path:
+//   - custom resource create/update -> 400 BadRequest, "strict decoding error: unknown field"
+//   - custom resource merge patch   -> 422 Invalid,    same prefix (verified live)
+//   - server-side apply on built-in types -> 500, "field not declared in schema"
+//     (verified against a live cluster: the error is a plain error from the field manager,
+//     so it is neither IsBadRequest nor IsInvalid)
+//
+// Gating on IsInvalid alone would also swallow every CEL and OpenAPI type violation, which
+// are user configuration errors that no upstream upgrade would fix — reporting those as an
+// upstream version mismatch would send operators down the wrong path entirely.
+//
+// The needle is the "strict decoding error" prefix rather than the bare "unknown field"
+// cause it wraps, because an Invalid status echoes the offending value back and a
+// user-supplied string (a model id, an image, an engine arg) could otherwise contain the
+// bare phrase and be misclassified.
+func isUpstreamSchemaRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "strict decoding error") ||
+		strings.Contains(msg, "field not declared in schema")
+}
 
 var (
 	deploymentGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
@@ -138,7 +216,14 @@ func (r *LLMDProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	resources, err := r.Transformer.Transform(ctx, &md)
 	if err != nil {
 		logger.Error(err, "Failed to transform ModelDeployment", "name", md.Name)
+		// Same treatment as the upstream-rejection path below: force Ready False and drop
+		// the stale endpoint/replica counts. Otherwise a previously-Running deployment whose
+		// spec is edited into something unrenderable reports Failed while still advertising
+		// a live endpoint and "1/1 ready" — the contradiction strict validation exists to surface.
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "TransformFailed", err.Error())
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "TransformFailed", err.Error())
+		md.Status.Endpoint = nil
+		md.Status.Replicas = nil
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 		md.Status.Message = fmt.Sprintf("Failed to generate llm-d resources: %s", err.Error())
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
@@ -153,15 +238,61 @@ func (r *LLMDProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				return ctrl.Result{Requeue: true}, nil
 			}
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
+			// Strict field validation rejected the write: the cluster does not accept a field
+			// this provider renders. Give it its own reason so an operator can tell it apart
+			// from a generic create failure, and keep requeueing — the remedy is
+			// an out-of-band upstream upgrade, and nothing else would re-trigger this
+			// reconcile. The provider-config watch fires only on Spec/Ready changes, and no
+			// upstream object exists to watch, so without a requeue the deployment would sit
+			// Failed until the ~10h resync even after the cluster is fixed.
+			//
+			// Ready is forced False here because the failure it catches is precisely a
+			// deployment that reports healthy while being unable to serve. Note this deliberately does NOT
+			// touch ProviderCompatible: that is set True earlier in this same reconcile, so
+			// flipping it here would rewrite LastTransitionTime on every requeue and the
+			// condition would never settle.
+			if isUpstreamSchemaRejection(err) {
+				detail := statusSafeRejectionDetail(err)
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "IncompatibleUpstream", detail)
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "IncompatibleUpstream", detail)
+				// Clear the Running-era endpoint and replica counts. This branch returns
+				// before syncStatus, so on an update rejection they would otherwise keep
+				// their previous values and the object would report Failed alongside a live
+				// endpoint and "1/1 ready" — the same contradiction described above.
+				md.Status.Endpoint = nil
+				md.Status.Replicas = nil
+				md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+				md.Status.Message = fmt.Sprintf("Incompatible with the installed upstream: the cluster rejected a field in the rendered resource. This provider renders built-in Kubernetes types, so it usually means spec.provider.overrides sets a field that does not exist, or the cluster's Kubernetes version predates a field this provider uses. %s", detail)
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
 			reason := "CreateFailed"
 			if isResourceConflict(err) {
+				// Ready is set below unconditionally with this same reason.
 				reason = "ResourceConflict"
-				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ResourceConflict", err.Error())
 			}
-			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+			// Same treatment as the TransformFailed and IncompatibleUpstream branches: a
+			// Failed deployment must not keep advertising a live endpoint and "1/1 ready".
+			// Leaving this branch alone would make the most common failure the one that
+			// still reports healthy — the same shape.
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
-			md.Status.Message = fmt.Sprintf("Failed to create/update resource %s: %s", resource.GetName(), err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, &md)
+			md.Status.Message = fmt.Sprintf("Failed to create/update resource %s: %s", resource.GetName(), statusSafeRejectionDetail(err))
+			// Requeue. Unlike a schema rejection this is usually transient — a timeout, a
+			// leader change, a momentary 500 — and it is the case that most needs a retry.
+			// Without one the second pass writes identical status, which the API server
+			// treats as a no-op, so nothing re-enqueues and the deployment sits Failed with
+			// its endpoint cleared until the ~10h resync even though the workload may still
+			// be serving.
+			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 		}
 	}
 
@@ -278,7 +409,7 @@ func (r *LLMDProviderReconciler) createOrUpdateResource(ctx context.Context, res
 	// Server-side apply: handles both create and update without needing resourceVersion.
 	// ForceOwnership ensures our field manager wins over any conflicting field managers.
 	logger.Info("Applying resource", "kind", resource.GetKind(), "name", resource.GetName())
-	return r.Patch(ctx, resource, client.Apply, client.FieldOwner(FieldManager), client.ForceOwnership)
+	return r.Patch(ctx, resource, client.Apply, client.FieldOwner(FieldManager), client.ForceOwnership, strictFieldValidation)
 }
 
 // syncStatus fetches the primary Deployment and syncs its status to the ModelDeployment

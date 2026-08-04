@@ -125,6 +125,76 @@ For HuggingFace GGUF models, KAITO uses in-cluster image building:
 
 ---
 
+## Upstream Compatibility
+
+A provider shim renders manifests it does not own the schema for. For `dynamo`, `kaito` and
+`kuberay` that means a third-party CRD installed separately; if the cluster's installed
+upstream is older than the shim expects, it may not declare a field the shim emits. `dynamo`
+and `kaito` pin their target version in `versions.env`; **KubeRay is not pinned at all**, so
+that shim has no declared target to compare against. `llmd` and `vllm` render only built-in `apps/v1` and `v1` types, whose
+schemas ship with the API server, so their exposure is to Kubernetes version skew rather than
+to a third-party operator.
+
+Kubernetes CRDs with a structural schema **prune** undeclared fields by default: the write
+succeeds, the field vanishes, and no error is raised. That produced a real failure
+([#308](https://github.com/ai-runway/airunway/issues/308)) where a workload came up without
+its HTTP frontend, the gateway returned 503, and `ModelDeployment.status.phase` still read
+`Running`.
+
+Provider writes to the upstream resource therefore set **`fieldValidation=Strict`**, so the
+API server rejects unknown fields instead of dropping them.
+
+This is what protects `dynamo`, `kaito` and `kuberay`. For `llmd` and `vllm` it changes
+little: they render built-in types through server-side apply, where the field manager already
+rejects unknown fields during typed conversion regardless of this option (verified — an SSA
+apply with validation explicitly ignored still fails with `field not declared in schema`).
+Setting it there adds duplicate-key detection and keeps one uniform rule across all five.
+
+**How a rejection surfaces.** `ResourceCreated=False` and `Ready=False`, both with reason
+`IncompatibleUpstream`, and phase `Failed`. For `dynamo`, `kaito` and `kuberay` the offending
+field is named in `status.message`. For `llmd` and `vllm` it is not: server-side apply reports
+only one arbitrarily-chosen unknown field and picks a different one per call, so storing it
+would rewrite status on every reconcile and re-enqueue the object each time. Those two store a
+stable summary and log the specific field instead.
+The provider keeps requeueing, so upgrading the upstream recovers the deployment without
+anyone touching the `ModelDeployment`. `Ready` is forced false deliberately: #308 was a
+deployment that reported healthy while unable to serve.
+
+**Detection is by error message, not status code**, because the API server's response varies
+by write path — a custom resource create returns `400` with `strict decoding error: unknown
+field`, a merge patch returns `422` with the same prefix, and server-side apply on a built-in
+type returns **`500`** with `field not declared in schema`. The last one is not a field-validation
+error at all: it originates in the field manager's typed conversion
+(`structured-merge-diff`, `typed/validate.go`), which is why it has a different status class and
+why SSA rejects unknown fields even when field validation is disabled. Matching on the status class alone would both miss the apply path and wrongly
+capture ordinary CEL and type-validation failures, which no upstream upgrade would fix.
+
+**Scope.** This covers writes to the upstream resource from the five provider shims. Three
+writers are **not** covered and carry the same skew risk:
+
+- provider self-registration to `InferenceProviderConfig` (`providers/*/config.go`), when a
+  provider binary is newer than the installed AI Runway CRDs;
+- the PVC and Job writes in `controller/pkg/storage`;
+- **the gateway reconciler** (`controller/internal/controller/gateway_reconciler.go`), which
+  writes `InferencePool`, `HTTPRoute`, an Istio `DestinationRule` and a Gateway API
+  `ReferenceGrant` — third-party CRDs pinned by `GAIE_VERSION`, `GATEWAY_API_VERSION` and
+  `ISTIO_VERSION`. This is the closest remaining instance of #308 in the codebase: an older
+  upstream that does not declare a field the reconciler sets would prune it silently.
+  Covering it is uneven: the `HTTPRoute` writes are a plain `Create`/`Update` and would take
+  the option directly, while `InferencePool`, `DestinationRule` and `ReferenceGrant` go
+  through `ctrl.CreateOrUpdate`, which accepts no field-validation option and would need
+  restructuring.
+
+**Rollback.** This is a fail-closed change: a mismatch that previously produced a silently
+degraded workload now blocks the deployment. There is no runtime opt-out — to revert the
+behaviour, pin the previous provider image.
+
+`spec.provider.overrides` is subject to the same rule — only keys the installed upstream CRD
+declares will be accepted. See
+[Provider Overrides](controller-architecture.md#provider-overrides).
+
+---
+
 ## See also
 
 - [Architecture Overview](architecture.md)

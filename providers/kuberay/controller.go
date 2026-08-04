@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -59,6 +60,40 @@ const (
 	// FinalizerTimeout is the timeout for finalizer cleanup
 	FinalizerTimeout = 5 * time.Minute
 )
+
+// strictFieldValidation makes the API server reject fields the installed upstream does
+// not declare, instead of silently pruning them — see issue #308 and the "Upstream
+// compatibility" section of docs/providers.md. kubectl sends strict validation by default;
+// Go clients do not, so it must be set explicitly on every upstream write.
+var strictFieldValidation = client.FieldValidation(metav1.FieldValidationStrict)
+
+// isUpstreamSchemaRejection reports whether err is the API server refusing a field the
+// installed upstream does not declare, as opposed to any other rejection.
+//
+// Matching on the message rather than the status class is deliberate, because the class
+// varies by write path:
+//   - custom resource create/update -> 400 BadRequest, "strict decoding error: unknown field"
+//   - custom resource merge patch   -> 422 Invalid,    same prefix (verified live)
+//   - server-side apply on built-in types -> 500, "field not declared in schema"
+//     (verified against a live cluster: the error is a plain error from the field manager,
+//     so it is neither IsBadRequest nor IsInvalid)
+//
+// Gating on IsInvalid alone would also swallow every CEL and OpenAPI type violation, which
+// are user configuration errors that no upstream upgrade would fix — reporting those as an
+// upstream version mismatch would send operators down the wrong path entirely.
+//
+// The needle is the "strict decoding error" prefix rather than the bare "unknown field"
+// cause it wraps, because an Invalid status echoes the offending value back and a
+// user-supplied string (a model id, an image, an engine arg) could otherwise contain the
+// bare phrase and be misclassified.
+func isUpstreamSchemaRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "strict decoding error") ||
+		strings.Contains(msg, "field not declared in schema")
+}
 
 // KubeRayProviderReconciler reconciles ModelDeployment resources for the KubeRay provider
 type KubeRayProviderReconciler struct {
@@ -137,7 +172,14 @@ func (r *KubeRayProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	resources, err := r.Transformer.Transform(ctx, &md)
 	if err != nil {
 		logger.Error(err, "Failed to transform ModelDeployment", "name", md.Name)
+		// Same treatment as the upstream-rejection path below: force Ready False and drop
+		// the stale endpoint/replica counts. Otherwise a previously-Running deployment whose
+		// spec is edited into something unrenderable reports Failed while still advertising
+		// a live endpoint and "1/1 ready" — the contradiction strict validation exists to surface.
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "TransformFailed", err.Error())
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "TransformFailed", err.Error())
+		md.Status.Endpoint = nil
+		md.Status.Replicas = nil
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 		md.Status.Message = fmt.Sprintf("Failed to generate KubeRay resources: %s", err.Error())
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
@@ -147,15 +189,72 @@ func (r *KubeRayProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
+			// A 409 is transient: the KubeRay operator writes RayService status frequently,
+			// so the Get→Update window can lose a race. Requeue rather than marking the
+			// deployment Failed — otherwise a still-serving workload loses its endpoint and
+			// replica counts to a race that resolves itself. The other four providers already
+			// guard this; kuberay did not, which made the status clearing below more harmful.
+			if errors.IsConflict(err) {
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "ResourceConflict", err.Error())
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			// Strict field validation rejected the write: the cluster does not accept a field
+			// this provider renders. Give it its own reason so an operator can tell it apart
+			// from a generic create failure, and keep requeueing — the remedy is
+			// an out-of-band upstream upgrade, and nothing else would re-trigger this
+			// reconcile. The provider-config watch fires only on Spec/Ready changes, and no
+			// upstream object exists to watch, so without a requeue the deployment would sit
+			// Failed until the ~10h resync even after the cluster is fixed.
+			//
+			// Ready is forced False here because the failure it catches is precisely a
+			// deployment that reports healthy while being unable to serve. Note this deliberately does NOT
+			// touch ProviderCompatible: that is set True earlier in this same reconcile, so
+			// flipping it here would rewrite LastTransitionTime on every requeue and the
+			// condition would never settle.
+			if isUpstreamSchemaRejection(err) {
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "IncompatibleUpstream", err.Error())
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "IncompatibleUpstream", err.Error())
+				// Clear the Running-era endpoint and replica counts. This branch returns
+				// before syncStatus, so on an update rejection they would otherwise keep
+				// their previous values and the object would report Failed alongside a live
+				// endpoint and "1/1 ready" — the same contradiction described above.
+				md.Status.Endpoint = nil
+				md.Status.Replicas = nil
+				md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+				md.Status.Message = fmt.Sprintf("Incompatible with the installed upstream: the installed KubeRay CRD does not declare a field this provider renders. This usually means the cluster's KubeRay is older than this provider requires, or that spec.provider.overrides sets a key it does not support. %s", err.Error())
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
 			reason := "CreateFailed"
 			if isResourceConflict(err) {
+				// Ready is set below unconditionally with this same reason.
 				reason = "ResourceConflict"
-				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ResourceConflict", err.Error())
 			}
+			// Same treatment as the TransformFailed and IncompatibleUpstream branches: a
+			// Failed deployment must not keep advertising a live endpoint and "1/1 ready".
+			// Leaving this branch alone would make the most common failure the one that
+			// still reports healthy — the same shape.
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, err.Error())
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 			md.Status.Message = fmt.Sprintf("Failed to create RayService: %s", err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, &md)
+			// Requeue. Unlike a schema rejection this is usually transient — a timeout, a
+			// leader change, a momentary 500 — and it is the case that most needs a retry.
+			// Without one the second pass writes identical status, which the API server
+			// treats as a no-op, so nothing re-enqueues and the deployment sits Failed with
+			// its endpoint cleared until the ~10h resync even though the workload may still
+			// be serving.
+			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 		}
 	}
 
@@ -258,7 +357,7 @@ func (r *KubeRayProviderReconciler) createOrUpdateResource(ctx context.Context, 
 	if errors.IsNotFound(err) {
 		// Create new resource
 		logger.Info("Creating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		return r.Create(ctx, resource)
+		return r.Create(ctx, resource, strictFieldValidation)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to get existing resource: %w", err)
@@ -276,7 +375,7 @@ func (r *KubeRayProviderReconciler) createOrUpdateResource(ctx context.Context, 
 	if !equality.Semantic.DeepEqual(existingSpec, newSpec) {
 		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
 		resource.SetResourceVersion(existing.GetResourceVersion())
-		return r.Update(ctx, resource)
+		return r.Update(ctx, resource, strictFieldValidation)
 	}
 
 	return nil

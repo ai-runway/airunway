@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -399,9 +400,34 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		}
 	}
 
+	// Reject any root key the Workspace schema does not declare. Note KAITO is unusual: it
+	// puts `resource` and `inference` at the OBJECT ROOT rather than under `spec`, so the
+	// allowlist here is not "spec" as it is for the other providers.
+	//
+	// Before strict field validation an unknown root key was pruned silently, so a typo'd
+	// override was invisible — the same silent-no-op issue #308 is about. Sorted so the
+	// message is stable: an unstable status.message re-enqueues the object on every
+	// reconcile (the ModelDeployment watch has no GenerationChangedPredicate).
+	var unsupported []string
+	for key := range overrides {
+		if !workspaceRootKeys[key] {
+			unsupported = append(unsupported, key)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		return fmt.Errorf("unsupported provider.overrides key(s) %q: this provider supports "+
+			"\"resource\" and \"inference\", which the KAITO Workspace places at the object "+
+			"root rather than under \"spec\"", unsupported)
+	}
+
 	obj.Object = deepMerge(obj.Object, overrides)
 	return nil
 }
+
+// workspaceRootKeys are the root keys a KAITO Workspace declares and this transformer
+// renders. KAITO does not nest them under `spec`, unlike the other providers' upstreams.
+var workspaceRootKeys = map[string]bool{"resource": true, "inference": true}
 
 // deepMerge recursively merges src into dst.
 // For maps, values are merged recursively. A nil src value deletes the field.

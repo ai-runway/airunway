@@ -1139,9 +1139,53 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		}
 	}
 
+	// Only "spec" may be merged into the object, plus the keys parseOverrides has already
+	// consumed into DynamoOverrides (routerMode, frontend, epp), which are inputs to this
+	// transformer rather than DynamoGraphDeployment fields. A DGD root declares
+	// apiVersion/kind/metadata/spec/status, so anything else is a field no API server will
+	// store.
+	//
+	// Unsupported keys are REJECTED rather than dropped. Silently ignoring them would
+	// reproduce exactly the failure strict validation exists to surface: an override visible in the
+	// ModelDeployment, absent from the rendered object, and a deployment reporting healthy.
+	//
+	// The consumed-key comparison is case-insensitive because encoding/json matches field
+	// names that way — parseOverrides decodes {"RouterMode": ...} into the typed struct just
+	// as happily as the documented spelling, so a case-sensitive check would let it through
+	// to the root. The "spec" comparison is deliberately case-SENSITIVE: "Spec" is not a
+	// field of any upstream CRD, so it must be rejected rather than merged.
+	// Collected and sorted rather than returning on the first offender: Go randomises map
+	// iteration, so returning early would produce a different message on each call for the
+	// same spec. That message becomes status.message, and since the ModelDeployment watch
+	// has no GenerationChangedPredicate, a changing message means every reconcile writes
+	// status, which re-enqueues the object — an unbounded write loop for as long as the
+	// bad spec exists.
+	var unsupported []string
+	for key := range overrides {
+		if key == "spec" {
+			continue
+		}
+		if consumedOverrideKeys[strings.ToLower(key)] {
+			delete(overrides, key)
+			continue
+		}
+		unsupported = append(unsupported, key)
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
+			"Dynamo-specific keys routerMode, frontend and epp are supported (note the webhook "+
+			"rejects replicas/resources anywhere inside overrides, so only epp.image and "+
+			"routerMode are settable in practice)", unsupported)
+	}
+
 	obj.Object = deepMerge(obj.Object, overrides)
 	return nil
 }
+
+// consumedOverrideKeys are the provider.overrides root keys parseOverrides decodes into
+// DynamoOverrides. Lowercased, because encoding/json matches field names case-insensitively.
+var consumedOverrideKeys = map[string]bool{"routermode": true, "frontend": true, "epp": true}
 
 // deepMerge recursively merges src into dst. dst is modified in place and also
 // returned for convenience. For maps, values are merged recursively. For all
