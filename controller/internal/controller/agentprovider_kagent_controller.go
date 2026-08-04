@@ -75,6 +75,16 @@ var (
 type KagentProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader is an uncached reader, used only for the ownership check before
+	// writing the managed no-auth Secret.
+	//
+	// It must not be the manager's cached client. A cached typed Get on a Secret
+	// starts a cluster-wide Secret informer, whose initial list/watch this
+	// provider's RBAC deliberately does not grant — so the first keyless agent
+	// would fail to provision its placeholder Secret with a Forbidden. Core
+	// carries an APIReader for exactly the same reason.
+	APIReader client.Reader
 }
 
 // kagentConfig is the framework-specific spec.config contract for kagent.
@@ -175,7 +185,7 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, KagentFieldOwner)
+	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.secretReader(), r.Scheme, &ad, binding, KagentFieldOwner)
 	if err != nil {
 		statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -393,4 +403,14 @@ func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Named("agent-provider-kagent").
 		Complete(r)
+}
+
+// secretReader returns the uncached reader for Secret existence checks, falling
+// back to the cached client so unit tests that construct the reconciler
+// directly keep working. Production always sets APIReader.
+func (r *KagentProviderReconciler) secretReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }

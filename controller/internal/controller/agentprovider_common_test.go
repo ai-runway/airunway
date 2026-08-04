@@ -169,7 +169,7 @@ func TestEnsureBindingCredentialsRefusesToAdoptForeignSecret(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ad, foreign).Build()
 
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://m/v1", ModelName: "m"}
-	_, err := agentprovider.EnsureBindingCredentials(context.Background(), c, scheme, ad, binding, "airunway-agents-kagent")
+	_, err := agentprovider.EnsureBindingCredentials(context.Background(), c, c, scheme, ad, binding, "airunway-agents-kagent")
 	if err == nil {
 		t.Fatal("a pre-existing Secret this AgentDeployment does not own must not be adopted")
 	}
@@ -194,7 +194,7 @@ func TestEnsureBindingCredentialsCreatesAndIsIdempotent(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ad).Build()
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://m/v1", ModelName: "m"}
 
-	out, err := agentprovider.EnsureBindingCredentials(context.Background(), c, scheme, ad, binding, "airunway-agents-kagent")
+	out, err := agentprovider.EnsureBindingCredentials(context.Background(), c, c, scheme, ad, binding, "airunway-agents-kagent")
 	if err != nil {
 		t.Fatalf("creating the keyless Secret must succeed when nothing is in the way: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestEnsureBindingCredentialsCreatesAndIsIdempotent(t *testing.T) {
 	}
 
 	// Second pass must not trip its own ownership check.
-	if _, err := agentprovider.EnsureBindingCredentials(context.Background(), c, scheme, ad, binding, "airunway-agents-kagent"); err != nil {
+	if _, err := agentprovider.EnsureBindingCredentials(context.Background(), c, c, scheme, ad, binding, "airunway-agents-kagent"); err != nil {
 		t.Errorf("re-reconciling must not refuse a Secret this AgentDeployment already owns: %v", err)
 	}
 }

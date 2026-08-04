@@ -104,7 +104,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler := agentproviders.NewOrkaReconciler(mgr.GetClient(), mgr.GetScheme())
+	reconciler := agentproviders.NewOrkaReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme())
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentOrkaProvider")
 		os.Exit(1)

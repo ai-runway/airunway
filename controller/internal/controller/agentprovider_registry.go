@@ -51,7 +51,7 @@ type AgentProviderRegistration struct {
 	Name string
 
 	// New builds the provider reconciler using the manager's client/scheme.
-	New func(client.Client, *runtime.Scheme) AgentProviderReconciler
+	New func(client.Client, client.Reader, *runtime.Scheme) AgentProviderReconciler
 
 	// Framework selects the AgentProviderConfig this provider serves by name.
 	// Mutually exclusive with Backend.
@@ -73,7 +73,7 @@ type AgentProviderRegistration struct {
 func RegisterAgentProviders(mgr manager.Manager, regs ...AgentProviderRegistration) error {
 	for i := range regs {
 		reg := regs[i]
-		reconciler := reg.New(mgr.GetClient(), mgr.GetScheme())
+		reconciler := reg.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme())
 		if err := reconciler.SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("unable to create controller %q: %w", reg.Name, err)
 		}

@@ -65,6 +65,16 @@ var (
 type OrkaProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader is an uncached reader, used only for the ownership check before
+	// writing the managed no-auth Secret.
+	//
+	// It must not be the manager's cached client. A cached typed Get on a Secret
+	// starts a cluster-wide Secret informer, whose initial list/watch this
+	// provider's RBAC deliberately does not grant — so the first keyless agent
+	// would fail to provision its placeholder Secret with a Forbidden. Core
+	// carries an APIReader for exactly the same reason.
+	APIReader client.Reader
 }
 
 // orkaAgentConfig is the Orka-specific spec.config contract.
@@ -144,7 +154,7 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.Scheme, &ad, binding, OrkaFieldOwner)
+	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.secretReader(), r.Scheme, &ad, binding, OrkaFieldOwner)
 	if err != nil {
 		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -317,4 +327,14 @@ func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Named("agent-provider-orka").
 		Complete(r)
+}
+
+// secretReader returns the uncached reader for Secret existence checks, falling
+// back to the cached client so unit tests that construct the reconciler
+// directly keep working. Production always sets APIReader.
+func (r *OrkaProviderReconciler) secretReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }

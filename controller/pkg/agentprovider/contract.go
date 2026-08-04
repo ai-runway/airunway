@@ -268,7 +268,7 @@ func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1
 // Call this before any force-apply, so an AgentDeployment cannot overwrite a
 // Deployment, Service, Job, ConfigMap or upstream custom resource it does not
 // own.
-func VerifyOwnedOrAbsent(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner metav1.Object, obj client.Object) error {
+func VerifyOwnedOrAbsent(ctx context.Context, c client.Reader, scheme *runtime.Scheme, owner metav1.Object, obj client.Object) error {
 	gvk, err := apiutil.GVKForObject(obj, scheme)
 	if err != nil {
 		// Unregistered types (an upstream CRD the provider renders as
@@ -511,6 +511,7 @@ func KeylessCredentialSecretName(agentName string) string {
 func EnsureBindingCredentials(
 	ctx context.Context,
 	c client.Client,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	ad *airunwayv1alpha1.AgentDeployment,
 	binding airunwayv1alpha1.ModelBindingStatus,
@@ -546,7 +547,7 @@ func EnsureBindingCredentials(
 	// Secret of this name exists and is not controlled by this AgentDeployment,
 	// which surfaces as a provider-not-ready reason the operator can act on —
 	// rename the agent, or remove the colliding Secret.
-	if err := VerifyOwnedOrAbsent(ctx, c, scheme, ad, secret.DeepCopy()); err != nil {
+	if err := VerifyOwnedOrAbsent(ctx, apiReader, scheme, ad, secret.DeepCopy()); err != nil {
 		return binding, err
 	}
 	if err := c.Patch(ctx, secret, client.Apply, client.FieldOwner(fieldOwner)); err != nil {

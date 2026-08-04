@@ -31,10 +31,11 @@ type Reconciler interface {
 }
 
 // NewKagentReconciler returns the kagent agent-provider reconciler.
-func NewKagentReconciler(c client.Client, scheme *runtime.Scheme) Reconciler {
+func NewKagentReconciler(c client.Client, apiReader client.Reader, scheme *runtime.Scheme) Reconciler {
 	return &internalcontroller.KagentProviderReconciler{
-		Client: c,
-		Scheme: scheme,
+		Client:    c,
+		APIReader: apiReader,
+		Scheme:    scheme,
 	}
 }
 
@@ -47,10 +48,11 @@ func NewContainerReconciler(c client.Client, scheme *runtime.Scheme) Reconciler 
 }
 
 // NewOrkaReconciler returns the orka agent-provider reconciler.
-func NewOrkaReconciler(c client.Client, scheme *runtime.Scheme) Reconciler {
+func NewOrkaReconciler(c client.Client, apiReader client.Reader, scheme *runtime.Scheme) Reconciler {
 	return &internalcontroller.OrkaProviderReconciler{
-		Client: c,
-		Scheme: scheme,
+		Client:    c,
+		APIReader: apiReader,
+		Scheme:    scheme,
 	}
 }
 

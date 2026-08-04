@@ -457,8 +457,8 @@ func main() {
 				Framework: controller.KagentFrameworkName,
 				Backend:   airunwayv1alpha1.AgentProviderBackendCRD,
 				Version:   "agent-kagent-provider:" + agentProviderVersion,
-				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-					return &controller.KagentProviderReconciler{Client: c, Scheme: s}
+				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.KagentProviderReconciler{Client: c, APIReader: ar, Scheme: s}
 				},
 			},
 			controller.AgentProviderRegistration{
@@ -466,15 +466,15 @@ func main() {
 				Framework: controller.OrkaFrameworkName,
 				Backend:   airunwayv1alpha1.AgentProviderBackendCRD,
 				Version:   "agent-orka-provider:" + agentProviderVersion,
-				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
-					return &controller.OrkaProviderReconciler{Client: c, Scheme: s}
+				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.OrkaProviderReconciler{Client: c, APIReader: ar, Scheme: s}
 				},
 			},
 			controller.AgentProviderRegistration{
 				Name:    "agent-container",
 				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
 				Version: "agent-container-provider:" + agentProviderVersion,
-				New: func(c client.Client, s *runtime.Scheme) controller.AgentProviderReconciler {
+				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
 					return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
 				},
 			},
