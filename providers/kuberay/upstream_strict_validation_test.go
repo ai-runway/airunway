@@ -173,6 +173,21 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 			}),
 			want: false,
 		},
+		{
+			// The needle requires BOTH halves. An Invalid status echoes the offending value
+			// back, so a user-supplied string containing only the prefix must not match.
+			name: "not ours: 'strict decoding error' echoed without an unknown-field cause",
+			err: apierrors.NewInvalid(schema.GroupKind{Kind: "X"}, "x", field.ErrorList{
+				field.Invalid(field.NewPath("spec", "engine", "extraArgs"),
+					"--served-model-name=strict decoding error probe", "must be a valid flag"),
+			}),
+			want: false,
+		},
+		{
+			name: "not ours: typed-object wrapper without the schema diagnostic",
+			err:  fmt.Errorf("failed to create typed patch object (default/x; apps/v1, Kind=Deployment): some other failure"),
+			want: false,
+		},
 		{name: "nil", err: nil, want: false},
 	}
 	for _, tc := range cases {

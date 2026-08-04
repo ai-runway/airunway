@@ -91,8 +91,25 @@ func isUpstreamSchemaRejection(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "strict decoding error") ||
-		strings.Contains(msg, "field not declared in schema")
+
+	// Custom-resource paths: apimachinery wraps the unknown-field cause in a
+	// "strict decoding error" prefix. Require BOTH parts. An Invalid status echoes the
+	// offending value back, so a user-supplied string (a model id, an image, an engine arg)
+	// containing either phrase on its own must not be misclassified as a version mismatch
+	// and retried forever.
+	if strings.Contains(msg, "strict decoding error") && strings.Contains(msg, "unknown field") {
+		return true
+	}
+
+	// Server-side apply on built-in types: the rejection comes from the field manager's
+	// typed conversion, not from field validation, so it carries a different wrapper and a
+	// different status class. Bind the diagnostic to that wrapper for the same reason.
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return strings.Contains(msg, "field not declared in schema")
+	}
+
+	return false
 }
 
 // KubeRayProviderReconciler reconciles ModelDeployment resources for the KubeRay provider
@@ -224,7 +241,9 @@ func (r *KubeRayProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				md.Status.Endpoint = nil
 				md.Status.Replicas = nil
 				md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
-				md.Status.Message = fmt.Sprintf("Incompatible with the installed upstream: the installed KubeRay CRD does not declare a field this provider renders. This usually means the cluster's KubeRay is older than this provider requires, or that spec.provider.overrides sets a key it does not support. %s", err.Error())
+				// No mention of provider.overrides here: this provider does not read them, so
+				// pointing an operator at a setting it ignores would send them the wrong way.
+				md.Status.Message = fmt.Sprintf("Incompatible with the installed upstream: the installed KubeRay CRD does not declare a field this provider renders. This usually means the cluster's KubeRay is older than this provider requires. %s", err.Error())
 				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 					return ctrl.Result{}, statusErr
 				}

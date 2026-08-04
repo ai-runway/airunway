@@ -94,8 +94,25 @@ func isUpstreamSchemaRejection(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "strict decoding error") ||
-		strings.Contains(msg, "field not declared in schema")
+
+	// Custom-resource paths: apimachinery wraps the unknown-field cause in a
+	// "strict decoding error" prefix. Require BOTH parts. An Invalid status echoes the
+	// offending value back, so a user-supplied string (a model id, an image, an engine arg)
+	// containing either phrase on its own must not be misclassified as a version mismatch
+	// and retried forever.
+	if strings.Contains(msg, "strict decoding error") && strings.Contains(msg, "unknown field") {
+		return true
+	}
+
+	// Server-side apply on built-in types: the rejection comes from the field manager's
+	// typed conversion, not from field validation, so it carries a different wrapper and a
+	// different status class. Bind the diagnostic to that wrapper for the same reason.
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return strings.Contains(msg, "field not declared in schema")
+	}
+
+	return false
 }
 
 // DynamoProviderReconciler reconciles ModelDeployment resources for the Dynamo provider
