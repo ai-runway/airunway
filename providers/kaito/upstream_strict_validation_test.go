@@ -489,6 +489,36 @@ func TestOverrideRootKeyComparisonIsCaseSensitive(t *testing.T) {
 	}
 }
 
+// TestOverrideRejectsTuningDeliberately pins a policy that is narrower than the upstream
+// schema, so it reads as a decision rather than an oversight.
+//
+// The pinned KAITO Workspace CRD (v0.10.0) declares four root properties beyond metadata:
+// resource, inference, tuning and status. This transformer accepts only the first two. That
+// is intentional: a ModelDeployment describes an inference deployment, the status translator
+// reads inference conditions, and nothing in the CRD prevents inference and tuning both
+// being set — so a tuning override would yield a Workspace whose status this provider cannot
+// interpret. Admitting `tuning` here would need a status-translation story first.
+func TestOverrideRejectsTuningDeliberately(t *testing.T) {
+	md := newMDForController("test", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: md.Status.Provider.Name,
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{"inference":null,"tuning":{"input":{},"output":{}}}`),
+		},
+	}
+	_, err := NewTransformer().Transform(context.Background(), md)
+	if err == nil {
+		t.Fatal("tuning override was accepted; this provider renders inference workloads only")
+	}
+	// The message must explain the policy, not imply the field is absent from the schema.
+	if !strings.Contains(err.Error(), "tuning") {
+		t.Errorf("error %q does not name the offending key", err.Error())
+	}
+	if !strings.Contains(err.Error(), "inference workloads") {
+		t.Errorf("error %q does not state the inference-only policy that motivates it", err.Error())
+	}
+}
+
 // TestReconcileOwnershipConflictUsesItsOwnReason covers the ownership-collision branch.
 //
 // An upstream object of the right name already exists but belongs to someone else. That is

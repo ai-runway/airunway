@@ -400,7 +400,7 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		}
 	}
 
-	// Reject any root key the Workspace schema does not declare. Note KAITO is unusual: it
+	// Reject any root key this transformer does not render. Note KAITO is unusual: it
 	// puts `resource` and `inference` at the OBJECT ROOT rather than under `spec`, so the
 	// allowlist here is not "spec" as it is for the other providers.
 	//
@@ -416,17 +416,23 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 	}
 	if len(unsupported) > 0 {
 		sort.Strings(unsupported)
-		return fmt.Errorf("unsupported provider.overrides key(s) %q: this provider supports "+
-			"\"resource\" and \"inference\", which the KAITO Workspace places at the object "+
-			"root rather than under \"spec\"", unsupported)
+		return fmt.Errorf("unsupported provider.overrides key(s) %q: this provider renders "+
+			"inference workloads and supports only \"resource\" and \"inference\", which the "+
+			"KAITO Workspace places at the object root rather than under \"spec\"", unsupported)
 	}
 
 	obj.Object = deepMerge(obj.Object, overrides)
 	return nil
 }
 
-// workspaceRootKeys are the root keys a KAITO Workspace declares and this transformer
-// renders. KAITO does not nest them under `spec`, unlike the other providers' upstreams.
+// workspaceRootKeys are the root keys this transformer renders. KAITO does not nest them
+// under `spec`, unlike the other providers' upstreams.
+//
+// Deliberately NARROWER than the Workspace schema, which also declares a root `tuning`:
+// a ModelDeployment describes an inference deployment, and the status translator reads
+// inference conditions. Nothing in the CRD stops `inference` and `tuning` both being set,
+// so admitting `tuning` would let an override produce a Workspace whose status this
+// provider cannot interpret — the report-healthy-but-cannot-serve failure #308 is about.
 var workspaceRootKeys = map[string]bool{"resource": true, "inference": true}
 
 // deepMerge recursively merges src into dst.
