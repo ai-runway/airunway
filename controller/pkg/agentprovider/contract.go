@@ -347,30 +347,34 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 // again. Standing aside silently would deadlock the handover it exists to
 // enable.
 //
-// The apply carries phase alone. Everything else the provider owns — runtime,
-// replicas and the ProviderReady condition — is absent, so SSA drops those
-// fields and releases them.
+// The apply names one field — an empty conditions list — and nothing else. That
+// releases phase, runtime, replicas and the ProviderReady condition together,
+// because SSA drops what an apply omits.
 //
-// The shape is forced by two measured constraints. An entirely empty status is
-// rejected with `status: Invalid value: "null"`, both as a typed
-// AgentDeployment (converting the zero AgentDeploymentStatus drops the key) and
-// as unstructured with a literal `status: {}`. And keeping the ProviderReady
-// condition, as an earlier version did, deadlocks the handover for real — a
-// successor's non-forced apply fails with:
+// The shape is forced by two measured constraints, both established against a
+// real API server rather than reasoned about:
 //
-//	Apply failed with 2 conflicts: conflicts with "airunway-agents-container"
-//	- .status.conditions[type="ProviderReady"].message
-//	- .status.conditions[type="ProviderReady"].reason
+// An entirely empty status is rejected with `status: Invalid value: "null"`,
+// as a typed AgentDeployment (converting the zero AgentDeploymentStatus drops
+// the key) and as unstructured with a literal `status: {}`. So the apply has to
+// name something.
 //
-// Only reason and message conflict, because phase and the condition's status
-// happened to match; that is luck, not design. Releasing the condition is what
-// makes the takeover work. Phase stays owned, which is harmless: a successor
-// writing the same Pending value co-owns it without conflict, and any later
-// phase it writes is a value this manager no longer maintains.
+// And naming phase — as an earlier version did, carrying a terminal Pending —
+// looked correct and was not. A successor could claim Pending, because it wrote
+// the same value, but its first real transition failed:
 //
-// It is built unstructured because a typed apply cannot express "status with
-// phase and no conditions" — the zero-valued condition slice is indistinguishable
-// from one the caller wants removed.
+//	Apply failed with 1 conflict: conflict with "airunway-agents-container"
+//	with subresource "status": .status.phase
+//
+// The handover deadlocked one step later than any test then reached. conditions
+// is the right field to name because it is listType=map: an empty list claims
+// no entries, so it satisfies the non-empty requirement while asserting
+// ownership of nothing. Core's conditions are unaffected — SSA ownership is
+// per-manager, per-key.
+//
+// It is built unstructured because a typed apply cannot express "a status
+// claiming nothing": a zero-valued condition slice is indistinguishable from one
+// the caller wants removed.
 func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, fieldOwner string) error {
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": airunwayv1alpha1.GroupVersion.String(),
@@ -379,8 +383,15 @@ func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alph
 			"name":      ad.Name,
 			"namespace": ad.Namespace,
 		},
+		// An empty conditions list, and nothing else. The status object must be
+		// non-empty or the API server rejects it as null, but every field named
+		// here stays owned — so this names the one field whose empty value is
+		// meaningful. conditions is listType=map, so an empty list claims no
+		// entries and releases the ProviderReady key; phase, runtime and replicas
+		// are absent and released with it. Core's own conditions are untouched:
+		// SSA ownership is per-manager, per-key.
 		"status": map[string]any{
-			"phase": string(airunwayv1alpha1.AgentPhasePending),
+			"conditions": []any{},
 		},
 	}}
 	return c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner))

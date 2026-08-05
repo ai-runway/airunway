@@ -644,8 +644,8 @@ var _ = Describe("Provider status ownership on stand-aside", func() {
 		Expect(agentprovider.ReleaseOwnedStatus(ctx, k8sClient, live, ContainerFieldOwner)).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
-		Expect(live.Status.Phase).NotTo(Equal(airunwayv1alpha1.AgentPhaseRunning),
-			"a torn-down agent must not keep reporting Running")
+		Expect(live.Status.Phase).To(BeEmpty(),
+			"phase must be released, not just changed — a retained phase deadlocks the successor's first transition")
 		Expect(live.Status.Runtime).To(BeNil(), "runtime.workloadRef pointed at a deleted workload")
 		Expect(live.Status.Replicas).To(BeNil(), "nothing is running, so replicas must not be reported")
 
@@ -667,6 +667,22 @@ var _ = Describe("Provider status ownership on stand-aside", func() {
 		succ := meta.FindStatusCondition(live.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
 		Expect(succ).NotTo(BeNil())
 		Expect(succ.Reason).To(Equal("WaitingForBindings"))
+
+		By("the successor then transitioning to a DIFFERENT phase")
+		// The assertion that was missing. Claiming Pending only works because it
+		// happens to match the value the old manager wrote; the real handover is
+		// the first transition away from it. If phase ownership was not released,
+		// this is where the successor deadlocks against a manager that will never
+		// write again.
+		Expect(agentprovider.ApplyOwnedStatus(ctx, k8sClient, live, KagentFieldOwner,
+			airunwayv1alpha1.AgentPhaseDeploying,
+			&airunwayv1alpha1.AgentRuntimeStatus{Address: "http://taken-over"},
+			&airunwayv1alpha1.AgentReplicaStatus{Desired: 1},
+			metav1.ConditionFalse, "AwaitingKagent", "rendering")).To(Succeed(),
+			"a successor must be able to move phase off the value the previous owner left")
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
+		Expect(live.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
 	})
 })
 
