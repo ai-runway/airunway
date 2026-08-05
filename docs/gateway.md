@@ -215,13 +215,15 @@ See the [upstream multi-model guide](https://gateway-api-inference-extension.sig
 > [!NOTE]
 > **Adding a model needs no BBR restart.** BBR holds no model registry. On every
 > request its `body-field-to-header` plugin reads the `model` field from the body
-> and sets `X-Gateway-Model-Name` unconditionally — it never looks up HTTPRoutes
-> or InferencePools, and its ServiceAccount is only granted `get`/`list`/`watch`
-> on ConfigMaps, so it cannot read them. The one piece of state it does cache is
-> the optional LoRA adapter → base-model map, kept current by a live watch on
-> ConfigMaps labelled `inference.networking.k8s.io/bbr-managed`. A new
-> `ModelDeployment` therefore starts routing as soon as the Gateway admits the
-> HTTPRoute for its model name.
+> and copies it into `X-Gateway-Model-Name`; when that field is missing or empty
+> it records a metric, skips the header, and lets the request through without it.
+> Either way the decision is made from the request body alone — BBR never looks
+> up HTTPRoutes or InferencePools, and its ServiceAccount is only granted
+> `get`/`list`/`watch` on ConfigMaps, so it cannot read them. The one piece of
+> state it does cache is the optional LoRA adapter → base-model map, kept current
+> by a live watch on ConfigMaps labelled
+> `inference.networking.k8s.io/bbr-managed`. A new `ModelDeployment` therefore
+> starts routing as soon as the Gateway admits the HTTPRoute for its model name.
 >
 > Earlier releases rolled the shared BBR Deployment once per new
 > `ModelDeployment` on the mistaken premise that it built a registry at startup.
