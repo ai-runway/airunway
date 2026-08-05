@@ -168,15 +168,6 @@ Read these files **only when relevant** to your task:
 | [docs/standards.md](docs/standards.md) | Code style questions (prefer running linters instead) |
 | [plugins/headlamp/README.md](plugins/headlamp/README.md) | Headlamp plugin development, patterns, components |
 
-## GitHub PRs & Issues
-
-Before creating or updating a GitHub PR or issue body for agent-authored work, read `$agent-transcript` (`.agents/skills/agent-transcript/SKILL.md`) if available and check for a safe local session transcript.
-
-- If a high-confidence transcript is found, ask exactly: "Include a redacted agent transcript? It helps reviewers and can make the PR easier to prioritize. I can open a local preview first."
-- Never upload raw logs. Include an `## Agent Transcript` section only after human approval and only with a sanitized, scoped transcript.
-- Drop system/developer prompts, reasoning, raw tool outputs, env, cookies, tokens, auth URLs, secrets, broad local paths, and unrelated session turns.
-- If no safe transcript exists or the human declines, continue without a transcript and do not add a placeholder section.
-
 ## Security Rules
 
 These rules are **mandatory** for all AI agents working on this codebase:
