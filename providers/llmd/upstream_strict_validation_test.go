@@ -99,9 +99,14 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "observed: custom resource create against an older CRD (400)",
+			// Unreachable for this provider: it writes only apps/v1 Deployment and v1 Service,
+			// both through server-side apply, so a custom-resource strict-decoding error can
+			// never arrive. Not matching it is deliberate — the phrase would otherwise be a
+			// way for an ordinary validation error echoing a user value to be misread as a
+			// version mismatch and retried forever.
+			name: "not ours: custom-resource strict decoding (this provider writes no CRs)",
 			err:  apierrors.NewBadRequest(`strict decoding error: unknown field "spec.services.VllmWorker.frontendSidecar"`),
-			want: true,
+			want: false,
 		},
 		{
 			// The sibling wrapper. structuredmerge emits this one when the LIVE object
@@ -121,12 +126,10 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 			want: false,
 		},
 		{
-			// The reason the needle is "strict decoding error" and not the bare
-			// "unknown field": an Invalid status echoes the offending value back, so a
-			// user-supplied string can contain the bare phrase. Classifying this as an
-			// upstream mismatch would tell an operator to upgrade a cluster that is fine,
-			// and retry every 30s forever.
-			name: "not ours: Invalid echoing a user value that contains the bare phrase",
+			// An Invalid status echoes the offending value back, so a user-supplied string can
+			// carry any phrasing at all. This provider matches no bare phrase, so none of the
+			// three cases below can be misread as an upstream mismatch and retried every 30s.
+			name: "not ours: Invalid echoing a user value containing 'unknown field'",
 			err: apierrors.NewInvalid(schema.GroupKind{Kind: "X"}, "x", field.ErrorList{
 				field.Invalid(field.NewPath("spec", "engine", "extraArgs"),
 					"--served-model-name=unknown field probe", "must be a valid flag"),
@@ -134,12 +137,22 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 			want: false,
 		},
 		{
-			// The needle requires BOTH halves. An Invalid status echoes the offending value
-			// back, so a user-supplied string containing only the prefix must not match.
-			name: "not ours: 'strict decoding error' echoed without an unknown-field cause",
+			name: "not ours: Invalid echoing a user value containing 'strict decoding error'",
 			err: apierrors.NewInvalid(schema.GroupKind{Kind: "X"}, "x", field.ErrorList{
 				field.Invalid(field.NewPath("spec", "engine", "extraArgs"),
 					"--served-model-name=strict decoding error probe", "must be a valid flag"),
+			}),
+			want: false,
+		},
+		{
+			// The adversarial case: both phrases inside one user-supplied value. A provider
+			// that matches the custom-resource shape has to weigh this against the false
+			// negative of a stricter match; this one writes no custom resources, so the
+			// question does not arise and the answer is simply no.
+			name: "not ours: Invalid echoing a value containing both phrases at once",
+			err: apierrors.NewInvalid(schema.GroupKind{Kind: "X"}, "x", field.ErrorList{
+				field.Invalid(field.NewPath("spec", "engine", "extraArgs"),
+					"--served-model-name=strict decoding error unknown field", "must be a valid flag"),
 			}),
 			want: false,
 		},

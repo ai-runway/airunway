@@ -108,40 +108,27 @@ func statusSafeRejectionDetail(err error) string {
 // isUpstreamSchemaRejection reports whether err is the API server refusing a field the
 // installed upstream does not declare, as opposed to any other rejection.
 //
-// Matching on the message rather than the status class is deliberate, because the class
-// varies by write path:
-//   - custom resource create/update -> 400 BadRequest, "strict decoding error: unknown field"
-//   - custom resource merge patch   -> 422 Invalid,    same prefix (verified live)
-//   - server-side apply on built-in types -> 500, "field not declared in schema"
-//     (verified against a live cluster: the error is a plain error from the field manager,
-//     so it is neither IsBadRequest nor IsInvalid)
+// This provider renders only built-in types — apps/v1 Deployment and v1 Service — and writes
+// them through server-side apply, so that is the only rejection shape it can receive. It
+// arrives as a plain error from the field manager's typed conversion
+// (structured-merge-diff, typed/validate.go), neither IsBadRequest nor IsInvalid, which is
+// why the match is on the message rather than the status class. Gating on IsInvalid would
+// additionally swallow every CEL and OpenAPI type violation — user configuration errors no
+// upstream upgrade would fix.
 //
-// Gating on IsInvalid alone would also swallow every CEL and OpenAPI type violation, which
-// are user configuration errors that no upstream upgrade would fix — reporting those as an
-// upstream version mismatch would send operators down the wrong path entirely.
-//
-// The needle is the "strict decoding error" prefix rather than the bare "unknown field"
-// cause it wraps, because an Invalid status echoes the offending value back and a
-// user-supplied string (a model id, an image, an engine arg) could otherwise contain the
-// bare phrase and be misclassified.
+// The custom-resource shape ("strict decoding error: unknown field", 400 on create/update and
+// 422 on merge patch) is deliberately NOT matched here: it is unreachable for this provider,
+// and matching it would only create a way to misclassify an ordinary validation error whose
+// echoed value happens to contain that phrasing — reported as a version mismatch and retried
+// forever. The providers that do write custom resources match it in their own copy.
 func isUpstreamSchemaRejection(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 
-	// Custom-resource paths: apimachinery wraps the unknown-field cause in a
-	// "strict decoding error" prefix. Require BOTH parts. An Invalid status echoes the
-	// offending value back, so a user-supplied string (a model id, an image, an engine arg)
-	// containing either phrase on its own must not be misclassified as a version mismatch
-	// and retried forever.
-	if strings.Contains(msg, "strict decoding error") && strings.Contains(msg, "unknown field") {
-		return true
-	}
-
-	// Server-side apply on built-in types: the rejection comes from the field manager's
-	// typed conversion, not from field validation, so it carries a different wrapper and a
-	// different status class. Bind the diagnostic to that wrapper for the same reason.
+	// Bind the diagnostic to the wrapper, so an error that merely echoes the phrase back
+	// cannot match on the phrase alone.
 	if strings.Contains(msg, "failed to create typed patch object") ||
 		strings.Contains(msg, "failed to create typed live object") {
 		return strings.Contains(msg, "field not declared in schema")

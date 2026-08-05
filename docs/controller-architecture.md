@@ -270,9 +270,17 @@ provider:
 > are merged after admission has checked `spec.resources` / `spec.scaling` ceilings. Use
 > `spec.resources` and `spec.scaling` for sizing.
 
-KAITO and KubeRay have no documented override surface. KubeRay does not read
-`spec.provider.overrides` at all, so overrides set for it have no effect; KAITO merges them,
-but the supported keys are not specified here. Invalid types cause reconciliation failure.
+**KubeRay** does not read `spec.provider.overrides` at all, so overrides set for it have no
+effect.
+
+**KAITO** accepts `resource` and `inference`, which the Workspace places at the object root
+rather than under `spec` — so unlike the other providers, `spec` is not an accepted key here.
+Any other root key is rejected with an error naming it. The allowlist is deliberately narrower
+than the Workspace schema, which also declares `tuning`: a `ModelDeployment` describes an
+inference deployment and the status translator reads inference conditions, so a tuning
+Workspace would report status the provider cannot interpret.
+
+Invalid types cause reconciliation failure.
 
 ## Validation Webhook
 

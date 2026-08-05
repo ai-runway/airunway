@@ -189,9 +189,20 @@ writers are **not** covered and carry the same skew risk:
 degraded workload now blocks the deployment. There is no runtime opt-out — to revert the
 behaviour, pin the previous provider image.
 
-`spec.provider.overrides` is subject to the same rule — only keys the installed upstream CRD
-declares will be accepted. See
-[Provider Overrides](controller-architecture.md#provider-overrides).
+`spec.provider.overrides` passes through **two** separate checks, and it is worth keeping them
+apart:
+
+1. **The provider checks the root keys** before rendering. Each provider accepts only the roots
+   it knows how to apply — `spec` plus its own transformer-specific keys, or `resource` and
+   `inference` for KAITO, which places them at the object root. Anything else is rejected with
+   an error naming the offending key, rather than being merged and silently pruned.
+2. **The API server checks everything sent upstream.** Keys nested under `spec` reach the
+   upstream object, so they must be declared by the installed CRD or the write is rejected.
+
+The distinction matters because the transformer-specific keys are *not* declared upstream and
+are never sent: Dynamo's `routerMode` and `epp`, for example, are decoded into the shim's own
+config and stripped before the write. They are accepted despite being absent from the upstream
+schema. See [Provider Overrides](controller-architecture.md#provider-overrides).
 
 ---
 
