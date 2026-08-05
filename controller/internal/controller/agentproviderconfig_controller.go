@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -26,7 +27,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
@@ -254,7 +258,43 @@ func providerConfigReadyTransition(apc *airunwayv1alpha1.AgentProviderConfig, st
 // SetupWithManager wires the provider-readiness reconciler.
 func (r *AgentProviderConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&airunwayv1alpha1.AgentProviderConfig{}).
+		For(&airunwayv1alpha1.AgentProviderConfig{},
+			ctrlbuilder.WithPredicates(providerConfigReadinessTrigger())).
 		Named("agent-provider-config-readiness").
 		Complete(r)
+}
+
+// providerConfigReadinessTrigger drops the status-only updates this controller
+// causes itself.
+//
+// Every reconcile writes a fresh lastHeartbeat. Without a predicate that patch
+// comes straight back as an update event and enqueues another reconcile, so the
+// 60-second RequeueAfter is not what paces this controller — the feedback loop
+// is. Within a single clock second the write is a no-op (metav1.Time serialises
+// at second precision, so SSA sees no change and no event fires), which bounds
+// it; but once a reconcile-plus-delivery cycle crosses a second boundary each
+// pass writes a new timestamp and re-triggers, and the ceiling becomes one write
+// per config per second rather than one per minute.
+//
+// Filtering here removes the question entirely, and matches what the container
+// provider already does for this same type via ProviderConfigRelevantChange.
+//
+// Kept: creates, deletes, generation changes (spec edits) and annotation changes
+// (install instructions and the catalog feed readiness messages). Dropped: pure
+// status writes, which this controller is the author of and never needs to react
+// to.
+func providerConfigReadinessTrigger() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldAPC, okOld := e.ObjectOld.(*airunwayv1alpha1.AgentProviderConfig)
+			newAPC, okNew := e.ObjectNew.(*airunwayv1alpha1.AgentProviderConfig)
+			if !okOld || !okNew {
+				return true
+			}
+			if oldAPC.Generation != newAPC.Generation {
+				return true
+			}
+			return !maps.Equal(oldAPC.Annotations, newAPC.Annotations)
+		},
+	}
 }

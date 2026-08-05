@@ -19,12 +19,15 @@ package controller
 import (
 	"context"
 	"strings"
+	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -221,3 +224,67 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		Expect(strings.Contains(cond.Message, "kubectl apply -f https://example.com/install.yaml")).To(BeTrue())
 	})
 })
+
+// TestProviderConfigReadinessTriggerDropsSelfCausedUpdates pins the predicate
+// that stops this controller re-triggering on its own status writes.
+//
+// Every reconcile writes a fresh lastHeartbeat. Without the filter that patch
+// returns as an update event and enqueues another reconcile, so what paces the
+// controller is the feedback loop rather than the 60s RequeueAfter. Raised three
+// times in review; this is what keeps it closed.
+func TestProviderConfigReadinessTriggerDropsSelfCausedUpdates(t *testing.T) {
+	base := func() *airunwayv1alpha1.AgentProviderConfig {
+		return &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "fw",
+				Generation:  3,
+				Annotations: map[string]string{"airunway.ai/install-instructions": "helm install ..."},
+			},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{
+				Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+					Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+				},
+			},
+		}
+	}
+	p := providerConfigReadinessTrigger()
+
+	t.Run("its own heartbeat write is dropped", func(t *testing.T) {
+		before, after := base(), base()
+		now := metav1.Now()
+		later := metav1.NewTime(now.Add(time.Second))
+		before.Status.LastHeartbeat = &now
+		after.Status.LastHeartbeat = &later
+		after.Status.Ready = ptrBool(true)
+		if p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
+			t.Error("a status-only update must not enqueue another reconcile")
+		}
+	})
+
+	t.Run("a spec edit still triggers", func(t *testing.T) {
+		before, after := base(), base()
+		after.Generation = 4
+		if !p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
+			t.Error("a generation change must trigger")
+		}
+	})
+
+	t.Run("an annotation edit still triggers", func(t *testing.T) {
+		// Install instructions and the catalog feed readiness messages, and
+		// annotation edits do not bump generation.
+		before, after := base(), base()
+		after.Annotations["airunway.ai/install-instructions"] = "helm install --set new=true"
+		if !p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
+			t.Error("an annotation change must trigger")
+		}
+	})
+
+	t.Run("creates and deletes are untouched", func(t *testing.T) {
+		if !p.Create(event.CreateEvent{Object: base()}) {
+			t.Error("creates must still enqueue")
+		}
+		if !p.Delete(event.DeleteEvent{Object: base()}) {
+			t.Error("deletes must still enqueue")
+		}
+	})
+}
