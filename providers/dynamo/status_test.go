@@ -8,6 +8,10 @@ import (
 )
 
 func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured {
+	return newDGDWithSpecAndStatus(nil, status)
+}
+
+func newDGDWithSpecAndStatus(spec map[string]interface{}, status map[string]interface{}) *unstructured.Unstructured {
 	obj := map[string]interface{}{
 		"apiVersion": "nvidia.com/v1alpha1",
 		"kind":       "DynamoGraphDeployment",
@@ -15,6 +19,9 @@ func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured 
 			"name":      "test-dgd",
 			"namespace": "default",
 		},
+	}
+	if spec != nil {
+		obj["spec"] = spec
 	}
 	if status != nil {
 		obj["status"] = status
@@ -226,9 +233,18 @@ func TestTranslateStatusWithEndpoint(t *testing.T) {
 	}
 }
 
-func TestTranslateStatusDefaultEndpoint(t *testing.T) {
+func TestTranslateStatusNilEndpointWithoutFrontend(t *testing.T) {
 	st := NewStatusTranslator()
-	dgd := newDGDWithStatus(map[string]interface{}{
+	dgd := newDGDWithSpecAndStatus(map[string]interface{}{
+		"services": map[string]interface{}{
+			"Epp": map[string]interface{}{
+				"componentType": "epp",
+			},
+			"VllmWorker": map[string]interface{}{
+				"componentType": "worker",
+			},
+		},
+	}, map[string]interface{}{
 		"state": "successful",
 	})
 
@@ -236,8 +252,35 @@ func TestTranslateStatusDefaultEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.Endpoint != nil {
+		t.Fatalf("expected nil endpoint without standalone Frontend service, got %#v", result.Endpoint)
+	}
+}
+
+func TestTranslateStatusWithInferredFrontendEndpoint(t *testing.T) {
+	st := NewStatusTranslator()
+	dgd := newDGDWithSpecAndStatus(map[string]interface{}{
+		"services": map[string]interface{}{
+			"Frontend": map[string]interface{}{
+				"componentType": "frontend",
+			},
+			"VllmWorker": map[string]interface{}{
+				"componentType": "worker",
+			},
+		},
+	}, map[string]interface{}{
+		"state": "successful",
+	})
+
+	result, err := st.TranslateStatus(dgd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Endpoint == nil {
+		t.Fatal("expected inferred endpoint when standalone Frontend service is configured")
+	}
 	if result.Endpoint.Service != "test-dgd-frontend" {
-		t.Errorf("expected default service 'test-dgd-frontend', got %s", result.Endpoint.Service)
+		t.Errorf("expected inferred service 'test-dgd-frontend', got %s", result.Endpoint.Service)
 	}
 	if result.Endpoint.Port != 8000 {
 		t.Errorf("expected default port 8000, got %d", result.Endpoint.Port)

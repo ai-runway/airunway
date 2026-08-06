@@ -180,6 +180,9 @@ func (t *StatusTranslator) extractEndpoint(upstream *unstructured.Unstructured, 
 	if serviceName, found, _ := unstructured.NestedString(status, "endpoint", "service"); found {
 		endpoint.Service = serviceName
 	} else {
+		if !hasFrontendService(upstream) {
+			return nil
+		}
 		// Default to deployment name + "-frontend"
 		endpoint.Service = fmt.Sprintf("%s-frontend", upstream.GetName())
 	}
@@ -192,6 +195,16 @@ func (t *StatusTranslator) extractEndpoint(upstream *unstructured.Unstructured, 
 	}
 
 	return endpoint
+}
+
+func hasFrontendService(upstream *unstructured.Unstructured) bool {
+	services, found, _ := unstructured.NestedMap(upstream.Object, "spec", "services")
+	if !found {
+		return false
+	}
+
+	_, hasFrontend := services["Frontend"]
+	return hasFrontend
 }
 
 // IsReady checks if the DynamoGraphDeployment is ready
