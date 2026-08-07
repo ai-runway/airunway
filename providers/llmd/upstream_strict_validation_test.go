@@ -538,8 +538,9 @@ func TestReconcileTransientFailurePreservesServingStatus(t *testing.T) {
 
 // TestReconcileTransientApplyFailureWithUnreadyDeploymentFailsClosed proves that existence,
 // ownership, and a non-terminating object are not enough to retain stale serving health. The
-// pre-write Deployment snapshot is explicitly Deploying, so a retryable apply failure must
-// use the prompt retry cadence while clearing the stale Ready/endpoint/replica status.
+// pre-write Deployment snapshot has a stale Available=True condition but zero current replica
+// counts, so a retryable apply failure must use the prompt retry cadence while clearing the
+// stale Ready/endpoint/replica status.
 func TestReconcileTransientApplyFailureWithUnreadyDeploymentFailsClosed(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
@@ -842,9 +843,9 @@ func seedRunningDeploymentStatus(t *testing.T, deployment *unstructured.Unstruct
 
 func seedUnreadyDeploymentStatus(t *testing.T, deployment *unstructured.Unstructured) {
 	t.Helper()
-	seedDeploymentStatus(t, deployment, "False", int64(0), int64(0))
+	seedDeploymentStatus(t, deployment, "True", int64(0), int64(0))
 	if err := unstructured.SetNestedSlice(deployment.Object, []interface{}{
-		map[string]interface{}{"type": conditionAvailable, "status": "False"},
+		map[string]interface{}{"type": conditionAvailable, "status": "True"},
 		map[string]interface{}{"type": conditionProgressing, "status": "True"},
 	}, "status", "conditions"); err != nil {
 		t.Fatalf("set unready Deployment conditions: %v", err)

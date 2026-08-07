@@ -576,6 +576,10 @@ func (r *LLMDProviderReconciler) syncStatus(ctx context.Context, md *airunwayv1a
 		// The translator reports no message for a healthy Deployment; replace the
 		// stale "waiting for pods" message so status reflects the Running phase.
 		md.Status.Message = "Deployments created, pods are ready"
+	} else {
+		// Do not retain a prior healthy message when current replica evidence
+		// downgrades the Deployment to an in-progress state.
+		md.Status.Message = "Deployments created, waiting for pods to be ready"
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint
