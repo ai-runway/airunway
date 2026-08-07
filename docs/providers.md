@@ -130,10 +130,11 @@ For HuggingFace GGUF models, KAITO uses in-cluster image building:
 A provider shim renders manifests it does not own the schema for. For `dynamo`, `kaito` and
 `kuberay` that means a third-party CRD installed separately; if the cluster's installed
 upstream is older than the shim expects, it may not declare a field the shim emits. `dynamo`
-and `kaito` pin their target version in `versions.env`; **KubeRay is not pinned at all**, so
-that shim has no declared target to compare against. `llmd` and `vllm` render only built-in `apps/v1` and `v1` types, whose
-schemas ship with the API server, so their exposure is to Kubernetes version skew rather than
-to a third-party operator.
+and `kaito` pin their target version in `versions.env`. KubeRay's installation metadata pins
+operator chart `1.3.0` in `providers/kuberay/config.go`, but unlike those two it has no
+centralized `KUBERAY_VERSION` pin or version-sync check. `llmd` and `vllm` render only built-in
+`apps/v1` and `v1` types, whose schemas ship with the API server, so their exposure is to
+Kubernetes version skew rather than to a third-party operator.
 
 Kubernetes CRDs with a structural schema **prune** undeclared fields by default: the write
 succeeds, the field vanishes, and no error is raised. That produced a real failure
@@ -189,20 +190,28 @@ writers are **not** covered and carry the same skew risk:
 degraded workload now blocks the deployment. There is no runtime opt-out — to revert the
 behaviour, pin the previous provider image.
 
-`spec.provider.overrides` passes through **two** separate checks, and it is worth keeping them
+`spec.provider.overrides` passes through **three** separate checks, and it is worth keeping them
 apart:
 
-1. **The provider checks the root keys** before rendering. Each provider accepts only the roots
-   it knows how to apply — `spec` plus its own transformer-specific keys, or `resource` and
-   `inference` for KAITO, which places them at the object root. Anything else is rejected with
-   an error naming the offending key, rather than being merged and silently pruned.
-2. **The API server checks everything sent upstream.** Keys nested under `spec` reach the
-   upstream object, so they must be declared by the installed CRD or the write is rejected.
+1. **The AI Runway validating webhook checks every provider's override payload** before a
+   `ModelDeployment` is admitted. Its recursive rules reject security-sensitive fields and
+   workload-sizing fields that could bypass the unified resource and replica limits.
+2. **Providers that consume overrides check the root keys** before rendering. Dynamo, KAITO,
+   llm-d and Direct vLLM accept only the roots they know how to apply — `spec` plus Dynamo's
+   transformer-specific keys, or `resource` and `inference` for KAITO, which places them at the
+   object root. Anything else is rejected with an error naming the offending key, rather than
+   being merged and silently pruned. KubeRay does not consume overrides that pass the global
+   admission rules, so they do not change the rendered `RayService`.
+3. **The target API server checks the rendered object.** Passed-through fields must be
+   declared by the target CRD or built-in Kubernetes schema, otherwise the write is rejected.
 
 The distinction matters because the transformer-specific keys are *not* declared upstream and
 are never sent: Dynamo's `routerMode` and `epp`, for example, are decoded into the shim's own
 config and stripped before the write. They are accepted despite being absent from the upstream
-schema. See [Provider Overrides](controller-architecture.md#provider-overrides).
+schema, but their documented structure is decoded strictly so a typo such as `epp.imag` is
+rejected rather than silently discarded. KAITO similarly rejects its replica path
+`resource.count`; replicas must be set through `spec.scaling.replicas`. See
+[Provider Overrides](controller-architecture.md#provider-overrides).
 
 ---
 

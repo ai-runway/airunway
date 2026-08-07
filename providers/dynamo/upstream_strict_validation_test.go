@@ -13,12 +13,16 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -146,6 +150,219 @@ func TestUpstreamUpdateUsesStrictFieldValidation(t *testing.T) {
 	}
 }
 
+// TestUpstreamUpdateDoesNotIgnoreDesiredUnknownEmptyFields guards the update
+// half of strict validation. The API server may add empty defaults to the object it
+// returns, but empty values explicitly present in the desired spec must not be
+// normalized away: an installed CRD that does not declare them still needs to see a
+// strict update and reject them.
+func TestUpstreamUpdateDoesNotIgnoreDesiredUnknownEmptyFields(t *testing.T) {
+	tests := []struct {
+		name           string
+		overrideRaw    string
+		existingFields map[string]interface{}
+		desiredFields  map[string]interface{}
+	}{
+		{
+			name:          "empty string",
+			overrideRaw:   `{"spec":{"futureField":""}}`,
+			desiredFields: map[string]interface{}{"futureField": ""},
+		},
+		{
+			name:          "empty object",
+			overrideRaw:   `{"spec":{"futureField":{}}}`,
+			desiredFields: map[string]interface{}{"futureField": map[string]interface{}{}},
+		},
+		{
+			name:        "nested empty object",
+			overrideRaw: `{"spec":{"services":{"VllmWorker":{"futureField":{}}}}}`,
+			existingFields: map[string]interface{}{
+				"services": map[string]interface{}{
+					"VllmWorker": map[string]interface{}{},
+				},
+			},
+			desiredFields: map[string]interface{}{
+				"services": map[string]interface{}{
+					"VllmWorker": map[string]interface{}{
+						"futureField": map[string]interface{}{},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newScheme()
+
+			existing := &unstructured.Unstructured{}
+			setDGDGVK(existing)
+			existing.SetName("test")
+			existing.SetNamespace("default")
+			existing.SetOwnerReferences([]metav1.OwnerReference{{
+				APIVersion: airunwayv1alpha1.GroupVersion.String(),
+				Kind:       "ModelDeployment",
+				Name:       "test",
+				UID:        types.UID("test-uid"),
+			}})
+			existingSpec := map[string]interface{}{
+				"backendFramework": "vllm",
+				"serverDefault":    "",
+			}
+			for key, value := range tt.existingFields {
+				existingSpec[key] = value
+			}
+			existing.Object["spec"] = existingSpec
+
+			var called bool
+			var got string
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(_ context.Context, _ client.WithWatch, _ client.Object, opts ...client.UpdateOption) error {
+						called = true
+						o := &client.UpdateOptions{}
+						for _, opt := range opts {
+							opt.ApplyToUpdate(o)
+						}
+						got = o.FieldValidation
+						return fmt.Errorf(`strict decoding error: unknown field "spec.futureField"`)
+					},
+				}).Build()
+
+			r := NewDynamoProviderReconciler(c, scheme, "")
+			md := &airunwayv1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{
+				Name: "test", Namespace: "default", UID: types.UID("test-uid"),
+			}}
+			md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+				Name: ProviderName,
+				Overrides: &runtime.RawExtension{
+					Raw: []byte(tt.overrideRaw),
+				},
+			}
+			desired := &unstructured.Unstructured{}
+			setDGDGVK(desired)
+			desired.SetName("test")
+			desired.SetNamespace("default")
+			desired.SetOwnerReferences(existing.GetOwnerReferences())
+			desiredSpec := map[string]interface{}{
+				"backendFramework": "vllm",
+			}
+			for key, value := range tt.desiredFields {
+				desiredSpec[key] = value
+			}
+			desired.Object["spec"] = desiredSpec
+
+			err := r.createOrUpdateResource(context.Background(), desired, md)
+			if err == nil {
+				t.Fatal("expected strict unknown-field rejection")
+			}
+			if !called {
+				t.Fatal("Update was not called; desired empty unknown field was normalized away")
+			}
+			if got != metav1.FieldValidationStrict {
+				t.Errorf("update fieldValidation = %q, want %q", got, metav1.FieldValidationStrict)
+			}
+			if !isUpstreamSchemaRejection(err) {
+				t.Errorf("error was not classified as an upstream schema rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpstreamUpdateIgnoresDefaultsAndPersistedEmptyOverrides(t *testing.T) {
+	tests := []struct {
+		name         string
+		overrideRaw  string
+		existingSpec map[string]interface{}
+		desiredSpec  map[string]interface{}
+	}{
+		{
+			name: "server-added defaults",
+			existingSpec: map[string]interface{}{
+				"backendFramework": "vllm",
+				"name":             "",
+				"resources":        map[string]interface{}{},
+			},
+			desiredSpec: map[string]interface{}{"backendFramework": "vllm"},
+		},
+		{
+			name:        "persisted empty string override",
+			overrideRaw: `{"spec":{"futureField":""}}`,
+			existingSpec: map[string]interface{}{
+				"backendFramework": "vllm",
+				"futureField":      "",
+				"name":             "",
+			},
+			desiredSpec: map[string]interface{}{
+				"backendFramework": "vllm",
+				"futureField":      "",
+			},
+		},
+		{
+			name:        "persisted empty object override",
+			overrideRaw: `{"spec":{"futureField":{}}}`,
+			existingSpec: map[string]interface{}{
+				"backendFramework": "vllm",
+				"futureField":      map[string]interface{}{},
+				"resources":        map[string]interface{}{},
+			},
+			desiredSpec: map[string]interface{}{
+				"backendFramework": "vllm",
+				"futureField":      map[string]interface{}{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newScheme()
+			existing := &unstructured.Unstructured{}
+			setDGDGVK(existing)
+			existing.SetName("test")
+			existing.SetNamespace("default")
+			existing.SetOwnerReferences([]metav1.OwnerReference{{
+				APIVersion: airunwayv1alpha1.GroupVersion.String(),
+				Kind:       "ModelDeployment",
+				Name:       "test",
+				UID:        types.UID("test-uid"),
+			}})
+			existing.Object["spec"] = tt.existingSpec
+
+			var updateCalled bool
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+						updateCalled = true
+						return nil
+					},
+				}).Build()
+
+			md := &airunwayv1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{
+				Name: "test", Namespace: "default", UID: types.UID("test-uid"),
+			}}
+			if tt.overrideRaw != "" {
+				md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+					Name:      ProviderName,
+					Overrides: &runtime.RawExtension{Raw: []byte(tt.overrideRaw)},
+				}
+			}
+
+			desired := &unstructured.Unstructured{}
+			setDGDGVK(desired)
+			desired.SetName("test")
+			desired.SetNamespace("default")
+			desired.SetOwnerReferences(existing.GetOwnerReferences())
+			desired.Object["spec"] = tt.desiredSpec
+
+			if err := NewDynamoProviderReconciler(c, scheme, "").createOrUpdateResource(context.Background(), desired, md); err != nil {
+				t.Fatalf("createOrUpdateResource: %v", err)
+			}
+			if updateCalled {
+				t.Fatal("Update was called even though defaults and explicit empty overrides were already satisfied")
+			}
+		})
+	}
+}
+
 // TestRenderedObjectHasNoUnknownRootFields guards the interaction between the
 // provider.overrides escape hatch and strict field validation.
 //
@@ -244,9 +461,9 @@ func TestReconcileRequeuesOnStrictRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned an error, expected the rejection to be reported in status: %v", err)
 	}
-	if res.RequeueAfter <= 0 {
-		t.Error("expected a requeue after a strict-validation rejection; without one the " +
-			"deployment stays Failed until the default resync even after the upstream is upgraded")
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a strict-validation rejection",
+			res.Requeue, res.RequeueAfter, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
@@ -366,6 +583,17 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 			want: false,
 		},
 		{
+			// Even the complete diagnostic can occur inside an echoed value. The real
+			// strict-decoding cause is terminal; this value is followed by its validation
+			// reason and must not be classified as an upstream mismatch.
+			name: "not ours: full strict diagnostic echoed inside a user value",
+			err: apierrors.NewInvalid(schema.GroupKind{Kind: "X"}, "x", field.ErrorList{
+				field.Invalid(field.NewPath("spec", "engine", "extraArgs"),
+					`--served-model-name=strict decoding error: unknown field "spec.fake"`, "must be a valid flag"),
+			}),
+			want: false,
+		},
+		{
 			name: "not ours: typed-object wrapper without the schema diagnostic",
 			err:  fmt.Errorf("failed to create typed patch object (default/x; apps/v1, Kind=Deployment): some other failure"),
 			want: false,
@@ -377,6 +605,25 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isUpstreamSchemaRejection(tc.err); got != tc.want {
 				t.Errorf("isUpstreamSchemaRejection() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsRetryableUpstreamWriteErrorRecognizesWrappedEOF(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "EOF", err: io.EOF},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF},
+		{name: "broken pipe", err: syscall.EPIPE},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isRetryableUpstreamWriteError(wrapResourceWriteError(tt.err, true)) {
+				t.Errorf("wrapped %v was not classified as retryable", tt.err)
 			}
 		})
 	}
@@ -415,27 +662,80 @@ func TestUnsupportedOverrideKeyIsRejected(t *testing.T) {
 // TestDocumentedOverrideKeysStillAccepted is the other half: the documented keys, in both
 // the documented spelling and the capitalisation encoding/json also accepts, must work.
 func TestDocumentedOverrideKeysStillAccepted(t *testing.T) {
-	md := &airunwayv1alpha1.ModelDeployment{}
-	md.Name = "test"
-	md.Namespace = "default"
-	md.Spec.Model = airunwayv1alpha1.ModelSpec{ID: "Qwen/Qwen3-0.6B", Source: airunwayv1alpha1.ModelSourceHuggingFace}
-	md.Spec.Engine = airunwayv1alpha1.EngineSpec{Type: airunwayv1alpha1.EngineTypeVLLM}
-	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}}
-	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
-		Name: "dynamo",
-		Overrides: &runtime.RawExtension{
-			Raw: []byte(`{"routerMode":"kv","epp":{"image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`),
+	testCases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "documented spelling",
+			raw:  `{"routerMode":"kv","epp":{"image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`,
+		},
+		{
+			name: "case-insensitive consumed keys",
+			raw:  `{"RouterMode":"kv","EPP":{"Image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`,
 		},
 	}
 
-	results, err := NewTransformer().Transform(context.Background(), md)
-	if err != nil {
-		t.Fatalf("documented override keys were rejected: %v", err)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			md := newTestMD("test", "default")
+			md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+				Name:      "dynamo",
+				Overrides: &runtime.RawExtension{Raw: []byte(tc.raw)},
+			}
+
+			results, err := NewTransformer().Transform(context.Background(), md)
+			if err != nil {
+				t.Fatalf("documented override keys were rejected: %v", err)
+			}
+			// The opaque upstream spec override still lands.
+			got, _, _ := unstructured.NestedString(results[0].Object, "spec", "backendFramework")
+			if got != "sglang" {
+				t.Errorf("spec override did not apply: backendFramework = %q, want %q", got, "sglang")
+			}
+		})
 	}
-	// the spec override still lands
-	got, _, _ := unstructured.NestedString(results[0].Object, "spec", "backendFramework")
-	if got != "sglang" {
-		t.Errorf("spec override did not apply: backendFramework = %q, want %q", got, "sglang")
+}
+
+func TestConsumedOverrideUnknownFieldsAreRejected(t *testing.T) {
+	testCases := []struct {
+		name         string
+		raw          string
+		unknownField string
+	}{
+		{
+			name:         "epp child",
+			raw:          `{"epp":{"imag":"custom:v1"}}`,
+			unknownField: "imag",
+		},
+		{
+			name:         "frontend child",
+			raw:          `{"frontend":{"bogus":true}}`,
+			unknownField: "bogus",
+		},
+		{
+			name:         "frontend resources child",
+			raw:          `{"frontend":{"resources":{"cpus":"4"}}}`,
+			unknownField: "cpus",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			md := newTestMD("test", "default")
+			md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+				Name:      "dynamo",
+				Overrides: &runtime.RawExtension{Raw: []byte(tc.raw)},
+			}
+
+			_, err := NewTransformer().Transform(context.Background(), md)
+			if err == nil {
+				t.Fatalf("unknown consumed override field %q was silently accepted", tc.unknownField)
+			}
+			if want := fmt.Sprintf(`unknown field %q`, tc.unknownField); !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not identify %q", err, want)
+			}
+		})
 	}
 }
 
@@ -570,25 +870,431 @@ func TestReconcileTransformFailureClearsStaleStatus(t *testing.T) {
 	}
 }
 
-// TestReconcileGenericFailureClearsStaleStatus covers the THIRD failure branch — an ordinary
-// write failure that is neither a transform error nor a schema rejection.
-//
-// It is the most common of the three, and it must not be the one that still reports healthy.
-// Without the clearing, a previously-Running deployment hitting a transient upstream error
-// reports Failed while advertising a live endpoint and "1/1 ready" — the contradiction issue
-// this guards against.
-func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
+// TestReconcileTransientWriteFailurePreservesLastKnownStatus covers a retryable update
+// failure after the controller has observed an owned upstream resource. The ambiguous write
+// does not prove that existing workload stopped serving, so last-known status is retained.
+func TestReconcileTransientWriteFailurePreservesLastKnownStatus(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
 	controllerutil.AddFinalizer(md, FinalizerName)
 	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
 	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
-	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
 
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, "sglang", "spec", "backendFramework"); err != nil {
+		t.Fatalf("mutate existing spec: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, string(DynamoStateSuccessful), "status", "state"); err != nil {
+		t.Fatalf("mark existing resource ready: %v", err)
+	}
+
+	var updateCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					updateCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("RequeueAfter = %s, want %s", res.RequeueAfter, RequeueInterval)
+	}
+	if !updateCalled {
+		t.Fatal("Update was never called; test did not exercise the existing-resource path")
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	var createdReason string
+	var createdStatus metav1.ConditionStatus
+	var readyStatus metav1.ConditionStatus
+	var readyReason string
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == airunwayv1alpha1.ConditionTypeResourceCreated {
+			createdReason = cond.Reason
+			createdStatus = cond.Status
+		}
+		if cond.Type == airunwayv1alpha1.ConditionTypeReady {
+			readyStatus = cond.Status
+			readyReason = cond.Reason
+		}
+	}
+	if createdReason != "CreateFailed" {
+		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
+	}
+	if createdStatus != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %q, want False", createdStatus)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		t.Errorf("Status.Phase = %q, want Running", updated.Status.Phase)
+	}
+	if readyStatus != metav1.ConditionTrue || readyReason != "DeploymentReady" {
+		t.Errorf("Ready = %q reason %q, want True reason DeploymentReady", readyStatus, readyReason)
+	}
+	if updated.Status.Endpoint == nil || updated.Status.Endpoint.Service != "stale-svc" || updated.Status.Endpoint.Port != 8000 {
+		t.Errorf("Status.Endpoint = %+v, want stale-svc:8000", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas == nil || updated.Status.Replicas.Desired != 1 || updated.Status.Replicas.Ready != 1 || updated.Status.Replicas.Available != 1 {
+		t.Errorf("Status.Replicas = %+v, want 1 desired/ready/available", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileTransientWriteFailureOnUnreadyResourceFailsClosed proves that ownership and
+// an active object are not enough to retain stale serving status. The current upstream
+// observation is explicitly non-serving, so an ambiguous write failure must fail closed.
+func TestReconcileTransientWriteFailureOnUnreadyResourceFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:   airunwayv1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: "DeploymentReady",
+	})
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, "sglang", "spec", "backendFramework"); err != nil {
+		t.Fatalf("mutate existing spec: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, string(DynamoStateDeploying), "status", "state"); err != nil {
+		t.Fatalf("mark existing resource unready: %v", err)
+	}
+
+	var updateCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					updateCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s", res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+	if !updateCalled {
+		t.Fatal("Update was never called; test did not exercise the active unready-resource path")
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+	created := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
+	if created == nil || created.Status != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %+v, want False", created)
+	}
+	ready := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Errorf("Ready = %+v, want False", ready)
+	}
+}
+
+// TestReconcileTransientUpdateFailureOnTerminatingResourceFailsClosed covers an owned
+// upstream object that was observed but is already terminating. A retryable update failure
+// cannot preserve serving status in that case because the last observation says the workload
+// is going away, not that it remains safely available.
+func TestReconcileTransientUpdateFailureOnTerminatingResourceFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, "sglang", "spec", "backendFramework"); err != nil {
+		t.Fatalf("mutate existing spec: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, string(DynamoStateSuccessful), "status", "state"); err != nil {
+		t.Fatalf("mark existing resource ready: %v", err)
+	}
+	deletingAt := metav1.Now()
+	existing.SetDeletionTimestamp(&deletingAt)
+	existing.SetFinalizers([]string{"test.airunway.ai/upstream-cleanup"})
+
+	var updateCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					updateCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a transient update of a terminating resource",
+			res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+	if !updateCalled {
+		t.Fatal("Update was never called; test did not exercise the terminating existing-resource path")
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+	created := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
+	if created == nil || created.Status != metav1.ConditionFalse || created.Reason != "CreateFailed" {
+		t.Errorf("ResourceCreated = %+v, want False reason CreateFailed", created)
+	}
+	ready := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "CreateFailed" {
+		t.Errorf("Ready = %+v, want False reason CreateFailed", ready)
+	}
+}
+
+// TestReconcileTransientUpstreamGetFailureFailsClosed covers a retryable read failure before
+// the provider can determine whether the upstream object exists, is owned, or is active. With
+// no verified observation, stale serving status is unsafe to preserve.
+func TestReconcileTransientUpstreamGetFailureFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	var upstreamGetCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					upstreamGetCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated upstream read outage"))
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a transient upstream read failure",
+			res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+	if !upstreamGetCalled {
+		t.Fatal("upstream Get was never called; test did not exercise the unverified-observation path")
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+	created := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
+	if created == nil || created.Status != metav1.ConditionFalse || created.Reason != "CreateFailed" {
+		t.Errorf("ResourceCreated = %+v, want False reason CreateFailed", created)
+	}
+	ready := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "CreateFailed" {
+		t.Errorf("Ready = %+v, want False reason CreateFailed", ready)
+	}
+}
+
+// TestReconcileOwnedUpdateConflictRetriesPromptly covers a resourceVersion race after the
+// controller has read and ownership-checked an existing DynamoGraphDeployment. A 409 from
+// that owned update is transient and should trigger a fresh read promptly, while preserving
+// the last-known serving status.
+func TestReconcileOwnedUpdateConflictRetriesPromptly(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "live-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:   airunwayv1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: "DeploymentReady",
+	})
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, "sglang", "spec", "backendFramework"); err != nil {
+		t.Fatalf("mutate existing spec: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, string(DynamoStateSuccessful), "status", "state"); err != nil {
+		t.Fatalf("mark existing resource ready: %v", err)
+	}
+
+	var updateCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					updateCalled = true
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: DynamoAPIGroup, Resource: "dynamographdeployments"},
+						obj.GetName(), fmt.Errorf("the object has been modified"),
+					)
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; a conflict should requeue: %v", err)
+	}
+	if !updateCalled {
+		t.Fatal("Update was never called; test did not exercise the owned existing-resource path")
+	}
+	if res.Requeue || res.RequeueAfter != time.Second {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after an update conflict",
+			res.Requeue, res.RequeueAfter, time.Second)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		t.Errorf("Status.Phase = %q, want Running", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint == nil || updated.Status.Endpoint.Service != "live-svc" {
+		t.Errorf("Status.Endpoint = %+v, want live-svc", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas == nil || updated.Status.Replicas.Ready != 1 {
+		t.Errorf("Status.Replicas = %+v, want last-known ready count preserved", updated.Status.Replicas)
+	}
+	created := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
+	if created == nil || created.Reason != "ResourceConflict" {
+		t.Errorf("ResourceCreated = %+v, want reason ResourceConflict", created)
+	}
+	ready := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Errorf("Ready = %+v, want last-known True condition preserved", ready)
+	}
+}
+
+// TestReconcileTransientCreateFailureClearsStaleStatus covers the same retryable API error
+// when the controller has just observed that no upstream resource exists. There is no known
+// workload to preserve, so stale serving status must be cleared while retrying promptly.
+func TestReconcileTransientCreateFailureClearsStaleStatus(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	var createCalled bool
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					createCalled = true
 					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
 				}
 				return cl.Create(ctx, obj, opts...)
@@ -602,32 +1308,161 @@ func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
 	}
-	// A generic write failure is usually transient, so it must retry. Without a requeue the
-	// second pass writes identical status (a server-side no-op), nothing re-enqueues, and the
-	// deployment sits Failed with no endpoint until the default resync.
-	if res.RequeueAfter <= 0 {
-		t.Error("expected a requeue after a transient write failure")
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a transient create failure",
+			res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+	if !createCalled {
+		t.Fatal("Create was never called; test did not exercise the absent-resource path")
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	var createdReason string
-	var readyStatus metav1.ConditionStatus
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+	if condition := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady); condition == nil || condition.Status != metav1.ConditionFalse {
+		t.Errorf("Ready = %+v, want False", condition)
+	}
+}
+
+// TestReconcileNotFoundWriteFailureClearsStaleStatus covers a definite API-server 404.
+// Unlike an ambiguous 5xx or transport failure, a 404 proves this write did not update an
+// existing workload, so stale serving status must be cleared while retrying promptly.
+func TestReconcileNotFoundWriteFailureClearsStaleStatus(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					return apierrors.NewNotFound(
+						schema.GroupResource{Group: DynamoAPIGroup, Resource: "dynamographdeployments"},
+						obj.GetName(),
+					)
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the 404 should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a 404",
+			res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+	if condition := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady); condition == nil || condition.Status != metav1.ConditionFalse {
+		t.Errorf("Ready = %+v, want False", condition)
+	}
+}
+
+// TestReconcileValidationFailureIsTerminal distinguishes deterministic admission failures
+// from retryable transport errors and schema-version mismatches. It fails closed and retries
+// slowly so an out-of-band policy or CRD repair can recover it without a spec edit.
+func TestReconcileValidationFailureIsTerminal(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	rejection := apierrors.NewInvalid(
+		schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind},
+		"test",
+		field.ErrorList{field.Invalid(
+			field.NewPath("spec", "services", "VllmWorker", "replicas"),
+			int64(0),
+			"must be greater than zero",
+		)},
+	)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
+					return rejection
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the validation failure should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s for a deterministic validation failure",
+			res.Requeue, res.RequeueAfter, ExternalRecoveryInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	statuses := map[string]metav1.ConditionStatus{}
+	reasons := map[string]string{}
 	for _, cond := range updated.Status.Conditions {
-		if cond.Type == airunwayv1alpha1.ConditionTypeResourceCreated {
-			createdReason = cond.Reason
-		}
-		if cond.Type == airunwayv1alpha1.ConditionTypeReady {
-			readyStatus = cond.Status
-		}
+		statuses[cond.Type] = cond.Status
+		reasons[cond.Type] = cond.Reason
 	}
-	if createdReason != "CreateFailed" {
-		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
 	}
-	if readyStatus != metav1.ConditionFalse {
-		t.Errorf("Ready = %q, want False", readyStatus)
+	if got := statuses[airunwayv1alpha1.ConditionTypeReady]; got != metav1.ConditionFalse {
+		t.Errorf("Ready = %q, want False", got)
+	}
+	if got := statuses[airunwayv1alpha1.ConditionTypeResourceCreated]; got != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %q, want False", got)
+	}
+	if got := reasons[airunwayv1alpha1.ConditionTypeResourceCreated]; got != "CreateFailed" {
+		t.Errorf("ResourceCreated reason = %q, want CreateFailed", got)
 	}
 	if updated.Status.Endpoint != nil {
 		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
@@ -662,10 +1497,15 @@ func TestReconcileOwnershipConflictUsesItsOwnReason(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, foreign).WithStatusSubresource(md).Build()
 	r := NewDynamoProviderReconciler(c, scheme, "")
 
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("reconcile returned an error: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s for an ownership conflict",
+			res.Requeue, res.RequeueAfter, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment

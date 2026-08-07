@@ -13,7 +13,9 @@ package vllm
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"syscall"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -172,6 +174,34 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 	}
 }
 
+func TestIsRetryableUpstreamWriteErrorTransportEOF(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "wrapped resource write EOF",
+			err:  wrapResourceWriteError(io.EOF, true),
+		},
+		{
+			name: "wrapped resource write unexpected EOF",
+			err:  wrapResourceWriteError(io.ErrUnexpectedEOF, true),
+		},
+		{
+			name: "wrapped resource write broken pipe",
+			err:  wrapResourceWriteError(syscall.EPIPE, true),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isRetryableUpstreamWriteError(tc.err) {
+				t.Errorf("isRetryableUpstreamWriteError(%v) = false, want true", tc.err)
+			}
+		})
+	}
+}
+
 // TestReconcileRequeuesOnStrictRejection covers the recovery path for the failure mode
 // strict validation introduces. A schema rejection is terminal from the controller's point
 // of view — the remedy is an out-of-band upstream upgrade — and nothing in the watch set
@@ -215,8 +245,8 @@ func TestReconcileRequeuesOnStrictRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned an error; the rejection should be reported in status: %v", err)
 	}
-	if res.RequeueAfter <= 0 {
-		t.Error("expected a requeue after a strict-validation rejection")
+	if res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("RequeueAfter = %s, want external recovery interval %s", res.RequeueAfter, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
@@ -384,22 +414,28 @@ func TestStatusSafeRejectionDetailIsStable(t *testing.T) {
 	}
 }
 
-// TestReconcileGenericFailureClearsStaleStatus covers the THIRD failure branch — an ordinary
-// write failure that is neither a transform error nor a schema rejection.
-//
-// It is the most common of the three, and it must not be the one that still reports healthy.
-// Without the clearing, a previously-Running deployment hitting a transient upstream error
-// reports Failed while advertising a live endpoint and "1/1 ready" — the contradiction issue
-// this guards against.
-func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
+// TestReconcileTransientWriteFailurePreservesLastKnownStatus covers retryable API failures.
+// A failed update to an observed existing resource does not prove the workload stopped
+// serving, so the provider records the failed write while retaining last-known status.
+func TestReconcileTransientWriteFailurePreservesLastKnownStatus(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
 	controllerutil.AddFinalizer(md, FinalizerName)
 	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
 	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
-	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+	deployment := ownedDeploymentForMD(md)
+	seedRunningDeploymentStatus(t, deployment)
+	service := ownedServiceForMD(md)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deployment, service).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
@@ -416,11 +452,8 @@ func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
 	}
-	// A generic write failure is usually transient, so it must retry. Without a requeue the
-	// second pass writes identical status (a server-side no-op), nothing re-enqueues, and the
-	// deployment sits Failed with no endpoint until the default resync.
-	if res.RequeueAfter <= 0 {
-		t.Error("expected a requeue after a transient write failure")
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("RequeueAfter = %s, want %s", res.RequeueAfter, RequeueInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
@@ -428,20 +461,518 @@ func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	var createdReason string
+	var createdStatus metav1.ConditionStatus
 	var readyStatus metav1.ConditionStatus
+	var readyReason string
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == airunwayv1alpha1.ConditionTypeResourceCreated {
 			createdReason = cond.Reason
+			createdStatus = cond.Status
 		}
 		if cond.Type == airunwayv1alpha1.ConditionTypeReady {
 			readyStatus = cond.Status
+			readyReason = cond.Reason
 		}
 	}
 	if createdReason != "CreateFailed" {
 		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
 	}
-	if readyStatus != metav1.ConditionFalse {
-		t.Errorf("Ready = %q, want False", readyStatus)
+	if createdStatus != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %q, want False", createdStatus)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		t.Errorf("Status.Phase = %q, want Running", updated.Status.Phase)
+	}
+	if readyStatus != metav1.ConditionTrue || readyReason != "DeploymentReady" {
+		t.Errorf("Ready = %q reason %q, want True reason DeploymentReady", readyStatus, readyReason)
+	}
+	if updated.Status.Endpoint == nil || updated.Status.Endpoint.Service != "stale-svc" || updated.Status.Endpoint.Port != 8000 {
+		t.Errorf("Status.Endpoint = %+v, want stale-svc:8000", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas == nil || updated.Status.Replicas.Desired != 1 || updated.Status.Replicas.Ready != 1 || updated.Status.Replicas.Available != 1 {
+		t.Errorf("Status.Replicas = %+v, want 1 desired/ready/available", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileTransientApplyFailureWithUnreadyDeploymentFailsClosed proves that existence,
+// ownership, and a non-terminating object are not enough to retain stale serving health. The
+// pre-write Deployment snapshot is explicitly Deploying, so a retryable apply failure must
+// use the prompt retry cadence while clearing the stale Ready/endpoint/replica status.
+func TestReconcileTransientApplyFailureWithUnreadyDeploymentFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	deployment := ownedDeploymentForMD(md)
+	seedUnreadyDeploymentStatus(t, deployment)
+	service := ownedServiceForMD(md)
+	deploymentPatched := false
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deployment, service).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+					deploymentPatched = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Deployment apply failure"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the apply failure should be reported in status: %v", err)
+	}
+	if !deploymentPatched {
+		t.Fatal("Deployment Patch was never called")
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+// TestReconcileTransientLaterServiceFailureAfterSuccessfulDeploymentApplyFailsClosed proves
+// that the pre-write serving snapshot becomes stale as soon as an earlier resource write
+// succeeds. Even when every required resource was initially ready, a later ambiguous Service
+// failure cannot retain Ready because the Deployment apply may already have started a rollout.
+func TestReconcileTransientLaterServiceFailureAfterSuccessfulDeploymentApplyFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	deployment := ownedDeploymentForMD(md)
+	seedRunningDeploymentStatus(t, deployment)
+	service := ownedServiceForMD(md)
+	var patchOrder []string
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deployment, service).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				kind := obj.GetObjectKind().GroupVersionKind().Kind
+				switch kind {
+				case "Deployment":
+					patchOrder = append(patchOrder, kind)
+					return nil
+				case "Service":
+					patchOrder = append(patchOrder, kind)
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Service apply failure"))
+				default:
+					return cl.Patch(ctx, obj, patch, opts...)
+				}
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the later apply failure should be reported in status: %v", err)
+	}
+	if len(patchOrder) != 2 || patchOrder[0] != "Deployment" || patchOrder[1] != "Service" {
+		t.Fatalf("patch order = %v, want [Deployment Service]", patchOrder)
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+// TestReconcileTransientCreateFailureFailsClosed covers an ambiguous write failure after the
+// controller successfully observed that the primary Deployment was absent. There is no
+// workload whose health can be preserved, so stale Running status must be cleared even though
+// the 5xx gets the prompt transient retry cadence.
+func TestReconcileTransientCreateFailureFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	deploymentPatched := false
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+					deploymentPatched = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient create failure"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the create failure should be reported in status: %v", err)
+	}
+	if !deploymentPatched {
+		t.Fatal("Deployment Patch was never called")
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+// TestReconcileTransientMissingServiceFailureFailsClosed covers a partially present resource
+// set: the primary Deployment exists, but its required Service does not. A successful
+// Deployment update cannot justify retaining Ready when creation of the missing child fails.
+func TestReconcileTransientMissingServiceFailureFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	deployment := ownedDeploymentForMD(md)
+	seedRunningDeploymentStatus(t, deployment)
+	deploymentPatched := false
+	servicePatched := false
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deployment).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				switch obj.GetObjectKind().GroupVersionKind().Kind {
+				case "Deployment":
+					deploymentPatched = true
+					return nil
+				case "Service":
+					servicePatched = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Service create failure"))
+				default:
+					return cl.Patch(ctx, obj, patch, opts...)
+				}
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the create failure should be reported in status: %v", err)
+	}
+	if !deploymentPatched || !servicePatched {
+		t.Fatalf("patch calls: Deployment=%v Service=%v, want both", deploymentPatched, servicePatched)
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+// TestReconcileTransientExistingServiceAfterMissingDeploymentFailsClosed reverses the partial
+// resource set above: the required primary Deployment was absent, while its Service already
+// existed. Even though the Deployment apply succeeds and the later transient failure is an
+// update to that Service, the reconcile cannot preserve stale serving health after observing
+// the primary workload missing earlier in the same resource pass.
+func TestReconcileTransientExistingServiceAfterMissingDeploymentFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	service := ownedServiceForMD(md)
+	deploymentPatched := false
+	servicePatched := false
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, service).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				switch obj.GetObjectKind().GroupVersionKind().Kind {
+				case "Deployment":
+					deploymentPatched = true
+					return nil
+				case "Service":
+					servicePatched = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Service update failure"))
+				default:
+					return cl.Patch(ctx, obj, patch, opts...)
+				}
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the update failure should be reported in status: %v", err)
+	}
+	if !deploymentPatched || !servicePatched {
+		t.Fatalf("patch calls: Deployment=%v Service=%v, want both", deploymentPatched, servicePatched)
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+// TestReconcileTransientEarlierFailureWithForeignRequiredResourceFailsClosed proves the
+// pre-write resource snapshot validates ownership across the complete set. The Deployment
+// update fails before reconciliation reaches the foreign Service; mere presence of that later
+// object must not make stale Ready=True safe to preserve.
+func TestReconcileTransientEarlierFailureWithForeignRequiredResourceFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	deployment := ownedDeploymentForMD(md)
+	seedRunningDeploymentStatus(t, deployment)
+	service := ownedServiceForMD(md)
+	service.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: airunwayv1alpha1.GroupVersion.String(),
+		Kind:       "ModelDeployment",
+		Name:       "someone-else",
+		UID:        types.UID("foreign-uid"),
+	}})
+	deploymentPatched := false
+	servicePatched := false
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deployment, service).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				switch obj.GetObjectKind().GroupVersionKind().Kind {
+				case "Deployment":
+					deploymentPatched = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Deployment update failure"))
+				case "Service":
+					servicePatched = true
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the update failure should be reported in status: %v", err)
+	}
+	if !deploymentPatched {
+		t.Fatal("Deployment Patch was never called")
+	}
+	if servicePatched {
+		t.Fatal("Service Patch was called despite the earlier Deployment failure")
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+// TestReconcileTransientEarlierFailureWithTerminatingRequiredResourceFailsClosed proves an
+// object already being deleted is not counted as a usable member of the required resource
+// set. A retryable Deployment update error occurs first, but stale serving status must still
+// be cleared because the later Service has a deletion timestamp.
+func TestReconcileTransientEarlierFailureWithTerminatingRequiredResourceFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedStaleServingStatus(md)
+
+	deployment := ownedDeploymentForMD(md)
+	seedRunningDeploymentStatus(t, deployment)
+	service := ownedServiceForMD(md)
+	service.SetFinalizers([]string{"test.airunway.ai/hold"})
+	deletingAt := metav1.Now()
+	service.SetDeletionTimestamp(&deletingAt)
+	deploymentPatched := false
+	servicePatched := false
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deployment, service).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				switch obj.GetObjectKind().GroupVersionKind().Kind {
+				case "Deployment":
+					deploymentPatched = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Deployment update failure"))
+				case "Service":
+					servicePatched = true
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the update failure should be reported in status: %v", err)
+	}
+	if !deploymentPatched {
+		t.Fatal("Deployment Patch was never called")
+	}
+	if servicePatched {
+		t.Fatal("Service Patch was called despite the earlier Deployment failure")
+	}
+	assertPromptRetryFailedClosed(t, c, res, types.NamespacedName{Name: "test", Namespace: "default"})
+}
+
+func ownedDeploymentForMD(md *airunwayv1alpha1.ModelDeployment) *unstructured.Unstructured {
+	deployment := &unstructured.Unstructured{}
+	deployment.SetGroupVersionKind(deploymentGVK)
+	deployment.SetName(md.Name)
+	deployment.SetNamespace(md.Namespace)
+	deployment.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: airunwayv1alpha1.GroupVersion.String(),
+		Kind:       "ModelDeployment",
+		Name:       md.Name,
+		UID:        md.UID,
+	}})
+	return deployment
+}
+
+func seedRunningDeploymentStatus(t *testing.T, deployment *unstructured.Unstructured) {
+	t.Helper()
+	seedDeploymentStatus(t, deployment, "True", int64(1), int64(1))
+}
+
+func seedUnreadyDeploymentStatus(t *testing.T, deployment *unstructured.Unstructured) {
+	t.Helper()
+	seedDeploymentStatus(t, deployment, "False", int64(0), int64(0))
+	if err := unstructured.SetNestedSlice(deployment.Object, []interface{}{
+		map[string]interface{}{"type": conditionAvailable, "status": "False"},
+		map[string]interface{}{"type": conditionProgressing, "status": "True"},
+	}, "status", "conditions"); err != nil {
+		t.Fatalf("set unready Deployment conditions: %v", err)
+	}
+}
+
+func seedDeploymentStatus(t *testing.T, deployment *unstructured.Unstructured, available string, readyReplicas, availableReplicas int64) {
+	t.Helper()
+	if err := unstructured.SetNestedField(deployment.Object, int64(1), "spec", "replicas"); err != nil {
+		t.Fatalf("set Deployment desired replicas: %v", err)
+	}
+	if err := unstructured.SetNestedField(deployment.Object, readyReplicas, "status", "readyReplicas"); err != nil {
+		t.Fatalf("set Deployment ready replicas: %v", err)
+	}
+	if err := unstructured.SetNestedField(deployment.Object, availableReplicas, "status", "availableReplicas"); err != nil {
+		t.Fatalf("set Deployment available replicas: %v", err)
+	}
+	if err := unstructured.SetNestedSlice(deployment.Object, []interface{}{
+		map[string]interface{}{"type": conditionAvailable, "status": available},
+	}, "status", "conditions"); err != nil {
+		t.Fatalf("set Deployment conditions: %v", err)
+	}
+}
+
+func ownedServiceForMD(md *airunwayv1alpha1.ModelDeployment) *unstructured.Unstructured {
+	service := &unstructured.Unstructured{}
+	service.SetGroupVersionKind(serviceGVK)
+	service.SetName(md.Name)
+	service.SetNamespace(md.Namespace)
+	service.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: airunwayv1alpha1.GroupVersion.String(),
+		Kind:       "ModelDeployment",
+		Name:       md.Name,
+		UID:        md.UID,
+	}})
+	return service
+}
+
+func seedStaleServingStatus(md *airunwayv1alpha1.ModelDeployment) {
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:   airunwayv1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: "DeploymentReady",
+	})
+}
+
+func assertPromptRetryFailedClosed(t *testing.T, c client.Client, res ctrl.Result, key types.NamespacedName) {
+	t.Helper()
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %+v, want RequeueAfter=%s", res, RequeueInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), key, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	statuses := map[string]metav1.ConditionStatus{}
+	reasons := map[string]string{}
+	for _, cond := range updated.Status.Conditions {
+		statuses[cond.Type] = cond.Status
+		reasons[cond.Type] = cond.Reason
+	}
+	if got := statuses[airunwayv1alpha1.ConditionTypeReady]; got != metav1.ConditionFalse {
+		t.Errorf("Ready = %q, want False", got)
+	}
+	if got := statuses[airunwayv1alpha1.ConditionTypeResourceCreated]; got != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %q, want False", got)
+	}
+	if got := reasons[airunwayv1alpha1.ConditionTypeResourceCreated]; got != "CreateFailed" {
+		t.Errorf("ResourceCreated reason = %q, want CreateFailed", got)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("phase = %q, want %q", updated.Status.Phase, airunwayv1alpha1.DeploymentPhaseFailed)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileNotFoundWriteFailureClearsStaleStatus covers a definite API-server 404.
+// Unlike an ambiguous transport or server failure, NotFound proves the write did not leave
+// the expected object at that name, so retaining Running/Ready and its endpoint would report
+// a workload the controller knows is absent. It still retries promptly because recreation can
+// succeed without a ModelDeployment change.
+func TestReconcileNotFoundWriteFailureClearsStaleStatus(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:   airunwayv1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: "DeploymentReady",
+	})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+					return apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, obj.GetName())
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %+v, want RequeueAfter=%s", res, RequeueInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	var createdReason, readyReason string
+	var readyStatus metav1.ConditionStatus
+	for _, cond := range updated.Status.Conditions {
+		switch cond.Type {
+		case airunwayv1alpha1.ConditionTypeResourceCreated:
+			createdReason = cond.Reason
+		case airunwayv1alpha1.ConditionTypeReady:
+			readyStatus = cond.Status
+			readyReason = cond.Reason
+		}
+	}
+	if createdReason != "CreateFailed" {
+		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
+	}
+	if readyStatus != metav1.ConditionFalse || readyReason != "CreateFailed" {
+		t.Errorf("Ready = %q reason %q, want False reason CreateFailed", readyStatus, readyReason)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
 	}
 	if updated.Status.Endpoint != nil {
 		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
@@ -509,14 +1040,25 @@ func TestOverrideRootKeyComparisonIsCaseSensitive(t *testing.T) {
 // wrapper but NOT the unknown-field needle, so isUpstreamSchemaRejection returns false and it
 // lands in the generic branch rather than the rejection branch. structured-merge-diff
 // accumulates type errors without sorting them, so their concatenation order follows Go map
-// iteration — just as volatile as the unknown-field case, and with a 30s requeue on top.
+// iteration — just as volatile as the unknown-field case. The failure needs an external
+// change, so it must fail closed and retry only at the slower recovery cadence.
 func TestGenericFailureNormalisesVolatileSSADetail(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
 	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:   airunwayv1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: "DeploymentReady",
+	})
 
-	typeMismatch := fmt.Errorf("failed to create typed patch object (default/test; apps/v1, " +
-		"Kind=Deployment): .spec.replicas: expected numeric, got string")
+	// Kubernetes wraps deterministic managed-fields conversion failures as HTTP 500.
+	// The status code must not make an invalid override look transient.
+	typeMismatch := apierrors.NewInternalError(fmt.Errorf("failed to create typed patch object (default/test; apps/v1, " +
+		"Kind=Deployment): .spec.replicas: expected numeric, got string"))
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -530,10 +1072,14 @@ func TestGenericFailureNormalisesVolatileSSADetail(t *testing.T) {
 
 	r := NewVLLMProviderReconciler(c, scheme)
 
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("reconcile returned an error: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %+v, want RequeueAfter=%s for deterministic SSA validation failure", res, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
@@ -564,6 +1110,24 @@ func TestGenericFailureNormalisesVolatileSSADetail(t *testing.T) {
 			t.Errorf("condition %s retains the volatile SSA detail: %q", cond.Type, cond.Message)
 		}
 	}
+	var readyStatus metav1.ConditionStatus
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == airunwayv1alpha1.ConditionTypeReady {
+			readyStatus = cond.Status
+		}
+	}
+	if readyStatus != metav1.ConditionFalse {
+		t.Errorf("Ready = %q, want False", readyStatus)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
 }
 
 // TestReconcileOwnershipConflictSetsReadyReason covers the ownership-collision branch's Ready
@@ -593,10 +1157,14 @@ func TestReconcileOwnershipConflictSetsReadyReason(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, foreign).WithStatusSubresource(md).Build()
 	r := NewVLLMProviderReconciler(c, scheme)
 
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("reconcile returned an error: %v", err)
+	}
+	if res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("RequeueAfter = %s, want external recovery interval %s", res.RequeueAfter, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment

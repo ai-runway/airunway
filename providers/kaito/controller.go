@@ -21,7 +21,10 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
+	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,6 +63,10 @@ const (
 	// RequeueInterval is the default requeue interval for periodic reconciliation
 	RequeueInterval = 30 * time.Second
 
+	// ExternalRecoveryInterval retries failures that require an out-of-band fix without
+	// hot-looping while the installed upstream or resource ownership remains unchanged.
+	ExternalRecoveryInterval = 5 * time.Minute
+
 	// FinalizerTimeout is the timeout for finalizer cleanup
 	FinalizerTimeout = 5 * time.Minute
 )
@@ -68,6 +76,13 @@ const (
 // compatibility" section of docs/providers.md. kubectl sends strict validation by default;
 // Go clients do not, so it must be set explicitly on every upstream write.
 var strictFieldValidation = client.FieldValidation(metav1.FieldValidationStrict)
+
+// strictUnknownFieldRejection matches the terminal diagnostic emitted by apimachinery's
+// strict decoder. Anchoring the diagnostic at the end keeps an ordinary validation error
+// from matching when its echoed user value contains the same words.
+var strictUnknownFieldRejection = regexp.MustCompile(
+	`(^|: )strict decoding error: unknown field "(\\.|[^"\\])*"(, unknown field "(\\.|[^"\\])*")*$`,
+)
 
 // isUpstreamSchemaRejection reports whether err is the API server refusing a field the
 // installed upstream does not declare, as opposed to any other rejection.
@@ -94,12 +109,11 @@ func isUpstreamSchemaRejection(err error) bool {
 	}
 	msg := err.Error()
 
-	// Custom-resource paths: apimachinery wraps the unknown-field cause in a
-	// "strict decoding error" prefix. Require BOTH parts. An Invalid status echoes the
-	// offending value back, so a user-supplied string (a model id, an image, an engine arg)
-	// containing either phrase on its own must not be misclassified as a version mismatch
-	// and retried forever.
-	if strings.Contains(msg, "strict decoding error") && strings.Contains(msg, "unknown field") {
+	// Custom-resource paths: match the complete terminal diagnostic, not independent
+	// substrings. An Invalid status echoes the offending value back, so a user-supplied
+	// string may itself contain both phrases and must not be misclassified as a version
+	// mismatch and retried forever.
+	if strictUnknownFieldRejection.MatchString(msg) {
 		return true
 	}
 
@@ -112,6 +126,56 @@ func isUpstreamSchemaRejection(err error) bool {
 	}
 
 	return false
+}
+
+// isRetryableUpstreamWriteError reports failures that can recover without changing the
+// ModelDeployment or cluster configuration. These must not erase last-known serving status:
+// a failed or ambiguous API response does not mean the existing workload stopped serving.
+func isRetryableUpstreamWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.IsConflict(err) || errors.IsAlreadyExists(err) ||
+		errors.IsTimeout(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err) ||
+		errors.IsServiceUnavailable(err) || errors.IsInternalError(err) {
+		return true
+	}
+
+	var status errors.APIStatus
+	if stderrors.As(err, &status) && status.Status().Code >= 500 {
+		return true
+	}
+
+	return stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF) ||
+		stderrors.Is(err, syscall.EPIPE) ||
+		utilnet.IsTimeout(err) || utilnet.IsProbableEOF(err) ||
+		utilnet.IsConnectionReset(err) || utilnet.IsConnectionRefused(err) ||
+		utilnet.IsHTTP2ConnectionLost(err)
+}
+
+// resourceWriteError records whether the target was observed as owned, active, and serving
+// before its write. A transient update failure can retain last-known serving status only after
+// that safe observation; create failures, terminating or unready resources, and unverified
+// read failures cannot.
+type resourceWriteError struct {
+	err                              error
+	resourceWasOwnedActiveAndServing bool
+}
+
+func (e *resourceWriteError) Error() string { return e.err.Error() }
+func (e *resourceWriteError) Unwrap() error { return e.err }
+
+func wrapResourceWriteError(err error, resourceWasOwnedActiveAndServing bool) error {
+	if err == nil {
+		return nil
+	}
+	return &resourceWriteError{err: err, resourceWasOwnedActiveAndServing: resourceWasOwnedActiveAndServing}
+}
+
+func canPreserveLastKnownStatus(err error) bool {
+	var writeErr *resourceWriteError
+	return stderrors.As(err, &writeErr) && writeErr.resourceWasOwnedActiveAndServing
 }
 
 // KaitoProviderReconciler reconciles ModelDeployment resources for the KAITO provider
@@ -224,12 +288,6 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Create or update the Workspace
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
-			// API conflict errors (stale resourceVersion) are transient — requeue to retry
-			if errors.IsConflict(err) {
-				logger.Info("Resource version conflict, requeuing", "name", resource.GetName(), "kind", resource.GetKind())
-				return ctrl.Result{Requeue: true}, nil
-			}
-
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
 			// Strict field validation rejected the write: the cluster does not accept a field
 			// this provider renders. Give it its own reason so an operator can tell it apart
@@ -258,33 +316,56 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 					return ctrl.Result{}, statusErr
 				}
-				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, nil
+			}
+			// Conflicts, throttling, server failures, and transport interruptions say nothing
+			// about whether the existing workload is still serving. Record the failed write,
+			// but preserve last-known Phase/Ready/Endpoint/Replicas until a successful read can
+			// replace them.
+			retryableWriteError := isRetryableUpstreamWriteError(err)
+			if retryableWriteError && canPreserveLastKnownStatus(err) {
+				reason := "CreateFailed"
+				if errors.IsConflict(err) || errors.IsAlreadyExists(err) {
+					reason = "ResourceConflict"
+				}
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				requeueAfter := RequeueInterval
+				if errors.IsConflict(err) {
+					// A fresh read resolves a resourceVersion race; do not delay desired
+					// spec convergence by the normal transient-error interval.
+					requeueAfter = time.Second
+				}
+				return ctrl.Result{RequeueAfter: requeueAfter}, nil
 			}
 			reason := "CreateFailed"
+			requeueAfter := ExternalRecoveryInterval
+			if errors.IsConflict(err) {
+				requeueAfter = time.Second
+			} else if errors.IsNotFound(err) || retryableWriteError {
+				// A definite 404 means the write did not reach an existing upstream
+				// object. Fail closed, but retry on the normal recovery cadence because
+				// discovery or admission ordering can make this short-lived.
+				requeueAfter = RequeueInterval
+			}
 			if isResourceConflict(err) {
-				// Ready is set below unconditionally with this same reason.
 				reason = "ResourceConflict"
 			}
-			// Same treatment as the TransformFailed and IncompatibleUpstream branches: a
-			// Failed deployment must not keep advertising a live endpoint and "1/1 ready".
-			// Leaving this branch alone would make the most common failure the one that
-			// still reports healthy — the same shape.
+			// Definite write failures fail closed. Validation/admission and ownership
+			// failures use a slower retry because an out-of-band policy, CRD, or ownership
+			// change can make the same ModelDeployment valid without changing its spec.
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, err.Error())
 			md.Status.Endpoint = nil
 			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 			md.Status.Message = fmt.Sprintf("Failed to create Workspace: %s", err.Error())
-			// Requeue. Unlike a schema rejection this is usually transient — a timeout, a
-			// leader change, a momentary 500 — and it is the case that most needs a retry.
-			// Without one the second pass writes identical status, which the API server
-			// treats as a no-op, so nothing re-enqueues and the deployment sits Failed with
-			// its endpoint cleared until the ~10h resync even though the workload may still
-			// be serving.
 			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
-			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
 	}
 
@@ -389,7 +470,7 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 	if errors.IsNotFound(err) {
 		// Create new resource
 		logger.Info("Creating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		return r.Create(ctx, resource, strictFieldValidation)
+		return wrapResourceWriteError(r.Create(ctx, resource, strictFieldValidation), false)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to get existing resource: %w", err)
@@ -398,6 +479,11 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 	// Verify ownership before updating
 	if err := verifyOwnerReference(existing, md.UID); err != nil {
 		return err
+	}
+	resourceWasOwnedActiveAndServing := false
+	if existing.GetDeletionTimestamp() == nil && r.StatusTranslator != nil {
+		statusResult, statusErr := r.StatusTranslator.TranslateStatus(existing)
+		resourceWasOwnedActiveAndServing = statusErr == nil && statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning
 	}
 
 	// Update existing resource if managed fields or desired metadata have changed. Compare only the fields we manage.
@@ -413,7 +499,10 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 	metadataMatches := desiredMetadataMatches(resource, existing, lastAppliedLabels, lastAppliedAnnotations)
 	if !resourceMatches || !inferenceMatches || !metadataMatches {
 		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		return r.updateManagedWorkspaceFields(ctx, existing, resource, lastAppliedResource, lastAppliedInference, lastAppliedLabels, lastAppliedAnnotations)
+		return wrapResourceWriteError(
+			r.updateManagedWorkspaceFields(ctx, existing, resource, lastAppliedResource, lastAppliedInference, lastAppliedLabels, lastAppliedAnnotations),
+			resourceWasOwnedActiveAndServing,
+		)
 	}
 
 	return nil

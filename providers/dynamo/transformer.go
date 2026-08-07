@@ -17,6 +17,7 @@ limitations under the License.
 package dynamo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,6 +99,16 @@ type ResourceOverrides struct {
 	Memory string `json:"memory,omitempty"`
 }
 
+// dynamoOverridesWire is the strict decoding boundary for keys the transformer
+// consumes itself. Spec remains opaque because it is passed through to the
+// upstream DynamoGraphDeployment and validated against the installed CRD.
+type dynamoOverridesWire struct {
+	RouterMode string             `json:"routerMode,omitempty"`
+	Frontend   *FrontendOverrides `json:"frontend,omitempty"`
+	Epp        *EPPOverrides      `json:"epp,omitempty"`
+	Spec       json.RawMessage    `json:"spec,omitempty"`
+}
+
 // Transformer handles transformation of ModelDeployment to DynamoGraphDeployment
 type Transformer struct{}
 
@@ -176,12 +187,29 @@ func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*Dyn
 		return &DynamoOverrides{}, nil
 	}
 
-	var overrides DynamoOverrides
-	if err := json.Unmarshal(md.Spec.Provider.Overrides.Raw, &overrides); err != nil {
+	// Validate root keys separately before strict typed decoding. Besides preserving
+	// a deterministic error that names every unsupported root, this keeps exact-root
+	// "spec" semantics: encoding/json would otherwise match "Spec" case-insensitively.
+	var overrideRoots map[string]interface{}
+	if err := json.Unmarshal(md.Spec.Provider.Overrides.Raw, &overrideRoots); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal overrides: %w", err)
+	}
+	if err := validateDynamoOverrideRootKeys(overrideRoots); err != nil {
+		return nil, err
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(md.Spec.Provider.Overrides.Raw))
+	decoder.DisallowUnknownFields()
+	var wire dynamoOverridesWire
+	if err := decoder.Decode(&wire); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
 
-	return &overrides, nil
+	return &DynamoOverrides{
+		RouterMode: wire.RouterMode,
+		Frontend:   wire.Frontend,
+		Epp:        wire.Epp,
+	}, nil
 }
 
 // mapEngineType maps AI Runway engine types to Dynamo backend framework names
@@ -1131,14 +1159,6 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		return fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
 
-	// Block dangerous top-level keys to prevent privilege escalation
-	blockedKeys := []string{"apiVersion", "kind", "metadata", "status"}
-	for _, key := range blockedKeys {
-		if _, exists := overrides[key]; exists {
-			return fmt.Errorf("overriding %q is not allowed", key)
-		}
-	}
-
 	// Only "spec" may be merged into the object, plus the keys parseOverrides has already
 	// consumed into DynamoOverrides (routerMode, frontend, epp), which are inputs to this
 	// transformer rather than DynamoGraphDeployment fields. A DGD root declares
@@ -1160,23 +1180,17 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 	// has no GenerationChangedPredicate, a changing message means every reconcile writes
 	// status, which re-enqueues the object — an unbounded write loop for as long as the
 	// bad spec exists.
-	var unsupported []string
+	if err := validateDynamoOverrideRootKeys(overrides); err != nil {
+		return err
+	}
+
 	for key := range overrides {
 		if key == "spec" {
 			continue
 		}
 		if consumedOverrideKeys[strings.ToLower(key)] {
 			delete(overrides, key)
-			continue
 		}
-		unsupported = append(unsupported, key)
-	}
-	if len(unsupported) > 0 {
-		sort.Strings(unsupported)
-		return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
-			"Dynamo-specific keys routerMode, frontend and epp are supported (note the webhook "+
-			"rejects replicas/resources anywhere inside overrides, so only epp.image and "+
-			"routerMode are settable in practice)", unsupported)
 	}
 
 	obj.Object = deepMerge(obj.Object, overrides)
@@ -1186,6 +1200,33 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 // consumedOverrideKeys are the provider.overrides root keys parseOverrides decodes into
 // DynamoOverrides. Lowercased, because encoding/json matches field names case-insensitively.
 var consumedOverrideKeys = map[string]bool{"routermode": true, "frontend": true, "epp": true}
+
+func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
+	// Block dangerous top-level keys to prevent privilege escalation.
+	blockedKeys := []string{"apiVersion", "kind", "metadata", "status"}
+	for _, key := range blockedKeys {
+		if _, exists := overrides[key]; exists {
+			return fmt.Errorf("overriding %q is not allowed", key)
+		}
+	}
+
+	var unsupported []string
+	for key := range overrides {
+		if key == "spec" || consumedOverrideKeys[strings.ToLower(key)] {
+			continue
+		}
+		unsupported = append(unsupported, key)
+	}
+	if len(unsupported) == 0 {
+		return nil
+	}
+
+	sort.Strings(unsupported)
+	return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
+		"Dynamo-specific keys routerMode, frontend and epp are supported (note the webhook "+
+		"rejects replicas/resources anywhere inside overrides, so only epp.image and "+
+		"routerMode are settable in practice)", unsupported)
+}
 
 // deepMerge recursively merges src into dst. dst is modified in place and also
 // returned for convenience. For maps, values are merged recursively. For all

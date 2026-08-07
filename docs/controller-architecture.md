@@ -268,17 +268,21 @@ provider:
 > The validating webhook rejects `replicas` and `resources` **anywhere** inside
 > `provider.overrides` (including nested, e.g. `frontend.replicas`), because raw overrides
 > are merged after admission has checked `spec.resources` / `spec.scaling` ceilings. Use
-> `spec.resources` and `spec.scaling` for sizing.
+> `spec.resources` and `spec.scaling` for sizing. KAITO's equivalent replica field,
+> `resource.count`, is rejected explicitly; use `spec.scaling.replicas` instead.
 
-**KubeRay** does not read `spec.provider.overrides` at all, so overrides set for it have no
-effect.
+**KubeRay** does not read `spec.provider.overrides`. Overrides that pass the global webhook
+do not affect the rendered `RayService`; the webhook still rejects globally blocked security
+and sizing paths.
 
 **KAITO** accepts `resource` and `inference`, which the Workspace places at the object root
 rather than under `spec` — so unlike the other providers, `spec` is not an accepted key here.
 Any other root key is rejected with an error naming it. The allowlist is deliberately narrower
 than the Workspace schema, which also declares `tuning`: a `ModelDeployment` describes an
 inference deployment and the status translator reads inference conditions, so a tuning
-Workspace would report status the provider cannot interpret.
+Workspace would report status the provider cannot interpret. Within `resource`, `count` is
+managed by `spec.scaling.replicas` and cannot be overridden; fields such as `labelSelector`
+and `instanceType` remain available.
 
 Invalid types cause reconciliation failure.
 

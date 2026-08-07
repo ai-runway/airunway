@@ -20,7 +20,9 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"strings"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -30,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -51,6 +54,10 @@ const (
 
 	// RequeueInterval is the default requeue interval for periodic reconciliation
 	RequeueInterval = 30 * time.Second
+
+	// ExternalRecoveryInterval retries failures that require an out-of-band fix without
+	// hot-looping while the installed upstream or resource ownership remains unchanged.
+	ExternalRecoveryInterval = 5 * time.Minute
 
 	// FinalizerTimeout is the timeout for finalizer cleanup
 	FinalizerTimeout = 5 * time.Minute
@@ -135,6 +142,63 @@ func isUpstreamSchemaRejection(err error) bool {
 	}
 
 	return false
+}
+
+// isRetryableUpstreamWriteError reports failures that can recover without changing the
+// ModelDeployment or cluster configuration. These must not erase last-known serving status:
+// a failed or ambiguous API response does not mean the existing workload stopped serving.
+func isRetryableUpstreamWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The API server may wrap deterministic structured-merge-diff conversion failures in
+	// an HTTP 500. Retrying the identical rendered object cannot make those succeed; schema
+	// unknown-field errors are classified separately before this helper is called.
+	msg := err.Error()
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return false
+	}
+	if errors.IsConflict(err) || errors.IsAlreadyExists(err) ||
+		errors.IsTimeout(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err) ||
+		errors.IsServiceUnavailable(err) || errors.IsInternalError(err) {
+		return true
+	}
+
+	var status errors.APIStatus
+	if stderrors.As(err, &status) && status.Status().Code >= 500 {
+		return true
+	}
+
+	return stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF) ||
+		stderrors.Is(err, syscall.EPIPE) ||
+		utilnet.IsTimeout(err) || utilnet.IsProbableEOF(err) ||
+		utilnet.IsConnectionReset(err) || utilnet.IsConnectionRefused(err) ||
+		utilnet.IsHTTP2ConnectionLost(err)
+}
+
+// resourceWriteError records whether the target was observed before its write. A transient
+// update failure can retain last-known serving status; a transient create failure cannot,
+// because the controller had just observed that the required resource was absent.
+type resourceWriteError struct {
+	err             error
+	resourceExisted bool
+}
+
+func (e *resourceWriteError) Error() string { return e.err.Error() }
+func (e *resourceWriteError) Unwrap() error { return e.err }
+
+func wrapResourceWriteError(err error, resourceExisted bool) error {
+	if err == nil {
+		return nil
+	}
+	return &resourceWriteError{err: err, resourceExisted: resourceExisted}
+}
+
+func canPreserveLastKnownStatus(err error) bool {
+	var writeErr *resourceWriteError
+	return !stderrors.As(err, &writeErr) || writeErr.resourceExisted
 }
 
 var (
@@ -233,14 +297,14 @@ func (r *LLMDProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 
+	// Status may be preserved after an ambiguous update failure only when every required
+	// resource existed before this write pass. Otherwise a successfully recreated earlier
+	// resource followed by a failed later update could leave stale Ready=True status.
+	preserveLastKnownStatusSafe := r.allRequiredResourcesAreOwnedActiveAndServing(ctx, resources, md.UID)
+
 	// Create or update all resources
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
-			// Transient API conflict — requeue instead of marking as failed
-			if errors.IsConflict(err) {
-				logger.Info("Resource conflict during reconcile, requeueing", "name", resource.GetName())
-				return ctrl.Result{Requeue: true}, nil
-			}
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
 			// Strict field validation rejected the write: the cluster does not accept a field
 			// this provider renders. Give it its own reason so an operator can tell it apart
@@ -270,34 +334,59 @@ func (r *LLMDProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 					return ctrl.Result{}, statusErr
 				}
-				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, nil
+			}
+			// Conflicts, throttling, server failures, and transport interruptions say nothing
+			// about whether the existing workload is still serving. Record the failed write,
+			// but preserve last-known Phase/Ready/Endpoint/Replicas until a successful read can
+			// replace them.
+			retryableWriteError := isRetryableUpstreamWriteError(err)
+			if retryableWriteError && preserveLastKnownStatusSafe && canPreserveLastKnownStatus(err) {
+				reason := "CreateFailed"
+				if errors.IsConflict(err) || errors.IsAlreadyExists(err) {
+					reason = "ResourceConflict"
+				}
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				requeueAfter := RequeueInterval
+				if errors.IsConflict(err) {
+					requeueAfter = time.Second
+				}
+				return ctrl.Result{RequeueAfter: requeueAfter}, nil
 			}
 			reason := "CreateFailed"
+			// A definite NotFound means the prior workload cannot be assumed to still
+			// exist, so fail closed but retry promptly. Other deterministic API-side
+			// rejections may recover after an admission-policy or cluster change; retry
+			// them at the slower external-recovery cadence.
+			requeueAfter := ExternalRecoveryInterval
+			if errors.IsConflict(err) {
+				requeueAfter = time.Second
+			} else if errors.IsNotFound(err) || retryableWriteError {
+				requeueAfter = RequeueInterval
+			}
 			if isResourceConflict(err) {
-				// Ready is set below unconditionally with this same reason.
 				reason = "ResourceConflict"
 			}
-			// Same treatment as the TransformFailed and IncompatibleUpstream branches: a
-			// Failed deployment must not keep advertising a live endpoint and "1/1 ready".
-			// Leaving this branch alone would make the most common failure the one that
-			// still reports healthy — the same shape.
+			// Validation/admission errors and ownership conflicts need an external change.
+			// Fail closed and poll slowly so recovery does not depend on another watched event.
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
 			md.Status.Endpoint = nil
 			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 			md.Status.Message = fmt.Sprintf("Failed to create/update resource %s: %s", resource.GetName(), statusSafeRejectionDetail(err))
-			// Requeue. Unlike a schema rejection this is usually transient — a timeout, a
-			// leader change, a momentary 500 — and it is the case that most needs a retry.
-			// Without one the second pass writes identical status, which the API server
-			// treats as a no-op, so nothing re-enqueues and the deployment sits Failed with
-			// its endpoint cleared until the ~10h resync even though the workload may still
-			// be serving.
 			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
-			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
+		// Once any earlier resource write succeeds, the pre-write serving snapshot no
+		// longer proves the complete resource set is still serving. A later ambiguous
+		// failure must therefore fail closed instead of retaining stale Ready status.
+		preserveLastKnownStatusSafe = false
 	}
 
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionTrue, "ResourceCreated", "Deployments and Services created successfully")
@@ -402,7 +491,8 @@ func (r *LLMDProviderReconciler) createOrUpdateResource(ctx context.Context, res
 		Name:      resource.GetName(),
 		Namespace: resource.GetNamespace(),
 	}, existing)
-	if err == nil {
+	resourceExisted := err == nil
+	if resourceExisted {
 		if err := verifyOwnerReference(existing, md.UID); err != nil {
 			return err
 		}
@@ -413,7 +503,49 @@ func (r *LLMDProviderReconciler) createOrUpdateResource(ctx context.Context, res
 	// Server-side apply: handles both create and update without needing resourceVersion.
 	// ForceOwnership ensures our field manager wins over any conflicting field managers.
 	logger.Info("Applying resource", "kind", resource.GetKind(), "name", resource.GetName())
-	return r.Patch(ctx, resource, client.Apply, client.FieldOwner(FieldManager), client.ForceOwnership, strictFieldValidation)
+	return wrapResourceWriteError(
+		r.Patch(ctx, resource, client.Apply, client.FieldOwner(FieldManager), client.ForceOwnership, strictFieldValidation),
+		resourceExisted,
+	)
+}
+
+// allRequiredResourcesAreOwnedActiveAndServing snapshots whether the complete rendered
+// resource set was present, owned by this ModelDeployment, and not terminating before
+// reconciliation starts mutating it. Every Deployment must also be Running; otherwise stale
+// serving status is unsafe to preserve if a later write fails ambiguously.
+func (r *LLMDProviderReconciler) allRequiredResourcesAreOwnedActiveAndServing(
+	ctx context.Context,
+	resources []*unstructured.Unstructured,
+	mdUID types.UID,
+) bool {
+	if r.StatusTranslator == nil {
+		return false
+	}
+	foundDeployment := false
+	for _, resource := range resources {
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(resource.GroupVersionKind())
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      resource.GetName(),
+			Namespace: resource.GetNamespace(),
+		}, existing); err != nil {
+			return false
+		}
+		if existing.GetDeletionTimestamp() != nil {
+			return false
+		}
+		if err := verifyOwnerReference(existing, mdUID); err != nil {
+			return false
+		}
+		if existing.GroupVersionKind() == deploymentGVK {
+			foundDeployment = true
+			statusResult, err := r.StatusTranslator.TranslateStatus(existing)
+			if err != nil || statusResult.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+				return false
+			}
+		}
+	}
+	return foundDeployment
 }
 
 // syncStatus fetches the primary Deployment and syncs its status to the ModelDeployment

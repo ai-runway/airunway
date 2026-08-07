@@ -392,6 +392,15 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		return fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
 
+	// KAITO calls its replica field resource.count. Reject that exact path so a
+	// caller that bypasses the validating webhook still cannot override the
+	// replica count derived from the bounded unified scaling field.
+	if resourceOverride, ok := overrides["resource"].(map[string]interface{}); ok {
+		if _, exists := resourceOverride["count"]; exists {
+			return fmt.Errorf("overriding %q is not allowed because it can bypass admission replica limits; use spec.scaling.replicas instead", "resource.count")
+		}
+	}
+
 	// Block dangerous top-level keys to prevent privilege escalation
 	blockedKeys := []string{"apiVersion", "kind", "metadata", "status"}
 	for _, key := range blockedKeys {

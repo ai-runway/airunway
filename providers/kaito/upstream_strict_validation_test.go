@@ -13,8 +13,11 @@ package kaito
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -203,6 +206,17 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 			want: false,
 		},
 		{
+			// Even the complete diagnostic can occur inside an echoed value. The real
+			// strict-decoding cause is terminal; this value is followed by its validation
+			// reason and must not be classified as an upstream mismatch.
+			name: "not ours: full strict diagnostic echoed inside a user value",
+			err: apierrors.NewInvalid(schema.GroupKind{Kind: "X"}, "x", field.ErrorList{
+				field.Invalid(field.NewPath("spec", "engine", "extraArgs"),
+					`--served-model-name=strict decoding error: unknown field "spec.fake"`, "must be a valid flag"),
+			}),
+			want: false,
+		},
+		{
 			name: "not ours: typed-object wrapper without the schema diagnostic",
 			err:  fmt.Errorf("failed to create typed patch object (default/x; apps/v1, Kind=Deployment): some other failure"),
 			want: false,
@@ -213,6 +227,25 @@ func TestIsUpstreamSchemaRejection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isUpstreamSchemaRejection(tc.err); got != tc.want {
 				t.Errorf("isUpstreamSchemaRejection() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsRetryableUpstreamWriteErrorRecognizesWrappedEOF(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "EOF", err: io.EOF},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF},
+		{name: "broken pipe", err: syscall.EPIPE},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isRetryableUpstreamWriteError(wrapResourceWriteError(tt.err, true)) {
+				t.Errorf("wrapped %v was not classified as retryable", tt.err)
 			}
 		})
 	}
@@ -259,8 +292,9 @@ func TestReconcileRequeuesOnStrictRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned an error; the rejection should be reported in status: %v", err)
 	}
-	if res.RequeueAfter <= 0 {
-		t.Error("expected a requeue after a strict-validation rejection")
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a strict-validation rejection",
+			res.Requeue, res.RequeueAfter, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
@@ -369,25 +403,414 @@ func TestReconcileTransformFailureClearsStaleStatus(t *testing.T) {
 	}
 }
 
-// TestReconcileGenericFailureClearsStaleStatus covers the THIRD failure branch — an ordinary
-// write failure that is neither a transform error nor a schema rejection.
-//
-// It is the most common of the three, and it must not be the one that still reports healthy.
-// Without the clearing, a previously-Running deployment hitting a transient upstream error
-// reports Failed while advertising a live endpoint and "1/1 ready" — the contradiction issue
-// this guards against.
-func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
+// TestReconcileTransientWriteFailurePreservesLastKnownStatus covers a retryable patch
+// failure after the controller has observed an owned upstream resource. The ambiguous write
+// does not prove that existing workload stopped serving, so last-known status is retained.
+func TestReconcileTransientWriteFailurePreservesLastKnownStatus(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, int64(2), "resource", "count"); err != nil {
+		t.Fatalf("mutate existing resource: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, "Ready", "status", "state"); err != nil {
+		t.Fatalf("mark existing Workspace ready: %v", err)
+	}
+
+	var patchCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					patchCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("RequeueAfter = %s, want %s", res.RequeueAfter, RequeueInterval)
+	}
+	if !patchCalled {
+		t.Fatal("Patch was never called; test did not exercise the existing-resource path")
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	var createdReason string
+	var createdStatus metav1.ConditionStatus
+	var readyStatus metav1.ConditionStatus
+	var readyReason string
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == airunwayv1alpha1.ConditionTypeResourceCreated {
+			createdReason = cond.Reason
+			createdStatus = cond.Status
+		}
+		if cond.Type == airunwayv1alpha1.ConditionTypeReady {
+			readyStatus = cond.Status
+			readyReason = cond.Reason
+		}
+	}
+	if createdReason != "CreateFailed" {
+		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
+	}
+	if createdStatus != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %q, want False", createdStatus)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		t.Errorf("Status.Phase = %q, want Running", updated.Status.Phase)
+	}
+	if readyStatus != metav1.ConditionTrue || readyReason != "DeploymentReady" {
+		t.Errorf("Ready = %q reason %q, want True reason DeploymentReady", readyStatus, readyReason)
+	}
+	if updated.Status.Endpoint == nil || updated.Status.Endpoint.Service != "stale-svc" || updated.Status.Endpoint.Port != 8000 {
+		t.Errorf("Status.Endpoint = %+v, want stale-svc:8000", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas == nil || updated.Status.Replicas.Desired != 1 || updated.Status.Replicas.Ready != 1 || updated.Status.Replicas.Available != 1 {
+		t.Errorf("Status.Replicas = %+v, want 1 desired/ready/available", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileTransientWriteFailureOnUnreadyWorkspaceFailsClosed proves that an active,
+// owned Workspace must also be serving before stale ModelDeployment status can be retained.
+func TestReconcileTransientWriteFailureOnUnreadyWorkspaceFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedKaitoStaleServingStatus(md)
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, int64(2), "resource", "count"); err != nil {
+		t.Fatalf("mutate existing resource: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, "NotReady", "status", "state"); err != nil {
+		t.Fatalf("mark existing Workspace unready: %v", err)
+	}
+
+	var patchCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					patchCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
+	}
+	if !patchCalled {
+		t.Fatal("Patch was never called; test did not exercise the active unready-Workspace path")
+	}
+	assertKaitoPromptRetryFailedClosed(t, c, res)
+}
+
+// TestReconcileTerminatingWorkspaceTransientPatchFailsClosed distinguishes an active owned
+// Workspace from one already being deleted. Even though the object was observed and the patch
+// failure is retryable, a terminating Workspace cannot support stale Ready=True serving status.
+func TestReconcileTerminatingWorkspaceTransientPatchFailsClosed(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedKaitoStaleServingStatus(md)
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, int64(2), "resource", "count"); err != nil {
+		t.Fatalf("mutate existing resource: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, "Ready", "status", "state"); err != nil {
+		t.Fatalf("mark existing Workspace ready: %v", err)
+	}
+	deletionTimestamp := metav1.Now()
+	existing.SetFinalizers([]string{"test.airunway.ai/hold"})
+	existing.SetDeletionTimestamp(&deletionTimestamp)
+
+	var patchCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					patchCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Workspace patch failure"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the patch failure should be reported in status: %v", err)
+	}
+	if !patchCalled {
+		t.Fatal("Patch was never called; test did not exercise the terminating existing-resource path")
+	}
+	assertKaitoPromptRetryFailedClosed(t, c, res)
+}
+
+// TestReconcileTransientWorkspaceGetFailureFailsClosed covers a retryable read failure before
+// the controller has verified whether the Workspace exists, is owned, or is active. Without a
+// trustworthy observation there is no basis for preserving stale serving status.
+func TestReconcileTransientWorkspaceGetFailureFailsClosed(t *testing.T) {
+	scheme := newSchemeWithWorkspace()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	seedKaitoStaleServingStatus(md)
+
+	var getCalled, writeCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					getCalled = true
+					return apierrors.NewInternalError(fmt.Errorf("simulated transient Workspace get failure"))
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					writeCalled = true
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					writeCalled = true
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the get failure should be reported in status: %v", err)
+	}
+	if !getCalled {
+		t.Fatal("Workspace Get was never called; test did not exercise the unverified-observation path")
+	}
+	if writeCalled {
+		t.Fatal("Workspace write was called after its Get failed")
+	}
+	assertKaitoPromptRetryFailedClosed(t, c, res)
+}
+
+func seedKaitoStaleServingStatus(md *airunwayv1alpha1.ModelDeployment) {
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+}
+
+func assertKaitoPromptRetryFailedClosed(t *testing.T, c client.Client, res ctrl.Result) {
+	t.Helper()
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s", res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	var ready, created *metav1.Condition
+	for i := range updated.Status.Conditions {
+		condition := &updated.Status.Conditions[i]
+		switch condition.Type {
+		case airunwayv1alpha1.ConditionTypeReady:
+			ready = condition
+		case airunwayv1alpha1.ConditionTypeResourceCreated:
+			created = condition
+		}
+	}
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Errorf("Ready = %+v, want False", ready)
+	}
+	if created == nil || created.Status != metav1.ConditionFalse || created.Reason != "CreateFailed" {
+		t.Errorf("ResourceCreated = %+v, want False reason CreateFailed", created)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileOwnedPatchConflictRetriesPromptly covers a resourceVersion race after the
+// controller has read and ownership-checked an existing Workspace. A 409 from KAITO's
+// managed-field merge patch should trigger a fresh read promptly, while preserving the
+// last-known serving status.
+func TestReconcileOwnedPatchConflictRetriesPromptly(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "live-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:   airunwayv1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: "DeploymentReady",
+	})
+
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	existing := resources[0].DeepCopy()
+	if err := unstructured.SetNestedField(existing.Object, int64(2), "resource", "count"); err != nil {
+		t.Fatalf("mutate existing resource: %v", err)
+	}
+	if err := unstructured.SetNestedField(existing.Object, "Ready", "status", "state"); err != nil {
+		t.Fatalf("mark existing Workspace ready: %v", err)
+	}
+
+	var patchCalled bool
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, existing).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					patchCalled = true
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: KaitoAPIGroup, Resource: "workspaces"},
+						obj.GetName(), fmt.Errorf("the object has been modified"),
+					)
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; a conflict should requeue: %v", err)
+	}
+	if !patchCalled {
+		t.Fatal("Patch was never called; test did not exercise the owned existing-resource path")
+	}
+	if res.Requeue || res.RequeueAfter != time.Second {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a patch conflict",
+			res.Requeue, res.RequeueAfter, time.Second)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		t.Errorf("Status.Phase = %q, want Running", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint == nil || updated.Status.Endpoint.Service != "live-svc" {
+		t.Errorf("Status.Endpoint = %+v, want live-svc", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas == nil || updated.Status.Replicas.Ready != 1 {
+		t.Errorf("Status.Replicas = %+v, want last-known ready count preserved", updated.Status.Replicas)
+	}
+	var created, ready *metav1.Condition
+	for i := range updated.Status.Conditions {
+		condition := &updated.Status.Conditions[i]
+		switch condition.Type {
+		case airunwayv1alpha1.ConditionTypeResourceCreated:
+			created = condition
+		case airunwayv1alpha1.ConditionTypeReady:
+			ready = condition
+		}
+	}
+	if created == nil || created.Reason != "ResourceConflict" {
+		t.Errorf("ResourceCreated = %+v, want reason ResourceConflict", created)
+	}
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Errorf("Ready = %+v, want last-known True condition preserved", ready)
+	}
+}
+
+// TestReconcileTransientCreateFailureClearsStaleStatus covers the same retryable API error
+// when the controller has just observed that no upstream resource exists. There is no known
+// workload to preserve, so stale serving status must be cleared while retrying promptly.
+func TestReconcileTransientCreateFailureClearsStaleStatus(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
 	controllerutil.AddFinalizer(md, FinalizerName)
 	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
 	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
-	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
 
+	var createCalled bool
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					createCalled = true
 					return apierrors.NewInternalError(fmt.Errorf("simulated upstream outage"))
 				}
 				return cl.Create(ctx, obj, opts...)
@@ -402,32 +825,182 @@ func TestReconcileGenericFailureClearsStaleStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned an error; the failure should be reported in status: %v", err)
 	}
-	// A generic write failure is usually transient, so it must retry. Without a requeue the
-	// second pass writes identical status (a server-side no-op), nothing re-enqueues, and the
-	// deployment sits Failed with no endpoint until the default resync.
-	if res.RequeueAfter <= 0 {
-		t.Error("expected a requeue after a transient write failure")
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a transient create failure",
+			res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+	if !createCalled {
+		t.Fatal("Create was never called; test did not exercise the absent-resource path")
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	var createdReason string
 	var readyStatus metav1.ConditionStatus
-	for _, cond := range updated.Status.Conditions {
-		if cond.Type == airunwayv1alpha1.ConditionTypeResourceCreated {
-			createdReason = cond.Reason
+	for _, condition := range updated.Status.Conditions {
+		if condition.Type == airunwayv1alpha1.ConditionTypeReady {
+			readyStatus = condition.Status
 		}
+	}
+	if readyStatus != metav1.ConditionFalse {
+		t.Errorf("Ready = %q, want False", readyStatus)
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileNotFoundWriteFailureClearsStaleStatus covers a definite API-server 404.
+// Unlike an ambiguous 5xx or transport failure, a 404 proves this write did not update an
+// existing workload, so stale serving status must be cleared while retrying promptly.
+func TestReconcileNotFoundWriteFailureClearsStaleStatus(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					return apierrors.NewNotFound(
+						schema.GroupResource{Group: KaitoAPIGroup, Resource: "workspaces"},
+						obj.GetName(),
+					)
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the 404 should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != RequeueInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s after a 404",
+			res.Requeue, res.RequeueAfter, RequeueInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	var readyStatus metav1.ConditionStatus
+	var createdReason string
+	for _, cond := range updated.Status.Conditions {
 		if cond.Type == airunwayv1alpha1.ConditionTypeReady {
 			readyStatus = cond.Status
 		}
+		if cond.Type == airunwayv1alpha1.ConditionTypeResourceCreated {
+			createdReason = cond.Reason
+		}
+	}
+	if readyStatus != metav1.ConditionFalse {
+		t.Errorf("Ready = %q, want False", readyStatus)
 	}
 	if createdReason != "CreateFailed" {
 		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
 	}
-	if readyStatus != metav1.ConditionFalse {
-		t.Errorf("Ready = %q, want False", readyStatus)
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint != nil {
+		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
+	}
+	if updated.Status.Replicas != nil {
+		t.Errorf("Status.Replicas = %+v, want nil", updated.Status.Replicas)
+	}
+}
+
+// TestReconcileValidationFailureIsTerminal distinguishes deterministic admission failures
+// from retryable transport errors and schema-version mismatches. It fails closed and retries
+// slowly so an out-of-band policy or CRD repair can recover it without a spec edit.
+func TestReconcileValidationFailureIsTerminal(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
+	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1}
+	md.Status.Conditions = append(md.Status.Conditions, metav1.Condition{
+		Type:    airunwayv1alpha1.ConditionTypeReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "DeploymentReady",
+		Message: "last observed workload is ready",
+	})
+
+	rejection := apierrors.NewInvalid(
+		schema.GroupKind{Group: KaitoAPIGroup, Kind: WorkspaceKind},
+		"test",
+		field.ErrorList{field.Invalid(
+			field.NewPath("resource", "count"),
+			int64(0),
+			"must be greater than zero",
+		)},
+	)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == WorkspaceKind {
+					return rejection
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
+	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile returned an error; the validation failure should be reported in status: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s for a deterministic validation failure",
+			res.Requeue, res.RequeueAfter, ExternalRecoveryInterval)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	statuses := map[string]metav1.ConditionStatus{}
+	reasons := map[string]string{}
+	for _, cond := range updated.Status.Conditions {
+		statuses[cond.Type] = cond.Status
+		reasons[cond.Type] = cond.Reason
+	}
+	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Errorf("Status.Phase = %q, want Failed", updated.Status.Phase)
+	}
+	if got := statuses[airunwayv1alpha1.ConditionTypeReady]; got != metav1.ConditionFalse {
+		t.Errorf("Ready = %q, want False", got)
+	}
+	if got := statuses[airunwayv1alpha1.ConditionTypeResourceCreated]; got != metav1.ConditionFalse {
+		t.Errorf("ResourceCreated = %q, want False", got)
+	}
+	if got := reasons[airunwayv1alpha1.ConditionTypeResourceCreated]; got != "CreateFailed" {
+		t.Errorf("ResourceCreated reason = %q, want CreateFailed", got)
 	}
 	if updated.Status.Endpoint != nil {
 		t.Errorf("Status.Endpoint = %+v, want nil", updated.Status.Endpoint)
@@ -545,10 +1118,15 @@ func TestReconcileOwnershipConflictUsesItsOwnReason(t *testing.T) {
 	directC := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
 	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
 
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("reconcile returned an error: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter != ExternalRecoveryInterval {
+		t.Errorf("requeue = %v, RequeueAfter = %s; want false and %s for an ownership conflict",
+			res.Requeue, res.RequeueAfter, ExternalRecoveryInterval)
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment
