@@ -1,6 +1,7 @@
 package dynamo
 
 import (
+	"context"
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -8,10 +9,6 @@ import (
 )
 
 func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured {
-	return newDGDWithSpecAndStatus(nil, status)
-}
-
-func newDGDWithSpecAndStatus(spec map[string]interface{}, status map[string]interface{}) *unstructured.Unstructured {
 	obj := map[string]interface{}{
 		"apiVersion": "nvidia.com/v1alpha1",
 		"kind":       "DynamoGraphDeployment",
@@ -19,9 +16,6 @@ func newDGDWithSpecAndStatus(spec map[string]interface{}, status map[string]inte
 			"name":      "test-dgd",
 			"namespace": "default",
 		},
-	}
-	if spec != nil {
-		obj["spec"] = spec
 	}
 	if status != nil {
 		obj["status"] = status
@@ -235,18 +229,18 @@ func TestTranslateStatusWithEndpoint(t *testing.T) {
 
 func TestTranslateStatusNilEndpointWithoutFrontend(t *testing.T) {
 	st := NewStatusTranslator()
-	dgd := newDGDWithSpecAndStatus(map[string]interface{}{
-		"services": map[string]interface{}{
-			"Epp": map[string]interface{}{
-				"componentType": "epp",
-			},
-			"VllmWorker": map[string]interface{}{
-				"componentType": "worker",
-			},
-		},
-	}, map[string]interface{}{
+	resources, err := NewTransformer().Transform(context.Background(), newTestMD("test-dgd", "default"))
+	if err != nil {
+		t.Fatalf("unexpected transformer error: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("expected 1 transformed resource, got %d", len(resources))
+	}
+
+	dgd := resources[0]
+	dgd.Object["status"] = map[string]interface{}{
 		"state": "successful",
-	})
+	}
 
 	result, err := st.TranslateStatus(dgd)
 	if err != nil {
@@ -259,18 +253,22 @@ func TestTranslateStatusNilEndpointWithoutFrontend(t *testing.T) {
 
 func TestTranslateStatusWithInferredFrontendEndpoint(t *testing.T) {
 	st := NewStatusTranslator()
-	dgd := newDGDWithSpecAndStatus(map[string]interface{}{
-		"services": map[string]interface{}{
-			"Frontend": map[string]interface{}{
-				"componentType": "frontend",
-			},
-			"VllmWorker": map[string]interface{}{
-				"componentType": "worker",
-			},
-		},
-	}, map[string]interface{}{
+	md := newTestMD("test-dgd", "default")
+	// the Transformer creates Frontend whenever spec.gateway.enabled is explicitly false.
+	gatewayEnabled := false
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{Enabled: &gatewayEnabled}
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected transformer error: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("expected 1 transformed resource, got %d", len(resources))
+	}
+
+	dgd := resources[0]
+	dgd.Object["status"] = map[string]interface{}{
 		"state": "successful",
-	})
+	}
 
 	result, err := st.TranslateStatus(dgd)
 	if err != nil {
