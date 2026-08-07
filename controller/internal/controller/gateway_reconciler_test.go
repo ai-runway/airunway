@@ -128,6 +128,42 @@ func newTestGateway(name, ns string) *gatewayv1.Gateway {
 	}
 }
 
+// newBBRDeployment returns a stand-in for the shared body-based-router
+// Deployment installed by the upstream GAIE helm chart. It carries an unrelated
+// pod-template annotation so a wholesale rewrite is detectable, not just the
+// restart annotation itself.
+func newBBRDeployment(ns string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "body-based-router", Namespace: ns},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"unrelated": "keep-me"},
+				},
+			},
+		},
+	}
+}
+
+// assertBBRNotRestarted fails if anything rolled the shared BBR Deployment.
+// The controller used to patch airunway.ai/restartedAt onto its pod template to
+// force a restart; nothing should write to that Deployment at all now.
+func assertBBRNotRestarted(t *testing.T, r *ModelDeploymentReconciler, ns string) {
+	t.Helper()
+	var bbr appsv1.Deployment
+	key := types.NamespacedName{Name: "body-based-router", Namespace: ns}
+	if err := r.Get(context.Background(), key, &bbr); err != nil {
+		t.Fatalf("body-based-router Deployment not found: %v", err)
+	}
+	if _, found := bbr.Spec.Template.Annotations["airunway.ai/restartedAt"]; found {
+		t.Errorf("BBR was restarted: pod template carries airunway.ai/restartedAt (%v)",
+			bbr.Spec.Template.Annotations)
+	}
+	if got := bbr.Spec.Template.Annotations["unrelated"]; got != "keep-me" {
+		t.Errorf("BBR pod template annotations were rewritten: %v", bbr.Spec.Template.Annotations)
+	}
+}
+
 // --- Tests ---
 
 func TestGateway_InferencePoolCreation(t *testing.T) {
@@ -137,7 +173,7 @@ func TestGateway_InferencePoolCreation(t *testing.T) {
 	r := newTestReconciler(scheme, detector, md)
 	ctx := context.Background()
 
-	err := r.reconcileInferencePool(ctx, md, 8080, "gateway-ns")
+	err := r.reconcileInferencePool(ctx, md, 8080)
 	if err != nil {
 		t.Fatalf("reconcileInferencePool failed: %v", err)
 	}
@@ -186,6 +222,78 @@ func TestGateway_InferencePoolCreation(t *testing.T) {
 	}
 }
 
+// TestGateway_InferencePoolCreationDoesNotRestartBBR is a regression guard for
+// #334. Creating an InferencePool used to force a rolling restart of the shared
+// body-based-router Deployment, on the mistaken premise that BBR builds a model
+// registry at startup. It does not — its body-field-to-header plugin sets the
+// model header per request, and its ServiceAccount is only granted read access
+// to ConfigMaps — so the restart bought nothing while opening a window in which
+// an already-serving model could mis-route. Nothing should touch BBR now.
+func TestGateway_InferencePoolCreationDoesNotRestartBBR(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	// The removed code resolved BBR's namespace from the Gateway, so seed the
+	// Deployment where a restart would have gone looking for it.
+	bbr := newBBRDeployment("gateway-ns")
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, bbr)
+	ctx := context.Background()
+
+	if err := r.reconcileInferencePool(ctx, md, 8080); err != nil {
+		t.Fatalf("reconcileInferencePool failed: %v", err)
+	}
+
+	// Confirm the pool was actually created, otherwise the restart path never
+	// ran and this test would pass vacuously.
+	var pool inferencev1.InferencePool
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model", Namespace: "default"}, &pool); err != nil {
+		t.Fatalf("InferencePool not created, so this test proves nothing: %v", err)
+	}
+
+	assertBBRNotRestarted(t, r, "gateway-ns")
+}
+
+// TestGateway_ProviderManagedPoolDoesNotRestartBBR covers the second removed
+// call site (#334). Provider-managed pools are created by the provider's own
+// operator, so there is no "created" signal; the restart was gated on a
+// one-shot airunway.ai/bbr-restarted annotation written back to the
+// ModelDeployment instead. Neither the restart nor that annotation should
+// happen now.
+func TestGateway_ProviderManagedPoolDoesNotRestartBBR(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	bbr := newBBRDeployment("gateway-ns")
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "provider-pool", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			EndpointPickerRef: inferencev1.EndpointPickerRef{
+				Name: inferencev1.ObjectName("provider-pool-epp"),
+			},
+		},
+	}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, bbr, pool)
+	ctx := context.Background()
+
+	eppName, err := r.reconcileProviderManagedInferencePool(ctx, md, "provider-pool", "default")
+	if err != nil {
+		t.Fatalf("reconcileProviderManagedInferencePool failed: %v", err)
+	}
+	if eppName != "provider-pool-epp" {
+		t.Errorf("expected EPP name %q, got %q", "provider-pool-epp", eppName)
+	}
+
+	assertBBRNotRestarted(t, r, "gateway-ns")
+
+	var got airunwayv1alpha1.ModelDeployment
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("ModelDeployment not found: %v", err)
+	}
+	if _, found := got.Annotations["airunway.ai/bbr-restarted"]; found {
+		t.Error("ModelDeployment carries the removed airunway.ai/bbr-restarted annotation")
+	}
+}
+
 func TestGateway_InferencePoolDefaultPort(t *testing.T) {
 	scheme := newTestScheme()
 	md := newModelDeployment("test-model", "default")
@@ -195,7 +303,7 @@ func TestGateway_InferencePoolDefaultPort(t *testing.T) {
 	ctx := context.Background()
 
 	// reconcileGateway uses default port 8000 when no endpoint
-	err := r.reconcileInferencePool(ctx, md, 8000, "gateway-ns")
+	err := r.reconcileInferencePool(ctx, md, 8000)
 	if err != nil {
 		t.Fatalf("reconcileInferencePool failed: %v", err)
 	}
@@ -917,7 +1025,7 @@ func TestGateway_ProviderManagedInferencePool_Found(t *testing.T) {
 
 	r := newTestReconciler(scheme, nil, md, pool)
 
-	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system", "default")
+	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -929,7 +1037,7 @@ func TestGateway_ProviderManagedInferencePool_NotFound(t *testing.T) {
 	md := newModelDeployment("llama-70b", "default")
 	r := newTestReconciler(scheme, nil, md)
 
-	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system", "default")
+	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system")
 	if err == nil {
 		t.Fatal("expected error when InferencePool does not exist")
 	}
