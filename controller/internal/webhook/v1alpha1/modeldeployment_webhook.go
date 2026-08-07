@@ -1036,9 +1036,23 @@ func checkBlockedKeys(m map[string]interface{}, fldPath *field.Path) field.Error
 // checkSizingOverrideKeys recursively walks provider overrides and rejects
 // fields that would let raw provider overrides bypass resource/replica ceilings.
 func checkSizingOverrideKeys(m map[string]interface{}, fldPath *field.Path) field.ErrorList {
-	return checkForbiddenOverrideKeys(m, fldPath, sizingOverrideKeys, func(key string) string {
+	allErrs := checkForbiddenOverrideKeys(m, fldPath, sizingOverrideKeys, func(key string) string {
 		return fmt.Sprintf("overriding %q is not allowed because it can bypass admission resource limits; use spec.resources / spec.scaling instead", key)
 	})
+
+	// KAITO names its replica field resource.count rather than replicas. Keep this
+	// check path-specific: other count fields in provider-specific configuration do
+	// not necessarily control workload size.
+	if resourceOverride, ok := m["resource"].(map[string]interface{}); ok {
+		if _, exists := resourceOverride["count"]; exists {
+			allErrs = append(allErrs, field.Forbidden(
+				fldPath.Child("resource", "count"),
+				"overriding \"resource.count\" is not allowed because it can bypass admission replica limits; use spec.scaling.replicas instead",
+			))
+		}
+	}
+
+	return allErrs
 }
 
 // checkForbiddenOverrideKeys recursively walks an unmarshalled JSON object and

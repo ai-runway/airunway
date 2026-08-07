@@ -71,9 +71,9 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	}
 
 	condMap := t.parseConditions(conditions)
-
-	result.Phase, result.Message = t.mapConditionsToPhase(condMap)
 	result.Replicas = t.extractReplicas(upstream)
+
+	result.Phase, result.Message = t.mapConditionsToPhase(condMap, result.Replicas)
 	result.Endpoint = t.extractEndpoint(upstream)
 
 	return result, nil
@@ -110,16 +110,19 @@ func (t *StatusTranslator) parseConditions(conditions []interface{}) map[string]
 // mapConditionsToPhase maps Kubernetes Deployment conditions to a ModelDeployment phase.
 //
 // Mapping logic:
-//   - Available=True → Running
+//   - Available=True with all desired replicas currently ready and available → Running
 //   - Available=False AND Progressing=True → Deploying
 //   - Progressing=False (DeadlineExceeded) OR Available=False with reason → Failed
 //   - else → Pending
-func (t *StatusTranslator) mapConditionsToPhase(condMap map[string]conditionInfo) (airunwayv1alpha1.DeploymentPhase, string) {
+func (t *StatusTranslator) mapConditionsToPhase(condMap map[string]conditionInfo, replicas *airunwayv1alpha1.ReplicaStatus) (airunwayv1alpha1.DeploymentPhase, string) {
 	avail, hasAvail := condMap[conditionAvailable]
 	prog, hasProg := condMap[conditionProgressing]
 
-	// Available = True means all desired replicas are up
-	if hasAvail && avail.Status == "True" {
+	// Available=True guarantees only minimum availability, and Deployment status
+	// can lag the underlying Pods. Require full current counts before advertising
+	// that all replicas are ready.
+	if hasAvail && avail.Status == "True" && replicas != nil && replicas.Desired > 0 &&
+		replicas.Ready >= replicas.Desired && replicas.Available >= replicas.Desired {
 		return airunwayv1alpha1.DeploymentPhaseRunning, ""
 	}
 

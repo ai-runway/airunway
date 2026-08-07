@@ -197,6 +197,50 @@ func TestValidateOverrides_BlocksSizingKeysInsideArray(t *testing.T) {
 	requireValidationErrorField(t, errs, "spec.provider.overrides.services[0].replicas")
 }
 
+func TestValidateOverrides_BlocksKaitoResourceCount(t *testing.T) {
+	v := &ModelDeploymentCustomValidator{}
+	overrides := map[string]interface{}{
+		"resource": map[string]interface{}{
+			"count": 10,
+		},
+	}
+	raw, _ := json.Marshal(overrides)
+	spec := &airunwayv1alpha1.ModelDeploymentSpec{
+		Provider: &airunwayv1alpha1.ProviderSpec{
+			Name:      "kaito",
+			Overrides: &runtime.RawExtension{Raw: raw},
+		},
+	}
+	errs := v.validateOverrides(spec, field.NewPath("spec"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.resource.count")
+	requireValidationErrorDetail(t, errs, "overriding \"resource.count\" is not allowed because it can bypass admission replica limits; use spec.scaling.replicas instead")
+}
+
+func TestValidateOverrides_AllowsNonSizingCountAndKaitoResourceFields(t *testing.T) {
+	v := &ModelDeploymentCustomValidator{}
+	overrides := map[string]interface{}{
+		"resource": map[string]interface{}{
+			"instanceType": "Standard_NC24ads_A100_v4",
+			"labelSelector": map[string]interface{}{
+				"matchLabels": map[string]interface{}{"accelerator": "nvidia"},
+			},
+		},
+		"inference": map[string]interface{}{
+			"preset": map[string]interface{}{"count": 2},
+		},
+	}
+	raw, _ := json.Marshal(overrides)
+	spec := &airunwayv1alpha1.ModelDeploymentSpec{
+		Provider: &airunwayv1alpha1.ProviderSpec{
+			Name:      "kaito",
+			Overrides: &runtime.RawExtension{Raw: raw},
+		},
+	}
+	if errs := v.validateOverrides(spec, field.NewPath("spec")); len(errs) != 0 {
+		t.Fatalf("expected non-sizing KAITO overrides to remain allowed, got %v", errs)
+	}
+}
+
 func TestValidateOverrides_NilOverrides(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
 	spec := &airunwayv1alpha1.ModelDeploymentSpec{}
