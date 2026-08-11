@@ -18,8 +18,13 @@ package dynamo
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
+	"regexp"
+	"strings"
+	"syscall"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -32,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,9 +65,120 @@ const (
 	// RequeueInterval is the default requeue interval for periodic reconciliation
 	RequeueInterval = 30 * time.Second
 
+	// ExternalRecoveryInterval retries failures that require an out-of-band fix without
+	// hot-looping while the installed upstream or resource ownership remains unchanged.
+	ExternalRecoveryInterval = 5 * time.Minute
+
 	// FinalizerTimeout is the timeout for finalizer cleanup
 	FinalizerTimeout = 5 * time.Minute
 )
+
+// strictFieldValidation makes the API server reject fields the installed upstream does
+// not declare, instead of silently pruning them — see issue #308 and the "Upstream
+// compatibility" section of docs/providers.md. kubectl sends strict validation by default;
+// Go clients do not, so it must be set explicitly on every upstream write.
+var strictFieldValidation = client.FieldValidation(metav1.FieldValidationStrict)
+
+// strictUnknownFieldRejection matches the terminal diagnostic emitted by apimachinery's
+// strict decoder. Anchoring the diagnostic at the end keeps an ordinary validation error
+// from matching when its echoed user value contains the same words.
+var strictUnknownFieldRejection = regexp.MustCompile(
+	`(^|: )strict decoding error: unknown field "(\\.|[^"\\])*"(, unknown field "(\\.|[^"\\])*")*$`,
+)
+
+// isUpstreamSchemaRejection reports whether err is the API server refusing a field the
+// installed upstream does not declare, as opposed to any other rejection.
+//
+// Matching on the message rather than the status class is deliberate, because the class
+// varies by write path:
+//   - custom resource create/update -> 400 BadRequest, "strict decoding error: unknown field"
+//   - custom resource merge patch   -> 422 Invalid,    same prefix (verified live)
+//   - server-side apply on built-in types -> 500, "field not declared in schema"
+//     (verified against a live cluster: the error is a plain error from the field manager,
+//     so it is neither IsBadRequest nor IsInvalid)
+//
+// Gating on IsInvalid alone would also swallow every CEL and OpenAPI type violation, which
+// are user configuration errors that no upstream upgrade would fix — reporting those as an
+// upstream version mismatch would send operators down the wrong path entirely.
+//
+// The needle is the "strict decoding error" prefix rather than the bare "unknown field"
+// cause it wraps, because an Invalid status echoes the offending value back and a
+// user-supplied string (a model id, an image, an engine arg) could otherwise contain the
+// bare phrase and be misclassified.
+func isUpstreamSchemaRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+
+	// Custom-resource paths: match the complete terminal diagnostic, not independent
+	// substrings. An Invalid status echoes the offending value back, so a user-supplied
+	// string may itself contain both phrases and must not be misclassified as a version
+	// mismatch and retried forever.
+	if strictUnknownFieldRejection.MatchString(msg) {
+		return true
+	}
+
+	// Server-side apply on built-in types: the rejection comes from the field manager's
+	// typed conversion, not from field validation, so it carries a different wrapper and a
+	// different status class. Bind the diagnostic to that wrapper for the same reason.
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return strings.Contains(msg, "field not declared in schema")
+	}
+
+	return false
+}
+
+// isRetryableUpstreamWriteError reports failures that can recover without changing the
+// ModelDeployment or cluster configuration. These must not erase last-known serving status:
+// a failed or ambiguous API response does not mean the existing workload stopped serving.
+func isRetryableUpstreamWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.IsConflict(err) || errors.IsAlreadyExists(err) ||
+		errors.IsTimeout(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err) ||
+		errors.IsServiceUnavailable(err) || errors.IsInternalError(err) {
+		return true
+	}
+
+	var status errors.APIStatus
+	if stderrors.As(err, &status) && status.Status().Code >= 500 {
+		return true
+	}
+
+	return stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF) ||
+		stderrors.Is(err, syscall.EPIPE) ||
+		utilnet.IsTimeout(err) || utilnet.IsProbableEOF(err) ||
+		utilnet.IsConnectionReset(err) || utilnet.IsConnectionRefused(err) ||
+		utilnet.IsHTTP2ConnectionLost(err)
+}
+
+// resourceWriteError records whether the target was observed as owned, active, and serving
+// before its write. A transient update failure can retain last-known serving status only after
+// that safe observation; create failures, terminating or unready resources, and unverified
+// read failures cannot.
+type resourceWriteError struct {
+	err                              error
+	resourceWasOwnedActiveAndServing bool
+}
+
+func (e *resourceWriteError) Error() string { return e.err.Error() }
+func (e *resourceWriteError) Unwrap() error { return e.err }
+
+func wrapResourceWriteError(err error, resourceWasOwnedActiveAndServing bool) error {
+	if err == nil {
+		return nil
+	}
+	return &resourceWriteError{err: err, resourceWasOwnedActiveAndServing: resourceWasOwnedActiveAndServing}
+}
+
+func canPreserveLastKnownStatus(err error) bool {
+	var writeErr *resourceWriteError
+	return stderrors.As(err, &writeErr) && writeErr.resourceWasOwnedActiveAndServing
+}
 
 // DynamoProviderReconciler reconciles ModelDeployment resources for the Dynamo provider
 type DynamoProviderReconciler struct {
@@ -192,7 +309,14 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	resources, err := r.Transformer.Transform(ctx, &md)
 	if err != nil {
 		logger.Error(err, "Failed to transform ModelDeployment", "name", md.Name)
+		// Same treatment as the upstream-rejection path below: force Ready False and drop
+		// the stale endpoint/replica counts. Otherwise a previously-Running deployment whose
+		// spec is edited into something unrenderable reports Failed while still advertising
+		// a live endpoint and "1/1 ready" — the contradiction strict validation exists to surface.
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "TransformFailed", err.Error())
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "TransformFailed", err.Error())
+		md.Status.Endpoint = nil
+		md.Status.Replicas = nil
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 		md.Status.Message = fmt.Sprintf("Failed to generate Dynamo resources: %s", err.Error())
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
@@ -202,25 +326,83 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
-			// requeue to retry with the latest version rather than marking
-			// the deployment as Failed to prevent triggering gateway resource cleanup and
-			// invalidate the EPP pod's ServiceAccount token.
-			if errors.IsConflict(err) {
-				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "ResourceConflict", err.Error())
+			// Strict field validation rejected the write: the cluster does not accept a field
+			// this provider renders. Give it its own reason so an operator can tell it apart
+			// from a generic create failure, and keep requeueing — the remedy is
+			// an out-of-band upstream upgrade, and nothing else would re-trigger this
+			// reconcile. The provider-config watch fires only on Spec/Ready changes, and no
+			// upstream object exists to watch, so without a requeue the deployment would sit
+			// Failed until the ~10h resync even after the cluster is fixed.
+			//
+			// Ready is forced False here because the failure it catches is precisely a
+			// deployment that reports healthy while being unable to serve. Note this deliberately does NOT
+			// touch ProviderCompatible: that is set True earlier in this same reconcile, so
+			// flipping it here would rewrite LastTransitionTime on every requeue and the
+			// condition would never settle.
+			if isUpstreamSchemaRejection(err) {
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "IncompatibleUpstream", err.Error())
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "IncompatibleUpstream", err.Error())
+				// Clear the Running-era endpoint and replica counts. This branch returns
+				// before syncStatus, so on an update rejection they would otherwise keep
+				// their previous values and the object would report Failed alongside a live
+				// endpoint and "1/1 ready" — the same contradiction described above.
+				md.Status.Endpoint = nil
+				md.Status.Replicas = nil
+				md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+				md.Status.Message = fmt.Sprintf("Incompatible with the installed upstream: the installed Dynamo CRD does not declare a field this provider renders. This usually means the cluster's Dynamo is older than this provider requires, or that spec.provider.overrides sets a key it does not support. %s", err.Error())
 				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 					return ctrl.Result{}, statusErr
 				}
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, nil
+			}
+			// Conflicts, throttling, server failures, and transport interruptions say nothing
+			// about whether the existing workload is still serving. Record the failed write,
+			// but preserve last-known Phase/Ready/Endpoint/Replicas until a successful read can
+			// replace them.
+			retryableWriteError := isRetryableUpstreamWriteError(err)
+			if retryableWriteError && canPreserveLastKnownStatus(err) {
+				reason := "CreateFailed"
+				if errors.IsConflict(err) || errors.IsAlreadyExists(err) {
+					reason = "ResourceConflict"
+				}
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				requeueAfter := RequeueInterval
+				if errors.IsConflict(err) {
+					// A fresh read resolves a resourceVersion race; do not delay desired
+					// spec convergence by the normal transient-error interval.
+					requeueAfter = time.Second
+				}
+				return ctrl.Result{RequeueAfter: requeueAfter}, nil
 			}
 			reason := "CreateFailed"
+			requeueAfter := ExternalRecoveryInterval
+			if errors.IsConflict(err) {
+				requeueAfter = time.Second
+			} else if errors.IsNotFound(err) || retryableWriteError {
+				// A definite 404 means the write did not reach an existing upstream
+				// object. Fail closed, but retry on the normal recovery cadence because
+				// discovery or admission ordering can make this short-lived.
+				requeueAfter = RequeueInterval
+			}
 			if isResourceConflict(err) {
 				reason = "ResourceConflict"
-				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ResourceConflict", err.Error())
 			}
+			// Definite write failures fail closed. Validation/admission and ownership
+			// failures use a slower retry because an out-of-band policy, CRD, or ownership
+			// change can make the same ModelDeployment valid without changing its spec.
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, err.Error())
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 			md.Status.Message = fmt.Sprintf("Failed to create DynamoGraphDeployment: %s", err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, &md)
+			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
 	}
 
@@ -341,7 +523,7 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(ctx context.Context, r
 	if errors.IsNotFound(err) {
 		// Create new resource
 		logger.Info("Creating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		return r.Create(ctx, resource)
+		return wrapResourceWriteError(r.Create(ctx, resource, strictFieldValidation), false)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to get existing resource: %w", err)
@@ -350,6 +532,11 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(ctx context.Context, r
 	// Verify ownership before updating
 	if err := verifyDynamoOwnership(existing, md.UID); err != nil {
 		return err
+	}
+	resourceWasOwnedActiveAndServing := false
+	if existing.GetDeletionTimestamp() == nil && r.StatusTranslator != nil {
+		statusResult, statusErr := r.StatusTranslator.TranslateStatus(existing)
+		resourceWasOwnedActiveAndServing = statusErr == nil && statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning
 	}
 
 	// Update existing resource if spec has changed.
@@ -360,13 +547,81 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(ctx context.Context, r
 	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 	newSpec, _, _ := unstructured.NestedMap(resource.Object, "spec")
 
-	if !equality.Semantic.DeepEqual(stripEmptyDefaults(existingSpec), stripEmptyDefaults(newSpec)) {
+	// Normalize server-added zero values on both sides for the ordinary comparison, then
+	// compare paths explicitly supplied through provider.overrides.spec with presence-aware
+	// semantics. Without the second check an empty unknown override such as futureField: {}
+	// disappears during normalization, so no strict update is attempted and the incompatible
+	// override appears to succeed.
+	if !equality.Semantic.DeepEqual(stripEmptyDefaults(existingSpec), stripEmptyDefaults(newSpec)) ||
+		overrideSpecDiffers(md, existingSpec, newSpec) {
 		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
 		resource.SetResourceVersion(existing.GetResourceVersion())
-		return r.Update(ctx, resource)
+		return wrapResourceWriteError(r.Update(ctx, resource, strictFieldValidation), resourceWasOwnedActiveAndServing)
 	}
 
 	return nil
+}
+
+// overrideSpecDiffers reports whether any path explicitly supplied through
+// provider.overrides.spec is absent from, or differs between, the observed and desired
+// specs. The override value acts as a path selector: provider-generated and server-defaulted
+// siblings are deliberately ignored, while key presence is still significant for empty maps
+// and strings that stripEmptyDefaults removes.
+func overrideSpecDiffers(md *airunwayv1alpha1.ModelDeployment, existingSpec, desiredSpec map[string]interface{}) bool {
+	if md.Spec.Provider == nil || md.Spec.Provider.Overrides == nil {
+		return false
+	}
+
+	var overrides map[string]interface{}
+	if err := json.Unmarshal(md.Spec.Provider.Overrides.Raw, &overrides); err != nil {
+		// Transform validates the same payload before this function is reached. Keep this
+		// comparison side-effect free if a direct caller supplies malformed test data.
+		return false
+	}
+	overrideSpec, ok := overrides["spec"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+
+	return selectedOverrideValuesDiffer(existingSpec, desiredSpec, overrideSpec)
+}
+
+func selectedOverrideValuesDiffer(existing, desired, selected interface{}) bool {
+	switch selectedValue := selected.(type) {
+	case map[string]interface{}:
+		existingMap, existingOK := existing.(map[string]interface{})
+		desiredMap, desiredOK := desired.(map[string]interface{})
+		if !existingOK || !desiredOK {
+			return !equality.Semantic.DeepEqual(existing, desired)
+		}
+		for key, childSelection := range selectedValue {
+			desiredChild, desiredFound := desiredMap[key]
+			if !desiredFound {
+				// A deep-merged override path should always be present in the desired
+				// object. If it is not, there is nothing this update could validate.
+				continue
+			}
+			existingChild, existingFound := existingMap[key]
+			if !existingFound || selectedOverrideValuesDiffer(existingChild, desiredChild, childSelection) {
+				return true
+			}
+		}
+		return false
+	case []interface{}:
+		existingSlice, existingOK := existing.([]interface{})
+		desiredSlice, desiredOK := desired.([]interface{})
+		if !existingOK || !desiredOK || len(existingSlice) != len(desiredSlice) || len(selectedValue) != len(desiredSlice) {
+			return !equality.Semantic.DeepEqual(existing, desired)
+		}
+		for i, childSelection := range selectedValue {
+			if selectedOverrideValuesDiffer(existingSlice[i], desiredSlice[i], childSelection) {
+				return true
+			}
+		}
+		return false
+	default:
+		return !equality.Semantic.DeepEqual(existing, desired)
+	}
 }
 
 // stripEmptyDefaults recursively removes zero-value fields (empty strings,
