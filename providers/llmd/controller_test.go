@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -285,7 +286,10 @@ func TestSyncStatusRunningUpdatesMessage(t *testing.T) {
 	deploy.SetKind("Deployment")
 	deploy.SetName("test")
 	deploy.SetNamespace("default")
+	deploy.Object["spec"] = map[string]interface{}{"replicas": int64(1)}
 	deploy.Object["status"] = map[string]interface{}{
+		"readyReplicas":     int64(1),
+		"availableReplicas": int64(1),
 		"conditions": []interface{}{
 			map[string]interface{}{"type": "Available", "status": "True"},
 		},
@@ -314,5 +318,49 @@ func TestSyncStatusRunningUpdatesMessage(t *testing.T) {
 	}
 	if md.Status.Message == "" {
 		t.Errorf("expected a non-empty status message in Running phase")
+	}
+}
+
+func TestSyncStatusStaleAvailableConditionIsNotReady(t *testing.T) {
+	scheme := newScheme()
+
+	deploy := &unstructured.Unstructured{}
+	deploy.SetAPIVersion("apps/v1")
+	deploy.SetKind("Deployment")
+	deploy.SetName("test")
+	deploy.SetNamespace("default")
+	deploy.Object["spec"] = map[string]interface{}{"replicas": int64(1)}
+	deploy.Object["status"] = map[string]interface{}{
+		"conditions": []interface{}{
+			map[string]interface{}{"type": "Available", "status": "True"},
+			map[string]interface{}{"type": "Progressing", "status": "True"},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy).Build()
+	r := NewLLMDProviderReconciler(c, scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{}
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	md.Status.Message = "Deployments created, pods are ready"
+
+	desired := &unstructured.Unstructured{}
+	desired.SetAPIVersion("apps/v1")
+	desired.SetKind("Deployment")
+	desired.SetName("test")
+	desired.SetNamespace("default")
+
+	if err := r.syncStatus(context.Background(), md, desired); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+		t.Fatalf("expected Deploying phase, got %s", md.Status.Phase)
+	}
+	if strings.Contains(md.Status.Message, "pods are ready") {
+		t.Errorf("status retained a stale healthy message: %q", md.Status.Message)
+	}
+	ready := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "DeploymentInProgress" {
+		t.Errorf("Ready = %+v, want False with reason DeploymentInProgress", ready)
 	}
 }

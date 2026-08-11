@@ -261,28 +261,30 @@ provider:
   name: dynamo
   overrides:
     routerMode: "kv"          # kv | round-robin | none (default: round-robin)
-    frontend:
-      replicas: 2
-      resources:
-        cpu: "4"
-        memory: "8Gi"
+    epp:
+      image: "my-registry/epp:v1"
 ```
 
-**KubeRay overrides:**
-```yaml
-provider:
-  name: kuberay
-  overrides:
-    head:
-      resources:
-        cpu: "4"
-        memory: "8Gi"
-      rayStartParams:
-        dashboard-host: "0.0.0.0"
-        num-cpus: "0"
-```
+> The validating webhook rejects `replicas` and `resources` **anywhere** inside
+> `provider.overrides` (including nested, e.g. `frontend.replicas`), because raw overrides
+> are merged after admission has checked `spec.resources` / `spec.scaling` ceilings. Use
+> `spec.resources` and `spec.scaling` for sizing. KAITO's equivalent replica field,
+> `resource.count`, is rejected explicitly; use `spec.scaling.replicas` instead.
 
-KAITO currently has no supported overrides. Unknown keys trigger warnings; invalid types cause reconciliation failure.
+**KubeRay** does not read `spec.provider.overrides`. Overrides that pass the global webhook
+do not affect the rendered `RayService`; the webhook still rejects globally blocked security
+and sizing paths.
+
+**KAITO** accepts `resource` and `inference`, which the Workspace places at the object root
+rather than under `spec` — so unlike the other providers, `spec` is not an accepted key here.
+Any other root key is rejected with an error naming it. The allowlist is deliberately narrower
+than the Workspace schema, which also declares `tuning`: a `ModelDeployment` describes an
+inference deployment and the status translator reads inference conditions, so a tuning
+Workspace would report status the provider cannot interpret. Within `resource`, `count` is
+managed by `spec.scaling.replicas` and cannot be overridden; fields such as `labelSelector`
+and `instanceType` remain available.
+
+Invalid types cause reconciliation failure.
 
 ## Validation Webhook
 
