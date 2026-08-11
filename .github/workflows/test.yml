@@ -222,11 +222,13 @@ jobs:
         run: |
           cd controller
           make test
-          echo "## 🎯 Controller Test Coverage" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          go tool cover -func=cover.out | tail -1 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🎯 Controller Test Coverage"
+            echo ""
+            echo '```'
+            go tool cover -func=cover.out | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Test verify-versions guard
         run: make test-verify-versions

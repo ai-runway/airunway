@@ -290,7 +290,7 @@ jobs:
           echo "Sending inference request through gateway at http://${GW_IP}..."
           for i in $(seq 1 18); do
             HTTP_CODE=$(curl -s -o /tmp/response.json -w '%{http_code}' --max-time 30 \
-              http://${GW_IP}/v1/chat/completions \
+              "http://${GW_IP}/v1/chat/completions" \
               -H "Content-Type: application/json" \
               -d "{
                 \"model\": \"$MODEL_NAME\",
@@ -304,7 +304,7 @@ jobs:
               echo "✅ Inference through gateway succeeded"
               exit 0
             fi
-            echo "Attempt $i/18: HTTP=$HTTP_CODE body=$(echo $RESPONSE | head -c 200)"
+            echo "Attempt $i/18: HTTP=$HTTP_CODE body=$(printf '%s' "$RESPONSE" | head -c 200)"
             sleep 10
           done
           echo "❌ Inference through gateway failed"
