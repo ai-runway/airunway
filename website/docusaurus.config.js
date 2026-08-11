@@ -120,16 +120,20 @@ const config = {
             title: 'Community',
             items: [
               {
-                label: 'GitHub',
-                href: 'https://github.com/ai-runway/airunway',
+                label: 'Slack (#airunway)',
+                href: 'https://slack.cncf.io/',
               },
               {
                 label: 'Issues',
                 href: 'https://github.com/ai-runway/airunway/issues',
               },
               {
-                label: 'Discussions',
-                href: 'https://github.com/ai-runway/airunway/discussions',
+                label: 'Contributing',
+                href: 'https://github.com/ai-runway/airunway/blob/main/CONTRIBUTING.md',
+              },
+              {
+                label: 'Roadmap',
+                href: 'https://github.com/orgs/ai-runway/projects/2',
               },
             ],
           },
