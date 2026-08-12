@@ -9771,6 +9771,20 @@ def codex_auth_config_flags(repo: Path, *, force_file: bool = False) -> list[str
     )
     base_url = config.get("openai_base_url")
     if isinstance(base_url, str) and base_url:
+        # Downstream deviation: Codex runs with --ignore-user-config, which would
+        # otherwise drop this value, so it is forwarded explicitly. Command line
+        # arguments are readable by other processes on the machine, so refuse to
+        # forward a base URL that embeds a credential rather than leaking it into
+        # the process list.
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.username or parsed.password or parsed.query:
+            raise SystemExit(
+                "openai_base_url in CODEX_HOME/config.toml carries credentials "
+                "(user info or query parameters). autoreview forwards this value "
+                "on the Codex command line, where any local process could read "
+                "it. Move the credential into Codex's auth configuration and set "
+                "openai_base_url to a plain scheme://host/path URL, then rerun."
+            )
         flags.extend(
             ["-c", f"openai_base_url={json.dumps(base_url, ensure_ascii=False)}"]
         )

@@ -14,7 +14,7 @@ The vendored runtime skill matches that snapshot except for the three overrides 
 
 - Codex defaults to `gpt-5.6-sol` with `max` reasoning instead of upstream's `high` reasoning.
 - Claude defaults to `claude-opus-5` with `max` reasoning instead of upstream's `claude-fable-5` default.
-- Codex runs with `--ignore-user-config`, so the downstream copy also preserves `openai_base_url` from the external `CODEX_HOME/config.toml` and passes it as an explicit Codex configuration override.
+- Codex runs with `--ignore-user-config`, so the downstream copy also preserves `openai_base_url` from the external `CODEX_HOME/config.toml` and passes it as an explicit Codex configuration override. Because that value is forwarded on the command line, where any local process can read it, autoreview refuses to run when the configured base URL embeds a credential (user info or query parameters), and asks for the credential to be moved into Codex's auth configuration instead.
 
 `SKILL.md` documents all three exceptions. No other skill behavior is intentionally changed.
 
