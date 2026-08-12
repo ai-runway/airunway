@@ -39,11 +39,18 @@ func NewKagentReconciler(c client.Client, apiReader client.Reader, scheme *runti
 	}
 }
 
-// NewContainerReconciler returns the container agent-provider reconciler.
-func NewContainerReconciler(c client.Client, scheme *runtime.Scheme) Reconciler {
+// NewContainerReconciler returns the container agent-provider reconciler. The
+// optional API reader keeps the original (client, scheme) call source-compatible;
+// production callers should pass manager.GetAPIReader() as the third argument.
+func NewContainerReconciler(c client.Client, scheme *runtime.Scheme, apiReaders ...client.Reader) Reconciler {
+	var apiReader client.Reader
+	if len(apiReaders) > 0 {
+		apiReader = apiReaders[0]
+	}
 	return &internalcontroller.ContainerProviderReconciler{
-		Client: c,
-		Scheme: scheme,
+		Client:    c,
+		APIReader: apiReader,
+		Scheme:    scheme,
 	}
 }
 

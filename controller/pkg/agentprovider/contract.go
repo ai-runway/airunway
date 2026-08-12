@@ -222,9 +222,10 @@ func ApplyOwnedStatus(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace},
 		Status: airunwayv1alpha1.AgentDeploymentStatus{
-			Phase:    phase,
-			Runtime:  rt,
-			Replicas: replicas,
+			ProviderOwner: fieldOwner,
+			Phase:         phase,
+			Runtime:       rt,
+			Replicas:      replicas,
 			Conditions: []metav1.Condition{{
 				Type:               airunwayv1alpha1.AgentConditionTypeProviderReady,
 				Status:             providerReady,
@@ -237,6 +238,14 @@ func ApplyOwnedStatus(
 	}
 
 	return c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner))
+}
+
+// ProviderHandoffPending reports whether another provider still owns the
+// rendered workload lifecycle for ad. A successor must wait until the previous
+// provider has completed foreground cleanup and released its provider status;
+// otherwise both backends can run at once during a framework re-registration.
+func ProviderHandoffPending(ad *airunwayv1alpha1.AgentDeployment, fieldOwner string) bool {
+	return ad.Status.ProviderOwner != "" && ad.Status.ProviderOwner != fieldOwner
 }
 
 // FieldOwner builds the server-side apply field manager for a provider. Each
@@ -260,14 +269,15 @@ func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1
 // Ownership guards
 // -----------------------------------------------------------------------------
 
-// VerifyOwnedOrAbsent guards a server-side apply against silently adopting an
+// VerifyOwnedOrAbsent checks whether a server-side apply would silently adopt an
 // unrelated, same-named object. It looks up any existing object matching obj's
 // kind, name and namespace, and returns an error unless that object is already
 // controlled by owner (or does not exist).
 //
-// Call this before any force-apply, so an AgentDeployment cannot overwrite a
-// Deployment, Service, Job, ConfigMap or upstream custom resource it does not
-// own.
+// This is useful for diagnostics, but it is not a safe write boundary by
+// itself: another object can be created or replaced between this read and a
+// later patch. Providers should use ApplyOwned, which couples the check to a
+// create or resource-version-preconditioned apply.
 func VerifyOwnedOrAbsent(ctx context.Context, c client.Reader, scheme *runtime.Scheme, owner metav1.Object, obj client.Object) error {
 	gvk, err := apiutil.GVKForObject(obj, scheme)
 	if err != nil {
@@ -287,6 +297,75 @@ func VerifyOwnedOrAbsent(ctx context.Context, c client.Reader, scheme *runtime.S
 	}
 	if !metav1.IsControlledBy(existing, owner) {
 		return fmt.Errorf("refusing to adopt %s %s: it is not owned by AgentDeployment %s", gvk.Kind, key, owner.GetName())
+	}
+	return nil
+}
+
+// ApplyOwned safely creates or server-side-applies obj under fieldOwner.
+//
+// The ownership read must be authoritative (normally manager.GetAPIReader()).
+// When the object is absent, this uses Create rather than apply so a concurrent
+// creator wins with AlreadyExists instead of being silently adopted. When the
+// object exists, the apply includes its resourceVersion, so deleting/replacing
+// it after the ownership check produces a conflict rather than applying to the
+// replacement. The API response is decoded back into obj, allowing callers to
+// make readiness decisions without a cache-lagged follow-up read.
+func ApplyOwned(
+	ctx context.Context,
+	c client.Client,
+	reader client.Reader,
+	scheme *runtime.Scheme,
+	owner metav1.Object,
+	obj client.Object,
+	fieldOwner string,
+	forceOwnership bool,
+) error {
+	if reader == nil {
+		reader = c
+	}
+	if scheme == nil {
+		return fmt.Errorf("scheme is required to apply owned object")
+	}
+	if err := controllerutil.SetControllerReference(owner, obj, scheme); err != nil {
+		return fmt.Errorf("set controller reference: %w", err)
+	}
+
+	gvk, err := apiutil.GVKForObject(obj, scheme)
+	if err != nil {
+		gvk = obj.GetObjectKind().GroupVersionKind()
+	}
+	key := k8stypes.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(gvk)
+	if err := reader.Get(ctx, key, existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get existing %s %s for ownership check: %w", gvk.Kind, key, err)
+		}
+		if err := c.Create(ctx, obj, client.FieldOwner(fieldOwner)); err == nil {
+			return nil
+		} else if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create owned %s %s: %w", gvk.Kind, key, err)
+		}
+
+		// A concurrent creator won. Re-read authoritatively and subject that
+		// exact object to the same ownership and resourceVersion checks below.
+		existing = &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(gvk)
+		if err := reader.Get(ctx, key, existing); err != nil {
+			return fmt.Errorf("get concurrently-created %s %s for ownership check: %w", gvk.Kind, key, err)
+		}
+	}
+	if !metav1.IsControlledBy(existing, owner) {
+		return fmt.Errorf("refusing to adopt %s %s: it is not owned by AgentDeployment %s", gvk.Kind, key, owner.GetName())
+	}
+
+	obj.SetResourceVersion(existing.GetResourceVersion())
+	options := []client.PatchOption{client.FieldOwner(fieldOwner)}
+	if forceOwnership {
+		options = append(options, client.ForceOwnership)
+	}
+	if err := c.Patch(ctx, obj, client.Apply, options...); err != nil {
+		return fmt.Errorf("apply owned %s %s: %w", gvk.Kind, key, err)
 	}
 	return nil
 }
@@ -324,10 +403,55 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 	// still holding it. Deployment, Service and ConfigMap already default to
 	// Background, so stating it costs nothing and closes the Job case.
 	policy := metav1.DeletePropagationBackground
-	if err := c.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+	options := &client.DeleteOptions{PropagationPolicy: &policy}
+	if obj.GetUID() != "" {
+		uid := obj.GetUID()
+		options.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+	if err := c.Delete(ctx, obj, options); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete owned object %s: %w", key, err)
 	}
 	return nil
+}
+
+// DeleteOwnedAndWait starts a foreground deletion for obj and reports pending
+// until the exact owned object is gone. The authoritative read plus UID
+// precondition prevents a stale cache entry from deleting a same-named
+// replacement. Unowned, missing, or unserved objects are complete no-ops.
+func DeleteOwnedAndWait(ctx context.Context, c client.Client, reader client.Reader, owner metav1.Object, obj client.Object) (bool, error) {
+	if reader == nil {
+		reader = c
+	}
+	key := k8stypes.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	if err := reader.Get(ctx, key, obj); err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get owned object %s for foreground cleanup: %w", key, err)
+	}
+	if !metav1.IsControlledBy(obj, owner) {
+		return false, nil
+	}
+	if !obj.GetDeletionTimestamp().IsZero() {
+		return true, nil
+	}
+
+	policy := metav1.DeletePropagationForeground
+	options := &client.DeleteOptions{PropagationPolicy: &policy}
+	if obj.GetUID() != "" {
+		uid := obj.GetUID()
+		options.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+	if err := c.Delete(ctx, obj, options); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if apierrors.IsConflict(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("delete owned object %s in foreground: %w", key, err)
+	}
+	return true, nil
 }
 
 // ReleaseOwnedStatus relinquishes every provider-owned status field, for a
@@ -414,6 +538,20 @@ func CleanupOwned(ctx context.Context, c client.Client, ad *airunwayv1alpha1.Age
 	return nil
 }
 
+// CleanupOwnedAndWait starts foreground deletion for every rendered object and
+// reports pending until all owned objects and their dependants are gone.
+func CleanupOwnedAndWait(ctx context.Context, c client.Client, reader client.Reader, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) (bool, error) {
+	pending := false
+	for _, obj := range objs {
+		deleting, err := DeleteOwnedAndWait(ctx, c, reader, ad, obj)
+		if err != nil {
+			return false, err
+		}
+		pending = pending || deleting
+	}
+	return pending, nil
+}
+
 // UnstructuredRef builds a minimal object handle — kind, name and namespace —
 // suitable for a Get or Delete of an upstream custom resource.
 func UnstructuredRef(gvk schema.GroupVersionKind, name, namespace string) *unstructured.Unstructured {
@@ -428,24 +566,18 @@ func UnstructuredRef(gvk schema.GroupVersionKind, name, namespace string) *unstr
 // Upstream readiness
 // -----------------------------------------------------------------------------
 
-// UpstreamCRReady reports whether an already-applied upstream custom resource
-// reports Ready=True. It lets a crd-backed provider reflect the framework
-// operator's own readiness into ProviderReady, rather than claiming ready the
-// moment the CR is created.
-//
-// Returns false when the CR is missing, has no Ready condition, or carries a
-// Ready=True left over from a previous generation — checked via the condition's
-// observedGeneration where the operator records one.
-func UpstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, name, namespace string) bool {
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	if err := c.Get(ctx, k8stypes.NamespacedName{Name: name, Namespace: namespace}, u); err != nil {
-		return false
-	}
+// UpstreamObjectReady reports whether an upstream custom resource reports
+// Ready=True. It is intentionally separate from the read so a provider can use
+// the authoritative object returned by Create/Patch rather than immediately
+// re-reading through a potentially stale cache.
+func UpstreamObjectReady(u *unstructured.Unstructured) (bool, error) {
 	generation := u.GetGeneration()
 	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
-	if err != nil || !found {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("read %s %s/%s status.conditions: %w", u.GetKind(), u.GetNamespace(), u.GetName(), err)
+	}
+	if !found {
+		return false, nil
 	}
 	for _, raw := range conds {
 		cm, ok := raw.(map[string]interface{})
@@ -456,14 +588,42 @@ func UpstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersi
 			continue
 		}
 		if cm["status"] != "True" {
-			return false
+			return false, nil
 		}
 		if observed, present := conditionObservedGeneration(cm); present && observed < generation {
-			return false
+			return false, nil
 		}
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
+}
+
+// ReadUpstreamCRReady reports whether an already-applied upstream custom
+// resource reports Ready=True, preserving read/parse errors separately from an
+// ordinary not-ready result.
+//
+// Returns false when the CR is missing, has no Ready condition, or carries a
+// Ready=True left over from a previous generation — checked via the condition's
+// observedGeneration where the operator records one.
+func ReadUpstreamCRReady(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind, name, namespace string) (bool, error) {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	if err := c.Get(ctx, k8stypes.NamespacedName{Name: name, Namespace: namespace}, u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get upstream %s %s/%s readiness: %w", gvk.Kind, namespace, name, err)
+	}
+	return UpstreamObjectReady(u)
+}
+
+// UpstreamCRReady is the compatibility form of ReadUpstreamCRReady. It retains
+// the original bool-only signature for existing provider modules. New code
+// should use ReadUpstreamCRReady (or, preferably after an apply,
+// UpstreamObjectReady) so API read failures are not presented as not-ready.
+func UpstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, name, namespace string) bool {
+	ready, _ := ReadUpstreamCRReady(ctx, c, gvk, name, namespace)
+	return ready
 }
 
 // conditionObservedGeneration extracts a status condition's observedGeneration.
@@ -551,17 +711,10 @@ func EnsureBindingCredentials(
 			KeylessCredentialKey: []byte(KeylessCredentialValue),
 		},
 	}
-	if err := controllerutil.SetControllerReference(ad, secret, scheme); err != nil {
-		return binding, fmt.Errorf("set owner reference on keyless credential secret: %w", err)
-	}
-	// Refuse rather than adopt. VerifyOwnedOrAbsent returns an error when a
-	// Secret of this name exists and is not controlled by this AgentDeployment,
-	// which surfaces as a provider-not-ready reason the operator can act on —
-	// rename the agent, or remove the colliding Secret.
-	if err := VerifyOwnedOrAbsent(ctx, apiReader, scheme, ad, secret.DeepCopy()); err != nil {
-		return binding, err
-	}
-	if err := c.Patch(ctx, secret, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+	// Refuse rather than adopt, including when another creator wins between the
+	// existence check and write. ApplyOwned uses create-if-absent and a
+	// resourceVersion-preconditioned unforced apply for exactly that boundary.
+	if err := ApplyOwned(ctx, c, apiReader, scheme, ad, secret, fieldOwner, false); err != nil {
 		return binding, fmt.Errorf("apply keyless credential secret %s/%s: %w",
 			secret.Namespace, secret.Name, err)
 	}
@@ -607,6 +760,14 @@ func BoundedResourceName(base, suffix string) string {
 	}
 	h := shortHash(base)
 	keep := MaxResourceNameLength - len(suffix) - len(h) - 1
+	if keep <= 0 {
+		// An unusually long public suffix cannot be retained in full. Bound the
+		// combined value and hash all of it instead of slicing base at a negative
+		// index (which panics).
+		combined := base + suffix
+		h = shortHash(combined)
+		return combined[:MaxResourceNameLength-len(h)-1] + "-" + h
+	}
 	return base[:keep] + "-" + h + suffix
 }
 

@@ -364,6 +364,12 @@ type AgentRuntimeStatus struct {
 	// when applicable.
 	// +optional
 	Address string `json:"address,omitempty"`
+
+	// authSecretRef points at the provider-generated bearer token required to
+	// call the runtime address. The Secret is in the AgentDeployment namespace.
+	// Empty for one-shot Jobs and runtimes that do not expose a service.
+	// +optional
+	AuthSecretRef *SecretKeyRef `json:"authSecretRef,omitempty"`
 }
 
 // RuntimeWorkloadRef identifies the framework-native resource that
@@ -433,11 +439,19 @@ const (
 //   - framework, modelBinding                                     (core)
 //   - conditions[ModelBound], conditions[FrameworkReady]          (core)
 //   - conditions[Ready]                                           (core)
-//   - phase, runtime, replicas, conditions[ProviderReady]         (provider)
+//   - providerOwner, phase, runtime, replicas, conditions[ProviderReady]
+//     (provider)
 //
 // Both writers MUST use server-side apply with distinct field owners
 // so the API server itself prevents cross-writes.
 type AgentDeploymentStatus struct {
+	// providerOwner is the provider field manager currently serving this agent.
+	// Providers use it as a handoff lock: a successor waits until the previous
+	// provider has removed its workloads and released provider-owned status.
+	// Owned by the framework provider.
+	// +optional
+	ProviderOwner string `json:"providerOwner,omitempty"`
+
 	// phase is the high-level lifecycle phase. Owned by the framework provider.
 	// +optional
 	Phase AgentPhase `json:"phase,omitempty"`

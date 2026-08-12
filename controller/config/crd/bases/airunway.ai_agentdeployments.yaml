@@ -302,7 +302,8 @@ spec:
                 - framework, modelBinding                                     (core)
                 - conditions[ModelBound], conditions[FrameworkReady]          (core)
                 - conditions[Ready]                                           (core)
-                - phase, runtime, replicas, conditions[ProviderReady]         (provider)
+                - providerOwner, phase, runtime, replicas, conditions[ProviderReady]
+                  (provider)
 
               Both writers MUST use server-side apply with distinct field owners
               so the API server itself prevents cross-writes.
@@ -458,6 +459,13 @@ spec:
                 - Failed
                 - Terminating
                 type: string
+              providerOwner:
+                description: |-
+                  providerOwner is the provider field manager currently serving this agent.
+                  Providers use it as a handoff lock: a successor waits until the previous
+                  provider has removed its workloads and released provider-owned status.
+                  Owned by the framework provider.
+                type: string
               replicas:
                 description: |-
                   replicas summarises desired/ready instance counts. Owned by the
@@ -488,6 +496,24 @@ spec:
                       address is the in-cluster service URL the agent is reachable at,
                       when applicable.
                     type: string
+                  authSecretRef:
+                    description: |-
+                      authSecretRef points at the provider-generated bearer token required to
+                      call the runtime address. The Secret is in the AgentDeployment namespace.
+                      Empty for one-shot Jobs and runtimes that do not expose a service.
+                    properties:
+                      key:
+                        description: key inside the Secret to read.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: name of the Secret in the AgentDeployment's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
                   workloadRef:
                     description: |-
                       workloadRef points at the framework-native resource the provider

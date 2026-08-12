@@ -1,5 +1,8 @@
 # AgentProviderConfig samples — one per provider strategy.
 #
+# The alpha Agent Marketplace controllers ship disabled. Set the controller
+# argument --enable-agent-marketplace=true before applying these samples.
+#
 # AgentProviderConfig is cluster-scoped: it registers a framework and declares
 # what that framework supports. Admins create these; users only reference them
 # by name from spec.framework.name on an AgentDeployment.
@@ -104,9 +107,8 @@ spec:
 # only requirement is an image honouring the container contract — read
 # /etc/airunway/agent.json, take the endpoint from OPENAI_* env, serve HTTP.
 #
-# NOTE: the wrapper image below is not published yet. CrewAI is the easiest
-# real target because its library reads OPENAI_BASE_URL / OPENAI_API_KEY from
-# the environment natively, so the wrapper is thin.
+# The catalog image is built from images/agents/crewai/Dockerfile. It reads the
+# mounted contract and supports both long-running HTTP and one-shot Job modes.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
@@ -122,8 +124,8 @@ metadata:
           "name": "crewai-research-crew",
           "title": "Research crew (CrewAI)",
           "description": "A crew of specialist agents that research a topic and produce a written brief.",
-          "image": "ghcr.io/ai-runway/crewai-agent:latest",
-          "tags": ["research", "multi-agent"]
+          "tags": ["research", "multi-agent"],
+          "image": "ghcr.io/ai-runway/airunway/agent-crewai:latest"
         }
       ]
 spec:
@@ -143,8 +145,8 @@ spec:
 # Serves on :8000 rather than the default :8080, which spec.config.port handles
 # per-deployment — no provider change needed.
 #
-# NOTE: the wrapper image below is not published yet; LangGraph also needs
-# `langgraph build` to produce a servable image.
+# The catalog image is built from images/agents/langgraph/Dockerfile and exposes
+# the shared OpenAI-compatible contract on :8000.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
@@ -160,8 +162,8 @@ metadata:
           "name": "langgraph-stateful-agent",
           "title": "Stateful graph agent (LangGraph)",
           "description": "A graph-structured agent that keeps state across steps.",
-          "image": "ghcr.io/ai-runway/langgraph-agent:latest",
-          "tags": ["graph", "stateful"]
+          "tags": ["graph", "stateful"],
+          "image": "ghcr.io/ai-runway/airunway/agent-langgraph:latest"
         }
       ]
 spec:
@@ -177,15 +179,10 @@ spec:
 # ─────────────────────────────────────────────────────────────────────────────
 # openclaw — container backend. Personal automation agents.
 #
-# The one framework here that needs a writable root filesystem: it writes its
-# working directory and session state, so it cannot run with the hardened
-# read-only default. That is declared HERE, by the framework, not by each
-# AgentDeployment — a deployment author cannot relax it (the webhook rejects
-# readOnlyRootFilesystem: false), so the posture stays provider-owned.
-#
-# NOTE: the wrapper image below is not published yet. The upstream OpenClaw
-# image does not honour the container contract as-is — it uses its own config
-# format and serves :18789.
+# The catalog image is a pinned derivative of the official OpenClaw image. Its
+# state is redirected to the writable /tmp volume, so it retains the hardened
+# read-only root default. A narrow proxy exposes only health and OpenAI-compatible
+# chat routes while the authenticated native gateway stays on container loopback.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
@@ -200,16 +197,15 @@ metadata:
         {
           "name": "openclaw-personal-assistant",
           "title": "Personal AI assistant (OpenClaw)",
-          "description": "OpenClaw running as a personal automation agent. Bind it to any model AI Runway manages.",
-          "image": "ghcr.io/ai-runway/openclaw-agent:latest",
-          "tags": ["personal", "automation"]
+          "description": "OpenClaw running as a personal automation agent.",
+          "tags": ["personal", "automation"],
+          "image": "ghcr.io/ai-runway/airunway/agent-openclaw:latest"
         }
       ]
 spec:
   capabilities:
     backend: container
     requiresOperator: false
-    writableRootFilesystem: true
     modelBindingModes:
       - deploymentRef
       - externalAPI
@@ -219,12 +215,9 @@ spec:
 # ─────────────────────────────────────────────────────────────────────────────
 # hermes — container backend. Fast, concise task assistant.
 #
-# Registered with NO catalog image on purpose. The other container frameworks
-# ship a recipe carrying an image; hermes shows the other half of the contract —
-# a framework registered as pure capability metadata, where each
-# AgentDeployment brings its own image via spec.config.image. That is the
-# bring-your-own-image path, and it is what makes the container backend usable
-# for an image AI Runway has never heard of.
+# The catalog image is a pinned derivative of the official Hermes image. Its
+# wrapper configures the mounted model binding without persisting credentials
+# and exposes the authenticated native gateway through a narrow loopback proxy.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentProviderConfig
@@ -239,8 +232,9 @@ metadata:
         {
           "name": "hermes-task-assistant",
           "title": "Task assistant (Hermes)",
-          "description": "A fast, concise assistant for short tasks. Bring your own image with spec.config.image.",
-          "tags": ["assistant", "byo-image"]
+          "description": "A fast, concise assistant for short tasks.",
+          "tags": ["assistant"],
+          "image": "ghcr.io/ai-runway/airunway/agent-hermes:latest"
         }
       ]
 spec:

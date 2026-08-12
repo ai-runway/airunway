@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -67,6 +68,11 @@ const (
 	// namespace/name deploymentRef target so ModelDeployment changes can
 	// requeue only affected agents.
 	agentDeploymentModelRefIndexKey = "spec.model.deploymentRef"
+
+	// agentCredentialValidatingWebhookName identifies the fail-closed rule that
+	// authorizes the requesting user against a referenced credential Secret.
+	agentCredentialValidatingWebhookConfiguration = "airunway-validating-webhook-configuration"
+	agentCredentialValidatingWebhookName          = "vagentdeployment-v1alpha1.kb.io"
 )
 
 // AgentDeploymentReconciler reconciles the core, framework-neutral concerns
@@ -102,6 +108,12 @@ type AgentDeploymentReconciler struct {
 	//
 	// Defaults to false so a caller that forgets to set it fails closed.
 	CredentialAdmissionActive bool
+
+	// CredentialAdmissionCheck verifies that the fail-closed AgentDeployment
+	// validating admission rule is installed. Production wires this to an
+	// uncached ValidatingWebhookConfiguration read; the boolean above remains a
+	// fail-closed fallback for directly-constructed tests.
+	CredentialAdmissionCheck func(context.Context) error
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentdeployments,verbs=get;list;watch;update;patch
@@ -110,6 +122,7 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get
 
 // secretReader returns the uncached reader for Secret lookups, falling back to
 // the cached client when APIReader was not wired.
@@ -118,6 +131,90 @@ func (r *AgentDeploymentReconciler) secretReader() client.Reader {
 		return r.APIReader
 	}
 	return r.Client
+}
+
+// VerifyAgentCredentialAdmission checks that credential-bearing
+// AgentDeployments are protected by the expected fail-closed admission rule.
+// Merely starting the local webhook server is insufficient: a missing
+// ValidatingWebhookConfiguration means requests never reach it.
+func VerifyAgentCredentialAdmission(ctx context.Context, reader client.Reader) error {
+	var config admissionv1.ValidatingWebhookConfiguration
+	key := k8stypes.NamespacedName{Name: agentCredentialValidatingWebhookConfiguration}
+	if err := reader.Get(ctx, key, &config); err != nil {
+		return fmt.Errorf("read credential validating admission configuration: %w", err)
+	}
+
+	for i := range config.Webhooks {
+		webhook := &config.Webhooks[i]
+		if webhook.Name != agentCredentialValidatingWebhookName {
+			continue
+		}
+		// admissionregistration.k8s.io/v1 defaults an omitted failurePolicy to
+		// Fail. Accept nil as the fail-closed API default, but reject an explicit
+		// Ignore because that permits credential-bearing requests on webhook
+		// errors.
+		if webhook.FailurePolicy != nil && *webhook.FailurePolicy != admissionv1.Fail {
+			return fmt.Errorf("credential validating admission webhook must use failurePolicy Fail or its fail-closed default")
+		}
+		// Selectors and CEL match conditions can cause the API server to skip the
+		// webhook for a particular AgentDeployment even though the rule below
+		// appears to cover the resource globally. The controller cannot safely
+		// evaluate those predicates after admission (and, in particular, cannot
+		// reconstruct the requesting user's authorization), so credential
+		// resolution fails closed whenever the credential guard is conditional.
+		if webhook.NamespaceSelector != nil {
+			return fmt.Errorf("credential validating admission webhook must not use namespaceSelector")
+		}
+		if webhook.ObjectSelector != nil {
+			return fmt.Errorf("credential validating admission webhook must not use objectSelector")
+		}
+		if len(webhook.MatchConditions) > 0 {
+			return fmt.Errorf("credential validating admission webhook must not use matchConditions")
+		}
+		if webhook.ClientConfig.Service == nil || webhook.ClientConfig.Service.Path == nil ||
+			*webhook.ClientConfig.Service.Path != "/validate-airunway-ai-v1alpha1-agentdeployment" {
+			return fmt.Errorf("credential validating admission webhook has no matching service path")
+		}
+		createCovered := false
+		updateCovered := false
+		for j := range webhook.Rules {
+			rule := &webhook.Rules[j]
+			if admissionRuleContains(rule.Rule.APIGroups, airunwayv1alpha1.GroupVersion.Group) &&
+				admissionRuleContains(rule.Rule.APIVersions, airunwayv1alpha1.GroupVersion.Version) &&
+				admissionRuleContains(rule.Rule.Resources, "agentdeployments") &&
+				admissionRuleCoversNamespacedResources(rule.Rule.Scope) {
+				createCovered = createCovered || admissionOperationsContain(rule.Operations, admissionv1.Create)
+				updateCovered = updateCovered || admissionOperationsContain(rule.Operations, admissionv1.Update)
+			}
+		}
+		if createCovered && updateCovered {
+			return nil
+		}
+		return fmt.Errorf("credential validating admission webhook does not cover AgentDeployment CREATE and UPDATE")
+	}
+	return fmt.Errorf("credential validating admission webhook %q is not installed", agentCredentialValidatingWebhookName)
+}
+
+func admissionRuleContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want || value == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func admissionOperationsContain(values []admissionv1.OperationType, want admissionv1.OperationType) bool {
+	for _, value := range values {
+		if value == want || value == admissionv1.OperationAll {
+			return true
+		}
+	}
+	return false
+}
+
+func admissionRuleCoversNamespacedResources(scope *admissionv1.ScopeType) bool {
+	return scope == nil || *scope == admissionv1.AllScopes || *scope == admissionv1.NamespacedScope
 }
 
 // Reconcile resolves framework and model bindings for an AgentDeployment.
@@ -230,6 +327,12 @@ func providerReadyForGeneration(conds []metav1.Condition, generation int64) bool
 // the point where a stale endpoint stops being a surprise.
 const bindingHoldWindow = 10 * time.Minute
 
+// periodicallyRefreshedBindingHoldWindow reserves enough of the ten-minute
+// revocation budget for the initial polling blind spot and one reconciliation
+// interval. Without this subtraction the effective worst case is about fifteen
+// minutes: five before the first failed check plus ten more holding the binding.
+const periodicallyRefreshedBindingHoldWindow = bindingHoldWindow - agentCredentialRefreshInterval - agentRequeueInterval
+
 // retainBinding keeps the previously resolved status.modelBinding across a
 // RETRYABLE resolution failure, for at most bindingHoldWindow.
 //
@@ -271,7 +374,11 @@ func bindingHoldExpired(ad *airunwayv1alpha1.AgentDeployment) bool {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.LastTransitionTime.IsZero() {
 		return false
 	}
-	return time.Since(cond.LastTransitionTime.Time) > bindingHoldWindow
+	holdWindow := bindingHoldWindow
+	if bindingNeedsRefresh(ad) {
+		holdWindow = periodicallyRefreshedBindingHoldWindow
+	}
+	return time.Since(cond.LastTransitionTime.Time) > holdWindow
 }
 
 // bindingNeedsRefresh reports whether a resolved binding depends on something
@@ -455,10 +562,16 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 	//
 	// Keyless bindings are unaffected — only credential-bearing ones are refused,
 	// so a webhook-less development cluster still runs everything else.
-	if !r.CredentialAdmissionActive {
+	admissionErr := error(nil)
+	if r.CredentialAdmissionCheck != nil {
+		admissionErr = r.CredentialAdmissionCheck(ctx)
+	} else if !r.CredentialAdmissionActive {
+		admissionErr = fmt.Errorf("credential validating admission is not configured")
+	}
+	if admissionErr != nil {
 		return st, false, false, "CredentialAuthorizationUnavailable",
-			"credential-bearing bindings are refused because the validating webhook is disabled, " +
-				"and it is the only place the requesting user is authorized against the referenced Secret; " +
+			"credential-bearing bindings are refused because validating admission is unavailable: " + admissionErr.Error() + "; " +
+				"this is the only place the requesting user is authorized against the referenced Secret; " +
 				"enable the webhook, or use a binding with no credentialsRef"
 	}
 

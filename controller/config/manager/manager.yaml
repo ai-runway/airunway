@@ -44,6 +44,7 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --enable-provider-selector=true
+          - --enable-agent-marketplace=false
         image: controller:latest
         name: manager
         ports: []

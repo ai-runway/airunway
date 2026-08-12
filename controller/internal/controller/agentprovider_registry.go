@@ -62,8 +62,8 @@ type AgentProviderRegistration struct {
 	// backend rather than by a single name.
 	Backend airunwayv1alpha1.AgentProviderBackend
 
-	// Version is the build version reported to status.version. Empty disables
-	// version reporting for this provider.
+	// Version is the build version reported to status.version. Empty omits the
+	// version while retaining the provider liveness heartbeat.
 	Version string
 }
 
@@ -76,9 +76,6 @@ func RegisterAgentProviders(mgr manager.Manager, regs ...AgentProviderRegistrati
 		reconciler := reg.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme())
 		if err := reconciler.SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("unable to create controller %q: %w", reg.Name, err)
-		}
-		if reg.Version == "" {
-			continue
 		}
 		reporter := &AgentProviderVersionReconciler{
 			Client:    mgr.GetClient(),

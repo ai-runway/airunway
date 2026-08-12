@@ -89,6 +89,13 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+		reporter := &AgentProviderVersionReconciler{
+			Client: k8sClient, Name: "test-" + name, Version: "test",
+			Backend: caps.Backend,
+		}
+		result, err := reporter.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(agentProviderReporterHeartbeatInterval))
 	}
 
 	get := func(name string) *airunwayv1alpha1.AgentProviderConfig {
@@ -106,7 +113,104 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		apc := get("cap-container")
 		Expect(apc.Status.Ready).NotTo(BeNil())
 		Expect(*apc.Status.Ready).To(BeTrue())
+		Expect(apc.Status.LastHeartbeat).NotTo(BeNil(), "the provider reporter must publish the liveness heartbeat")
+	})
+
+	It("keeps a framework not-ready until its provider process reports a heartbeat", func() {
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "cap-no-provider"},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+
+		reconcileWith("cap-no-provider")
+		apc = get("cap-no-provider")
+		Expect(*apc.Status.Ready).To(BeFalse())
+		cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
+		Expect(cond.Reason).To(Equal("ProviderHeartbeatMissing"))
+	})
+
+	It("marks a framework not-ready when its provider heartbeat is stale", func() {
+		create("cap-stale-provider", airunwayv1alpha1.AgentProviderCapabilities{
+			Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+		})
+		apc := get("cap-stale-provider")
+		stale := metav1.NewTime(time.Now().Add(-agentProviderHeartbeatTimeout - time.Minute))
+		apc.Status.LastHeartbeat = &stale
+		Expect(k8sClient.Status().Update(ctx, apc)).To(Succeed())
+
+		reconcileWith("cap-stale-provider")
+		apc = get("cap-stale-provider")
+		Expect(*apc.Status.Ready).To(BeFalse())
+		cond := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
+		Expect(cond.Reason).To(Equal("ProviderHeartbeatStale"))
+	})
+
+	It("retains an existing ready verdict while a missing heartbeat bootstraps", func() {
+		now := time.Date(2026, time.August, 12, 1, 2, 3, 0, time.UTC)
+		previousReady := true
+		r := &AgentProviderConfigReconciler{now: func() time.Time { return now }}
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+			Status: airunwayv1alpha1.AgentProviderConfigStatus{Ready: &previousReady},
+		}
+
+		ready, reason, _ := r.evaluate(apc)
+		Expect(ready).To(BeTrue())
+		Expect(reason).To(Equal("ProviderHeartbeatBootstrapRetaining"))
+	})
+
+	It("retains a stale upgrade heartbeat only for the bounded bootstrap window", func() {
+		now := time.Date(2026, time.August, 12, 1, 2, 3, 0, time.UTC)
+		previousReady := true
+		stale := metav1.NewTime(now.Add(-agentProviderHeartbeatTimeout - time.Minute))
+		r := &AgentProviderConfigReconciler{now: func() time.Time { return now }}
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+			Status: airunwayv1alpha1.AgentProviderConfigStatus{
+				Ready:         &previousReady,
+				LastHeartbeat: &stale,
+			},
+		}
+
+		ready, reason, _ := r.evaluate(apc)
+		Expect(ready).To(BeTrue())
+		Expect(reason).To(Equal("ProviderHeartbeatBootstrapRetaining"))
+
+		now = now.Add(agentProviderHeartbeatBootstrapGrace + time.Second)
+		ready, reason, _ = r.evaluate(apc)
+		Expect(ready).To(BeFalse())
+		Expect(reason).To(Equal("ProviderHeartbeatStale"))
+	})
+
+	It("publishes a heartbeat even when the provider version is empty", func() {
+		name := "cap-versionless-provider"
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+
+		reporter := &AgentProviderVersionReconciler{
+			Client: k8sClient, Name: "test-versionless", Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+		}
+		result, err := reporter.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(agentProviderReporterHeartbeatInterval))
+
+		apc = get(name)
 		Expect(apc.Status.LastHeartbeat).NotTo(BeNil())
+		Expect(apc.Status.Version).To(BeEmpty())
 	})
 
 	It("marks a crd backend ready only when its operator API group is served", func() {
@@ -214,6 +318,12 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+		reporter := &AgentProviderVersionReconciler{
+			Client: k8sClient, Name: "test-install-hint", Version: "test",
+			Backend: airunwayv1alpha1.AgentProviderBackendCRD,
+		}
+		_, err := reporter.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: apc.Name}})
+		Expect(err).NotTo(HaveOccurred())
 
 		reconcileWith("cap-crd-install-hint") // no groups served
 		out := get("cap-crd-install-hint")
@@ -228,10 +338,9 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 // TestProviderConfigReadinessTriggerDropsSelfCausedUpdates pins the predicate
 // that stops this controller re-triggering on its own status writes.
 //
-// Every reconcile writes a fresh lastHeartbeat. Without the filter that patch
-// returns as an update event and enqueues another reconcile, so what paces the
-// controller is the feedback loop rather than the 60s RequeueAfter. Raised three
-// times in review; this is what keeps it closed.
+// Provider heartbeat and readiness writes are status-only. Without the filter
+// those patches return as update events and enqueue another reconcile, so the
+// feedback loop rather than RequeueAfter paces the controller.
 func TestProviderConfigReadinessTriggerDropsSelfCausedUpdates(t *testing.T) {
 	base := func() *airunwayv1alpha1.AgentProviderConfig {
 		return &airunwayv1alpha1.AgentProviderConfig{
@@ -258,6 +367,15 @@ func TestProviderConfigReadinessTriggerDropsSelfCausedUpdates(t *testing.T) {
 		after.Status.Ready = ptrBool(true)
 		if p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
 			t.Error("a status-only update must not enqueue another reconcile")
+		}
+	})
+
+	t.Run("a provider heartbeat appearing triggers readiness immediately", func(t *testing.T) {
+		before, after := base(), base()
+		now := metav1.Now()
+		after.Status.LastHeartbeat = &now
+		if !p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
+			t.Error("a missing-to-fresh provider heartbeat must trigger readiness")
 		}
 	})
 

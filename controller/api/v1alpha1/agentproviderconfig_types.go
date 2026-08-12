@@ -201,13 +201,9 @@ type AgentProviderConfigSpec struct {
 // AgentProviderConfigStatus reports whether a framework is ready to accept
 // AgentDeployments.
 //
-// Provider-reported readiness is the intended end state, but it is not what
-// happens today: `ready`, `lastHeartbeat` and the Ready condition are written by
-// the core readiness reconciler (field owner `airunway-agents-provider-readiness`),
-// and `version` by a per-provider version reporter. Core therefore infers health
-// from backend metadata and operator CRD presence rather than from the process
-// that actually renders agents — so a framework can report ready while its shim
-// is absent. Tracked as a known gap; see docs/agent-marketplace-design.md.
+// The framework provider writes version and lastHeartbeat. The core readiness
+// reconciler requires a fresh provider heartbeat, then combines it with backend
+// metadata and operator-API discovery to publish ready and the Ready condition.
 type AgentProviderConfigStatus struct {
 	// ready indicates whether the framework provider controller is
 	// healthy and willing to accept AgentDeployments. The dashboard
@@ -224,8 +220,8 @@ type AgentProviderConfigStatus struct {
 	// +optional
 	Version string `json:"version,omitempty"`
 
-	// lastHeartbeat is the most recent provider status write. The
-	// dashboard treats stale heartbeats as the provider being unhealthy.
+	// lastHeartbeat is the most recent write by the framework provider process.
+	// Core treats a missing or stale heartbeat as provider unavailability.
 	// +optional
 	LastHeartbeat *metav1.Time `json:"lastHeartbeat,omitempty"`
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,7 +39,7 @@ import (
 const (
 	// AgentProviderReadinessFieldOwner is the SSA field manager for the
 	// provider-readiness reconciler, distinct from every other owner so it
-	// only ever writes status.ready / lastHeartbeat / the Ready condition.
+	// only ever writes status.ready and the Ready condition.
 	AgentProviderReadinessFieldOwner = "airunway-agents-provider-readiness"
 
 	// agentProviderHeartbeatInterval is how often provider readiness is
@@ -46,17 +47,29 @@ const (
 	// flips back to not-ready, and a stale heartbeat is detectable.
 	agentProviderHeartbeatInterval = 60 * time.Second
 
+	// agentProviderHeartbeatTimeout allows several 30-second reporter cycles
+	// before declaring a process absent, while still bounding stale readiness.
+	agentProviderHeartbeatTimeout = 2 * time.Minute
+
+	// agentProviderHeartbeatBootstrapGrace prevents an already-evaluated
+	// framework from visibly flapping not-ready when the core readiness
+	// reconciler wins the startup race against its provider reporter. The
+	// window is deliberately bounded: after one full heartbeat timeout, a
+	// still-missing reporter is a liveness failure and must make the framework
+	// not-ready rather than retaining a stale verdict indefinitely.
+	agentProviderHeartbeatBootstrapGrace = agentProviderHeartbeatTimeout
+
 	// agentProviderReadyCondition is the condition type mirroring status.ready.
 	agentProviderReadyCondition = "Ready"
 )
 
-// AgentProviderConfigReconciler keeps AgentProviderConfig.status.ready and
-// lastHeartbeat current so that provisioning an agent is fully airunway-driven
-// and never depends on a human hand-patching provider readiness.
+// AgentProviderConfigReconciler keeps AgentProviderConfig.status.ready current
+// so provisioning never depends on a human hand-patching provider readiness.
+// The actual provider process owns lastHeartbeat through its reporter.
 //
 // Readiness is data-driven from the provider's declared capabilities:
-//   - container backends are ready whenever this controller is running, because
-//     the generic container renderer has no external dependency;
+//   - every backend first requires a fresh heartbeat from its renderer process;
+//   - container backends then need no external dependency;
 //   - crd backends are ready only once their declared operatorAPIGroup is served
 //     in the cluster, so core never renders an agent before the framework
 //     operator is installed. (Installing that operator stays an out-of-band /
@@ -67,6 +80,14 @@ type AgentProviderConfigReconciler struct {
 	// Discovery is used to check whether a crd backend's operator API group
 	// is served in the cluster.
 	Discovery discovery.DiscoveryInterface
+
+	// The bootstrap deadline is initialized lazily by the first reconciliation,
+	// not SetupWithManager. That keeps the full grace window available after
+	// leader election or a slow manager startup. once makes concurrent first
+	// reconciliations safe. now is injectable for deterministic unit tests.
+	heartbeatBootstrapOnce     sync.Once
+	heartbeatBootstrapDeadline time.Time
+	now                        func() time.Time
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
@@ -104,6 +125,17 @@ func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 // provider metadata (such as install instructions annotations).
 func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProviderConfig) (ready bool, reason, msg string) {
 	caps := apc.Spec.Capabilities
+	now := r.currentTime()
+	r.startHeartbeatBootstrap(now)
+	if apc.Status.LastHeartbeat == nil {
+		return r.heartbeatUnavailableDuringBootstrap(apc, now,
+			"ProviderHeartbeatMissing", "The framework provider has not reported a heartbeat")
+	}
+	if now.Sub(apc.Status.LastHeartbeat.Time) > agentProviderHeartbeatTimeout {
+		return r.heartbeatUnavailableDuringBootstrap(apc, now,
+			"ProviderHeartbeatStale",
+			fmt.Sprintf("The framework provider's last heartbeat is older than %s", agentProviderHeartbeatTimeout))
+	}
 
 	// Catalog validity is deliberately NOT a readiness gate.
 	//
@@ -167,6 +199,39 @@ func (r *AgentProviderConfigReconciler) evaluate(apc *airunwayv1alpha1.AgentProv
 	return true, "OperatorInstalled", fmt.Sprintf("operator API %q is served", group)
 }
 
+func (r *AgentProviderConfigReconciler) currentTime() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+func (r *AgentProviderConfigReconciler) startHeartbeatBootstrap(now time.Time) {
+	r.heartbeatBootstrapOnce.Do(func() {
+		if r.heartbeatBootstrapDeadline.IsZero() {
+			r.heartbeatBootstrapDeadline = now.Add(agentProviderHeartbeatBootstrapGrace)
+		}
+	})
+}
+
+// heartbeatUnavailableDuringBootstrap retains an existing readiness verdict
+// while provider reporters perform their first reconciliation after a core
+// controller restart. It never makes a new framework ready: a config without a
+// prior verdict still fails closed. Retention ends after a bounded grace window
+// so a genuinely dead provider is detected and normal binding-hold cleanup can
+// proceed.
+func (r *AgentProviderConfigReconciler) heartbeatUnavailableDuringBootstrap(
+	apc *airunwayv1alpha1.AgentProviderConfig,
+	now time.Time,
+	reason, msg string,
+) (ready bool, resultReason, resultMsg string) {
+	if apc.Status.Ready != nil && now.Before(r.heartbeatBootstrapDeadline) {
+		return *apc.Status.Ready, "ProviderHeartbeatBootstrapRetaining",
+			fmt.Sprintf("%s; retaining previous readiness during provider reporter bootstrap", msg)
+	}
+	return false, reason, msg
+}
+
 // groupServed reports whether the cluster serves the operator API that a
 // framework renders into.
 //
@@ -204,16 +269,15 @@ func (r *AgentProviderConfigReconciler) groupServed(groupVersion string) (bool, 
 	return false, nil
 }
 
-// applyReadiness writes status.ready, lastHeartbeat, and the Ready condition via
-// server-side apply under the readiness field owner, leaving other status
-// fields (e.g. version) untouched.
+// applyReadiness writes status.ready and the Ready condition via server-side
+// apply under the readiness field owner, leaving provider-owned status fields
+// (version and lastHeartbeat) untouched.
 func (r *AgentProviderConfigReconciler) applyReadiness(
 	ctx context.Context,
 	apc *airunwayv1alpha1.AgentProviderConfig,
 	ready bool,
 	reason, msg string,
 ) error {
-	now := metav1.Now()
 	condStatus := metav1.ConditionFalse
 	if ready {
 		condStatus = metav1.ConditionTrue
@@ -226,8 +290,7 @@ func (r *AgentProviderConfigReconciler) applyReadiness(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: apc.Name},
 		Status: airunwayv1alpha1.AgentProviderConfigStatus{
-			Ready:         &ready,
-			LastHeartbeat: &now,
+			Ready: &ready,
 			Conditions: []metav1.Condition{{
 				Type:               agentProviderReadyCondition,
 				Status:             condStatus,
@@ -264,25 +327,16 @@ func (r *AgentProviderConfigReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Complete(r)
 }
 
-// providerConfigReadinessTrigger drops the status-only updates this controller
-// causes itself.
-//
-// Every reconcile writes a fresh lastHeartbeat. Without a predicate that patch
-// comes straight back as an update event and enqueues another reconcile, so the
-// 60-second RequeueAfter is not what paces this controller — the feedback loop
-// is. Within a single clock second the write is a no-op (metav1.Time serialises
-// at second precision, so SSA sees no change and no event fires), which bounds
-// it; but once a reconcile-plus-delivery cycle crosses a second boundary each
-// pass writes a new timestamp and re-triggers, and the ceiling becomes one write
-// per config per second rather than one per minute.
+// providerConfigReadinessTrigger drops routine status-only writes. It retains
+// the one status transition that matters immediately: a provider heartbeat
+// becoming fresh after being missing or stale. Routine 30-second heartbeats are
+// then ignored and the 60-second RequeueAfter remains the readiness pacer.
 //
 // Filtering here removes the question entirely, and matches what the container
 // provider already does for this same type via ProviderConfigRelevantChange.
 //
-// Kept: creates, deletes, generation changes (spec edits) and annotation changes
-// (install instructions and the catalog feed readiness messages). Dropped: pure
-// status writes, which this controller is the author of and never needs to react
-// to.
+// Kept: creates, deletes, generation changes, annotation changes, and heartbeat
+// recovery. Dropped: routine heartbeat/version/readiness status writes.
 func providerConfigReadinessTrigger() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -292,6 +346,12 @@ func providerConfigReadinessTrigger() predicate.Predicate {
 				return true
 			}
 			if oldAPC.Generation != newAPC.Generation {
+				return true
+			}
+			now := time.Now()
+			oldHeartbeatFresh := oldAPC.Status.LastHeartbeat != nil && now.Sub(oldAPC.Status.LastHeartbeat.Time) <= agentProviderHeartbeatTimeout
+			newHeartbeatFresh := newAPC.Status.LastHeartbeat != nil && now.Sub(newAPC.Status.LastHeartbeat.Time) <= agentProviderHeartbeatTimeout
+			if !oldHeartbeatFresh && newHeartbeatFresh {
 				return true
 			}
 			return !maps.Equal(oldAPC.Annotations, newAPC.Annotations)

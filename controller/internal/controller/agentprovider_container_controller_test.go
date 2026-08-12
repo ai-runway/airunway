@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -88,7 +89,12 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 		BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
 		CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "openai-api-key", Key: "api-key"},
 	}
-	dep := renderAgentDeployment(ad, renderInputs{cfg: containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding: binding, configMapName: "research-config", writableRoot: false, securityOverrides: nil})
+	authRef := &airunwayv1alpha1.SecretKeyRef{Name: "research-api-auth", Key: "token"}
+	dep := renderAgentDeployment(ad, renderInputs{
+		cfg: containerConfig{Image: "ghcr.io/x/crewai:poc"}, binding: binding,
+		configMapName: "research-config", authSecretRef: authRef,
+		accessTokenHash: "access-hash", writableRoot: false, securityOverrides: nil,
+	})
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != "ghcr.io/x/crewai:poc" {
@@ -122,13 +128,19 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 
 	// Model binding injected as OpenAI-compatible env.
 	env := map[string]string{}
-	var apiKeyFromSecret bool
+	var apiKeyFromSecret, accessTokenFromSecret bool
 	for _, e := range c.Env {
 		env[e.Name] = e.Value
 		if e.Name == "OPENAI_API_KEY" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
 			apiKeyFromSecret = true
 			if e.ValueFrom.SecretKeyRef.Name != "openai-api-key" {
 				t.Errorf("OPENAI_API_KEY secret = %q", e.ValueFrom.SecretKeyRef.Name)
+			}
+		}
+		if e.Name == agentAccessTokenEnv && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			accessTokenFromSecret = true
+			if e.ValueFrom.SecretKeyRef.Name != authRef.Name || e.ValueFrom.SecretKeyRef.Key != authRef.Key {
+				t.Errorf("%s secret ref = %+v, want %+v", agentAccessTokenEnv, e.ValueFrom.SecretKeyRef, authRef)
 			}
 		}
 	}
@@ -138,8 +150,29 @@ func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 	if env["AIRUNWAY_AGENT_CONFIG"] != agentConfigMountPath {
 		t.Errorf("AIRUNWAY_AGENT_CONFIG = %q, want %q", env["AIRUNWAY_AGENT_CONFIG"], agentConfigMountPath)
 	}
+	if env["AIRUNWAY_AGENT_MODE"] != "server" {
+		t.Errorf("AIRUNWAY_AGENT_MODE = %q, want server", env["AIRUNWAY_AGENT_MODE"])
+	}
+	if env["AIRUNWAY_AGENT_PORT"] != "8080" {
+		t.Errorf("AIRUNWAY_AGENT_PORT = %q, want 8080", env["AIRUNWAY_AGENT_PORT"])
+	}
+	if c.StartupProbe == nil || c.StartupProbe.TCPSocket == nil || c.StartupProbe.TCPSocket.Port.IntValue() != 8080 {
+		t.Errorf("startup probe = %+v, want TCP :8080", c.StartupProbe)
+	}
+	if c.ReadinessProbe == nil || c.ReadinessProbe.TCPSocket == nil || c.ReadinessProbe.TCPSocket.Port.IntValue() != 8080 {
+		t.Errorf("readiness probe = %+v, want TCP :8080", c.ReadinessProbe)
+	}
+	if c.LivenessProbe == nil || c.LivenessProbe.TCPSocket == nil || c.LivenessProbe.TCPSocket.Port.IntValue() != 8080 {
+		t.Errorf("liveness probe = %+v, want TCP :8080", c.LivenessProbe)
+	}
 	if !apiKeyFromSecret {
 		t.Error("OPENAI_API_KEY must be sourced from the binding secret")
+	}
+	if !accessTokenFromSecret {
+		t.Errorf("%s must be sourced from the provider-managed access Secret", agentAccessTokenEnv)
+	}
+	if got := dep.Spec.Template.Annotations[agentAccessChecksumAnnotation]; got != "access-hash" {
+		t.Errorf("access token checksum = %q, want access-hash", got)
 	}
 }
 
@@ -416,6 +449,9 @@ func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
 	if c.Ports[0].ContainerPort != 9000 {
 		t.Errorf("containerPort = %d, want 9000", c.Ports[0].ContainerPort)
 	}
+	if c.ReadinessProbe == nil || c.ReadinessProbe.TCPSocket == nil || c.ReadinessProbe.TCPSocket.Port.IntValue() != 9000 {
+		t.Errorf("readiness probe = %+v, want TCP :9000", c.ReadinessProbe)
+	}
 	// The Service must target the overridden port too.
 	svc := renderAgentService(ad, cfg)
 	if svc.Spec.Ports[0].TargetPort.IntValue() != 9000 {
@@ -460,6 +496,7 @@ func TestParseContainerConfig(t *testing.T) {
 
 func TestRenderAgentJob(t *testing.T) {
 	ad := containerAD("swarm", containerConfig{Image: "img:1"}, nil)
+	ad.Spec.Lifecycle = airunwayv1alpha1.AgentLifecycleJob
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
 	job, err := renderAgentJob(ad, renderInputs{cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "swarm-config", writableRoot: false, securityOverrides: nil})
 	if err != nil {
@@ -480,6 +517,16 @@ func TestRenderAgentJob(t *testing.T) {
 	}
 	if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil || c.SecurityContext.Capabilities.Drop[0] != "ALL" {
 		t.Error("job pod must share the hardened security posture (drop ALL)")
+	}
+	env := map[string]string{}
+	for _, value := range c.Env {
+		env[value.Name] = value.Value
+	}
+	if env["AIRUNWAY_AGENT_MODE"] != "job" {
+		t.Errorf("AIRUNWAY_AGENT_MODE = %q, want job", env["AIRUNWAY_AGENT_MODE"])
+	}
+	if c.StartupProbe != nil || c.ReadinessProbe != nil || c.LivenessProbe != nil {
+		t.Error("one-shot jobs must not receive server probes")
 	}
 }
 
@@ -579,12 +626,34 @@ var _ = Describe("Container provider", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run-config", Namespace: "default"}, cm)).To(Succeed())
 		Expect(cm.Data).To(HaveKey(agentConfigFileName))
 
-		By("creating the Deployment with the BYO image and injected binding env")
+		By("creating an independently scoped access token for the outward endpoint")
+		accessSecret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run-api-auth", Namespace: "default"}, accessSecret)).To(Succeed())
+		Expect(accessSecret.OwnerReferences).To(HaveLen(1))
+		Expect(accessSecret.OwnerReferences[0].Name).To(Equal("c-run"))
+		Expect(accessSecret.Immutable).NotTo(BeNil())
+		Expect(*accessSecret.Immutable).To(BeTrue())
+		accessToken := accessSecret.Data[agentAccessTokenKey]
+		Expect(accessToken).To(HaveLen(43), "32 random bytes should be encoded as unpadded base64url")
+		accessDigest := sha256.Sum256(accessToken)
+
+		By("creating the Deployment with the BYO image and injected bindings")
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-run", Namespace: "default"}, dep)).To(Succeed())
 		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/x/crewai:poc"))
 		Expect(dep.OwnerReferences).To(HaveLen(1))
 		Expect(dep.OwnerReferences[0].Name).To(Equal("c-run"))
+		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(agentAccessChecksumAnnotation, fmt.Sprintf("%x", accessDigest)))
+		var accessEnv *corev1.EnvVar
+		for i := range dep.Spec.Template.Spec.Containers[0].Env {
+			if dep.Spec.Template.Spec.Containers[0].Env[i].Name == agentAccessTokenEnv {
+				accessEnv = &dep.Spec.Template.Spec.Containers[0].Env[i]
+				break
+			}
+		}
+		Expect(accessEnv).NotTo(BeNil())
+		Expect(accessEnv.ValueFrom.SecretKeyRef.Name).To(Equal("c-run-api-auth"))
+		Expect(accessEnv.ValueFrom.SecretKeyRef.Key).To(Equal(agentAccessTokenKey))
 
 		By("creating the Service")
 		svc := &corev1.Service{}
@@ -596,6 +665,10 @@ var _ = Describe("Container provider", func() {
 		Expect(prCond(ad).Status).To(Equal(metav1.ConditionFalse))
 		// Core-owned fields survive the provider write.
 		Expect(ad.Status.ModelBinding).NotTo(BeNil())
+		Expect(ad.Status.Runtime).NotTo(BeNil())
+		Expect(ad.Status.Runtime.AuthSecretRef).To(Equal(&airunwayv1alpha1.SecretKeyRef{
+			Name: "c-run-api-auth", Key: agentAccessTokenKey,
+		}))
 
 		By("staying Deploying while the Deployment status still describes the previous generation")
 		dep.Status.Replicas = 1
@@ -637,6 +710,35 @@ var _ = Describe("Container provider", func() {
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-catalog", Namespace: "default"}, dep)).To(Succeed())
 		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/x/from-catalog:poc"))
+	})
+
+	It("refuses to adopt a same-named user access Secret", func() {
+		makeContainerProvider("crewai-auth-conflict", "")
+		makeContainerAgent("c-auth-conflict", "crewai-auth-conflict", "ghcr.io/x/crewai:poc")
+		reconcileCore("c-auth-conflict")
+
+		foreign := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "c-auth-conflict-api-auth", Namespace: "default"},
+			Data:       map[string][]byte{agentAccessTokenKey: []byte("user-owned-token-must-survive")},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+
+		r := &ContainerProviderReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: "c-auth-conflict", Namespace: "default",
+		}})
+		Expect(err).To(MatchError(ContainSubstring("refusing to adopt agent access Secret")))
+
+		current := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: foreign.Name, Namespace: foreign.Namespace}, current)).To(Succeed())
+		Expect(current.Data[agentAccessTokenKey]).To(Equal([]byte("user-owned-token-must-survive")))
+		Expect(current.OwnerReferences).To(BeEmpty())
+
+		out := getAgent("c-auth-conflict")
+		Expect(prCond(out).Reason).To(Equal("IngressCredentialProvisionFailed"))
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-auth-conflict", Namespace: "default"}, dep)).NotTo(Succeed())
 	})
 
 	It("fails with MissingImage when neither config nor catalog supplies an image", func() {
@@ -705,15 +807,21 @@ var _ = Describe("Container provider", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, job)).To(Succeed())
 		Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 		Expect(job.OwnerReferences).To(HaveLen(1))
+		for i := range job.Spec.Template.Spec.Containers[0].Env {
+			Expect(job.Spec.Template.Spec.Containers[0].Env[i].Name).NotTo(Equal(agentAccessTokenEnv))
+		}
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, dep)).NotTo(Succeed())
 		svc := &corev1.Service{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, svc)).NotTo(Succeed())
+		accessSecret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job-api-auth", Namespace: "default"}, accessSecret)).NotTo(Succeed())
 
 		By("reporting Deploying while the Job has not started")
 		ad2 := getAgent("c-job")
 		Expect(ad2.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseDeploying))
 		Expect(prCond(ad2).Reason).To(Equal("JobPending"))
+		Expect(ad2.Status.Runtime.AuthSecretRef).To(BeNil())
 
 		By("flipping to Running once the Job reports an active pod")
 		job.Status.Active = 1
@@ -724,6 +832,10 @@ var _ = Describe("Container provider", func() {
 		Expect(prCond(ad2).Status).To(Equal(metav1.ConditionTrue))
 
 		By("flipping to Completed once the Job succeeds")
+		// Reconcile server-side-applied the Job after the first status update,
+		// which can advance resourceVersion while converting the create manager's
+		// managed-fields entry to Apply. Refresh before the next status write.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "c-job", Namespace: "default"}, job)).To(Succeed())
 		job.Status.Active = 0
 		job.Status.Succeeded = 1
 		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
@@ -947,16 +1059,28 @@ var _ = Describe("Container provider: catalog and backend-switch handling", func
 
 		Expect(container("c-switch")).To(Succeed())
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch", Namespace: "default"}, dep)
-		Expect(apierrors.IsNotFound(err)).To(BeTrue(),
-			"the orphaned Deployment must be removed, not left running unmanaged")
+		if err == nil {
+			Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse(),
+				"the orphaned Deployment must be terminating, not left running unmanaged")
+		} else {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}
 
-		By("also removing the Service and ConfigMap")
+		By("also starting foreground removal of the Service and ConfigMap")
 		svc := &corev1.Service{}
-		Expect(apierrors.IsNotFound(
-			k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch", Namespace: "default"}, svc))).To(BeTrue())
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch", Namespace: "default"}, svc)
+		if err == nil {
+			Expect(svc.DeletionTimestamp.IsZero()).To(BeFalse())
+		} else {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}
 		cm := &corev1.ConfigMap{}
-		Expect(apierrors.IsNotFound(
-			k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch-config", Namespace: "default"}, cm))).To(BeTrue())
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: "c-switch-config", Namespace: "default"}, cm)
+		if err == nil {
+			Expect(cm.DeletionTimestamp.IsZero()).To(BeFalse())
+		} else {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}
 	})
 })
 

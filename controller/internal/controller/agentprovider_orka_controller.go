@@ -29,9 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -66,8 +64,8 @@ type OrkaProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// APIReader is an uncached reader, used only for the ownership check before
-	// writing the managed no-auth Secret.
+	// APIReader is the uncached reader used at ownership and deletion
+	// boundaries, including the managed no-auth Secret.
 	//
 	// It must not be the manager's cached client. A cached typed Get on a Secret
 	// starts a cluster-wide Secret informer, whose initial list/watch this
@@ -94,8 +92,6 @@ type orkaAgentConfig struct {
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
 func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	var ad airunwayv1alpha1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &ad); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -118,32 +114,47 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// DeleteOwned skips objects that are absent, of an unserved kind, or not
 		// controlled by this AgentDeployment, so this is safe for agents this
 		// provider never rendered.
-		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+		pending, err := agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), &ad,
 			agentprovider.UnstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
 			agentprovider.UnstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
-		); err != nil {
+		)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseDeploying, nil, metav1.ConditionFalse,
+				"ProviderHandoffCleanup", "Removing Orka resources before handing the agent to its new provider")
 		}
 		// See the kagent provider: release the provider-owned status and its SSA
 		// ownership so the status is not left stale and a successor provider can
 		// take over.
 		return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, &ad, OrkaFieldOwner)
 	}
+	if agentprovider.ProviderHandoffPending(&ad, OrkaFieldOwner) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 
 	switch agentprovider.ClassifyBinding(&ad) {
 	case agentprovider.BindingUnavailable:
 		// No binding at all: tear down the rendered Provider/Agent so it stops
 		// using stale credentials before reporting Pending.
-		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+		pending, err := agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), &ad,
 			agentprovider.UnstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
 			agentprovider.UnstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
-		); err != nil {
+		)
+		if err != nil {
 			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 				metav1.ConditionFalse, "BindingCleanupFailed", err.Error())
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseDeploying, nil, metav1.ConditionFalse,
+				"BindingCleanup", "Stopping Orka resources after the model binding was removed")
 		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
@@ -154,7 +165,7 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.secretReader(), r.Scheme, &ad, binding, OrkaFieldOwner)
+	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.objectReader(), r.Scheme, &ad, binding, OrkaFieldOwner)
 	if err != nil {
 		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -176,21 +187,9 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	agent := renderOrkaAgent(&ad, cfg, binding, provider.GetName())
 
 	for _, obj := range []*unstructured.Unstructured{provider, agent} {
-		if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
+		if err := agentprovider.ApplyOwned(ctx, r.Client, r.objectReader(), r.Scheme, &ad, obj, OrkaFieldOwner, true); err != nil {
 			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 				metav1.ConditionFalse, "OwnershipConflict", err.Error())
-			if statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{}, err
-		}
-		if err := controllerutil.SetControllerReference(&ad, obj, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("set owner reference on %s: %w", obj.GetKind(), err)
-		}
-		if err := r.Patch(ctx, obj, client.Apply, client.FieldOwner(OrkaFieldOwner), client.ForceOwnership); err != nil {
-			logger.Error(err, "Failed to apply Orka resource", "kind", obj.GetKind(), "name", obj.GetName())
-			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
-				metav1.ConditionFalse, "RenderFailed", err.Error())
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -204,7 +203,11 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		},
 	}
 
-	if agentprovider.UpstreamCRReady(ctx, r.Client, orkaAgentGVK, agent.GetName(), agent.GetNamespace()) {
+	ready, err := agentprovider.UpstreamObjectReady(agent)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if ready {
 		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.status(ctx, &ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, metav1.ConditionTrue, "AgentReady", "Orka Agent reports ready")
 	}
@@ -329,10 +332,9 @@ func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// secretReader returns the uncached reader for Secret existence checks, falling
-// back to the cached client so unit tests that construct the reconciler
-// directly keep working. Production always sets APIReader.
-func (r *OrkaProviderReconciler) secretReader() client.Reader {
+// objectReader returns the uncached reader for ownership and deletion checks,
+// falling back to the cached client for directly-constructed tests.
+func (r *OrkaProviderReconciler) objectReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}

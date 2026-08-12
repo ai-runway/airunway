@@ -184,7 +184,7 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableProviderSelector, "enable-provider-selector", true,
 		"If set, the controller will run provider selection for ModelDeployments without explicit provider.name")
-	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", true,
+	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", false,
 		"If set, the controller runs the Agent Marketplace controllers (AgentDeployment, AgentProviderConfig, and the in-process framework providers). "+
 			"Disable to turn the feature off without redeploying a different image.")
 	flag.BoolVar(&disableCertRotation, "disable-cert-rotation", false,
@@ -423,11 +423,10 @@ func main() {
 		}
 	}
 
-	// The Agent Marketplace controllers are gated so the feature can be turned
-	// off in a running cluster without shipping a different image. They are
-	// inert without AgentDeployment or AgentProviderConfig objects, so the
-	// default is on; the switch exists for the case where that turns out to be
-	// wrong somewhere we cannot reach quickly.
+	// The Agent Marketplace controllers are opt-in while the alpha API's
+	// ownership, RBAC, and upgrade behavior are being proven. Keeping the
+	// shipped controller inactive also avoids starting informers for the alpha
+	// CRDs before an operator explicitly enables the feature.
 	if enableAgentMarketplace {
 		if err := (&controller.AgentDeploymentReconciler{
 			Client: mgr.GetClient(),
@@ -436,10 +435,15 @@ func main() {
 			// cluster-wide Secret informer, which needs list/watch on every Secret
 			// in the cluster and would hold them all in memory.
 			APIReader: mgr.GetAPIReader(),
-			// Without the webhook nothing authorizes the requesting user against
-			// the Secret they referenced, so the reconciler refuses those bindings
-			// instead of resolving a credential on an unchecked request.
-			CredentialAdmissionActive: webhooksEnabled,
+			// Starting the local webhook server does not prove the admission rule is
+			// installed. Verify the fail-closed configuration live before resolving
+			// every credential-bearing binding.
+			CredentialAdmissionCheck: func(ctx context.Context) error {
+				if !webhooksEnabled {
+					return fmt.Errorf("the webhook server is disabled")
+				}
+				return controller.VerifyAgentCredentialAdmission(ctx, mgr.GetAPIReader())
+			},
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
 			os.Exit(1)
@@ -475,7 +479,7 @@ func main() {
 				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
 				Version: "agent-container-provider:" + agentProviderVersion,
 				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
-					return &controller.ContainerProviderReconciler{Client: c, Scheme: s}
+					return &controller.ContainerProviderReconciler{Client: c, APIReader: ar, Scheme: s}
 				},
 			},
 		); err != nil {

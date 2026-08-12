@@ -390,8 +390,40 @@ var _ = Describe("Container provider workload lifecycle", func() {
 
 		By("tearing down the workload")
 		Expect(container("terminal-agent")).To(Succeed())
-		err := k8sClient.Get(ctx, types.NamespacedName{Name: "terminal-agent", Namespace: "default"}, &appsv1.Deployment{})
-		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the Deployment to be deleted, got %v", err)
+		dep := &appsv1.Deployment{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: "terminal-agent", Namespace: "default"}, dep)
+		if err == nil {
+			// envtest has no garbage-collector controller, so foreground deletion
+			// remains in progress. A real cluster removes the object after its
+			// dependants are gone; the important property here is that termination
+			// started before the provider reports cleanup complete.
+			Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse(), "expected foreground deletion to be in progress")
+		} else {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the Deployment to be deleting or deleted, got %v", err)
+		}
+	})
+
+	It("waits for the previous provider to release its handoff lock before rendering", func() {
+		provider("handoff-fw")
+		agent("handoff-agent", "handoff-fw", map[string]any{"image": "ghcr.io/x/agent:v1"}, "")
+		core("handoff-agent")
+
+		ad := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "handoff-agent", Namespace: "default"}, ad)).To(Succeed())
+		Expect(agentprovider.ApplyOwnedStatus(ctx, k8sClient, ad, KagentFieldOwner,
+			airunwayv1alpha1.AgentPhaseRunning, nil, nil,
+			metav1.ConditionTrue, "AgentReady", "old provider still owns the workload")).To(Succeed())
+
+		By("not rendering while another provider owns the workload lifecycle")
+		Expect(container("handoff-agent")).To(Succeed())
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: "handoff-agent", Namespace: "default"}, &appsv1.Deployment{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+		By("rendering only after the old provider releases status ownership")
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "handoff-agent", Namespace: "default"}, ad)).To(Succeed())
+		Expect(agentprovider.ReleaseOwnedStatus(ctx, k8sClient, ad, KagentFieldOwner)).To(Succeed())
+		Expect(container("handoff-agent")).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "handoff-agent", Namespace: "default"}, &appsv1.Deployment{})).To(Succeed())
 	})
 
 	It("does not delete an unrelated same-named workload on a lifecycle switch", func() {
@@ -461,6 +493,16 @@ func TestBindingHoldExpiry(t *testing.T) {
 		ad := withModelBound(metav1.ConditionFalse, bindingHoldWindow+time.Minute)
 		if got := retainBinding(nil, ad); got != nil {
 			t.Fatal("after the hold window the binding must be cleared, so providers tear the agent down")
+		}
+	})
+
+	t.Run("a polled credential failure includes the refresh blind spot in the ten minute budget", func(t *testing.T) {
+		ad := withModelBound(metav1.ConditionFalse, periodicallyRefreshedBindingHoldWindow+time.Second)
+		ad.Spec.Model.ExternalAPI = &airunwayv1alpha1.ExternalAPIBinding{
+			CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: "credential", Key: "token"},
+		}
+		if got := retainBinding(nil, ad); got != nil {
+			t.Fatal("a periodically checked credential must clear early enough that polling plus hold stays within ten minutes")
 		}
 	})
 
@@ -637,6 +679,7 @@ var _ = Describe("Provider status ownership on stand-aside", func() {
 
 		live := &airunwayv1alpha1.AgentDeployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
+		Expect(live.Status.ProviderOwner).To(Equal(ContainerFieldOwner))
 		Expect(live.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
 		Expect(live.Status.Replicas).NotTo(BeNil())
 
@@ -646,6 +689,7 @@ var _ = Describe("Provider status ownership on stand-aside", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
 		Expect(live.Status.Phase).To(BeEmpty(),
 			"phase must be released, not just changed — a retained phase deadlocks the successor's first transition")
+		Expect(live.Status.ProviderOwner).To(BeEmpty(), "the successor's handoff lock must be released with provider status")
 		Expect(live.Status.Runtime).To(BeNil(), "runtime.workloadRef pointed at a deleted workload")
 		Expect(live.Status.Replicas).To(BeNil(), "nothing is running, so replicas must not be reported")
 
@@ -664,6 +708,7 @@ var _ = Describe("Provider status ownership on stand-aside", func() {
 			"the previous owner must have released these fields")
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "release-agent", Namespace: "default"}, live)).To(Succeed())
+		Expect(live.Status.ProviderOwner).To(Equal(KagentFieldOwner))
 		succ := meta.FindStatusCondition(live.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
 		Expect(succ).NotTo(BeNil())
 		Expect(succ.Reason).To(Equal("WaitingForBindings"))

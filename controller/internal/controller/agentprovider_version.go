@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,15 +30,18 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
+const agentProviderReporterHeartbeatInterval = 30 * time.Second
+
 // AgentProviderVersionReconciler publishes one framework provider's build
 // version into its AgentProviderConfig.status.version, mirroring how the
 // inference provider shims report ProviderVersion. Without it the Version
 // printer column and every AgentDeployment's status.framework.providerVersion
 // stay empty, so an operator cannot tell which build is serving a framework.
 //
-// It writes under its own field owner and touches only status.version, so it
-// composes with the readiness reconciler (which owns ready/lastHeartbeat/the
-// Ready condition) without either clobbering the other.
+// It writes status.version and a periodic status.lastHeartbeat under separate
+// field owners. The heartbeat proves that the process which actually renders
+// this framework is alive; the central readiness reconciler owns only ready and
+// the Ready condition.
 type AgentProviderVersionReconciler struct {
 	client.Client
 
@@ -61,6 +65,12 @@ type AgentProviderVersionReconciler struct {
 // reporter.
 func AgentProviderVersionFieldOwner(name string) string {
 	return "airunway-agents-" + name + "-version"
+}
+
+// AgentProviderHeartbeatFieldOwner builds the SSA field manager for a
+// provider's liveness heartbeat.
+func AgentProviderHeartbeatFieldOwner(name string) string {
+	return "airunway-agents-" + name + "-heartbeat"
 }
 
 // serves reports whether this reporter publishes a version for the given
@@ -103,24 +113,42 @@ func (r *AgentProviderVersionReconciler) Reconcile(ctx context.Context, req ctrl
 	if !apc.DeletionTimestamp.IsZero() || !r.serves(&apc) {
 		return ctrl.Result{}, nil
 	}
-	if apc.Status.Version == r.Version {
-		return ctrl.Result{}, nil
-	}
 
-	apply := &airunwayv1alpha1.AgentProviderConfig{
+	now := metav1.Now()
+	heartbeat := &airunwayv1alpha1.AgentProviderConfig{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: airunwayv1alpha1.GroupVersion.String(),
 			Kind:       "AgentProviderConfig",
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: apc.Name},
-		Status:     airunwayv1alpha1.AgentProviderConfigStatus{Version: r.Version},
+		Status:     airunwayv1alpha1.AgentProviderConfigStatus{LastHeartbeat: &now},
 	}
-	if err := r.Status().Patch(ctx, apply, client.Apply,
-		client.FieldOwner(AgentProviderVersionFieldOwner(r.Name)),
+	// Force only this dedicated heartbeat apply. Older combined-controller
+	// builds owned lastHeartbeat from the readiness manager; taking it here is
+	// the intentional one-time ownership migration to the real provider process.
+	if err := r.Status().Patch(ctx, heartbeat, client.Apply,
+		client.FieldOwner(AgentProviderHeartbeatFieldOwner(r.Name)),
+		client.ForceOwnership,
 	); err != nil {
-		return ctrl.Result{}, fmt.Errorf("publish provider version for %q: %w", apc.Name, err)
+		return ctrl.Result{}, fmt.Errorf("publish provider heartbeat for %q: %w", apc.Name, err)
 	}
-	return ctrl.Result{}, nil
+
+	if r.Version != "" && apc.Status.Version != r.Version {
+		apply := &airunwayv1alpha1.AgentProviderConfig{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: airunwayv1alpha1.GroupVersion.String(),
+				Kind:       "AgentProviderConfig",
+			},
+			ObjectMeta: metav1.ObjectMeta{Name: apc.Name},
+			Status:     airunwayv1alpha1.AgentProviderConfigStatus{Version: r.Version},
+		}
+		if err := r.Status().Patch(ctx, apply, client.Apply,
+			client.FieldOwner(AgentProviderVersionFieldOwner(r.Name)),
+		); err != nil {
+			return ctrl.Result{}, fmt.Errorf("publish provider version for %q: %w", apc.Name, err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: agentProviderReporterHeartbeatInterval}, nil
 }
 
 // SetupWithManager wires the version reporter.
@@ -133,10 +161,16 @@ func (r *AgentProviderVersionReconciler) SetupWithManager(mgr ctrl.Manager) erro
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.AgentProviderConfig{},
-			ctrlbuilder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				apc, ok := obj.(*airunwayv1alpha1.AgentProviderConfig)
-				return ok && r.serves(apc)
-			})),
+			ctrlbuilder.WithPredicates(predicate.And(
+				predicate.NewPredicateFuncs(func(obj client.Object) bool {
+					apc, ok := obj.(*airunwayv1alpha1.AgentProviderConfig)
+					return ok && r.serves(apc)
+				}),
+				// Heartbeats and version writes are status-only. RequeueAfter is the
+				// pacer; feeding those writes straight back into this controller
+				// would create the same hot loop the readiness predicate prevents.
+				predicate.GenerationChangedPredicate{},
+			)),
 		).
 		Named("agent-provider-version-" + r.Name).
 		Complete(r)

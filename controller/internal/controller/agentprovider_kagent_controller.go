@@ -29,7 +29,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -76,8 +75,8 @@ type KagentProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// APIReader is an uncached reader, used only for the ownership check before
-	// writing the managed no-auth Secret.
+	// APIReader is the uncached reader used at ownership and deletion
+	// boundaries, including the managed no-auth Secret.
 	//
 	// It must not be the manager's cached client. A cached typed Get on a Secret
 	// starts a cluster-wide Secret informer, whose initial list/watch this
@@ -145,11 +144,17 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// Safe for agents this provider never rendered: DeleteOwned skips
 		// objects that are absent, of an unserved kind, or not controlled by
 		// this AgentDeployment.
-		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+		pending, err := agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), &ad,
 			agentprovider.UnstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
 			agentprovider.UnstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
-		); err != nil {
+		)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.applyProviderStatus(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
+				"ProviderHandoffCleanup", "Removing kagent resources before handing the agent to its new provider")
 		}
 		// Release the provider-owned status rather than leaving it stale, and
 		// with it the SSA ownership — otherwise this agent keeps reporting
@@ -158,6 +163,9 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// write again.
 		return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, &ad, KagentFieldOwner)
 	}
+	if agentprovider.ProviderHandoffPending(&ad, KagentFieldOwner) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 
 	// Consume the core-resolved binding. Never build a ModelConfig from a
 	// half-resolved endpoint.
@@ -165,16 +173,22 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	case agentprovider.BindingUnavailable:
 		// No binding at all: tear down the rendered Agent/ModelConfig so it
 		// stops using a stale endpoint before reporting Pending.
-		if err := agentprovider.CleanupOwned(ctx, r.Client, &ad,
+		pending, err := agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), &ad,
 			agentprovider.UnstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
 			agentprovider.UnstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
-		); err != nil {
+		)
+		if err != nil {
 			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "BindingCleanupFailed", err.Error())
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.applyProviderStatus(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
+				"BindingCleanup", "Stopping kagent resources after the model binding was removed")
 		}
 		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
@@ -185,7 +199,7 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	binding := *ad.Status.ModelBinding
-	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.secretReader(), r.Scheme, &ad, binding, KagentFieldOwner)
+	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.objectReader(), r.Scheme, &ad, binding, KagentFieldOwner)
 	if err != nil {
 		statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
@@ -204,21 +218,9 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	agent := renderKagentAgent(&ad, cfg, modelConfig.GetName())
 
 	for _, obj := range []*unstructured.Unstructured{modelConfig, agent} {
-		if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.Client, r.Scheme, &ad, obj); err != nil {
+		if err := agentprovider.ApplyOwned(ctx, r.Client, r.objectReader(), r.Scheme, &ad, obj, KagentFieldOwner, true); err != nil {
 			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "OwnershipConflict", err.Error())
-			if statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{}, err
-		}
-		if err := controllerutil.SetControllerReference(&ad, obj, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("set owner reference on %s: %w", obj.GetKind(), err)
-		}
-		if err := r.Patch(ctx, obj, client.Apply, client.FieldOwner(KagentFieldOwner), client.ForceOwnership); err != nil {
-			logger.Error(err, "Failed to apply kagent resource", "kind", obj.GetKind(), "name", obj.GetName())
-			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
-				metav1.ConditionFalse, "RenderFailed", err.Error())
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -237,7 +239,11 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Reflect the kagent Agent's own readiness back into ProviderReady, rather
 	// than reporting ready the moment the CR is applied.
-	if agentprovider.UpstreamCRReady(ctx, r.Client, kagentAgentGVK, agent.GetName(), agent.GetNamespace()) {
+	ready, err := agentprovider.UpstreamObjectReady(agent)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if ready {
 		logger.Info("kagent Agent is ready", "agent", agent.GetName())
 		return ctrl.Result{RequeueAfter: 60 * time.Second}, r.applyProviderStatus(ctx, &ad,
 			airunwayv1alpha1.AgentPhaseRunning, runtimeStatus, nil,
@@ -405,10 +411,9 @@ func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// secretReader returns the uncached reader for Secret existence checks, falling
-// back to the cached client so unit tests that construct the reconciler
-// directly keep working. Production always sets APIReader.
-func (r *KagentProviderReconciler) secretReader() client.Reader {
+// objectReader returns the uncached reader for ownership and deletion checks,
+// falling back to the cached client for directly-constructed tests.
+func (r *KagentProviderReconciler) objectReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}

@@ -1,5 +1,8 @@
 # AgentDeployment samples — the ways an agent can be described.
 #
+# The alpha Agent Marketplace controllers ship disabled. Set the controller
+# argument --enable-agent-marketplace=true before applying these samples.
+#
 # An AgentDeployment says three things: which framework runs the agent, which
 # model it talks to, and how that framework should be configured. It never
 # names an endpoint, a served model name or a credential — the core controller
@@ -126,7 +129,7 @@ spec:
 # backends accept the field and ignore it, because their operator decides how
 # work executes.
 #
-# Prerequisite: a published wrapper image (not built yet).
+# The CrewAI workload image is selected from the framework catalog.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
@@ -144,6 +147,7 @@ spec:
       name: llama-8b-example
   config:
     systemPrompt: "Summarise yesterday's incidents into a written report, then exit."
+    task: "Write the daily incident report from the information available to you."
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # Container backend, external model, with the fields that only work here.
@@ -152,8 +156,7 @@ spec:
 # because it writes the pod spec itself. On a crd backend both are accepted and
 # silently ignored, which is why they are set here and nowhere above.
 #
-# Prerequisites: a Secret named openai-api-key with an api-key key, and a
-# published CrewAI wrapper image (not built yet).
+# Prerequisite: a Secret named openai-api-key with an api-key key.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
@@ -186,6 +189,13 @@ spec:
       protocol: http/protobuf
   config:
     systemPrompt: "Research the topic and produce a written brief."
+    agents:
+      - role: researcher
+        goal: Find and assess the relevant evidence.
+        backstory: You are a careful research specialist who distinguishes evidence from assumptions.
+      - role: writer
+        goal: Turn the research into a clear, concise brief.
+        backstory: You are an editor who preserves uncertainty and cites the strongest evidence.
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # Adapting to an image that does not fit the defaults.
@@ -194,7 +204,7 @@ spec:
 # vary, so spec.config carries image / command / args / port to adapt without
 # any provider change — LangGraph serves :8000, so the Service targets that.
 #
-# Prerequisite: a published LangGraph wrapper image (not built yet).
+# The LangGraph workload image is selected from the framework catalog.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
@@ -210,11 +220,9 @@ spec:
     deploymentRef:
       name: llama-8b-example
   config:
-    image: ghcr.io/ai-runway/langgraph-agent:latest
     port: 8000
-    command: ["langgraph"]
-    args: ["up", "--host", "0.0.0.0", "--port", "8000"]
-    graph: ./agent.py:graph
+    systemPrompt: "Work through the request as a small, explicit state graph."
+    threadID: graph-agent
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # A non-OpenAI provider.
@@ -245,20 +253,15 @@ spec:
         name: anthropic-api-key
         key: api-key
   config:
+    port: 18789
     systemPrompt: "You are a helpful personal automation assistant."
 ---
 # ─────────────────────────────────────────────────────────────────────────────
-# Bring your own image.
+# Hermes native agent runtime.
 #
-# The hermes AgentProviderConfig registers no catalog image, so this deployment
-# supplies one itself. This is the path for an image AI Runway has never heard
-# of: register the framework once as capability metadata, then every agent
-# points at whatever image it needs. spec.config carries both the fields the
-# provider consumes (image) and framework passthrough (systemPrompt) — the
-# whole of spec.config is mounted as /etc/airunway/agent.json either way.
-#
-# Prerequisite: a published image honouring the container contract (not built
-# yet — the upstream Hermes image has retired OPENAI_BASE_URL).
+# The wrapper translates the mounted AI Runway contract into Hermes config and
+# keeps the native API's bearer key on container loopback. The public pod port
+# exposes only health and OpenAI-compatible chat routes.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: airunway.ai/v1alpha1
 kind: AgentDeployment
@@ -274,7 +277,6 @@ spec:
     deploymentRef:
       name: llama-8b-example
   config:
-    image: ghcr.io/ai-runway/hermes-agent:latest
     systemPrompt: "You are Hermes, a fast and concise task assistant."
 ---
 # ─────────────────────────────────────────────────────────────────────────────

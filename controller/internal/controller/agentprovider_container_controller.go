@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -66,6 +69,16 @@ const (
 	// startup would keep serving the old config indefinitely.
 	agentConfigChecksumAnnotation = "airunway.ai/config-checksum"
 
+	// agentAccessChecksumAnnotation rolls a Deployment when its provider-managed
+	// ingress token changes. Environment Secret refs are resolved only when a pod
+	// starts, so without a template digest recreating a deleted token Secret
+	// would make the Secret and the running proxy disagree indefinitely.
+	agentAccessChecksumAnnotation = "airunway.ai/access-token-checksum"
+	agentAccessSecretSuffix       = "-api-auth"
+	agentAccessTokenKey           = "token"
+	agentAccessTokenEnv           = "AIRUNWAY_AGENT_API_KEY"
+	agentAccessTokenBytes         = 32
+
 	// defaultAgentRunAsUser is the conventional distroless/nonroot UID. It is
 	// both the numeric default the kubelet needs (see agentPodSpec) and the value
 	// the security floor falls back to when an override asks for root.
@@ -85,7 +98,8 @@ const (
 // framework's catalog annotation entry — the framework is data, not code.
 type ContainerProviderReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
 }
 
 func parseContainerSecurityOverrides(ad *airunwayv1alpha1.AgentDeployment) (*containerSecurityOverrides, error) {
@@ -323,6 +337,11 @@ func containerPort(cfg containerConfig) int32 {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch;create;update;patch;delete
+// The container provider creates one owner-referenced ingress token Secret per
+// long-running agent. `get` is the authoritative ownership check that prevents
+// a same-named user Secret from being adopted; the provider never lists or
+// watches all namespace Secrets.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create
 
 // Reconcile renders the container workload for a container-backed AgentDeployment.
 func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -352,13 +371,22 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// For agents that were never ours this is a no-op: each delete does a
 		// cached read first and skips objects that are absent or not controlled
 		// by this AgentDeployment.
-		if err := r.cleanupOwnedWorkloads(ctx, &ad); err != nil {
+		pending, err := r.cleanupOwnedWorkloads(ctx, &ad)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
+				"ProviderHandoffCleanup", "Removing the previous container workload before handing the agent to its new provider")
 		}
 		// See the kagent provider: release the provider-owned status and its SSA
 		// ownership so the status is not left stale and a successor provider can
 		// take over.
 		return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, &ad, ContainerFieldOwner)
+	}
+	if agentprovider.ProviderHandoffPending(&ad, ContainerFieldOwner) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Consume the core-resolved binding.
@@ -367,8 +395,14 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// No binding: either not resolved yet, or core cleared it because the
 		// request became terminally invalid (e.g. a cross-namespace reference).
 		// Tear down so the agent stops serving with stale endpoint/credentials.
-		if err := r.cleanupOwnedWorkloads(ctx, &ad); err != nil {
+		pending, err := r.cleanupOwnedWorkloads(ctx, &ad)
+		if err != nil {
 			return r.failWithStatus(ctx, &ad, "BindingCleanupFailed", err)
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
+				"BindingCleanup", "Stopping the agent workload after its model binding was removed")
 		}
 		return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhasePending, nil, nil,
 			metav1.ConditionFalse, "WaitingForBindings", "Waiting for the core controller to resolve model bindings")
@@ -404,6 +438,31 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	binding := *ad.Status.ModelBinding
 
+	// Complete the previous lifecycle's foreground deletion before touching the
+	// shared ConfigMap or creating the replacement workload. Updating the
+	// ConfigMap first could change the configuration mounted into the old pods
+	// while they are still running.
+	var obsolete []client.Object
+	cleanupMessage := "Removing the previous job before starting the long-running workload"
+	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
+		obsolete = []client.Object{
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ad.Name}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(&ad)}},
+		}
+		cleanupMessage = "Removing the long-running workload before starting the agent job"
+	} else {
+		obsolete = []client.Object{&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: ad.Name}}}
+	}
+	deleting, err := r.deleteObsolete(ctx, &ad, obsolete...)
+	if err != nil {
+		return r.failWithStatus(ctx, &ad, "LifecycleCleanupFailed", err)
+	}
+	if deleting {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, &ad,
+			airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
+			"LifecycleSwitching", cleanupMessage)
+	}
+
 	// The ConfigMap (mounted agent.json) is shared by both lifecycles. Its
 	// checksum rides on the pod template so a config-only edit rolls the
 	// workload.
@@ -416,11 +475,22 @@ func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return r.failWithStatus(ctx, &ad, "RenderFailed", err)
 	}
 
+	var authSecretRef *airunwayv1alpha1.SecretKeyRef
+	var accessTokenChecksum string
+	if ad.Spec.Lifecycle != airunwayv1alpha1.AgentLifecycleJob {
+		authSecretRef, accessTokenChecksum, err = r.ensureAgentAccessCredentials(ctx, &ad)
+		if err != nil {
+			return r.failWithStatus(ctx, &ad, "IngressCredentialProvisionFailed", err)
+		}
+	}
+
 	render := renderInputs{
 		cfg:               cfg,
 		binding:           binding,
 		configMapName:     configMap.Name,
 		configChecksum:    configChecksum,
+		authSecretRef:     authSecretRef,
+		accessTokenHash:   accessTokenChecksum,
 		writableRoot:      settings.writableRoot,
 		securityOverrides: securityOverrides,
 	}
@@ -437,21 +507,17 @@ type renderInputs struct {
 	binding           airunwayv1alpha1.ModelBindingStatus
 	configMapName     string
 	configChecksum    string
+	authSecretRef     *airunwayv1alpha1.SecretKeyRef
+	accessTokenHash   string
 	writableRoot      bool
 	securityOverrides *containerSecurityOverrides
 }
 
-// applyOwned sets the AgentDeployment as controller owner and server-side
-// applies the object under the container field owner. It first refuses to adopt
-// a pre-existing same-named object that this AgentDeployment does not own.
+// applyOwned atomically creates or server-side applies an owned object under
+// the container field owner. The authoritative ownership read and
+// resourceVersion precondition prevent stale-cache adoption of a replacement.
 func (r *ContainerProviderReconciler) applyOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
-	if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.Client, r.Scheme, ad, obj); err != nil {
-		return err
-	}
-	if err := controllerutil.SetControllerReference(ad, obj, r.Scheme); err != nil {
-		return fmt.Errorf("set owner reference: %w", err)
-	}
-	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(ContainerFieldOwner), client.ForceOwnership)
+	return agentprovider.ApplyOwned(ctx, r.Client, r.objectReader(), r.Scheme, ad, obj, ContainerFieldOwner, true)
 }
 
 // reconcileDeployment renders + applies the long-running Deployment and Service
@@ -461,12 +527,6 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 	ad *airunwayv1alpha1.AgentDeployment,
 	in renderInputs,
 ) (ctrl.Result, error) {
-	// A prior spec.lifecycle: job leaves a one-shot Job behind. Delete it so the
-	// two lifecycles never run side by side.
-	if err := r.deleteObsolete(ctx, ad, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: ad.Name}}); err != nil {
-		return r.failWithStatus(ctx, ad, "LifecycleCleanupFailed", err)
-	}
-
 	deployment := renderAgentDeployment(ad, in)
 	service := renderAgentService(ad, in.cfg)
 	for _, obj := range []client.Object{deployment, service} {
@@ -475,10 +535,9 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 		}
 	}
 
-	var live appsv1.Deployment
-	if err := r.Get(ctx, k8stypes.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, &live); err != nil {
-		return ctrl.Result{}, err
-	}
+	// ApplyOwned decodes the authoritative API response back into deployment.
+	// A cache read here can return NotFound or the pre-update generation.
+	live := deployment
 	desired := ptr.Deref(live.Spec.Replicas, 1)
 	replicas := &airunwayv1alpha1.AgentReplicaStatus{
 		Desired:   desired,
@@ -489,15 +548,16 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 		WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
 			APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, Namespace: deployment.Namespace,
 		},
-		Address: fmt.Sprintf("http://%s.%s.svc.cluster.local", service.Name, service.Namespace),
+		Address:       fmt.Sprintf("http://%s.%s.svc.cluster.local", service.Name, service.Namespace),
+		AuthSecretRef: in.authSecretRef,
 	}
 
-	if deploymentRolledOut(&live, desired) {
+	if deploymentRolledOut(live, desired) {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
 			metav1.ConditionTrue, "WorkloadReady", "Agent workload has available replicas")
 	}
-	reason, message := workloadNotReadyDetail(&live)
+	reason, message := workloadNotReadyDetail(live)
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, r.status(ctx, ad,
 		airunwayv1alpha1.AgentPhaseDeploying, rt, replicas,
 		metav1.ConditionFalse, reason, message)
@@ -564,15 +624,6 @@ func (r *ContainerProviderReconciler) reconcileJob(
 	ad *airunwayv1alpha1.AgentDeployment,
 	in renderInputs,
 ) (ctrl.Result, error) {
-	// A prior spec.lifecycle: deployment leaves a Deployment + Service behind.
-	// Delete them so the two lifecycles never run side by side.
-	if err := r.deleteObsolete(ctx, ad,
-		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ad.Name}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(ad)}},
-	); err != nil {
-		return r.failWithStatus(ctx, ad, "LifecycleCleanupFailed", err)
-	}
-
 	job, err := renderAgentJob(ad, in)
 	if err != nil {
 		return r.failWithStatus(ctx, ad, "RenderFailed", err)
@@ -598,10 +649,8 @@ func (r *ContainerProviderReconciler) reconcileJob(
 		return r.failWithStatus(ctx, ad, "RenderFailed", err)
 	}
 
-	var live batchv1.Job
-	if err := r.Get(ctx, k8stypes.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &live); err != nil {
-		return ctrl.Result{}, err
-	}
+	// ApplyOwned decodes the authoritative API response back into job.
+	live := job
 	replicas := &airunwayv1alpha1.AgentReplicaStatus{
 		Desired:   ptr.Deref(live.Spec.Parallelism, 1),
 		Ready:     live.Status.Active,
@@ -614,11 +663,11 @@ func (r *ContainerProviderReconciler) reconcileJob(
 	}
 
 	switch {
-	case jobConditionTrue(&live, batchv1.JobFailed):
+	case jobConditionTrue(live, batchv1.JobFailed):
 		return ctrl.Result{}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseFailed, rt, replicas,
 			metav1.ConditionFalse, "JobFailed", "Agent job failed (backoff limit exhausted)")
-	case jobConditionTrue(&live, batchv1.JobComplete) || live.Status.Succeeded > 0:
+	case jobConditionTrue(live, batchv1.JobComplete) || live.Status.Succeeded > 0:
 		return ctrl.Result{}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseCompleted, rt, replicas,
 			metav1.ConditionTrue, "JobCompleted", "Agent job completed successfully")
@@ -645,7 +694,7 @@ func (r *ContainerProviderReconciler) recreateJobIfTemplateChanged(
 ) (bool, error) {
 	var live batchv1.Job
 	key := k8stypes.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
-	if err := r.Get(ctx, key, &live); err != nil {
+	if err := r.objectReader().Get(ctx, key, &live); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
@@ -707,14 +756,18 @@ func jobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool 
 // *adopt* such an object is applyOwned's job.
 // Objects must already carry the name the provider renders them under, since
 // those names are bounded per-kind (Services use a stricter limit).
-func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
+func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) (bool, error) {
 	for _, obj := range objs {
 		obj.SetNamespace(ad.Namespace)
-		if err := agentprovider.DeleteOwned(ctx, r.Client, ad, obj); err != nil {
-			return fmt.Errorf("delete obsolete workload from previous lifecycle: %w", err)
+		pending, err := agentprovider.DeleteOwnedAndWait(ctx, r.Client, r.objectReader(), ad, obj)
+		if err != nil {
+			return false, fmt.Errorf("delete obsolete workload from previous lifecycle: %w", err)
+		}
+		if pending {
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // cleanupOwnedWorkloads deletes every workload this container agent owns so a
@@ -722,25 +775,116 @@ func (r *ContainerProviderReconciler) deleteObsolete(ctx context.Context, ad *ai
 // deleteObsolete it targets the workloads under their real names (including the
 // suffixed ConfigMap) and silently skips any same-named object this
 // AgentDeployment does not own.
-func (r *ContainerProviderReconciler) cleanupOwnedWorkloads(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
+func (r *ContainerProviderReconciler) cleanupOwnedWorkloads(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) (bool, error) {
 	owned := []client.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
 		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(ad), Namespace: ad.Namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: agentConfigMapName(ad), Namespace: ad.Namespace}},
 	}
-	for _, obj := range owned {
-		if err := r.deleteOwned(ctx, ad, obj); err != nil {
-			return err
-		}
-	}
-	return nil
+	return agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), ad, owned...)
 }
 
-// deleteOwned deletes obj (addressed by its already-set name/namespace) only
-// when it is controlled by ad; a missing or unowned object is a no-op.
-func (r *ContainerProviderReconciler) deleteOwned(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment, obj client.Object) error {
-	return agentprovider.DeleteOwned(ctx, r.Client, ad, obj)
+// objectReader returns the authoritative API reader used at ownership and
+// deletion boundaries, falling back to Client for directly-constructed tests.
+func (r *ContainerProviderReconciler) objectReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// ensureAgentAccessCredentials creates or reconciles the bearer token used by
+// repo-owned server images at their outward-facing Service. The token is kept in
+// a separate Secret from the model credential: callers can be authorized to use
+// an agent without learning the upstream provider key, and rotating one does not
+// silently rotate the other.
+//
+// The authoritative read preserves an existing strong token across reconciles
+// and refuses to adopt a same-named user Secret. New Secrets are immutable and
+// created once, so this reconciler itself only requires get/create and never
+// patches another Secret in the cluster.
+func (r *ContainerProviderReconciler) ensureAgentAccessCredentials(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+) (*airunwayv1alpha1.SecretKeyRef, string, error) {
+	if r.Scheme == nil {
+		return nil, "", fmt.Errorf("scheme is required to create agent access credentials")
+	}
+
+	name := agentAccessSecretName(ad)
+	key := k8stypes.NamespacedName{Name: name, Namespace: ad.Namespace}
+	var existing corev1.Secret
+	var token []byte
+	if err := r.objectReader().Get(ctx, key, &existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, "", fmt.Errorf("read agent access Secret %s: %w", key, err)
+		}
+	} else {
+		existingToken, validationErr := validatedAgentAccessToken(&existing, ad)
+		if validationErr != nil {
+			return nil, "", validationErr
+		}
+		return agentAccessCredentialResult(name, existingToken)
+	}
+
+	raw := make([]byte, agentAccessTokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, "", fmt.Errorf("generate agent access token: %w", err)
+	}
+	token = []byte(base64.RawURLEncoding.EncodeToString(raw))
+
+	secret := &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ad.Namespace,
+			Labels:    agentLabels(ad),
+		},
+		Immutable: ptr.To(true),
+		Type:      corev1.SecretTypeOpaque,
+		Data:      map[string][]byte{agentAccessTokenKey: token},
+	}
+	if err := controllerutil.SetControllerReference(ad, secret, r.Scheme); err != nil {
+		return nil, "", fmt.Errorf("set agent access Secret %s owner: %w", key, err)
+	}
+	if err := r.Create(ctx, secret); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, "", fmt.Errorf("create agent access Secret %s: %w", key, err)
+		}
+		// A concurrent reconcile won the create race. Verify the authoritative
+		// object rather than treating AlreadyExists as proof it is ours.
+		if err := r.objectReader().Get(ctx, key, &existing); err != nil {
+			return nil, "", fmt.Errorf("read concurrently created agent access Secret %s: %w", key, err)
+		}
+		token, err = validatedAgentAccessToken(&existing, ad)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return agentAccessCredentialResult(name, token)
+}
+
+func validatedAgentAccessToken(
+	secret *corev1.Secret,
+	ad *airunwayv1alpha1.AgentDeployment,
+) ([]byte, error) {
+	key := k8stypes.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}
+	if !metav1.IsControlledBy(secret, ad) {
+		return nil, fmt.Errorf("refusing to adopt agent access Secret %s: it is not controlled by AgentDeployment %s/%s",
+			key, ad.Namespace, ad.Name)
+	}
+	token := secret.Data[agentAccessTokenKey]
+	decoded, err := base64.RawURLEncoding.DecodeString(string(token))
+	if err != nil || len(decoded) != agentAccessTokenBytes {
+		return nil, fmt.Errorf("agent access Secret %s contains an invalid %q token", key, agentAccessTokenKey)
+	}
+	return token, nil
+}
+
+func agentAccessCredentialResult(name string, token []byte) (*airunwayv1alpha1.SecretKeyRef, string, error) {
+	digest := sha256.Sum256(token)
+	return &airunwayv1alpha1.SecretKeyRef{Name: name, Key: agentAccessTokenKey}, fmt.Sprintf("%x", digest), nil
 }
 
 // containerProviderSettings holds the provider-owned rendering settings the
@@ -839,6 +983,12 @@ func agentConfigMapName(ad *airunwayv1alpha1.AgentDeployment) string {
 	return agentprovider.BoundedResourceName(ad.Name, "-config")
 }
 
+// agentAccessSecretName is deterministic so clients can retrieve a stable
+// provider-managed token through status.runtime.authSecretRef.
+func agentAccessSecretName(ad *airunwayv1alpha1.AgentDeployment) string {
+	return agentprovider.BoundedResourceName(ad.Name, agentAccessSecretSuffix)
+}
+
 // renderAgentConfigMap mounts the agent's full spec.config as agent.json (the
 // pinned BYO contract). An empty config yields an empty JSON object.
 func renderAgentConfigMap(ad *airunwayv1alpha1.AgentDeployment) *corev1.ConfigMap {
@@ -869,9 +1019,20 @@ func agentPodSpec(
 	cfg := in.cfg
 	env := []corev1.EnvVar{
 		{Name: "AIRUNWAY_AGENT_CONFIG", Value: agentConfigMountPath},
+		{Name: "AIRUNWAY_AGENT_MODE", Value: agentRuntimeMode(ad)},
+		{Name: "AIRUNWAY_AGENT_PORT", Value: fmt.Sprintf("%d", containerPort(cfg))},
 	}
 	env = append(env, modelBindingEnv(in.binding)...)
 	env = append(env, otlpEnv(ad)...)
+	if in.authSecretRef != nil {
+		env = append(env, corev1.EnvVar{
+			Name: agentAccessTokenEnv,
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: in.authSecretRef.Name},
+				Key:                  in.authSecretRef.Key,
+			}},
+		})
+	}
 
 	containerSecurity := &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false),
@@ -912,6 +1073,21 @@ func agentPodSpec(
 		Resources:       agentResources(ad),
 		SecurityContext: containerSecurity,
 	}
+	if ad.Spec.Lifecycle != airunwayv1alpha1.AgentLifecycleJob {
+		// The generic contract has always required a server on the selected port,
+		// but did not require framework-independent health paths. TCP probes retain
+		// compatibility with existing BYO images while still preventing traffic
+		// before their listener is accepting connections.
+		container.StartupProbe = tcpAgentProbe(cfg)
+		container.StartupProbe.PeriodSeconds = 5
+		container.StartupProbe.FailureThreshold = 60
+		container.ReadinessProbe = tcpAgentProbe(cfg)
+		container.ReadinessProbe.PeriodSeconds = 5
+		container.ReadinessProbe.FailureThreshold = 3
+		container.LivenessProbe = tcpAgentProbe(cfg)
+		container.LivenessProbe.PeriodSeconds = 10
+		container.LivenessProbe.FailureThreshold = 3
+	}
 	if len(cfg.Command) > 0 {
 		container.Command = cfg.Command
 	}
@@ -941,6 +1117,24 @@ func agentPodSpec(
 			},
 			{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		},
+	}
+}
+
+func agentRuntimeMode(ad *airunwayv1alpha1.AgentDeployment) string {
+	if ad.Spec.Lifecycle == airunwayv1alpha1.AgentLifecycleJob {
+		return "job"
+	}
+	return "server"
+}
+
+func tcpAgentProbe(cfg containerConfig) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt32(containerPort(cfg)),
+			},
+		},
+		TimeoutSeconds: 3,
 	}
 }
 
@@ -1016,10 +1210,14 @@ func otlpEnv(ad *airunwayv1alpha1.AgentDeployment) []corev1.EnvVar {
 // agentPodTemplate builds the shared pod template, carrying the config
 // checksum so a change to the mounted agent.json rolls the workload.
 func agentPodTemplate(ad *airunwayv1alpha1.AgentDeployment, in renderInputs) corev1.PodTemplateSpec {
+	annotations := map[string]string{agentConfigChecksumAnnotation: in.configChecksum}
+	if in.accessTokenHash != "" {
+		annotations[agentAccessChecksumAnnotation] = in.accessTokenHash
+	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      agentLabels(ad),
-			Annotations: map[string]string{agentConfigChecksumAnnotation: in.configChecksum},
+			Annotations: annotations,
 		},
 		Spec: agentPodSpec(ad, in),
 	}

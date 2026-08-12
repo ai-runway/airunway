@@ -104,7 +104,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler := agentproviders.NewContainerReconciler(mgr.GetClient(), mgr.GetScheme())
+	reconciler := agentproviders.NewContainerReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetAPIReader())
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentContainerProvider")
 		os.Exit(1)

@@ -78,6 +78,87 @@ jobs:
       - name: Lint (frontend + backend)
         run: make lint
 
+  agent-image-source-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check agent runtime contracts and entrypoints
+        run: make agent-images-test
+
+  agent-images-docker-build:
+    name: Build and smoke ${{ matrix.name }} agent image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CrewAI
+            runtime: crewai
+            image: agent-crewai
+            dockerfile: images/agents/crewai/Dockerfile
+            base_arg: PYTHON_BASE
+            base_env: AGENT_PYTHON_BASE
+          - name: LangGraph
+            runtime: langgraph
+            image: agent-langgraph
+            dockerfile: images/agents/langgraph/Dockerfile
+            base_arg: PYTHON_BASE
+            base_env: AGENT_PYTHON_BASE
+          - name: OpenClaw
+            runtime: openclaw
+            image: agent-openclaw
+            dockerfile: images/agents/openclaw/Dockerfile
+            base_arg: OPENCLAW_BASE
+            base_env: AGENT_OPENCLAW_BASE
+          - name: Hermes
+            runtime: hermes
+            image: agent-hermes
+            dockerfile: images/agents/hermes/Dockerfile
+            base_arg: HERMES_BASE
+            base_env: AGENT_HERMES_BASE
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Load pinned agent base
+        id: agent_base
+        shell: bash
+        env:
+          BASE_ARG: ${{ matrix.base_arg }}
+          BASE_ENV: ${{ matrix.base_env }}
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          . ./versions.env
+          set +a
+          if [[ -z "${!BASE_ENV:-}" ]]; then
+            echo "Missing ${BASE_ENV} in versions.env" >&2
+            exit 1
+          fi
+          printf 'build_arg=%s=%s\n' "$BASE_ARG" "${!BASE_ENV}" >> "$GITHUB_OUTPUT"
+
+      - name: Build agent image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: airunway/${{ matrix.image }}:ci
+          build-args: ${{ steps.agent_base.outputs.build_arg }}
+          cache-from: type=gha,scope=agent-test-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=agent-test-${{ matrix.image }}
+
+      - name: Run hardened container smoke test
+        run: images/agents/smoke.sh "${{ matrix.runtime }}" "airunway/${{ matrix.image }}:ci"
+
   controller-manifest-check:
     runs-on: ubuntu-latest
 

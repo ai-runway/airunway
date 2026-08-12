@@ -21,9 +21,13 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -128,6 +132,20 @@ func TestFieldOwnerIsPerFramework(t *testing.T) {
 	}
 }
 
+func TestProviderHandoffPending(t *testing.T) {
+	ad := &airunwayv1alpha1.AgentDeployment{Status: airunwayv1alpha1.AgentDeploymentStatus{ProviderOwner: FieldOwner("kagent")}}
+	if ProviderHandoffPending(ad, FieldOwner("kagent")) {
+		t.Fatal("the current provider must not wait on itself")
+	}
+	if !ProviderHandoffPending(ad, FieldOwner("orka")) {
+		t.Fatal("a successor must wait until the previous provider releases its workload")
+	}
+	ad.Status.ProviderOwner = ""
+	if ProviderHandoffPending(ad, FieldOwner("orka")) {
+		t.Fatal("an unowned provider status must not block initial rendering")
+	}
+}
+
 func TestBoundedNamesRespectKubernetesLimits(t *testing.T) {
 	long := strings.Repeat("a", 300)
 
@@ -139,6 +157,9 @@ func TestBoundedNamesRespectKubernetesLimits(t *testing.T) {
 	}
 	if got := BoundedResourceName(long, "-config"); len(got) > MaxResourceNameLength {
 		t.Errorf("BoundedResourceName = %d bytes, want <= %d", len(got), MaxResourceNameLength)
+	}
+	if got := BoundedResourceName("agent", strings.Repeat("s", 300)); len(got) > MaxResourceNameLength {
+		t.Errorf("BoundedResourceName with an oversized suffix = %d bytes, want <= %d", len(got), MaxResourceNameLength)
 	}
 
 	// Short inputs must pass through byte-identical: the Deployment selector is
@@ -157,6 +178,89 @@ func TestBoundedNamesRespectKubernetesLimits(t *testing.T) {
 	b := strings.Repeat("a", 79) + "b"
 	if BoundedLabelValue(a) == BoundedLabelValue(b) {
 		t.Error("distinct long names collided onto one label value")
+	}
+}
+
+func TestUpstreamObjectReady(t *testing.T) {
+	ready := &unstructured.Unstructured{Object: map[string]interface{}{
+		"status": map[string]interface{}{
+			"conditions": []interface{}{map[string]interface{}{
+				"type": "Ready", "status": "True", "observedGeneration": int64(2),
+			}},
+		},
+	}}
+	ready.SetKind("Agent")
+	ready.SetGeneration(2)
+	got, err := UpstreamObjectReady(ready)
+	if err != nil || !got {
+		t.Fatalf("UpstreamObjectReady = (%v, %v), want (true, nil)", got, err)
+	}
+
+	stale := ready.DeepCopy()
+	stale.SetGeneration(3)
+	got, err = UpstreamObjectReady(stale)
+	if err != nil || got {
+		t.Fatalf("stale UpstreamObjectReady = (%v, %v), want (false, nil)", got, err)
+	}
+
+	malformed := &unstructured.Unstructured{Object: map[string]interface{}{
+		"status": map[string]interface{}{"conditions": "not-a-list"},
+	}}
+	if _, err := UpstreamObjectReady(malformed); err == nil {
+		t.Fatal("malformed upstream conditions must be reported as a read error, not ordinary not-ready")
+	}
+}
+
+// missOnceReader models the exact stale-cache window that used to permit
+// adoption: the ownership read says NotFound even though another writer has
+// already created the object. ApplyOwned must recover from AlreadyExists and
+// authoritatively reject that object.
+type missOnceReader struct {
+	client.Reader
+	miss bool
+}
+
+func (r *missOnceReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if !r.miss {
+		r.miss = true
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, key.Name)
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func TestApplyOwnedRejectsConcurrentForeignCreate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-model-noauth", Namespace: "default"},
+		Data:       map[string][]byte{"foreign": []byte("preserve")},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
+	reader := &missOnceReader{Reader: c}
+	owner := &airunwayv1alpha1.AgentDeployment{
+		TypeMeta:   metav1.TypeMeta{APIVersion: airunwayv1alpha1.GroupVersion.String(), Kind: "AgentDeployment"},
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "owner-uid"},
+	}
+	desired := &corev1.Secret{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{Name: foreign.Name, Namespace: foreign.Namespace},
+		Data:       map[string][]byte{KeylessCredentialKey: []byte(KeylessCredentialValue)},
+	}
+	if err := ApplyOwned(context.Background(), c, reader, scheme, owner, desired, FieldOwner("test"), false); err == nil || !strings.Contains(err.Error(), "refusing to adopt") {
+		t.Fatalf("ApplyOwned concurrent-create error = %v, want refusing-to-adopt", err)
+	}
+
+	preserved := &corev1.Secret{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(foreign), preserved); err != nil {
+		t.Fatal(err)
+	}
+	if string(preserved.Data["foreign"]) != "preserve" || len(preserved.OwnerReferences) != 0 {
+		t.Fatalf("foreign Secret was modified or adopted: %#v", preserved)
 	}
 }
 
