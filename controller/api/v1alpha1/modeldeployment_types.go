@@ -723,7 +723,6 @@ const (
 
 const (
 	HTTPRouteCreated     = "airunway.ai/httproute-created"
-	BBRRestarted         = "airunway.ai/bbr-restarted"
 	LabelModelDeployment = "airunway.ai/model-deployment"
 	LabelManagedBy       = "airunway.ai/managed-by"
 	LabelJobType         = "airunway.ai/job-type"

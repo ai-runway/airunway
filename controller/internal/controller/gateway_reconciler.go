@@ -33,11 +33,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -129,7 +127,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 
 	// Use provider managed inference pool if it exists,
 	// otherwise use the default inference pool.
-	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities, gwConfig); ok && err == nil {
+	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities); ok && err == nil {
 		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", resolvedProviderName(md))
 
 		// Resolve the InferencePool name for the provider.
@@ -138,7 +136,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		poolNamespace = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace, md.Namespace)
 
 		// Use provider-managed InferencePool
-		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace, gwConfig.GetBBRNamespace())
+		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace)
 		if err != nil {
 			logger.Info("Error reconciling provider-managed InferencePool", "error", err)
 			return err
@@ -240,21 +238,16 @@ func (r *ModelDeploymentReconciler) resolveGatewayConfig(ctx context.Context) (*
 	}
 }
 
-// gatewayConfigFromResource builds a GatewayConfig from a Gateway resource,
-// reading the optional airunway.ai/bbr-namespace annotation.
+// gatewayConfigFromResource builds a GatewayConfig from a Gateway resource.
 func gatewayConfigFromResource(gw *gatewayv1.Gateway) *gateway.GatewayConfig {
-	cfg := &gateway.GatewayConfig{
+	return &gateway.GatewayConfig{
 		GatewayName:      gw.Name,
 		GatewayNamespace: gw.Namespace,
 	}
-	if gw.Annotations != nil {
-		cfg.BBRNamespace = gw.Annotations[gateway.AnnotationBBRNamespace]
-	}
-	return cfg
 }
 
 // reconcileInferencePool creates or updates the InferencePool for a ModelDeployment.
-func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, port int32, bbrNamespace string) error {
+func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, port int32) error {
 	pool := &inferencev1.InferencePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      md.Name,
@@ -289,19 +282,11 @@ func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, 
 
 	log.FromContext(ctx).V(1).Info("InferencePool reconciled", "name", pool.Name, "result", result)
 
-	// When a new InferencePool is created, restart the BBR deployment (if present) so it
-	// discovers the new model. BBR watches ConfigMaps via controller-runtime and rebuilds
-	// its internal model registry on startup.
-	if result == controllerutil.OperationResultCreated {
-		if err := r.restartBBRIfPresent(ctx, bbrNamespace); err != nil {
-			log.FromContext(ctx).Info("Could not restart BBR deployment (non-fatal)", "error", err)
-		}
-	}
 	return nil
 }
 
 func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx context.Context,
-	md *airunwayv1alpha1.ModelDeployment, poolName, poolNamespace, bbrNamespace string,
+	md *airunwayv1alpha1.ModelDeployment, poolName, poolNamespace string,
 ) (string, error) {
 	logger := log.FromContext(ctx)
 	mdNamespace := md.Namespace
@@ -321,27 +306,6 @@ func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx co
 	}
 
 	logger.V(1).Info("Found provider-managed InferencePool", "pool", poolKey)
-
-	// BBR builds its internal model registry from HTTPRoute headers at startup and
-	// needs a rolling restart whenever a new model is added. For default (airunway-
-	// managed) pools, reconcileInferencePool handles this when CreateOrUpdate reports
-	// Created. Provider-managed pools are created by the provider's operator, so
-	// there's no Created signal. This is gated on a one-shot annotation instead,
-	// restart BBR exactly once per ModelDeployment, not on every reconcile.
-	if md.Annotations[airunwayv1alpha1.BBRRestarted] != "true" {
-		if err := r.restartBBRIfPresent(ctx, bbrNamespace); err != nil {
-			logger.Info("Could not restart BBR deployment (non-fatal)", "error", err)
-		} else {
-			mdBase := md.DeepCopy()
-			if md.Annotations == nil {
-				md.Annotations = map[string]string{}
-			}
-			md.Annotations[airunwayv1alpha1.BBRRestarted] = "true"
-			if patchErr := r.Patch(ctx, md, client.MergeFrom(mdBase)); patchErr != nil {
-				logger.V(1).Info("Could not annotate ModelDeployment after BBR restart", "error", patchErr)
-			}
-		}
-	}
 
 	// Use it as HTTPRoute backend ref (cross-namespace ref + ReferenceGrant).
 	// Create ReferenceGrant in the inference pool namespace.
@@ -1347,7 +1311,7 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 	return nil
 }
 
-func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities, gwConfig *gateway.GatewayConfig) (bool, error) {
+func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	// Only treat the pool as provider-managed when the provider has explicitly
@@ -1377,7 +1341,7 @@ func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(c
 	}
 
 	// Create or update InferencePool
-	if err := r.reconcileInferencePool(ctx, md, port, gwConfig.GetBBRNamespace()); err != nil {
+	if err := r.reconcileInferencePool(ctx, md, port); err != nil {
 		r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "InferencePoolFailed", err.Error())
 		return false, fmt.Errorf("reconciling InferencePool: %w", err)
 	}
@@ -1494,24 +1458,4 @@ func (r *ModelDeploymentReconciler) cleanupGatewayAllowedRoutesForNamespace(ctx 
 	if changed {
 		logger.Info("Removed namespace from Gateway allowedRoutes after MD deletion", "gateway", gwConfig.GatewayName, "namespace", namespace)
 	}
-}
-
-// restartBBRIfPresent triggers a rolling restart of the body-based-router Deployment (if present
-// in the given namespace) by updating its restart annotation. This is necessary because BBR builds
-// its internal model registry on startup and does not dynamically watch InferencePools.
-//
-// The namespace is resolved by GatewayConfig.GetBBRNamespace(), which reads the
-// airunway.ai/bbr-namespace annotation from the Gateway resource, falling back to the
-// Gateway's own namespace.
-func (r *ModelDeploymentReconciler) restartBBRIfPresent(ctx context.Context, namespace string) error {
-	var bbr appsv1.Deployment
-	if err := r.Get(ctx, client.ObjectKey{Name: "body-based-router", Namespace: namespace}, &bbr); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"airunway.ai/restartedAt":"` + time.Now().UTC().Format(time.RFC3339) + `"}}}}}`)
-	if err := r.Patch(ctx, &bbr, client.RawPatch(types.StrategicMergePatchType, patch)); err != nil {
-		return fmt.Errorf("patching body-based-router: %w", err)
-	}
-	log.FromContext(ctx).Info("Triggered BBR rolling restart to discover new InferencePool", "namespace", namespace)
-	return nil
 }
