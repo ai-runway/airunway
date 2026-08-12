@@ -20,7 +20,9 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"strings"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -30,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -63,9 +66,154 @@ const (
 	// RequeueInterval is the default requeue interval for periodic reconciliation
 	RequeueInterval = 30 * time.Second
 
+	// ExternalRecoveryInterval retries failures that require an out-of-band fix without
+	// hot-looping while the installed schema or resource ownership remains unchanged.
+	ExternalRecoveryInterval = 5 * time.Minute
+
 	// FinalizerTimeout is the timeout for finalizer cleanup
 	FinalizerTimeout = 5 * time.Minute
 )
+
+// strictFieldValidation makes the API server reject fields the target schema does not
+// declare, instead of silently pruning them — see issue #308 and the "Upstream
+// compatibility" section of docs/providers.md.
+//
+// This provider renders built-in apps/v1 and v1 types via server-side apply, where the
+// field manager ALREADY rejects unknown fields during typed conversion regardless of this
+// option (verified: an SSA apply with validation explicitly ignored still fails with
+// "field not declared in schema"). So here this mainly adds duplicate-key detection and
+// keeps one uniform rule across all five providers; the providers that write third-party
+// CRDs are the ones it genuinely protects.
+var strictFieldValidation = client.FieldValidation(metav1.FieldValidationStrict)
+
+// statusSafeRejectionDetail returns a form of err that is stable across identical calls, for
+// storing in status.
+//
+// Server-side apply reports only the FIRST unknown field it encounters, and with more than
+// one it picks a different field each time. Two independent confirmations:
+//   - mechanism: structured-merge-diff's typed/validate.go appends one error and returns out
+//     of the map walk, and value/mapunstructured.go iterates a plain Go map, so the field
+//     chosen is whichever the randomised iteration reached first;
+//   - observed: against a live API server, three unknown fields on one Deployment produced
+//     three different messages across twelve identical apply calls. Putting that straight into
+//
+// status.message — or into a condition Message, which is status too — would rewrite status on
+// every reconcile, and since the ModelDeployment watch has no GenerationChangedPredicate each
+// write re-enqueues the object: an unbounded loop.
+//
+// Custom-resource strict decoding does not have this problem: apimachinery sorts the unknown
+// field paths and lists them all, so those messages pass through unchanged.
+//
+// Applied on the generic-failure path too: a server-side apply TYPE mismatch carries the same
+// wrapper without the unknown-field needle, so it lands there rather than in the rejection
+// branch — and structured-merge-diff accumulates type errors without sorting them, so their
+// concatenation order follows map iteration and is just as volatile.
+//
+// The full error is always logged; only the stored copy is normalised.
+func statusSafeRejectionDetail(err error) string {
+	msg := err.Error()
+	// These are the two wrappers apimachinery's structuredmerge can produce on the APPLY
+	// path. It has two more ("failed to convert new/live object … to smd typed") carrying the
+	// same payload on the non-apply Update path, which this provider never takes — add them
+	// here if that ever changes, or the volatile detail gets through and the loop returns.
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return "the offending field and the exact reason are in the controller logs"
+	}
+	return msg
+}
+
+// isUpstreamSchemaRejection reports whether err is the API server refusing a field the
+// installed upstream does not declare, as opposed to any other rejection.
+//
+// This provider renders only built-in types — apps/v1 Deployment and v1 Service — and writes
+// them through server-side apply, so that is the only rejection shape it can receive. It
+// arrives as a plain error from the field manager's typed conversion
+// (structured-merge-diff, typed/validate.go), neither IsBadRequest nor IsInvalid, which is
+// why the match is on the message rather than the status class. Gating on IsInvalid would
+// additionally swallow every CEL and OpenAPI type violation — user configuration errors no
+// upstream upgrade would fix.
+//
+// The custom-resource shape ("strict decoding error: unknown field", 400 on create/update and
+// 422 on merge patch) is deliberately NOT matched here: it is unreachable for this provider,
+// and matching it would only create a way to misclassify an ordinary validation error whose
+// echoed value happens to contain that phrasing — reported as a version mismatch and retried
+// forever. The providers that do write custom resources match it in their own copy.
+func isUpstreamSchemaRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+
+	// Bind the diagnostic to the wrapper, so an error that merely echoes the phrase back
+	// cannot match on the phrase alone.
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return strings.Contains(msg, "field not declared in schema")
+	}
+
+	return false
+}
+
+// isRetryableUpstreamWriteError reports failures that can recover without changing the
+// ModelDeployment or cluster configuration. These must not erase last-known serving status:
+// a failed or ambiguous API response does not mean the existing workload stopped serving.
+func isRetryableUpstreamWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// The API server reports deterministic structured-merge conversion failures as HTTP
+	// 500 even though retrying cannot change the result. Unknown-field variants are handled
+	// by isUpstreamSchemaRejection before this function; the remaining typed-object errors
+	// (wrong scalar/list/map shapes) must reach the terminal validation branch.
+	msg := err.Error()
+	if strings.Contains(msg, "failed to create typed patch object") ||
+		strings.Contains(msg, "failed to create typed live object") {
+		return false
+	}
+
+	if errors.IsConflict(err) || errors.IsAlreadyExists(err) ||
+		errors.IsTimeout(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err) ||
+		errors.IsServiceUnavailable(err) || errors.IsInternalError(err) {
+		return true
+	}
+
+	var status errors.APIStatus
+	if stderrors.As(err, &status) && status.Status().Code >= 500 {
+		return true
+	}
+
+	return stderrors.Is(err, context.DeadlineExceeded) ||
+		stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF) ||
+		stderrors.Is(err, syscall.EPIPE) ||
+		utilnet.IsTimeout(err) || utilnet.IsProbableEOF(err) ||
+		utilnet.IsConnectionReset(err) || utilnet.IsConnectionRefused(err) ||
+		utilnet.IsHTTP2ConnectionLost(err)
+}
+
+// resourceWriteError records whether the target was observed before its write. A transient
+// update failure can retain last-known serving status; a transient create failure cannot,
+// because the controller had just observed that the required resource was absent.
+type resourceWriteError struct {
+	err             error
+	resourceExisted bool
+}
+
+func (e *resourceWriteError) Error() string { return e.err.Error() }
+func (e *resourceWriteError) Unwrap() error { return e.err }
+
+func wrapResourceWriteError(err error, resourceExisted bool) error {
+	if err == nil {
+		return nil
+	}
+	return &resourceWriteError{err: err, resourceExisted: resourceExisted}
+}
+
+func canPreserveLastKnownStatus(err error) bool {
+	var writeErr *resourceWriteError
+	return !stderrors.As(err, &writeErr) || writeErr.resourceExisted
+}
 
 var (
 	deploymentGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
@@ -161,31 +309,110 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	resources, err := r.Transformer.Transform(ctx, &md)
 	if err != nil {
 		logger.Error(err, "Failed to transform ModelDeployment", "name", md.Name)
+		// Same treatment as the upstream-rejection path below: force Ready False and drop
+		// the stale endpoint/replica counts. Otherwise a previously-Running deployment whose
+		// spec is edited into something unrenderable reports Failed while still advertising
+		// a live endpoint and "1/1 ready" — the contradiction strict validation exists to surface.
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "TransformFailed", err.Error())
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "TransformFailed", err.Error())
+		md.Status.Endpoint = nil
+		md.Status.Replicas = nil
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 		md.Status.Message = fmt.Sprintf("Failed to generate vLLM resources: %s", err.Error())
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 
+	// Status may be preserved after an ambiguous update failure only when every required
+	// resource existed before this write pass. Otherwise a successfully recreated earlier
+	// resource followed by a failed later update could leave stale Ready=True status.
+	preserveLastKnownStatusSafe := r.allRequiredResourcesAreOwnedActiveAndServing(ctx, resources, md.UID)
+
 	// Create or update all resources
 	for _, resource := range resources {
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
-			// Transient API conflict — requeue instead of marking as failed
-			if errors.IsConflict(err) {
-				logger.Info("Resource conflict during reconcile, requeueing", "name", resource.GetName())
-				return ctrl.Result{Requeue: true}, nil
-			}
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
+			// Strict field validation rejected the write: the cluster does not accept a field
+			// this provider renders. Give it its own reason so an operator can tell it apart
+			// from a generic create failure, and keep requeueing — the remedy is
+			// an out-of-band upstream upgrade, and nothing else would re-trigger this
+			// reconcile. The provider-config watch fires only on Spec/Ready changes, and no
+			// upstream object exists to watch, so without a requeue the deployment would sit
+			// Failed until the ~10h resync even after the cluster is fixed.
+			//
+			// Ready is forced False here because the failure it catches is precisely a
+			// deployment that reports healthy while being unable to serve. Note this deliberately does NOT
+			// touch ProviderCompatible: that is set True earlier in this same reconcile, so
+			// flipping it here would rewrite LastTransitionTime on every requeue and the
+			// condition would never settle.
+			if isUpstreamSchemaRejection(err) {
+				detail := statusSafeRejectionDetail(err)
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "IncompatibleUpstream", detail)
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "IncompatibleUpstream", detail)
+				// Clear the Running-era endpoint and replica counts. This branch returns
+				// before syncStatus, so on an update rejection they would otherwise keep
+				// their previous values and the object would report Failed alongside a live
+				// endpoint and "1/1 ready" — the same contradiction described above.
+				md.Status.Endpoint = nil
+				md.Status.Replicas = nil
+				md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+				md.Status.Message = fmt.Sprintf("Incompatible with the installed upstream: the cluster rejected a field in the rendered resource. This provider renders built-in Kubernetes types, so it usually means spec.provider.overrides sets a field that does not exist, or the cluster's Kubernetes version predates a field this provider uses. %s", detail)
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, nil
+			}
+			// Conflicts, throttling, server failures, and transport interruptions say nothing
+			// about whether the existing workload is still serving. Record the failed write,
+			// but preserve last-known Phase/Ready/Endpoint/Replicas until a successful read can
+			// replace them.
+			retryableWriteError := isRetryableUpstreamWriteError(err)
+			if retryableWriteError && preserveLastKnownStatusSafe && canPreserveLastKnownStatus(err) {
+				reason := "CreateFailed"
+				if errors.IsConflict(err) || errors.IsAlreadyExists(err) {
+					reason = "ResourceConflict"
+				}
+				detail := statusSafeRejectionDetail(err)
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, detail)
+				if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				requeueAfter := RequeueInterval
+				if errors.IsConflict(err) {
+					requeueAfter = time.Second
+				}
+				return ctrl.Result{RequeueAfter: requeueAfter}, nil
+			}
 			reason := "CreateFailed"
+			// A definite NotFound means the prior workload cannot be assumed to still
+			// exist, so fail closed but retry promptly. Other deterministic API-side
+			// rejections may recover after an admission-policy or cluster change; retry
+			// them at the slower external-recovery cadence.
+			requeueAfter := ExternalRecoveryInterval
+			if errors.IsConflict(err) {
+				requeueAfter = time.Second
+			} else if errors.IsNotFound(err) || retryableWriteError {
+				requeueAfter = RequeueInterval
+			}
 			if isResourceConflict(err) {
 				reason = "ResourceConflict"
-				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ResourceConflict", err.Error())
 			}
-			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+			// Validation/admission errors and ownership conflicts need an external change.
+			// Fail closed and poll slowly so recovery does not depend on another watched event.
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, statusSafeRejectionDetail(err))
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
-			md.Status.Message = fmt.Sprintf("Failed to create/update resource %s: %s", resource.GetName(), err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, &md)
+			md.Status.Message = fmt.Sprintf("Failed to create/update resource %s: %s", resource.GetName(), statusSafeRejectionDetail(err))
+			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
+		// Once any earlier resource write succeeds, the pre-write serving snapshot no
+		// longer proves the complete resource set is still serving. A later ambiguous
+		// failure must therefore fail closed instead of retaining stale Ready status.
+		preserveLastKnownStatusSafe = false
 	}
 
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionTrue, "ResourceCreated", "Deployments and Services created successfully")
@@ -309,7 +536,8 @@ func (r *VLLMProviderReconciler) createOrUpdateResource(ctx context.Context, res
 		Name:      resource.GetName(),
 		Namespace: resource.GetNamespace(),
 	}, existing)
-	if err == nil {
+	resourceExisted := err == nil
+	if resourceExisted {
 		if err := verifyOwnerReference(existing, md.UID); err != nil {
 			return err
 		}
@@ -320,7 +548,49 @@ func (r *VLLMProviderReconciler) createOrUpdateResource(ctx context.Context, res
 	// Server-side apply: handles both create and update without needing resourceVersion.
 	// ForceOwnership ensures our field manager wins over any conflicting field managers.
 	logger.Info("Applying resource", "kind", resource.GetKind(), "name", resource.GetName())
-	return r.Patch(ctx, resource, client.Apply, client.FieldOwner(FieldManager), client.ForceOwnership)
+	return wrapResourceWriteError(
+		r.Patch(ctx, resource, client.Apply, client.FieldOwner(FieldManager), client.ForceOwnership, strictFieldValidation),
+		resourceExisted,
+	)
+}
+
+// allRequiredResourcesAreOwnedActiveAndServing snapshots whether the complete rendered
+// resource set was present, owned by this ModelDeployment, and not terminating before
+// reconciliation starts mutating it. Every Deployment must also be Running; otherwise stale
+// serving status is unsafe to preserve if a later write fails ambiguously.
+func (r *VLLMProviderReconciler) allRequiredResourcesAreOwnedActiveAndServing(
+	ctx context.Context,
+	resources []*unstructured.Unstructured,
+	mdUID types.UID,
+) bool {
+	if r.StatusTranslator == nil {
+		return false
+	}
+	foundDeployment := false
+	for _, resource := range resources {
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(resource.GroupVersionKind())
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      resource.GetName(),
+			Namespace: resource.GetNamespace(),
+		}, existing); err != nil {
+			return false
+		}
+		if existing.GetDeletionTimestamp() != nil {
+			return false
+		}
+		if err := verifyOwnerReference(existing, mdUID); err != nil {
+			return false
+		}
+		if existing.GroupVersionKind() == deploymentGVK {
+			foundDeployment = true
+			statusResult, err := r.StatusTranslator.TranslateStatus(existing)
+			if err != nil || statusResult.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
+				return false
+			}
+		}
+	}
+	return foundDeployment
 }
 
 // syncStatus fetches the primary Deployment and syncs its status to the ModelDeployment
@@ -351,6 +621,10 @@ func (r *VLLMProviderReconciler) syncStatus(ctx context.Context, md *airunwayv1a
 		// The translator reports no message for a healthy Deployment; replace the
 		// stale "waiting for pods" message so status reflects the Running phase.
 		md.Status.Message = "Deployments created, pods are ready"
+	} else {
+		// Do not retain a prior healthy message when current replica evidence
+		// downgrades the Deployment to an in-progress state.
+		md.Status.Message = "Deployments created, waiting for pods to be ready"
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint

@@ -78,6 +78,25 @@ jobs:
       - name: Lint (frontend + backend)
         run: make lint
 
+  actionlint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.25"
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+
+      - name: Lint GitHub workflow files
+        run: |
+          "$(go env GOPATH)/bin/actionlint" -color .github/workflows/*.yml
+
   controller-manifest-check:
     runs-on: ubuntu-latest
 
@@ -203,11 +222,13 @@ jobs:
         run: |
           cd controller
           make test
-          echo "## 🎯 Controller Test Coverage" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          go tool cover -func=cover.out | tail -1 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🎯 Controller Test Coverage"
+            echo ""
+            echo '```'
+            go tool cover -func=cover.out | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Test verify-versions guard
         run: make test-verify-versions
