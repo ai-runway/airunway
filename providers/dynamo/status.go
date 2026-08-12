@@ -180,6 +180,11 @@ func (t *StatusTranslator) extractEndpoint(upstream *unstructured.Unstructured, 
 	if serviceName, found, _ := unstructured.NestedString(status, "endpoint", "service"); found {
 		endpoint.Service = serviceName
 	} else {
+		// Dynamo does not report an endpoint, so only infer one when its rendered
+		// spec includes the standalone Frontend service.
+		if !hasFrontendService(upstream) {
+			return nil
+		}
 		// Default to deployment name + "-frontend"
 		endpoint.Service = fmt.Sprintf("%s-frontend", upstream.GetName())
 	}
@@ -192,6 +197,17 @@ func (t *StatusTranslator) extractEndpoint(upstream *unstructured.Unstructured, 
 	}
 
 	return endpoint
+}
+
+// hasFrontendService reads the spec to check if a Frontend service exists.
+func hasFrontendService(upstream *unstructured.Unstructured) bool {
+	services, found, _ := unstructured.NestedMap(upstream.Object, "spec", "services")
+	if !found {
+		return false
+	}
+
+	_, hasFrontend := services["Frontend"]
+	return hasFrontend
 }
 
 // IsReady checks if the DynamoGraphDeployment is ready

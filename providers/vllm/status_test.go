@@ -75,6 +75,45 @@ func TestTranslateStatusAvailableTrue(t *testing.T) {
 	}
 }
 
+func TestTranslateStatusAvailableTrueRequiresCurrentReplicas(t *testing.T) {
+	tests := []struct {
+		name        string
+		desired     int64
+		ready       int64
+		available   int64
+		setReplicas bool
+	}{
+		{name: "ready count is stale", desired: 1, ready: 0, available: 1, setReplicas: true},
+		{name: "available count is stale", desired: 1, ready: 1, available: 0, setReplicas: true},
+		{name: "both counts are stale", desired: 1, ready: 0, available: 0, setReplicas: true},
+		{name: "counts are below desired", desired: 2, ready: 1, available: 1, setReplicas: true},
+		{name: "scaled to zero is not serving", desired: 0, ready: 0, available: 0, setReplicas: true},
+		{name: "replica fields are missing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := NewStatusTranslator()
+			d := newTestDeployment("test", "default")
+			if tt.setReplicas {
+				setDeploymentReplicas(d, tt.desired, tt.ready, tt.available)
+			}
+			setDeploymentConditions(d, []map[string]interface{}{
+				{"type": "Available", "status": "True"},
+				{"type": "Progressing", "status": "True"},
+			})
+
+			result, err := st.TranslateStatus(d)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+				t.Errorf("expected Deploying phase, got %s", result.Phase)
+			}
+		})
+	}
+}
+
 func TestTranslateStatusProgressingDeadlineExceeded(t *testing.T) {
 	st := NewStatusTranslator()
 	d := newTestDeployment("test", "default")
