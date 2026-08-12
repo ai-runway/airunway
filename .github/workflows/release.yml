@@ -45,7 +45,7 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Compile all binaries
         run: |
@@ -76,7 +76,7 @@ jobs:
           
           # Generate checksums
           cd release
-          sha256sum * > checksums.txt
+          sha256sum ./airunway-* > checksums.txt
           cat checksums.txt
 
       - name: Check if pre-release

@@ -116,6 +116,12 @@ The same content also lives in [`docs/`](docs/) for in-repo browsing.
 | Gateway Integration | [docs/gateway.md](docs/gateway.md) |
 | Headlamp Plugin | [docs/headlamp-plugin.md](docs/headlamp-plugin.md) |
 
+## Community
+
+- **Slack:** Join the [CNCF Slack](https://slack.cncf.io/) workspace and find us in `#airunway`
+- **Issues:** Report bugs or request features in [GitHub Issues](https://github.com/ai-runway/airunway/issues)
+- **Roadmap:** Follow planned work on the [AI Runway project board](https://github.com/orgs/ai-runway/projects/2)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup. We also accept [AI-assisted prompt requests](CONTRIBUTING.md#ai-assisted-contributions--prompt-requests).

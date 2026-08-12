@@ -56,7 +56,7 @@ See [controller-architecture.md](controller-architecture.md) for controller inte
 | `engine.args` | map[string]string | No | `{}` | Engine-specific named arguments/CLI flags |
 | `engine.extraArgs` | []string | No | `[]` | Additional raw engine flags |
 | `provider.name` | string | No | Auto-selected | `dynamo`, `kaito`, `kuberay`, `llmd`, or `vllm` |
-| `provider.overrides` | object | No | `{}` | Provider-specific escape hatch |
+| `provider.overrides` | object | No | `{}` | Provider-specific escape hatch. Accepts `spec` plus documented provider-specific keys (KAITO instead accepts `resource`/`inference`); any other root key is rejected by the provider. KubeRay ignores overrides entirely. Keys nested under `spec` must exist in the installed upstream CRD or the API server rejects the write |
 | `serving.mode` | string | No | `aggregated` | `aggregated` or `disaggregated` |
 | `scaling.replicas` | int | No | `1` | Replicas (aggregated mode) |
 | `scaling.prefill` | object | No | — | Prefill scaling (disaggregated mode) |
@@ -205,8 +205,8 @@ spec:
     name: dynamo
     overrides:
       routerMode: "kv"
-      frontend:
-        replicas: 2
+      epp:
+        image: "my-registry/epp:v1"
   engine:
     type: vllm
   serving:
