@@ -99,7 +99,7 @@ jobs:
           SVC_PORT=$(kubectl get svc llama-cpu-e2e -n default -o jsonpath='{.spec.ports[0].port}')
           echo "Service port: $SVC_PORT"
 
-          kubectl port-forward svc/llama-cpu-e2e 8080:${SVC_PORT} -n default &
+          kubectl port-forward svc/llama-cpu-e2e "8080:${SVC_PORT}" -n default &
           sleep 5
 
           RESPONSE=$(curl -sf http://localhost:8080/v1/chat/completions \
