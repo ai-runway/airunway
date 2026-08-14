@@ -34,7 +34,9 @@ SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 LDFLAGS := -X $(MODULE).VLLMVersion=$(VLLM_VERSION)
 LDFLAGS += -X $(MODULE).shimVersion=$(SHIM_VERSION)
 
-.PHONY: build vet test docker-build deploy generate-deploy-manifests verify-versions
+GOLANGCI_LINT ?= ../../bin/golangci-lint
+
+.PHONY: build vet test lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests verify-versions
 
 ## Verify upstream versions are in sync (delegates to root Makefile).
 verify-versions:
@@ -51,6 +53,22 @@ vet:
 test: vet
 	go test ./...
 	@echo "✅ vLLM provider unit tests passed"
+
+## Run golangci-lint against code
+lint: golangci-lint
+	"$(GOLANGCI_LINT)" run --config=../../.golangci.yml
+
+## Run golangci-lint and apply auto-fixes
+lint-fix: golangci-lint
+	"$(GOLANGCI_LINT)" run --config=../../.golangci.yml --fix
+
+## Verify golangci-lint configuration
+lint-config: golangci-lint
+	"$(GOLANGCI_LINT)" config verify --config=../../.golangci.yml
+
+## Ensure golangci-lint is installed via the controller toolchain pin
+golangci-lint:
+	@$(MAKE) -C ../../controller AIRUNWAY_ROOT=$(abspath ../..) golangci-lint
 
 ## Build the provider binary
 build: verify-versions vet
