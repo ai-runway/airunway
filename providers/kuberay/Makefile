@@ -27,7 +27,7 @@ SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 # Makefile (e.g. `go run`, `go test`).
 LDFLAGS := -X $(MODULE).shimVersion=$(SHIM_VERSION)
 
-GOLANGCI_LINT ?= ../../controller/bin/golangci-lint
+GOLANGCI_LINT ?= ../../bin/golangci-lint
 
 .PHONY: build vet test lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests
 

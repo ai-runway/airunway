@@ -33,7 +33,7 @@ SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 LDFLAGS := -X $(MODULE).LLMDSchedulerImage=ghcr.io/llm-d/llm-d-inference-scheduler:v$(LLMD_VERSION)
 LDFLAGS += -X $(MODULE).shimVersion=$(SHIM_VERSION)
 
-GOLANGCI_LINT ?= ../../controller/bin/golangci-lint
+GOLANGCI_LINT ?= ../../bin/golangci-lint
 
 .PHONY: build vet test lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests verify-versions
 
