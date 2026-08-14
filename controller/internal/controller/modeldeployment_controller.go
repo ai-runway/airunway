@@ -16,6 +16,7 @@ limitations under the License.
 
 package controller
 
+// This temporary lint probe occured in controller code.
 import (
 	"context"
 	"encoding/json"
