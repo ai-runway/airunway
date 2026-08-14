@@ -1,6 +1,7 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  relative-path-mode: gitroot
 linters:
   default: none
   enable:
@@ -35,15 +36,13 @@ linters:
     rules:
       - linters:
           - lll
-        path: api/*
+        path: ^controller/api/
       - linters:
           - dupl
           - lll
-        path: internal/*
+        path: ^controller/internal/
     paths:
-      - third_party$
-      - builtin$
-      - examples$
+      - ^controller/(third_party|builtin|examples)(/|$)
 formatters:
   enable:
     - gofmt
@@ -51,6 +50,4 @@ formatters:
   exclusions:
     generated: lax
     paths:
-      - third_party$
-      - builtin$
-      - examples$
+      - ^controller/(third_party|builtin|examples)(/|$)
