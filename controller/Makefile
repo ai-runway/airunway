@@ -195,12 +195,11 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 ##@ Dependencies
 
 ## Location to install dependencies to
-LOCALBIN ?= $(if $(AIRUNWAY_ROOT),$(AIRUNWAY_ROOT)/bin,$(shell pwd)/bin)
+LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p "$(LOCALBIN)"
 
 ## Tool Binaries
-AIRUNWAY_ROOT ?= $(abspath $(CURDIR)/..)
 KUBECTL ?= kubectl
 KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize

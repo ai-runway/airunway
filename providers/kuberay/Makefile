@@ -27,7 +27,7 @@ SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 # Makefile (e.g. `go run`, `go test`).
 LDFLAGS := -X $(MODULE).shimVersion=$(SHIM_VERSION)
 
-GOLANGCI_LINT ?= ../../bin/golangci-lint
+GOLANGCI_LINT ?= ../../controller/bin/golangci-lint
 
 .PHONY: build vet test lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests
 
@@ -55,7 +55,7 @@ lint-config: golangci-lint
 
 ## Ensure golangci-lint is installed via the controller toolchain pin
 golangci-lint:
-	@$(MAKE) -C ../../controller AIRUNWAY_ROOT=$(abspath ../..) golangci-lint
+	@$(MAKE) -C ../../controller golangci-lint
 
 ## Build the provider binary
 build: vet
