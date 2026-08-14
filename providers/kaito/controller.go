@@ -16,7 +16,6 @@ limitations under the License.
 
 package kaito
 
-// This temporary lint probe occured in KAITO provider code.
 import (
 	"context"
 	"encoding/json"

@@ -16,7 +16,6 @@ limitations under the License.
 
 package dynamo
 
-// This temporary lint probe occured in Dynamo provider code.
 import (
 	"context"
 	"encoding/json"
