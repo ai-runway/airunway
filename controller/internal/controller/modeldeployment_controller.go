@@ -16,8 +16,6 @@ limitations under the License.
 
 package controller
 
-// This comment intentionally contains a misspelling for CI lint verification.
-// The typo occured only in this test change and should be removed afterward.
 import (
 	"context"
 	"encoding/json"
@@ -70,7 +68,7 @@ type ModelDeploymentReconciler struct {
 	phaseCache   map[k8stypes.NamespacedName]phaseEntry
 }
 
-// TODO: delete this line in the future.
+// The typo occured only in this test change and should be removed afterward.
 // phaseEntry holds per-deployment metrics state that the K8s API cannot
 // provide: previous phase, wall-clock timestamps, one-shot guards, and
 // aggregate gauge data. Volatile on restart; transitions are skipped

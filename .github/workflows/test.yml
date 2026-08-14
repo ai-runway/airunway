@@ -84,8 +84,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -98,7 +96,6 @@ jobs:
         with:
           version: v2.7.2
           working-directory: controller
-          args: --new-from-rev=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
 
   actionlint:
     runs-on: ubuntu-latest
