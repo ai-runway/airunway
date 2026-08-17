@@ -62,6 +62,12 @@ jobs:
           fi
           echo "$gobin" >> "$GITHUB_PATH"
 
+      - name: Setup Bun for controller version verification
+        if: matrix.id == 'controller'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
       - name: Run tests and generate coverage profile
         working-directory: ${{ matrix.module }}
         run: ${{ matrix.test_command }}
