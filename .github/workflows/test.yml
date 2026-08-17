@@ -98,7 +98,8 @@ jobs:
         with:
           version: v2.7.2
           working-directory: controller
-          args: --config=${{ github.workspace }}/.golangci.yml --new-from-rev=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          only-new-issues: true
+          args: --config=${{ github.workspace }}/.golangci.yml
 
   provider-lint:
     runs-on: ubuntu-latest
@@ -126,7 +127,8 @@ jobs:
         with:
           version: v2.7.2
           working-directory: providers/${{ matrix.provider }}
-          args: --config=${{ github.workspace }}/.golangci.yml --new-from-rev=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          only-new-issues: true
+          args: --config=${{ github.workspace }}/.golangci.yml
 
   actionlint:
     runs-on: ubuntu-latest
