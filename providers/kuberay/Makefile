@@ -29,7 +29,7 @@ LDFLAGS := -X $(MODULE).shimVersion=$(SHIM_VERSION)
 
 GOLANGCI_LINT ?= ../../bin/golangci-lint
 
-.PHONY: build vet test lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests
+.PHONY: build vet test cover lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests
 
 ## Run go vet against code
 vet:
@@ -56,6 +56,11 @@ lint-config: golangci-lint
 ## Ensure golangci-lint is installed via the controller toolchain pin
 golangci-lint:
 	@$(MAKE) -C ../../controller golangci-lint
+
+## Run unit tests with coverage profile output
+cover: vet
+	go test ./... -coverprofile cover.out
+	@echo "✅ KubeRay provider coverage profile generated: cover.out"
 
 ## Build the provider binary
 build: vet
