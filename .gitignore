@@ -56,6 +56,9 @@ backend/src/embedded-assets.ts
 go.work
 go.work.sum
 
+# Shared Go tool binaries
+bin/
+
 # Provider build outputs
 providers/*/bin/
 
