@@ -1,8 +1,8 @@
 # Agent container runtime
 
-> The alpha Agent Marketplace controllers ship disabled. Set the controller argument `--enable-agent-marketplace=true` to opt in before creating these resources.
+> The Agent Marketplace controllers ship enabled. Set the controller argument `--enable-agent-marketplace=false` to turn the alpha feature off.
 
-Enabling the feature also starts additional cluster-wide watches for agent workloads and their supporting objects. The shipped controller memory limit is 128Mi because the feature is off by default; operators enabling it on a large cluster should monitor controller memory and raise that limit if needed.
+The feature starts additional cluster-wide watches for agent workloads and their supporting objects. Operators on large clusters should monitor controller memory and raise the shipped limit if needed.
 
 The generic agent container provider creates a Kubernetes Deployment for a long-running agent or a Job for a one-shot task. This document is the contract between that controller and a workload image.
 

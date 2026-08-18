@@ -1,4 +1,4 @@
-MODULE       := $(shell go list -m)
+MODULE       := $(shell go list -f '{{.Module.Path}}' ./cmd)
 GIT_SHA      := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 GIT_DIRTY    := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo '-dirty')
 SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
@@ -27,4 +27,3 @@ build: vet
 
 docker-build:
 	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg SHIM_VERSION=$(SHIM_VERSION) -f Dockerfile -t $(IMG) ../..
-

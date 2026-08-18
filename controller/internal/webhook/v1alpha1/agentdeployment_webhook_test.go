@@ -247,6 +247,69 @@ func TestValidateAgentProviderOverrides_AllowsRunAsGroupZero(t *testing.T) {
 	}
 }
 
+func TestValidateAgentProviderOverrides_RequiresExactInt64SecurityIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantField string
+	}{
+		{
+			name:      "fractional UID",
+			raw:       `{"workload":{"podSecurityContext":{"runAsUser":1000.5}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.runAsUser",
+		},
+		{
+			name:      "negative group",
+			raw:       `{"workload":{"podSecurityContext":{"runAsGroup":-1}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.runAsGroup",
+		},
+		{
+			name:      "int64 overflow",
+			raw:       `{"workload":{"podSecurityContext":{"fsGroup":9223372036854775808}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.fsGroup",
+		},
+		{
+			name:      "fractional supplemental group",
+			raw:       `{"workload":{"podSecurityContext":{"supplementalGroups":[1000,1001.25]}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.supplementalGroups[1]",
+		},
+		{
+			name:      "negative zero UID remains root",
+			raw:       `{"workload":{"securityContext":{"runAsUser":-0}}}`,
+			wantField: "spec.provider.overrides.workload.securityContext.runAsUser",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &airunwayv1alpha1.AgentProviderSpec{
+				Overrides: &runtime.RawExtension{Raw: []byte(tc.raw)},
+			}
+			errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+			requireValidationErrorField(t, errs, tc.wantField)
+		})
+	}
+}
+
+func TestValidateAgentProviderOverrides_PreservesLargeExactInt64Values(t *testing.T) {
+	for _, value := range []string{
+		"9007199254740993", // first integer float64 cannot represent exactly
+		"9223372036854775807",
+	} {
+		t.Run(value, func(t *testing.T) {
+			provider := &airunwayv1alpha1.AgentProviderSpec{
+				Overrides: &runtime.RawExtension{Raw: []byte(
+					`{"workload":{"podSecurityContext":{"runAsUser":` + value + `}}}`,
+				)},
+			}
+			errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+			if len(errs) != 0 {
+				t.Fatalf("exact int64 value %s should be accepted, got %v", value, errs)
+			}
+		})
+	}
+}
+
 func TestAgentDeploymentCustomValidator_RejectsOverLongName(t *testing.T) {
 	validator := &AgentDeploymentCustomValidator{}
 	obj := makeMinimalAgentDeployment("kagent")

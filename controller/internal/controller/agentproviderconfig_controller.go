@@ -288,7 +288,11 @@ func (r *AgentProviderConfigReconciler) applyReadiness(
 			APIVersion: airunwayv1alpha1.GroupVersion.String(),
 			Kind:       "AgentProviderConfig",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: apc.Name},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            apc.Name,
+			UID:             apc.UID,
+			ResourceVersion: apc.ResourceVersion,
+		},
 		Status: airunwayv1alpha1.AgentProviderConfigStatus{
 			Ready: &ready,
 			Conditions: []metav1.Condition{{

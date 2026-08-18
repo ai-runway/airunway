@@ -1,1 +1,1 @@
-crewai[litellm]==1.15.14
+crewai[azure-ai-inference,litellm]==1.15.14

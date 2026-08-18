@@ -1,7 +1,7 @@
 # AgentProviderConfig samples — one per provider strategy.
 #
-# The alpha Agent Marketplace controllers ship disabled. Set the controller
-# argument --enable-agent-marketplace=true before applying these samples.
+# The Agent Marketplace controllers ship enabled. Operators can set the
+# controller argument --enable-agent-marketplace=false to disable them.
 #
 # AgentProviderConfig is cluster-scoped: it registers a framework and declares
 # what that framework supports. Admins create these; users only reference them
@@ -125,7 +125,7 @@ metadata:
           "title": "Research crew (CrewAI)",
           "description": "A crew of specialist agents that research a topic and produce a written brief.",
           "tags": ["research", "multi-agent"],
-          "image": "ghcr.io/ai-runway/airunway/agent-crewai:latest"
+          "image": "ghcr.io/ai-runway/airunway/agent-crewai:${AIRUNWAY_VERSION}"
         }
       ]
 spec:
@@ -163,7 +163,7 @@ metadata:
           "title": "Stateful graph agent (LangGraph)",
           "description": "A graph-structured agent that keeps state across steps.",
           "tags": ["graph", "stateful"],
-          "image": "ghcr.io/ai-runway/airunway/agent-langgraph:latest"
+          "image": "ghcr.io/ai-runway/airunway/agent-langgraph:${AIRUNWAY_VERSION}"
         }
       ]
 spec:
@@ -199,7 +199,7 @@ metadata:
           "title": "Personal AI assistant (OpenClaw)",
           "description": "OpenClaw running as a personal automation agent.",
           "tags": ["personal", "automation"],
-          "image": "ghcr.io/ai-runway/airunway/agent-openclaw:latest"
+          "image": "ghcr.io/ai-runway/airunway/agent-openclaw:${AIRUNWAY_VERSION}"
         }
       ]
 spec:
@@ -234,7 +234,7 @@ metadata:
           "title": "Task assistant (Hermes)",
           "description": "A fast, concise assistant for short tasks.",
           "tags": ["assistant"],
-          "image": "ghcr.io/ai-runway/airunway/agent-hermes:latest"
+          "image": "ghcr.io/ai-runway/airunway/agent-hermes:${AIRUNWAY_VERSION}"
         }
       ]
 spec:

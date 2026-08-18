@@ -2160,12 +2160,15 @@ rules:
   - secrets
   verbs:
   - create
+  - delete
   - get
+  - list
   - patch
-  - update
+  - watch
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
+  - mutatingwebhookconfigurations
   - validatingwebhookconfigurations
   verbs:
   - get
@@ -2582,7 +2585,7 @@ spec:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --enable-provider-selector=true
-        - --enable-agent-marketplace=false
+        - --enable-agent-marketplace=true
         command:
         - /manager
         env:
@@ -2668,26 +2671,6 @@ kind: ValidatingWebhookConfiguration
 metadata:
   name: airunway-validating-webhook-configuration
 webhooks:
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: airunway-webhook-service
-      namespace: airunway-system
-      path: /validate-airunway-ai-v1alpha1-agentdeployment
-  failurePolicy: Fail
-  name: vagentdeployment-v1alpha1.kb.io
-  rules:
-  - apiGroups:
-    - airunway.ai
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - agentdeployments
-  sideEffects: None
 - admissionReviewVersions:
   - v1
   clientConfig:

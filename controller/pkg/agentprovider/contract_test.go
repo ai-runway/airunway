@@ -264,6 +264,84 @@ func TestApplyOwnedRejectsConcurrentForeignCreate(t *testing.T) {
 	}
 }
 
+func TestAgentDeploymentOwnershipGuardsRejectUIDOnlyReference(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	owner := &airunwayv1alpha1.AgentDeployment{
+		TypeMeta: metav1.TypeMeta{APIVersion: airunwayv1alpha1.GroupVersion.String(), Kind: "AgentDeployment"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "agent", Namespace: "default", UID: "owner-uid",
+		},
+	}
+	controller, blockOwnerDeletion := true, true
+	forgedRef := metav1.OwnerReference{
+		APIVersion:         airunwayv1alpha1.GroupVersion.String(),
+		Kind:               "AgentDeployment",
+		Name:               "different-agent",
+		UID:                owner.UID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
+	foreign := &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "agent-model-noauth", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{forgedRef},
+		},
+		Data: map[string][]byte{"foreign": []byte("preserve")},
+	}
+	if IsControlledByAgentDeployment(foreign, owner) {
+		t.Fatal("a same-UID controller reference with the wrong owner name must not authorize writes or deletion")
+	}
+	exact := foreign.DeepCopy()
+	exact.OwnerReferences[0].Name = owner.Name
+	if !IsControlledByAgentDeployment(exact, owner) {
+		t.Fatal("the exact blocking AgentDeployment controller reference must be accepted")
+	}
+	exact.OwnerReferences[0].BlockOwnerDeletion = nil
+	if IsControlledByAgentDeployment(exact, owner) {
+		t.Fatal("an otherwise exact non-blocking controller reference must not authorize writes or deletion")
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
+	desired := &corev1.Secret{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{Name: foreign.Name, Namespace: foreign.Namespace},
+		Data:       map[string][]byte{KeylessCredentialKey: []byte(KeylessCredentialValue)},
+	}
+	if err := VerifyOwnedOrAbsent(context.Background(), c, scheme, owner, desired); err == nil || !strings.Contains(err.Error(), "refusing to adopt") {
+		t.Fatalf("VerifyOwnedOrAbsent error = %v, want refusing-to-adopt", err)
+	}
+	if err := ApplyOwned(context.Background(), c, c, scheme, owner, desired, FieldOwner("test"), false); err == nil || !strings.Contains(err.Error(), "refusing to adopt") {
+		t.Fatalf("ApplyOwned error = %v, want refusing-to-adopt", err)
+	}
+	if err := DeleteOwned(context.Background(), c, owner, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: foreign.Name, Namespace: foreign.Namespace,
+	}}); err != nil {
+		t.Fatalf("DeleteOwned forged-reference no-op: %v", err)
+	}
+	pending, err := DeleteOwnedAndWait(context.Background(), c, c, owner, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: foreign.Name, Namespace: foreign.Namespace,
+	}})
+	if err != nil || pending {
+		t.Fatalf("DeleteOwnedAndWait forged-reference result = (%v, %v), want (false, nil)", pending, err)
+	}
+
+	preserved := &corev1.Secret{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(foreign), preserved); err != nil {
+		t.Fatal(err)
+	}
+	if string(preserved.Data["foreign"]) != "preserve" || len(preserved.OwnerReferences) != 1 || preserved.OwnerReferences[0].Name != forgedRef.Name {
+		t.Fatalf("foreign Secret was modified, adopted, or deleted: %#v", preserved)
+	}
+}
+
 func TestHashJSONIsStable(t *testing.T) {
 	v := map[string]string{"b": "2", "a": "1"}
 	first, err := HashJSON(v)
@@ -332,7 +410,7 @@ func TestClassifyBindingGating(t *testing.T) {
 		{"verified for this generation renders", 3, 3, BindingReady},
 		{"verified for a later generation renders", 3, 4, BindingReady},
 		{"stale from a previous generation holds", 3, 2, BindingStale},
-		{"untracked generation is accepted for compatibility", 3, 0, BindingReady},
+		{"untracked generation cannot license a current binding", 3, 0, BindingStale},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

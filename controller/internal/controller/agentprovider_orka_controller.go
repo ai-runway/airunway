@@ -88,7 +88,7 @@ type orkaAgentConfig struct {
 // (SSA only conflicts on fields another manager owns AND this apply changes;
 // adding a key, labels and an ownerReference is all "added"), which then
 // garbage-collects their Secret when the AgentDeployment is deleted.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
 func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -96,7 +96,26 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.Get(ctx, req.NamespacedName, &ad); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if ad.Spec.Framework.Name != OrkaFrameworkName || !ad.DeletionTimestamp.IsZero() {
+	if !ad.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+	if ad.Spec.Framework.Name != OrkaFrameworkName {
+		// A pre-validation object may still change framework while this provider
+		// owns its status. Standing aside immediately would leave the old Agent and
+		// Provider running and keep the successor blocked on our SSA ownership.
+		if ad.Status.ProviderOwner == OrkaFieldOwner {
+			return r.cleanupAndReleaseForFrameworkHandoff(ctx, &ad)
+		}
+		// A crash can occur after the deterministic children are created but before
+		// providerOwner is persisted. Exact controller ownership is sufficient
+		// evidence to clean those children without claiming or releasing status.
+		pending, err := r.cleanupRenderedResources(ctx, &ad)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -167,16 +186,28 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	binding := *ad.Status.ModelBinding
 	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.objectReader(), r.Scheme, &ad, binding, OrkaFieldOwner)
 	if err != nil {
-		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
-			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
-		if statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return ctrl.Result{}, err
+		return r.failClosedForCredentialProvision(ctx, &ad, err)
 	}
 	var cfg orkaAgentConfig
 	if ad.Spec.Config != nil && len(ad.Spec.Config.Raw) > 0 {
 		if err := json.Unmarshal(ad.Spec.Config.Raw, &cfg); err != nil {
+			pending, cleanupErr := agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), &ad,
+				agentprovider.UnstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
+				agentprovider.UnstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
+			)
+			if cleanupErr != nil {
+				statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+					metav1.ConditionFalse, "InvalidConfigCleanupFailed", cleanupErr.Error())
+				if statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{}, cleanupErr
+			}
+			if pending {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, &ad,
+					airunwayv1alpha1.AgentPhaseFailed, nil, metav1.ConditionFalse,
+					"InvalidConfigCleanup", "Stopping Orka resources after spec.config became invalid")
+			}
 			return ctrl.Result{}, r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
 				metav1.ConditionFalse, "InvalidConfig",
 				fmt.Sprintf("parse spec.config for the orka backend: %v", err))
@@ -186,15 +217,38 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	provider := renderOrkaProvider(&ad, binding)
 	agent := renderOrkaAgent(&ad, cfg, binding, provider.GetName())
 
-	for _, obj := range []*unstructured.Unstructured{provider, agent} {
-		if err := agentprovider.ApplyOwned(ctx, r.Client, r.objectReader(), r.Scheme, &ad, obj, OrkaFieldOwner, true); err != nil {
-			statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
-				metav1.ConditionFalse, "OwnershipConflict", err.Error())
-			if statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{}, err
+	// Verify both deterministic names before either write. The Provider embeds the
+	// model credential reference, so discovering a foreign Agent after applying
+	// the Provider would expose that reference in a resource we cannot complete.
+	// Agent-first apply then preserves the same invariant if a foreign object wins
+	// a race after preflight: ApplyOwned rejects the race, and a later Provider
+	// conflict cleans up the already-applied Agent below.
+	objects := []*unstructured.Unstructured{agent, provider}
+	var failedObject *unstructured.Unstructured
+	cleanupDefinitiveFailure := false
+	for _, obj := range objects {
+		if err = agentprovider.VerifyOwnedOrAbsent(ctx, r.objectReader(), r.Scheme, &ad, obj); err != nil {
+			failedObject = obj
+			break
 		}
+	}
+	if err == nil {
+		for i, obj := range objects {
+			if err = agentprovider.ApplyOwned(ctx, r.Client, r.objectReader(), r.Scheme, &ad, obj, OrkaFieldOwner, true); err != nil {
+				failedObject = obj
+				cleanupDefinitiveFailure = i > 0
+				break
+			}
+		}
+	}
+	if err != nil {
+		err = r.cleanupAfterRenderedWriteFailure(ctx, &ad, failedObject, err, cleanupDefinitiveFailure)
+		statusErr := r.status(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+			metav1.ConditionFalse, "OwnershipConflict", err.Error())
+		if statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
 	}
 
 	rt := &airunwayv1alpha1.AgentRuntimeStatus{
@@ -227,6 +281,14 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 	}
 	if binding.ModelName != "" {
 		spec["defaultModel"] = binding.ModelName
+	}
+	if orkaProviderType(ad, binding) == "azure-openai" {
+		// Orka does not use defaultModel as Azure's deployment selector. Its
+		// controller requires the provider-specific deploymentName field and marks
+		// the Provider unready when it is absent.
+		spec["azure"] = map[string]interface{}{
+			"deploymentName": binding.ModelName,
+		}
 	}
 	// Orka's Provider CRD requires spec.secretRef (name + key). Reconcile
 	// ensures keyless bindings have a managed no-auth Secret; this fallback keeps
@@ -339,4 +401,78 @@ func (r *OrkaProviderReconciler) objectReader() client.Reader {
 		return r.APIReader
 	}
 	return r.Client
+}
+
+func (r *OrkaProviderReconciler) cleanupRenderedResources(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+) (bool, error) {
+	return agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), ad,
+		agentprovider.UnstructuredRef(orkaProviderGVK, ad.Name+"-provider", ad.Namespace),
+		agentprovider.UnstructuredRef(orkaAgentGVK, ad.Name, ad.Namespace),
+	)
+}
+
+func (r *OrkaProviderReconciler) cleanupAndReleaseForFrameworkHandoff(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+) (ctrl.Result, error) {
+	pending, err := r.cleanupRenderedResources(ctx, ad)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pending {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseDeploying, nil, metav1.ConditionFalse,
+			"ProviderHandoffCleanup", "Removing Orka resources after the agent framework changed")
+	}
+	return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, ad, OrkaFieldOwner)
+}
+
+func (r *OrkaProviderReconciler) failClosedForCredentialProvision(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	cause error,
+) (ctrl.Result, error) {
+	pending, cleanupErr := r.cleanupRenderedResources(ctx, ad)
+	if cleanupErr != nil {
+		statusErr := r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+			metav1.ConditionFalse, "CredentialCleanupFailed", cleanupErr.Error())
+		if statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, fmt.Errorf("%w; stop Orka resources after credential failure: %v", cause, cleanupErr)
+	}
+	if pending {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.status(ctx, ad,
+			airunwayv1alpha1.AgentPhaseFailed, nil, metav1.ConditionFalse,
+			"CredentialCleanup", "Stopping Orka resources after keyless credential provisioning failed")
+	}
+	statusErr := r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil,
+		metav1.ConditionFalse, "CredentialProvisionFailed", cause.Error())
+	if statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+	return ctrl.Result{}, cause
+}
+
+func (r *OrkaProviderReconciler) cleanupAfterRenderedWriteFailure(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	failed *unstructured.Unstructured,
+	cause error,
+	cleanupDefinitiveFailure bool,
+) error {
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(failed.GroupVersionKind())
+	readErr := r.objectReader().Get(ctx, client.ObjectKeyFromObject(failed), live)
+	foreign := readErr == nil && !agentprovider.IsControlledByAgentDeployment(live, ad)
+	definitivelyIncomplete := cleanupDefinitiveFailure && definitiveCRDResourceWriteFailure(cause)
+	if !foreign && !definitivelyIncomplete {
+		return cause
+	}
+	if _, err := r.cleanupRenderedResources(ctx, ad); err != nil {
+		return fmt.Errorf("%w; clean up incomplete Orka topology after rendered resource write failure: %v", cause, err)
+	}
+	return cause
 }

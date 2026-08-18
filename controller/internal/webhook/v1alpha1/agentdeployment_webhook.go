@@ -17,18 +17,23 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
+	"io"
+	"strconv"
 	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/credentialadmission"
 )
 
 var (
@@ -67,17 +72,86 @@ var (
 	}
 )
 
-// SetupAgentDeploymentWebhookWithManager registers the validating webhook for AgentDeployment.
-func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager) error {
+// SetupAgentDeploymentWebhookWithManager registers the credential-attesting
+// mutating webhook and the validating webhook for AgentDeployment.
+func SetupAgentDeploymentWebhookWithManager(mgr ctrl.Manager, attestor *credentialadmission.Attestor, recordNamespace string) error {
+	secretAccess := &sarReviewer{client: mgr.GetClient()}
+	records, err := credentialadmission.NewRecordStore(attestor, mgr.GetAPIReader(), mgr.GetClient(), recordNamespace)
+	if err != nil {
+		return err
+	}
 	return ctrl.NewWebhookManagedBy(mgr, &airunwayv1alpha1.AgentDeployment{}).
+		WithDefaulter(&AgentDeploymentCustomDefaulter{
+			SecretAccess: secretAccess,
+			Attestor:     attestor,
+		}).
 		WithValidator(&AgentDeploymentCustomValidator{
-			SecretAccess: &sarReviewer{client: mgr.GetClient()},
+			SecretAccess:      secretAccess,
+			Attestor:          attestor,
+			CredentialRecords: records,
 		}).
 		Complete()
 }
 
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
-// +kubebuilder:webhook:path=/validate-airunway-ai-v1alpha1-agentdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=airunway.ai,resources=agentdeployments,verbs=create;update,versions=v1alpha1,name=vagentdeployment-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;create;update;patch;delete
+// +kubebuilder:webhook:path=/mutate-airunway-ai-v1alpha1-agentdeployment,mutating=true,failurePolicy=fail,sideEffects=None,groups=airunway.ai,resources=agentdeployments,verbs=create;update,versions=v1alpha1,name=magentdeployment-v1alpha1.kb.io,admissionReviewVersions=v1,reinvocationPolicy=IfNeeded
+// +kubebuilder:webhook:path=/validate-airunway-ai-v1alpha1-agentdeployment,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=airunway.ai,resources=agentdeployments,verbs=create;update,versions=v1alpha1,name=vagentdeployment-v1alpha1.kb.io,admissionReviewVersions=v1
+
+// AgentDeploymentCustomDefaulter stamps a durable proof only after the
+// requesting user is authorized to read the referenced Secret. Reconciliation
+// verifies this proof before it publishes the Secret reference to a provider.
+type AgentDeploymentCustomDefaulter struct {
+	SecretAccess SecretAccessReviewer
+	Attestor     *credentialadmission.Attestor
+}
+
+// Default implements webhook.CustomDefaulter.
+func (d *AgentDeploymentCustomDefaulter) Default(ctx context.Context, obj *airunwayv1alpha1.AgentDeployment) error {
+	if credentialsRefOf(obj) == nil {
+		d.Attestor.Remove(obj)
+		return nil
+	}
+
+	validator := &AgentDeploymentCustomValidator{SecretAccess: d.SecretAccess}
+	if allErrs := validator.validateCredentialAccess(ctx, obj); len(allErrs) > 0 {
+		return allErrs.ToAggregate()
+	}
+	if d.Attestor == nil {
+		return fmt.Errorf("credential admission attestor is not configured")
+	}
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot attest credential admission: %w", err)
+	}
+	if req.Operation == admissionv1.Create {
+		// The API server assigns UID and generation only after mutating
+		// admission. Never preserve a caller-supplied/replayed CREATE proof;
+		// validating admission persists a UID-bound bridge record instead.
+		d.Attestor.Remove(obj)
+		return nil
+	}
+	if req.Operation != admissionv1.Update {
+		return fmt.Errorf("credential admission attestation does not support operation %q", req.Operation)
+	}
+	if req.DryRun != nil && *req.DryRun {
+		// A dry-run response is visible to the requester. Never turn it into a
+		// production-signature oracle that can be replayed after admission is
+		// temporarily absent; validation still performs the Secret SAR below.
+		d.Attestor.Remove(obj)
+		return nil
+	}
+
+	var oldObj airunwayv1alpha1.AgentDeployment
+	if err := json.Unmarshal(req.OldObject.Raw, &oldObj); err != nil {
+		return fmt.Errorf("decode old AgentDeployment for credential admission attestation: %w", err)
+	}
+	expectedGeneration := oldObj.Generation
+	if !apiequality.Semantic.DeepEqual(oldObj.Spec, obj.Spec) {
+		expectedGeneration++
+	}
+	return d.Attestor.Stamp(ctx, obj, oldObj.UID, expectedGeneration)
+}
 
 // AgentDeploymentCustomValidator validates AgentDeployment resources.
 type AgentDeploymentCustomValidator struct {
@@ -86,6 +160,16 @@ type AgentDeploymentCustomValidator struct {
 	// one the author cannot. Nil disables the check, which is only appropriate
 	// in unit tests; the manager always wires it.
 	SecretAccess SecretAccessReviewer
+
+	// Attestor verifies UPDATE proofs after all mutating admission has run.
+	// CredentialRecords persists the CREATE-only UID bridge because validating
+	// admission sees server-assigned identity but cannot patch the object.
+	Attestor          *credentialadmission.Attestor
+	CredentialRecords CredentialAdmissionRecorder
+}
+
+type CredentialAdmissionRecorder interface {
+	PersistCreate(context.Context, *airunwayv1alpha1.AgentDeployment) error
 }
 
 // agentDeploymentMaxNameLength caps AgentDeployment names so every derived
@@ -99,6 +183,9 @@ func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj
 	allErrs = append(allErrs, v.validateCredentialAccess(ctx, obj)...)
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
+	}
+	if err := v.recordCredentialCreate(ctx, obj); err != nil {
+		return nil, err
 	}
 	return nil, nil
 }
@@ -152,7 +239,39 @@ func (v *AgentDeploymentCustomValidator) validateUpdate(ctx context.Context, old
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
 	}
+	if credentialsRefOf(newObj) != nil {
+		req, err := admission.RequestFromContext(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("cannot verify credential admission attestation: %w", err)
+		}
+		if req.DryRun != nil && *req.DryRun {
+			return nil, nil
+		}
+		if v.Attestor == nil {
+			return nil, fmt.Errorf("credential admission attestor is not configured")
+		}
+		if err := v.Attestor.Verify(ctx, newObj); err != nil {
+			return nil, fmt.Errorf("credential-bearing AgentDeployment update has no valid admission proof: %w", err)
+		}
+	}
 	return nil, nil
+}
+
+func (v *AgentDeploymentCustomValidator) recordCredentialCreate(ctx context.Context, obj *airunwayv1alpha1.AgentDeployment) error {
+	if credentialsRefOf(obj) == nil {
+		return nil
+	}
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot persist credential admission record: %w", err)
+	}
+	if req.DryRun != nil && *req.DryRun {
+		return nil
+	}
+	if v.CredentialRecords == nil {
+		return fmt.Errorf("credential admission CREATE record store is not configured")
+	}
+	return v.CredentialRecords.PersistCreate(ctx, obj)
 }
 
 // ValidateDelete performs no validation on delete.
@@ -167,11 +286,24 @@ func validateAgentProviderOverrides(provider *airunwayv1alpha1.AgentProviderSpec
 	}
 
 	var rawValue interface{}
-	if err := json.Unmarshal(provider.Overrides.Raw, &rawValue); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(provider.Overrides.Raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&rawValue); err != nil {
 		allErrs = append(allErrs, field.Invalid(
 			overridesPath,
 			fmt.Sprintf("<redacted %d bytes>", len(provider.Overrides.Raw)),
 			"overrides must be valid JSON",
+		))
+		return allErrs
+	}
+	// Decoder.Decode accepts another JSON value after the first. RawExtension
+	// must contain exactly one value, matching json.Unmarshal's behavior while
+	// retaining json.Number for exact integer validation.
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		allErrs = append(allErrs, field.Invalid(
+			overridesPath,
+			fmt.Sprintf("<redacted %d bytes>", len(provider.Overrides.Raw)),
+			"overrides must contain exactly one JSON value",
 		))
 		return allErrs
 	}
@@ -422,9 +554,13 @@ func validateContainerSecurityContextValues(m map[string]interface{}, path *fiel
 }
 
 func validateNonNegativeInt64(path *field.Path, value interface{}) field.ErrorList {
-	number, ok := value.(float64)
-	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number < 0 {
-		return field.ErrorList{field.Invalid(path, value, "must be a non-negative integer")}
+	number, ok := value.(json.Number)
+	if !ok {
+		return field.ErrorList{field.Invalid(path, value, "must be a non-negative 64-bit integer")}
+	}
+	parsed, err := strconv.ParseInt(number.String(), 10, 64)
+	if err != nil || parsed < 0 {
+		return field.ErrorList{field.Invalid(path, value, "must be a non-negative 64-bit integer")}
 	}
 	return nil
 }
@@ -436,8 +572,11 @@ func validateRunAsUser(path *field.Path, value interface{}) field.ErrorList {
 	if errs := validateNonNegativeInt64(path, value); len(errs) > 0 {
 		return errs
 	}
-	if number, ok := value.(float64); ok && number == 0 {
-		return field.ErrorList{field.Forbidden(path, "runAsUser cannot be 0 (root); runAsNonRoot is always enforced")}
+	if number, ok := value.(json.Number); ok {
+		parsed, _ := strconv.ParseInt(number.String(), 10, 64)
+		if parsed == 0 {
+			return field.ErrorList{field.Forbidden(path, "runAsUser cannot be 0 (root); runAsNonRoot is always enforced")}
+		}
 	}
 	return nil
 }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -115,13 +116,34 @@ func (r *AgentProviderVersionReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	now := metav1.Now()
+	if err := r.publishHeartbeat(ctx, &apc, now); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if apc.Status.Version != r.Version {
+		if err := r.publishVersion(ctx, &apc); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{RequeueAfter: agentProviderReporterHeartbeatInterval}, nil
+}
+
+func (r *AgentProviderVersionReconciler) publishHeartbeat(
+	ctx context.Context,
+	apc *airunwayv1alpha1.AgentProviderConfig,
+	now metav1.Time,
+) error {
 	heartbeat := &airunwayv1alpha1.AgentProviderConfig{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: airunwayv1alpha1.GroupVersion.String(),
 			Kind:       "AgentProviderConfig",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: apc.Name},
-		Status:     airunwayv1alpha1.AgentProviderConfigStatus{LastHeartbeat: &now},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            apc.Name,
+			UID:             apc.UID,
+			ResourceVersion: apc.ResourceVersion,
+		},
+		Status: airunwayv1alpha1.AgentProviderConfigStatus{LastHeartbeat: &now},
 	}
 	// Force only this dedicated heartbeat apply. Older combined-controller
 	// builds owned lastHeartbeat from the readiness manager; taking it here is
@@ -130,25 +152,54 @@ func (r *AgentProviderVersionReconciler) Reconcile(ctx context.Context, req ctrl
 		client.FieldOwner(AgentProviderHeartbeatFieldOwner(r.Name)),
 		client.ForceOwnership,
 	); err != nil {
-		return ctrl.Result{}, fmt.Errorf("publish provider heartbeat for %q: %w", apc.Name, err)
+		return fmt.Errorf("publish provider heartbeat for %q: %w", apc.Name, err)
+	}
+	apc.ResourceVersion = heartbeat.ResourceVersion
+	apc.Status.LastHeartbeat = &now
+	return nil
+}
+
+func (r *AgentProviderVersionReconciler) publishVersion(ctx context.Context, apc *airunwayv1alpha1.AgentProviderConfig) error {
+	metadata := map[string]any{
+		"name":            apc.Name,
+		"uid":             string(apc.UID),
+		"resourceVersion": apc.ResourceVersion,
+	}
+	fieldOwner := AgentProviderVersionFieldOwner(r.Name)
+	if r.Version == "" {
+		// An omitted typed status.version cannot express relinquishing an
+		// already-owned field. Apply an otherwise empty status under the same
+		// manager so SSA prunes the old version without claiming any condition.
+		release := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": airunwayv1alpha1.GroupVersion.String(),
+			"kind":       "AgentProviderConfig",
+			"metadata":   metadata,
+			"status": map[string]any{
+				"conditions": []any{},
+			},
+		}}
+		if err := r.Status().Patch(ctx, release, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+			return fmt.Errorf("release provider version for %q: %w", apc.Name, err)
+		}
+		return nil
 	}
 
-	if r.Version != "" && apc.Status.Version != r.Version {
-		apply := &airunwayv1alpha1.AgentProviderConfig{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: airunwayv1alpha1.GroupVersion.String(),
-				Kind:       "AgentProviderConfig",
-			},
-			ObjectMeta: metav1.ObjectMeta{Name: apc.Name},
-			Status:     airunwayv1alpha1.AgentProviderConfigStatus{Version: r.Version},
-		}
-		if err := r.Status().Patch(ctx, apply, client.Apply,
-			client.FieldOwner(AgentProviderVersionFieldOwner(r.Name)),
-		); err != nil {
-			return ctrl.Result{}, fmt.Errorf("publish provider version for %q: %w", apc.Name, err)
-		}
+	apply := &airunwayv1alpha1.AgentProviderConfig{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "AgentProviderConfig",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            apc.Name,
+			UID:             apc.UID,
+			ResourceVersion: apc.ResourceVersion,
+		},
+		Status: airunwayv1alpha1.AgentProviderConfigStatus{Version: r.Version},
 	}
-	return ctrl.Result{RequeueAfter: agentProviderReporterHeartbeatInterval}, nil
+	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+		return fmt.Errorf("publish provider version for %q: %w", apc.Name, err)
+	}
+	return nil
 }
 
 // SetupWithManager wires the version reporter.

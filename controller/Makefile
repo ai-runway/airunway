@@ -74,8 +74,12 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: verify-versions manifests generate fmt vet setup-envtest ## Run tests.
+test: verify-versions manifests generate fmt vet setup-envtest kustomize ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+.PHONY: test-webhook-staging
+test-webhook-staging: kustomize ## Verify the three-phase AgentDeployment webhook rollout manifests and ordering.
+	KUSTOMIZE="$(abspath $(KUSTOMIZE))" go test ./config -run '^(TestAgentDeploymentWebhookStaging|TestManagerSecretRBAC|TestManagerAdmissionConfigurationRBAC|TestControllerDeployOrdersAdmissionGuard|TestDocumentedStagedCommandsFailClosed)$$' -count=1
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -163,12 +167,14 @@ docker-buildx: verify-versions ## Build and push docker image for the manager fo
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests generate kustomize ## Generate the staged controller installer manifests.
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	"$(KUSTOMIZE)" build config/agentdeployment-webhook-guard > dist/agentdeployment-webhook-guard.yaml
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	"$(KUSTOMIZE)" build config/agentdeployment-webhook > dist/agentdeployment-webhook.yaml
 	@git checkout config/manager/kustomization.yaml 2>/dev/null || true
-	@echo "✅ Generated dist/install.yaml"
+	@echo "✅ Generated the AgentDeployment guard, controller, and webhook activation manifests"
 
 ##@ Deployment
 
@@ -187,15 +193,37 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests kustomize ## Guard AgentDeployment writes, roll out the controller, then activate admission.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	"$(KUSTOMIZE)" build config/agentdeployment-webhook-guard | "$(KUBECTL)" apply -f -
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+	"$(KUBECTL)" rollout restart deployment/airunway-controller-manager -n airunway-system
+	$(MAKE) activate-agentdeployment-webhook
 
 	@git checkout config/manager/kustomization.yaml 2>/dev/null || true
 	@echo "✅ AIRunway controller deployed"
 
+.PHONY: activate-agentdeployment-webhook
+activate-agentdeployment-webhook: kustomize ## Activate complete AgentDeployment admission after the controller rollout.
+	"$(KUBECTL)" rollout status deployment/airunway-controller-manager -n airunway-system --timeout=5m
+	"$(KUSTOMIZE)" build config/agentdeployment-webhook | "$(KUBECTL)" apply -f -
+	$(MAKE) wait-agentdeployment-webhook-ca
+	"$(KUSTOMIZE)" build config/agentdeployment-webhook-guard | "$(KUBECTL)" delete --ignore-not-found=true -f -
+	@echo "✅ AgentDeployment admission activated and upgrade guard removed"
+
+.PHONY: wait-agentdeployment-webhook-ca
+wait-agentdeployment-webhook-ca: ## Wait for cert-controller to trust both activated AgentDeployment webhook routes.
+	"$(KUBECTL)" wait secret/airunway-webhook-server-cert -n airunway-system --for=jsonpath='{.data.ca\.crt}' --timeout=5m
+	@ca_bundle="$$("$(KUBECTL)" get secret/airunway-webhook-server-cert -n airunway-system -o jsonpath='{.data.ca\.crt}')"; \
+		test -n "$$ca_bundle"; \
+		"$(KUBECTL)" wait mutatingwebhookconfiguration/airunway-mutating-webhook-configuration \
+			--for="jsonpath={.webhooks[?(@.name==\"magentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=$$ca_bundle" --timeout=5m; \
+		"$(KUBECTL)" wait validatingwebhookconfiguration/airunway-validating-webhook-configuration \
+			--for="jsonpath={.webhooks[?(@.name==\"vagentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=$$ca_bundle" --timeout=5m
+
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUSTOMIZE)" build config/agentdeployment-webhook-guard | "$(KUBECTL)" delete --ignore-not-found=true -f -
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies

@@ -15,7 +15,7 @@ case "${runtime}" in
     container_port=8642
     ;;
   langgraph)
-    container_port=8000
+    container_port=8080
     ;;
   openclaw)
     container_port=18789
@@ -32,6 +32,7 @@ job_container_name="airunway-${runtime}-job-smoke-$$"
 host_port=18080
 mock_port=18081
 access_token=non-secret-smoke-access-token
+model_access_token=non-secret-smoke-model-access-token
 mock_pid=""
 
 cleanup() {
@@ -44,7 +45,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 "${agent_repo_root}/images/agents/testdata/openai_mock.py" "${mock_port}" &
+AIRUNWAY_MOCK_API_KEY="${model_access_token}" \
+  python3 "${agent_repo_root}/images/agents/testdata/openai_mock.py" "${mock_port}" &
 mock_pid=$!
 for _attempt in $(seq 1 30); do
   if curl --fail --silent --max-time 2 "http://127.0.0.1:${mock_port}/healthz" >/dev/null; then
@@ -53,6 +55,15 @@ for _attempt in $(seq 1 30); do
   sleep 1
 done
 curl --fail --silent --max-time 2 "http://127.0.0.1:${mock_port}/healthz" >/dev/null
+mock_unauthenticated_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 2 \
+  "http://127.0.0.1:${mock_port}/v1/models")"
+if [[ "${mock_unauthenticated_status}" != "401" ]]; then
+  echo "model mock accepted a request without its model credential" >&2
+  exit 1
+fi
+curl --fail --silent --max-time 2 \
+  --header "Authorization: Bearer ${model_access_token}" \
+  "http://127.0.0.1:${mock_port}/v1/models" >/dev/null
 
 docker run --detach \
   --name "${server_container_name}" \
@@ -66,7 +77,7 @@ docker run --detach \
   --env "AIRUNWAY_AGENT_API_KEY=${access_token}" \
   --env OPENAI_MODEL=smoke-model \
   --env "OPENAI_BASE_URL=http://host.docker.internal:${mock_port}/v1" \
-  --env OPENAI_API_KEY=non-secret-smoke-value \
+  --env "OPENAI_API_KEY=${model_access_token}" \
   "${image}" >/dev/null
 
 for _attempt in $(seq 1 60); do
@@ -93,6 +104,16 @@ if [[ "${unauthenticated_status}" != "401" ]]; then
   echo "agent image accepted unauthenticated model discovery: ${runtime} (${image})" >&2
   exit 1
 fi
+wrong_token_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  --header 'Authorization: Bearer wrong-smoke-access-token' \
+  "http://127.0.0.1:${host_port}/v1/models")"
+if [[ "${wrong_token_status}" != "401" ]]; then
+  echo "agent image accepted an incorrect bearer token: ${runtime} (${image})" >&2
+  exit 1
+fi
+curl --fail --silent --max-time 5 \
+  --header "Authorization: Bearer ${access_token}" \
+  "http://127.0.0.1:${host_port}/v1/models" >/dev/null
 
 curl --fail-with-body --silent --show-error --max-time 120 \
   --header "Authorization: Bearer ${access_token}" \
@@ -125,7 +146,7 @@ docker run --detach \
   --env AIRUNWAY_AGENT_MODE=job \
   --env OPENAI_MODEL=smoke-model \
   --env "OPENAI_BASE_URL=http://host.docker.internal:${mock_port}/v1" \
-  --env OPENAI_API_KEY=non-secret-smoke-value \
+  --env "OPENAI_API_KEY=${model_access_token}" \
   "${image}" >/dev/null
 
 for _attempt in $(seq 1 90); do

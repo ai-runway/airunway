@@ -178,9 +178,10 @@ func ClassifyBinding(ad *airunwayv1alpha1.AgentDeployment) BindingState {
 	// generation against the previous endpoint or credential. Treat it as
 	// stale until core has re-verified — hold, do not tear down.
 	//
-	// ObservedGeneration 0 means the condition predates generation tracking;
-	// accept it rather than stalling agents written by an older controller.
-	if cond.ObservedGeneration != 0 && cond.ObservedGeneration < ad.Generation {
+	// Generation zero is not evidence that core verified the current spec. New
+	// AgentDeployments start at generation one, so accepting an untracked
+	// condition here lets a stale binding license rendering after any spec edit.
+	if cond.ObservedGeneration < ad.Generation {
 		return BindingStale
 	}
 	return BindingReady
@@ -197,6 +198,12 @@ func ClassifyBinding(ad *airunwayv1alpha1.AgentDeployment) BindingState {
 // the core controller's writes intact.
 //
 // fieldOwner must be unique to your provider; see FieldOwner.
+//
+// UID plus resourceVersion bind the apply to the exact object incarnation and
+// revision the reconciler read. CRD status update strategy replaces request
+// metadata with live metadata, so UID alone is not an atomic precondition;
+// resourceVersion is the API-server-supported guard against a delete/recreate
+// or concurrent status write.
 //
 // This deliberately does NOT force ownership. Conditions are a listType=map
 // keyed by type, so core and each provider own disjoint entries, and a conflict
@@ -215,12 +222,20 @@ func ApplyOwnedStatus(
 	providerReady metav1.ConditionStatus,
 	reason, message string,
 ) error {
+	if ad.UID == "" || ad.ResourceVersion == "" {
+		return fmt.Errorf("apply provider status for AgentDeployment %s/%s: UID and resourceVersion are required", ad.Namespace, ad.Name)
+	}
 	apply := &airunwayv1alpha1.AgentDeployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: airunwayv1alpha1.GroupVersion.String(),
 			Kind:       "AgentDeployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: ad.Name, Namespace: ad.Namespace},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            ad.Name,
+			Namespace:       ad.Namespace,
+			UID:             ad.UID,
+			ResourceVersion: ad.ResourceVersion,
+		},
 		Status: airunwayv1alpha1.AgentDeploymentStatus{
 			ProviderOwner: fieldOwner,
 			Phase:         phase,
@@ -237,7 +252,15 @@ func ApplyOwnedStatus(
 		},
 	}
 
-	return c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner))
+	if err := c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+		return err
+	}
+	// Patch decodes the authoritative response into apply. Carry its status and
+	// resourceVersion forward so a provider that intentionally publishes more
+	// than one transition in a reconcile uses the status it just committed.
+	ad.ResourceVersion = apply.ResourceVersion
+	ad.Status = apply.Status
+	return nil
 }
 
 // ProviderHandoffPending reports whether another provider still owns the
@@ -269,6 +292,33 @@ func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1
 // Ownership guards
 // -----------------------------------------------------------------------------
 
+// IsControlledByAgentDeployment reports whether obj carries the exact blocking
+// controller reference emitted for ad by controllerutil.SetControllerReference.
+// metav1.IsControlledBy intentionally compares only UIDs; that is sufficient
+// for garbage-collector identity, but too weak as a provider write/delete
+// boundary because a malformed or deliberately forged reference can reuse the
+// UID while naming another object. Requiring the blocking bit also preserves the
+// API-server authorization check on setting owner references.
+func IsControlledByAgentDeployment(obj metav1.Object, ad *airunwayv1alpha1.AgentDeployment) bool {
+	if obj == nil || ad == nil || ad.Namespace == "" || ad.UID == "" || obj.GetNamespace() != ad.Namespace {
+		return false
+	}
+	ref := metav1.GetControllerOfNoCopy(obj)
+	return ref != nil &&
+		ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
+		ref.Kind == "AgentDeployment" &&
+		ref.Name == ad.Name &&
+		ref.UID == ad.UID &&
+		ref.BlockOwnerDeletion != nil && *ref.BlockOwnerDeletion
+}
+
+func isControlledByOwner(obj, owner metav1.Object) bool {
+	if ad, ok := owner.(*airunwayv1alpha1.AgentDeployment); ok {
+		return IsControlledByAgentDeployment(obj, ad)
+	}
+	return metav1.IsControlledBy(obj, owner)
+}
+
 // VerifyOwnedOrAbsent checks whether a server-side apply would silently adopt an
 // unrelated, same-named object. It looks up any existing object matching obj's
 // kind, name and namespace, and returns an error unless that object is already
@@ -295,7 +345,7 @@ func VerifyOwnedOrAbsent(ctx context.Context, c client.Reader, scheme *runtime.S
 		}
 		return fmt.Errorf("get existing %s %s for ownership check: %w", gvk.Kind, key, err)
 	}
-	if !metav1.IsControlledBy(existing, owner) {
+	if !isControlledByOwner(existing, owner) {
 		return fmt.Errorf("refusing to adopt %s %s: it is not owned by AgentDeployment %s", gvk.Kind, key, owner.GetName())
 	}
 	return nil
@@ -355,7 +405,7 @@ func ApplyOwned(
 			return fmt.Errorf("get concurrently-created %s %s for ownership check: %w", gvk.Kind, key, err)
 		}
 	}
-	if !metav1.IsControlledBy(existing, owner) {
+	if !isControlledByOwner(existing, owner) {
 		return fmt.Errorf("refusing to adopt %s %s: it is not owned by AgentDeployment %s", gvk.Kind, key, owner.GetName())
 	}
 
@@ -389,7 +439,7 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 		}
 		return fmt.Errorf("get owned object %s for cleanup: %w", key, err)
 	}
-	if !metav1.IsControlledBy(obj, owner) {
+	if !isControlledByOwner(obj, owner) {
 		return nil
 	}
 	// Propagation must be explicit. batch/v1 Job is the one kind here whose
@@ -429,7 +479,7 @@ func DeleteOwnedAndWait(ctx context.Context, c client.Client, reader client.Read
 		}
 		return false, fmt.Errorf("get owned object %s for foreground cleanup: %w", key, err)
 	}
-	if !metav1.IsControlledBy(obj, owner) {
+	if !isControlledByOwner(obj, owner) {
 		return false, nil
 	}
 	if !obj.GetDeletionTimestamp().IsZero() {
@@ -500,12 +550,17 @@ func DeleteOwnedAndWait(ctx context.Context, c client.Client, reader client.Read
 // claiming nothing": a zero-valued condition slice is indistinguishable from one
 // the caller wants removed.
 func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, fieldOwner string) error {
+	if ad.UID == "" || ad.ResourceVersion == "" {
+		return fmt.Errorf("release provider status for AgentDeployment %s/%s: UID and resourceVersion are required", ad.Namespace, ad.Name)
+	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": airunwayv1alpha1.GroupVersion.String(),
 		"kind":       "AgentDeployment",
 		"metadata": map[string]any{
-			"name":      ad.Name,
-			"namespace": ad.Namespace,
+			"name":            ad.Name,
+			"namespace":       ad.Namespace,
+			"uid":             string(ad.UID),
+			"resourceVersion": ad.ResourceVersion,
 		},
 		// An empty conditions list, and nothing else. The status object must be
 		// non-empty or the API server rejects it as null, but every field named
@@ -518,7 +573,16 @@ func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alph
 			"conditions": []any{},
 		},
 	}}
-	return c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner))
+	if err := c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+		return err
+	}
+	var updated airunwayv1alpha1.AgentDeployment
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(apply.Object, &updated); err != nil {
+		return fmt.Errorf("decode released provider status response: %w", err)
+	}
+	ad.ResourceVersion = updated.ResourceVersion
+	ad.Status = updated.Status
+	return nil
 }
 
 // CleanupOwned tears down the resources a provider rendered for ad, so a

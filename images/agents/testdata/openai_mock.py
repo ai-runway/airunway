@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import sys
 import time
 from http import HTTPStatus
@@ -11,13 +13,33 @@ from typing import Any
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _json(self, status: HTTPStatus, body: dict[str, Any]) -> None:
+    expected_api_key = ""
+
+    def _json(
+        self,
+        status: HTTPStatus,
+        body: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> None:
         payload = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
+
+    def _authenticated(self) -> bool:
+        expected = f"Bearer {self.expected_api_key}"
+        if hmac.compare_digest(self.headers.get("Authorization", ""), expected):
+            return True
+        self._json(
+            HTTPStatus.UNAUTHORIZED,
+            {"error": {"message": "valid model credential is required"}},
+            {"WWW-Authenticate": "Bearer"},
+        )
+        return False
 
     def _sse(self, events: list[dict[str, Any]]) -> None:
         payload = b"".join(
@@ -34,6 +56,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"status": "ok"})
             return
         if self.path == "/v1/models":
+            if not self._authenticated():
+                return
             self._json(
                 HTTPStatus.OK,
                 {"object": "list", "data": [{"id": "smoke-model", "object": "model"}]},
@@ -42,6 +66,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": {"message": "not found"}})
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self._authenticated():
+            return
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length)) if length else {}
         model = body.get("model", "smoke-model") if isinstance(body, dict) else "smoke-model"
@@ -140,6 +166,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18081
+    expected_api_key = os.environ.get("AIRUNWAY_MOCK_API_KEY")
+    if not expected_api_key:
+        raise ValueError("AIRUNWAY_MOCK_API_KEY is required")
+    Handler.expected_api_key = expected_api_key
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 

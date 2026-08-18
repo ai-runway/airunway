@@ -17,7 +17,9 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -29,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/credentialadmission"
 )
 
 // fakeReviewer stands in for SubjectAccessReview.
@@ -36,6 +39,19 @@ type fakeReviewer struct {
 	allowed bool
 	err     error
 	asked   []string // "user/namespace/secret", so we can assert WHO was checked
+}
+
+type fakeCredentialAdmissionRecorder struct {
+	err      error
+	recorded []*airunwayv1alpha1.AgentDeployment
+}
+
+func (f *fakeCredentialAdmissionRecorder) PersistCreate(_ context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.recorded = append(f.recorded, ad.DeepCopy())
+	return nil
 }
 
 func (f *fakeReviewer) CanGetSecret(_ context.Context, req admission.Request, ns, name string) (bool, string, error) {
@@ -47,9 +63,29 @@ func (f *fakeReviewer) CanGetSecret(_ context.Context, req admission.Request, ns
 }
 
 func requestAs(user string) context.Context {
+	return requestAsOperation(user, admissionv1.Create, nil, nil)
+}
+
+func requestAsOperation(
+	user string,
+	operation admissionv1.Operation,
+	oldObj *airunwayv1alpha1.AgentDeployment,
+	dryRun *bool,
+) context.Context {
+	var oldRaw runtime.RawExtension
+	if oldObj != nil {
+		raw, err := json.Marshal(oldObj)
+		if err != nil {
+			panic(err)
+		}
+		oldRaw.Raw = raw
+	}
 	return admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
-			UserInfo: authnv1.UserInfo{Username: user, Groups: []string{"system:authenticated"}},
+			Operation: operation,
+			OldObject: oldRaw,
+			DryRun:    dryRun,
+			UserInfo:  authnv1.UserInfo{Username: user, Groups: []string{"system:authenticated"}},
 		},
 	})
 }
@@ -98,10 +134,171 @@ func TestCredentialAccessBlocksPrivilegeEscalation(t *testing.T) {
 }
 
 func TestCredentialAccessAllowsAuthorizedUser(t *testing.T) {
-	v := &AgentDeploymentCustomValidator{SecretAccess: &fakeReviewer{allowed: true}}
+	recorder := &fakeCredentialAdmissionRecorder{}
+	v := &AgentDeploymentCustomValidator{
+		SecretAccess:      &fakeReviewer{allowed: true},
+		CredentialRecords: recorder,
+	}
 	if _, err := v.ValidateCreate(requestAs("alice"), agentWithSecret("openai-api-key")); err != nil {
 		t.Fatalf("a user who CAN read the Secret must be allowed to reference it: %v", err)
 	}
+	if len(recorder.recorded) != 1 {
+		t.Fatalf("authorized CREATE persisted %d credential records, want 1", len(recorder.recorded))
+	}
+}
+
+func TestCredentialCreateRecordSideEffects(t *testing.T) {
+	t.Run("record persistence failure rejects CREATE", func(t *testing.T) {
+		recorder := &fakeCredentialAdmissionRecorder{err: errors.New("record store unavailable")}
+		v := &AgentDeploymentCustomValidator{
+			SecretAccess:      &fakeReviewer{allowed: true},
+			CredentialRecords: recorder,
+		}
+		if _, err := v.ValidateCreate(requestAs("alice"), agentWithSecret("openai-api-key")); err == nil {
+			t.Fatal("credential-bearing CREATE must fail closed when its UID-bound record cannot be persisted")
+		}
+	})
+
+	t.Run("dry-run performs no record write", func(t *testing.T) {
+		recorder := &fakeCredentialAdmissionRecorder{}
+		v := &AgentDeploymentCustomValidator{
+			SecretAccess:      &fakeReviewer{allowed: true},
+			CredentialRecords: recorder,
+		}
+		dryRun := true
+		ctx := requestAsOperation("alice", admissionv1.Create, nil, &dryRun)
+		if _, err := v.ValidateCreate(ctx, agentWithSecret("openai-api-key")); err != nil {
+			t.Fatalf("dry-run CREATE should validate without a persisted side effect: %v", err)
+		}
+		if len(recorder.recorded) != 0 {
+			t.Fatalf("dry-run CREATE persisted %d records, want 0", len(recorder.recorded))
+		}
+	})
+}
+
+func TestCredentialDefaulterAttestsOnlyAuthorizedRequests(t *testing.T) {
+	attestor, err := credentialadmission.New(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("authorized CREATE removes a caller proof until UID-bound validation", func(t *testing.T) {
+		reviewer := &fakeReviewer{allowed: true}
+		defaulter := &AgentDeploymentCustomDefaulter{SecretAccess: reviewer, Attestor: attestor}
+		ad := agentWithSecret("openai-api-key")
+		ad.Annotations = map[string]string{credentialadmission.AttestationAnnotation: "v1.forged.forged"}
+		if err := defaulter.Default(requestAs("alice"), ad); err != nil {
+			t.Fatalf("Default: %v", err)
+		}
+		if _, found := ad.Annotations[credentialadmission.AttestationAnnotation]; found {
+			t.Fatal("CREATE mutation retained a caller-supplied credential proof")
+		}
+		if len(reviewer.asked) != 1 || reviewer.asked[0] != "alice/team-a/openai-api-key" {
+			t.Fatalf("wrong subject authorized: %v", reviewer.asked)
+		}
+	})
+
+	t.Run("dry-run UPDATE returns no replayable production proof", func(t *testing.T) {
+		reviewer := &fakeReviewer{allowed: true}
+		defaulter := &AgentDeploymentCustomDefaulter{SecretAccess: reviewer, Attestor: attestor}
+		validator := &AgentDeploymentCustomValidator{SecretAccess: reviewer, Attestor: attestor}
+		old := agentWithSecret("openai-api-key")
+		old.UID = "uid-dry-run"
+		old.Generation = 1
+		updated := old.DeepCopy()
+		updated.Generation = 2
+		updated.Spec.Config = &runtime.RawExtension{Raw: []byte(`{"image":"ghcr.io/example/agent:v2"}`)}
+		updated.Annotations = map[string]string{credentialadmission.AttestationAnnotation: "v1.forged.forged"}
+		dryRun := true
+		dryRunCtx := requestAsOperation("alice", admissionv1.Update, old, &dryRun)
+
+		if err := defaulter.Default(dryRunCtx, updated); err != nil {
+			t.Fatalf("dry-run Default: %v", err)
+		}
+		if _, found := updated.Annotations[credentialadmission.AttestationAnnotation]; found {
+			t.Fatal("dry-run UPDATE returned a reusable credential attestation")
+		}
+		if _, err := validator.ValidateUpdate(dryRunCtx, old, updated); err != nil {
+			t.Fatalf("authorized dry-run UPDATE should validate without a production proof: %v", err)
+		}
+		if err := attestor.Verify(context.Background(), updated); err == nil {
+			t.Fatal("dry-run UPDATE unexpectedly produced a controller-verifiable proof")
+		}
+
+		realCtx := requestAsOperation("alice", admissionv1.Update, old, nil)
+		if _, err := validator.ValidateUpdate(realCtx, old, updated); err == nil {
+			t.Fatal("a proof-free dry-run response was replayed as a real UPDATE")
+		}
+	})
+
+	t.Run("authorized UPDATE is stamped and bound to UID generation and spec", func(t *testing.T) {
+		reviewer := &fakeReviewer{allowed: true}
+		defaulter := &AgentDeploymentCustomDefaulter{SecretAccess: reviewer, Attestor: attestor}
+		old := agentWithSecret("openai-api-key")
+		old.UID = "uid-1"
+		old.Generation = 4
+		ad := old.DeepCopy()
+		ad.Generation = 5
+		ad.Annotations = map[string]string{credentialadmission.AttestationAnnotation: "v1.forged.forged"}
+		ad.Spec.Config = &runtime.RawExtension{Raw: []byte(`{"image":"ghcr.io/example/agent:v2"}`)}
+		ctx := requestAsOperation("alice", admissionv1.Update, old, nil)
+		if err := defaulter.Default(ctx, ad); err != nil {
+			t.Fatalf("Default: %v", err)
+		}
+		if err := attestor.Verify(context.Background(), ad); err != nil {
+			t.Fatalf("authorized UPDATE was not durably attested: %v", err)
+		}
+		firstProof := ad.Annotations[credentialadmission.AttestationAnnotation]
+		if err := defaulter.Default(ctx, ad); err != nil {
+			t.Fatalf("reinvoked Default: %v", err)
+		}
+		if got := ad.Annotations[credentialadmission.AttestationAnnotation]; got != firstProof {
+			t.Fatalf("reinvocation changed an unchanged object's proof: first=%q second=%q", firstProof, got)
+		}
+		if err := attestor.Verify(context.Background(), ad); err != nil {
+			t.Fatalf("reinvoked UPDATE was not durably attested: %v", err)
+		}
+		if len(reviewer.asked) != 2 || reviewer.asked[0] != "alice/team-a/openai-api-key" ||
+			reviewer.asked[1] != "alice/team-a/openai-api-key" {
+			t.Fatalf("wrong subject authorized: %v", reviewer.asked)
+		}
+
+		ad.Spec.Config = &runtime.RawExtension{Raw: []byte(`{"image":"ghcr.io/mallory/exfil:latest"}`)}
+		if err := attestor.Verify(context.Background(), ad); err == nil {
+			t.Fatal("changing the image after admission must invalidate the attestation")
+		}
+	})
+
+	t.Run("unauthorized request is rejected without a proof", func(t *testing.T) {
+		defaulter := &AgentDeploymentCustomDefaulter{
+			SecretAccess: &fakeReviewer{allowed: false},
+			Attestor:     attestor,
+		}
+		ad := agentWithSecret("prod-db-password")
+		if err := defaulter.Default(requestAs("mallory"), ad); err == nil {
+			t.Fatal("unauthorized credential reference must not be attested")
+		}
+		if _, found := ad.Annotations[credentialadmission.AttestationAnnotation]; found {
+			t.Fatal("rejected request retained an attestation")
+		}
+	})
+
+	t.Run("dropping the credential clears a stale proof", func(t *testing.T) {
+		ad := agentWithSecret("openai-api-key")
+		ad.UID = "uid-1"
+		ad.Generation = 1
+		if err := attestor.Stamp(context.Background(), ad, ad.UID, ad.Generation); err != nil {
+			t.Fatal(err)
+		}
+		ad.Spec.Model.ExternalAPI.CredentialsRef = nil
+		defaulter := &AgentDeploymentCustomDefaulter{Attestor: attestor}
+		if err := defaulter.Default(context.Background(), ad); err != nil {
+			t.Fatal(err)
+		}
+		if _, found := ad.Annotations[credentialadmission.AttestationAnnotation]; found {
+			t.Fatal("keyless binding retained a credential attestation")
+		}
+	})
 }
 
 // A failing authorizer must not fall open: a security control that silently
@@ -173,8 +370,17 @@ func TestCredentialAccessOnUpdate(t *testing.T) {
 
 	t.Run("an authorized user may still edit", func(t *testing.T) {
 		reviewer := &fakeReviewer{allowed: true}
-		v := &AgentDeploymentCustomValidator{SecretAccess: reviewer}
+		attestor, err := credentialadmission.New(bytes.Repeat([]byte{0x42}, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := &AgentDeploymentCustomValidator{SecretAccess: reviewer, Attestor: attestor}
 		old, updated := agentWithSecret("openai-api-key"), agentWithSecret("openai-api-key")
+		old.UID, updated.UID = "uid-1", "uid-1"
+		old.Generation, updated.Generation = 1, 1
+		if err := attestor.Stamp(context.Background(), updated, updated.UID, updated.Generation); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := v.ValidateUpdate(requestAs("alice"), old, updated); err != nil {
 			t.Fatalf("a user who can read the Secret must still be able to edit: %v", err)
 		}

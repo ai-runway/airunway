@@ -15,5 +15,5 @@ WORKDIR /opt/airunway
 COPY --chmod=0555 images/agents/python/airunway_runtime.py images/agents/langgraph/adapter.py ./
 
 USER 65532:65532
-EXPOSE 8000
+EXPOSE 8080
 ENTRYPOINT ["python", "/opt/airunway/adapter.py"]

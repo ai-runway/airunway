@@ -18,17 +18,18 @@ package controller
 
 import (
 	"context"
+	"os"
+	"strings"
+
 	admissionv1 "k8s.io/api/admission/v1"
 	authnv1 "k8s.io/api/authentication/v1"
-	"os"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	webhookv1alpha1 "github.com/ai-runway/airunway/controller/internal/webhook/v1alpha1"
@@ -52,10 +53,14 @@ var _ = Describe("Agent samples", func() {
 		// instead of short-circuiting on a nil reviewer — the test claimed to run
 		// samples "through the webhook" while skipping it for exactly the samples
 		// where it matters.
-		validator := &webhookv1alpha1.AgentDeploymentCustomValidator{SecretAccess: allowAllSecrets{}}
+		validator := &webhookv1alpha1.AgentDeploymentCustomValidator{
+			SecretAccess:      allowAllSecrets{},
+			CredentialRecords: discardCredentialRecords{},
+		}
 		admitCtx := admission.NewContextWithRequest(ctx, admission.Request{
 			AdmissionRequest: admissionv1.AdmissionRequest{
-				UserInfo: authnv1.UserInfo{Username: "sample-validator"},
+				Operation: admissionv1.Create,
+				UserInfo:  authnv1.UserInfo{Username: "sample-validator"},
 			},
 		})
 		applied := 0
@@ -138,6 +143,12 @@ var _ = Describe("Agent samples", func() {
 // structurally valid, not that authorization works — that is covered by the
 // dedicated tests in the webhook package.
 type allowAllSecrets struct{}
+
+type discardCredentialRecords struct{}
+
+func (discardCredentialRecords) PersistCreate(context.Context, *airunwayv1alpha1.AgentDeployment) error {
+	return nil
+}
 
 func (allowAllSecrets) CanGetSecret(context.Context, admission.Request, string, string) (bool, string, error) {
 	return true, "sample validation", nil

@@ -18,6 +18,11 @@ AGENT_LANGGRAPH_IMG ?= ghcr.io/ai-runway/airunway/agent-langgraph:latest
 AGENT_OPENCLAW_IMG ?= ghcr.io/ai-runway/airunway/agent-openclaw:latest
 AGENT_HERMES_IMG ?= ghcr.io/ai-runway/airunway/agent-hermes:latest
 
+# Version reported by the in-process agent providers in controller images.
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo '-dirty')
+AGENT_PROVIDER_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
+
 # Image build settings
 PLATFORM ?= linux/amd64
 PUSH ?= false
@@ -165,7 +170,8 @@ controller-build: verify-versions
 
 # Build controller Docker image
 controller-docker-build: verify-versions
-	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg GAIE_VERSION=$(GAIE_VERSION) -f controller/Dockerfile -t $(CONTROLLER_IMG) .
+	@test -n "$(strip $(AGENT_PROVIDER_VERSION))" || { echo "❌ AGENT_PROVIDER_VERSION must not be empty"; exit 1; }
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg "GAIE_VERSION=$(GAIE_VERSION)" --build-arg "AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION)" -f controller/Dockerfile -t $(CONTROLLER_IMG) .
 	@echo "✅ Controller image built: $(CONTROLLER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
 # Generate CRD manifests and deep copy code
@@ -243,8 +249,10 @@ gpu-e2e-check:
 generate-deploy-manifests:
 	cd controller && $(MAKE) kustomize
 	cd controller/config/manager && ../../bin/kustomize edit set image controller=$(CONTROLLER_IMG)
+	cd controller && bin/kustomize build config/agentdeployment-webhook-guard > ../deploy/agentdeployment-webhook-guard.yaml
 	cd controller && bin/kustomize build config/default > ../deploy/controller.yaml
-	@echo "✅ Generated deploy/controller.yaml"
+	cd controller && bin/kustomize build config/agentdeployment-webhook > ../deploy/agentdeployment-webhook.yaml
+	@echo "✅ Generated the AgentDeployment guard, controller, and webhook activation manifests"
 	cd backend/config/manager && ../../../controller/bin/kustomize edit set image IMAGE_PLACEHOLDER=$(DASHBOARD_IMG)
 	controller/bin/kustomize build backend/config/default > deploy/dashboard.yaml
 	@git checkout backend/config/manager/kustomization.yaml 2>/dev/null || true
@@ -279,6 +287,7 @@ agent-images-test:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s images/agents/hermes -p 'test_*.py'
 	python3 -c 'import pathlib,sys; [compile(pathlib.Path(p).read_text(), p, "exec") for p in sys.argv[1:]]' images/agents/python/airunway_runtime.py images/agents/crewai/adapter.py images/agents/langgraph/adapter.py images/agents/hermes/entrypoint.py images/agents/testdata/openai_mock.py
 	node --check images/agents/openclaw/entrypoint.mjs
+	node --test images/agents/openclaw/*.test.mjs
 	bash -n images/agents/smoke.sh
 
 # ==================== Cluster Setup Targets ====================

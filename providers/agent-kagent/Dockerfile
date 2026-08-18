@@ -1,5 +1,5 @@
 # Build the provider binary
-FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25@sha256:fc32980f4e03a79db932b28485cf190a28067be1f2431844405451105fd0525f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # SHIM_VERSION is the reported shim version tag. Required so a hand-run
@@ -25,9 +25,6 @@ COPY controller/ controller/
 # Copy the provider Go source
 COPY providers/agent-kagent/ providers/agent-kagent/
 
-# Ensure go.sum is complete for all transitive dependencies
-RUN cd providers/agent-kagent && go mod tidy
-
 # Build
 RUN test -n "${SHIM_VERSION}" || (echo "ERROR: SHIM_VERSION build arg is required; pass --build-arg SHIM_VERSION=..." >&2; exit 1)
 # MODULE is resolved from go.mod (not hand-typed) so the -X target can never
@@ -39,10 +36,9 @@ RUN cd providers/agent-kagent && MODULE=$(go list -m) && \
       -o provider cmd/main.go
 
 # Use distroless as minimal base image to package the provider binary
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 WORKDIR /
 COPY --from=builder /workspace/providers/agent-kagent/provider .
 USER 65532:65532
 
 ENTRYPOINT ["/provider"]
-

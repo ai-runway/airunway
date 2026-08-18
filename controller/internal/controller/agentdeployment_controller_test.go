@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,7 +86,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 	}
 
 	reconcileOnce := func(name string) {
-		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
+		r := newCredentialAuthorizedAgentDeploymentReconciler(k8sClient)
 		_, err := r.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
 		})
@@ -242,11 +243,13 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
 
 			// Same reconciler, admission authorization unavailable.
-			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: false}
-			_, err := r.Reconcile(ctx, reconcile.Request{
+			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			result, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "agent-no-admission", Namespace: "default"},
 			})
 			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(agentRequeueInterval),
+				"restoring admission must recover without requiring another AgentDeployment edit")
 
 			out := get("agent-no-admission")
 			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
@@ -285,6 +288,54 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(out.Status.ModelBinding.CredentialsRef).NotTo(BeNil())
 			Expect(out.Status.ModelBinding.CredentialsRef.Name).To(Equal("openai-creds"))
 			Expect(out.Status.ModelBinding.CredentialsRef.Key).To(Equal("token"))
+		})
+
+		It("refuses externalAPI.credentialsRef while the Secret is being deleted", func() {
+			createReadyProvider("kagent-deleting-secret", airunwayv1alpha1.AgentProviderBackendCRD,
+				airunwayv1alpha1.ModelBindingModeExternalAPI)
+			sec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "deleting-creds",
+					Namespace:  "default",
+					Finalizers: []string{"test.airunway.ai/hold"},
+				},
+				Data: map[string][]byte{"token": []byte("dummy")},
+			}
+			Expect(k8sClient.Create(ctx, sec)).To(Succeed())
+			DeferCleanup(func() {
+				live := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sec), live); err == nil {
+					live.Finalizers = nil
+					_ = k8sClient.Update(ctx, live)
+				}
+			})
+
+			ad := newAgent("agent-deleting-secret", "kagent-deleting-secret")
+			ad.Spec.Model.ExternalAPI.CredentialsRef = &airunwayv1alpha1.SecretKeyRef{
+				Name: sec.Name,
+				Key:  "token",
+			}
+			Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, sec)).To(Succeed())
+			Eventually(func(g Gomega) {
+				live := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sec), live)).To(Succeed())
+				g.Expect(live.DeletionTimestamp.IsZero()).To(BeFalse())
+			}).Should(Succeed())
+
+			r := newCredentialAuthorizedAgentDeploymentReconciler(k8sClient)
+			result, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(agentRequeueInterval))
+
+			out := get(ad.Name)
+			mb := condition(out, airunwayv1alpha1.AgentConditionTypeModelBound)
+			Expect(mb).NotTo(BeNil())
+			Expect(mb.Status).To(Equal(metav1.ConditionFalse))
+			Expect(mb.Reason).To(Equal("CredentialSecretDeleting"))
+			Expect(out.Status.ModelBinding).To(BeNil())
 		})
 	})
 
@@ -331,7 +382,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(out.Status.ModelBinding).NotTo(BeNil())
 			b := *out.Status.ModelBinding
 			Expect(b.BindingMode).To(Equal(airunwayv1alpha1.ModelBindingModeDeploymentRef))
-			Expect(b.BaseURL).To(Equal("http://demo-model.default.svc.cluster.local:80/v1"))
+			Expect(b.BaseURL).To(Equal("http://demo-model.default.svc:80/v1"))
 			Expect(b.ModelName).To(Equal("llama-3.2-1b-instruct"))
 			Expect(b.ObservedResourceUID).To(Equal(string(md.UID)))
 
@@ -427,7 +478,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(k8sClient.Create(ctx, other)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, other) })
 
-			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
+			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			reqs := r.mapModelDeploymentToAgentDeployments(ctx, md)
 			Expect(reqs).To(HaveLen(1))
 			Expect(reqs[0].NamespacedName).To(Equal(types.NamespacedName{
@@ -523,10 +574,52 @@ var _ = Describe("AgentDeployment core controller", func() {
 	})
 
 	Context("server-side apply field ownership (issue #264 anti-clobber)", func() {
+		It("rejects a stale core status apply after an AgentDeployment is deleted and recreated", func() {
+			stale := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-core-uid-race", Namespace: "default"},
+				Spec: airunwayv1alpha1.AgentDeploymentSpec{
+					Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "uid-race-framework"},
+					Model: airunwayv1alpha1.ModelBinding{ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+						Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.example/v1", ModelName: "model",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, stale)).To(Succeed())
+			key := client.ObjectKeyFromObject(stale)
+			Expect(stale.UID).NotTo(BeEmpty())
+			Expect(stale.ResourceVersion).NotTo(BeEmpty())
+			Expect(k8sClient.Delete(ctx, stale)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, key, &airunwayv1alpha1.AgentDeployment{}))
+			}).Should(BeTrue())
+
+			replacement := &airunwayv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: stale.Name, Namespace: stale.Namespace},
+				Spec:       stale.Spec,
+			}
+			Expect(k8sClient.Create(ctx, replacement)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, replacement) })
+			Expect(replacement.UID).NotTo(Equal(stale.UID))
+
+			r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			err := r.applyCoreStatus(ctx, stale,
+				&airunwayv1alpha1.AgentFrameworkStatus{Name: "stale-framework"}, nil,
+				[]metav1.Condition{{
+					Type: airunwayv1alpha1.AgentConditionTypeFrameworkReady, Status: metav1.ConditionTrue,
+					Reason: "StaleWrite", Message: "must not reach the replacement", LastTransitionTime: metav1.Now(),
+				}})
+			Expect(apierrors.IsConflict(err)).To(BeTrue(), "expected resourceVersion conflict, got %v", err)
+
+			live := get(replacement.Name)
+			Expect(live.UID).To(Equal(replacement.UID))
+			Expect(live.Status.Framework).To(BeNil())
+			Expect(condition(live, airunwayv1alpha1.AgentConditionTypeFrameworkReady)).To(BeNil())
+		})
+
 		It("preserves provider-owned status across a core reconcile and aggregates Ready", func() {
 			createReadyProvider("kagent-ssa", airunwayv1alpha1.AgentProviderBackendCRD,
 				airunwayv1alpha1.ModelBindingModeExternalAPI)
-			newAgent("agent-ssa", "kagent-ssa")
+			created := newAgent("agent-ssa", "kagent-ssa")
 
 			// Simulate the framework provider writing its own status fields
 			// (phase, runtime, replicas, ProviderReady) under a DISTINCT field
@@ -546,6 +639,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 					Conditions: []metav1.Condition{{
 						Type:               airunwayv1alpha1.AgentConditionTypeProviderReady,
 						Status:             metav1.ConditionTrue,
+						ObservedGeneration: created.Generation,
 						Reason:             "WorkloadReady",
 						Message:            "provider reports ready",
 						LastTransitionTime: metav1.Now(),

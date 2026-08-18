@@ -52,6 +52,11 @@ jobs:
             image_version="main-${GITHUB_SHA::12}"
           fi
           printf 'IMAGE_VERSION=%s\n' "$image_version" >> "$GITHUB_ENV"
+          if [[ "${image_version,,}" =~ -(alpha|beta|rc|dev) ]]; then
+            printf 'PUBLISH_LATEST=false\n' >> "$GITHUB_ENV"
+          else
+            printf 'PUBLISH_LATEST=true\n' >> "$GITHUB_ENV"
+          fi
 
       - name: Log in to Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -69,7 +74,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/ai-runway/airunway/kuberay-provider:${{ env.IMAGE_VERSION }}
-            ghcr.io/ai-runway/airunway/kuberay-provider:latest
+            ${{ env.PUBLISH_LATEST == 'true' && 'ghcr.io/ai-runway/airunway/kuberay-provider:latest' || '' }}
           build-args: |
             SHIM_VERSION=${{ env.IMAGE_VERSION }}
           cache-from: type=gha

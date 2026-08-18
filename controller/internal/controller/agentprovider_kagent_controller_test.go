@@ -19,26 +19,74 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
+type recordingKagentResourceWriteClient struct {
+	client.Client
+	writes     map[schema.GroupVersionKind]int
+	rejectVerb string
+	rejectGVK  schema.GroupVersionKind
+	rejectErr  error
+}
+
+func (c *recordingKagentResourceWriteClient) Create(
+	ctx context.Context,
+	obj client.Object,
+	opts ...client.CreateOption,
+) error {
+	c.record(obj)
+	if c.rejectVerb == "create" && obj.GetObjectKind().GroupVersionKind() == c.rejectGVK {
+		return c.rejectErr
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c *recordingKagentResourceWriteClient) Patch(
+	ctx context.Context,
+	obj client.Object,
+	patch client.Patch,
+	opts ...client.PatchOption,
+) error {
+	c.record(obj)
+	if c.rejectVerb == "patch" && obj.GetObjectKind().GroupVersionKind() == c.rejectGVK {
+		return c.rejectErr
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+func (c *recordingKagentResourceWriteClient) record(obj client.Object) {
+	if c.writes == nil {
+		c.writes = make(map[schema.GroupVersionKind]int)
+	}
+	c.writes[obj.GetObjectKind().GroupVersionKind()]++
+}
+
+func (c *recordingKagentResourceWriteClient) writesFor(gvk schema.GroupVersionKind) int {
+	return c.writes[gvk]
+}
+
 // --- Pure render-function unit tests (no cluster) --------------------------
 
 func TestParseKagentConfig(t *testing.T) {
-	raw := &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"be concise","description":"sre agent"}`)}
+	raw := &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"be concise","description":"sre agent","runtime":"go"}`)}
 	cfg, err := parseKagentConfig(raw)
 	if err != nil {
 		t.Fatalf("parseKagentConfig: %v", err)
@@ -49,10 +97,22 @@ func TestParseKagentConfig(t *testing.T) {
 	if cfg.Description != "sre agent" {
 		t.Errorf("description = %q, want %q", cfg.Description, "sre agent")
 	}
+	if cfg.Runtime != "go" {
+		t.Errorf("runtime = %q, want go", cfg.Runtime)
+	}
 
 	// nil / empty config must not panic and yields an empty config.
 	if got, err := parseKagentConfig(nil); err != nil || got.SystemPrompt != "" {
 		t.Errorf("nil config should be empty, got %+v", got)
+	}
+	for _, valid := range []string{"", "python", "go"} {
+		raw := &runtime.RawExtension{Raw: []byte(fmt.Sprintf(`{"runtime":%q}`, valid))}
+		if _, err := parseKagentConfig(raw); err != nil {
+			t.Errorf("runtime %q rejected: %v", valid, err)
+		}
+	}
+	if _, err := parseKagentConfig(&runtime.RawExtension{Raw: []byte(`{"runtime":"rust"}`)}); err == nil {
+		t.Fatal("undocumented kagent runtime must be rejected")
 	}
 }
 
@@ -179,6 +239,10 @@ func TestRenderKagentModelConfig_AzureOpenAIType(t *testing.T) {
 	if azureEndpoint != "https://my-azure.openai.azure.com" {
 		t.Fatalf("azureOpenAI.azureEndpoint = %q", azureEndpoint)
 	}
+	azureDeployment, _, _ := unstructured.NestedString(mc.Object, "spec", "azureOpenAI", "azureDeployment")
+	if azureDeployment != "gpt-4.1" {
+		t.Fatalf("azureOpenAI.azureDeployment = %q, want gpt-4.1", azureDeployment)
+	}
 	apiVersion, _, _ := unstructured.NestedString(mc.Object, "spec", "azureOpenAI", "apiVersion")
 	if apiVersion != "2024-02-01" {
 		t.Fatalf("azureOpenAI.apiVersion = %q, want 2024-02-01", apiVersion)
@@ -255,7 +319,7 @@ var _ = Describe("Kagent crd provider", func() {
 	}
 
 	reconcileCore := func(name string) {
-		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
+		r := newCredentialAuthorizedAgentDeploymentReconciler(k8sClient)
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -268,6 +332,56 @@ var _ = Describe("Kagent crd provider", func() {
 		out := &airunwayv1alpha1.AgentDeployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, out)).To(Succeed())
 		return out
+	}
+	getUpstream := func(gvk schema.GroupVersionKind, name string) *unstructured.Unstructured {
+		out := &unstructured.Unstructured{}
+		out.SetGroupVersionKind(gvk)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, out)).To(Succeed())
+		return out
+	}
+	finishUpstreamDelete := func(gvk schema.GroupVersionKind, name string) {
+		live := &unstructured.Unstructured{}
+		live.SetGroupVersionKind(gvk)
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, live)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(live.GetDeletionTimestamp().IsZero()).To(BeFalse())
+		live.SetFinalizers(nil)
+		if err := k8sClient.Update(ctx, live); err != nil {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}
+		Eventually(func() bool {
+			probe := &unstructured.Unstructured{}
+			probe.SetGroupVersionKind(gvk)
+			return apierrors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: name, Namespace: "default"}, probe))
+		}).Should(BeTrue())
+	}
+	assertRejectedModelConfigWriteCleansTopology := func(name, verb string) {
+		makeReadyKagentProvider()
+		makeKagentAgent(name)
+		reconcileCore(name)
+		if verb == "patch" {
+			reconcileKagent(name)
+		}
+
+		rejection := "injected definitive ModelConfig " + verb + " rejection"
+		writeClient := &recordingKagentResourceWriteClient{
+			Client:     k8sClient,
+			rejectVerb: verb,
+			rejectGVK:  kagentModelConfigGVK,
+			rejectErr:  apierrors.NewBadRequest(rejection),
+		}
+		r := &KagentProviderReconciler{Client: writeClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: name, Namespace: "default",
+		}})
+		Expect(err).To(MatchError(ContainSubstring(rejection)))
+
+		finishUpstreamDelete(kagentModelConfigGVK, name+"-model")
+		finishUpstreamDelete(kagentAgentGVK, name)
 	}
 
 	It("waits for core bindings before rendering", func() {
@@ -381,6 +495,262 @@ var _ = Describe("Kagent crd provider", func() {
 		Expect(apiKeySecretKey).To(Equal(agentprovider.KeylessCredentialKey))
 	})
 
+	It("stops the Agent after a definitive ModelConfig create rejection", func() {
+		assertRejectedModelConfigWriteCleansTopology("kagent-model-create-rejected", "create")
+	})
+
+	It("stops the Agent and stale ModelConfig after a definitive ModelConfig patch rejection", func() {
+		assertRejectedModelConfigWriteCleansTopology("kagent-model-patch-rejected", "patch")
+	})
+
+	It("stops the sibling Agent when the ModelConfig name is owned by another object", func() {
+		makeReadyKagentProvider()
+		makeKagentAgent("kagent-ownership-conflict")
+		reconcileCore("kagent-ownership-conflict")
+		reconcileKagent("kagent-ownership-conflict")
+
+		owned := getUpstream(kagentModelConfigGVK, "kagent-ownership-conflict-model")
+		foreign := owned.DeepCopy()
+		Expect(k8sClient.Delete(ctx, owned)).To(Succeed())
+		finishUpstreamDelete(kagentModelConfigGVK, owned.GetName())
+		foreign.SetResourceVersion("")
+		foreign.SetUID("")
+		foreign.SetGeneration(0)
+		foreign.SetCreationTimestamp(metav1.Time{})
+		foreign.SetDeletionTimestamp(nil)
+		foreign.SetDeletionGracePeriodSeconds(nil)
+		foreign.SetManagedFields(nil)
+		ad := getAgent("kagent-ownership-conflict")
+		controller, blockOwnerDeletion := true, true
+		forgedOwner := metav1.OwnerReference{
+			APIVersion:         airunwayv1alpha1.GroupVersion.String(),
+			Kind:               "AgentDeployment",
+			Name:               ad.Name + "-forged",
+			UID:                ad.UID,
+			Controller:         &controller,
+			BlockOwnerDeletion: &blockOwnerDeletion,
+		}
+		foreign.SetOwnerReferences([]metav1.OwnerReference{forgedOwner})
+		foreign.SetFinalizers(nil)
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+		foreignUID := foreign.GetUID()
+
+		recordingClient := &recordingKagentResourceWriteClient{Client: k8sClient}
+		r := &KagentProviderReconciler{Client: recordingClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: "kagent-ownership-conflict", Namespace: "default",
+		}})
+		Expect(err).To(HaveOccurred())
+		Expect(recordingClient.writesFor(kagentAgentGVK)).To(BeZero(),
+			"all rendered resources must be ownership-preflighted before the Agent is written")
+
+		finishUpstreamDelete(kagentAgentGVK, "kagent-ownership-conflict")
+		preserved := getUpstream(kagentModelConfigGVK, foreign.GetName())
+		Expect(preserved.GetUID()).To(Equal(foreignUID), "the foreign ModelConfig must not be deleted or adopted")
+		Expect(preserved.GetOwnerReferences()).To(Equal([]metav1.OwnerReference{forgedOwner}))
+		condition := meta.FindStatusCondition(getAgent("kagent-ownership-conflict").Status.Conditions,
+			airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Reason).To(Equal("OwnershipConflict"))
+	})
+
+	It("does not publish the ModelConfig when the Agent name is owned by another object", func() {
+		makeReadyKagentProvider()
+		makeKagentAgent("kagent-agent-ownership-conflict")
+		reconcileCore("kagent-agent-ownership-conflict")
+		reconcileKagent("kagent-agent-ownership-conflict")
+
+		owned := getUpstream(kagentAgentGVK, "kagent-agent-ownership-conflict")
+		foreign := owned.DeepCopy()
+		Expect(k8sClient.Delete(ctx, owned)).To(Succeed())
+		finishUpstreamDelete(kagentAgentGVK, owned.GetName())
+		foreign.SetResourceVersion("")
+		foreign.SetUID("")
+		foreign.SetGeneration(0)
+		foreign.SetCreationTimestamp(metav1.Time{})
+		foreign.SetDeletionTimestamp(nil)
+		foreign.SetDeletionGracePeriodSeconds(nil)
+		foreign.SetManagedFields(nil)
+		ad := getAgent("kagent-agent-ownership-conflict")
+		controller, blockOwnerDeletion := true, true
+		forgedOwner := metav1.OwnerReference{
+			APIVersion:         airunwayv1alpha1.GroupVersion.String(),
+			Kind:               "AgentDeployment",
+			Name:               ad.Name + "-forged",
+			UID:                ad.UID,
+			Controller:         &controller,
+			BlockOwnerDeletion: &blockOwnerDeletion,
+		}
+		foreign.SetOwnerReferences([]metav1.OwnerReference{forgedOwner})
+		foreign.SetFinalizers(nil)
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+		foreignUID := foreign.GetUID()
+
+		recordingClient := &recordingKagentResourceWriteClient{Client: k8sClient}
+		r := &KagentProviderReconciler{Client: recordingClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: "kagent-agent-ownership-conflict", Namespace: "default",
+		}})
+		Expect(err).To(HaveOccurred())
+		Expect(recordingClient.writesFor(kagentModelConfigGVK)).To(BeZero(),
+			"a foreign Agent must be detected before credential-bearing ModelConfig writes")
+
+		finishUpstreamDelete(kagentModelConfigGVK, "kagent-agent-ownership-conflict-model")
+		preserved := getUpstream(kagentAgentGVK, foreign.GetName())
+		Expect(preserved.GetUID()).To(Equal(foreignUID), "the foreign Agent must not be deleted or adopted")
+		Expect(preserved.GetOwnerReferences()).To(Equal([]metav1.OwnerReference{forgedOwner}))
+		condition := meta.FindStatusCondition(getAgent("kagent-agent-ownership-conflict").Status.Conditions,
+			airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Reason).To(Equal("OwnershipConflict"))
+	})
+
+	It("cleans up and releases status for a pre-validation framework handoff", func() {
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "kagent-framework-handoff", Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "successor"},
+				Model: airunwayv1alpha1.ModelBinding{ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+					Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+		binding := airunwayv1alpha1.ModelBindingStatus{
+			BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
+			BaseURL:     "https://api.openai.com/v1",
+			ModelName:   "gpt-4o-mini",
+		}
+		modelConfig := renderKagentModelConfig(ad, binding)
+		agent := renderKagentAgent(ad, kagentConfig{SystemPrompt: "old provider"}, modelConfig.GetName())
+		for _, obj := range []*unstructured.Unstructured{modelConfig, agent} {
+			Expect(agentprovider.ApplyOwned(ctx, k8sClient, k8sClient, k8sClient.Scheme(), ad,
+				obj, KagentFieldOwner, true)).To(Succeed())
+		}
+		Expect(agentprovider.ApplyOwnedStatus(ctx, k8sClient, ad, KagentFieldOwner,
+			airunwayv1alpha1.AgentPhaseRunning,
+			&airunwayv1alpha1.AgentRuntimeStatus{WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
+				APIVersion: kagentAPIVersion, Kind: "Agent", Name: ad.Name, Namespace: ad.Namespace,
+			}}, nil, metav1.ConditionTrue, "AgentReady", "old kagent provider is running")).To(Succeed())
+
+		r := &KagentProviderReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: ad.Name, Namespace: ad.Namespace,
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		finishUpstreamDelete(kagentModelConfigGVK, modelConfig.GetName())
+		finishUpstreamDelete(kagentAgentGVK, agent.GetName())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: ad.Name, Namespace: ad.Namespace,
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		out := getAgent(ad.Name)
+		Expect(out.Status.ProviderOwner).To(BeEmpty())
+		Expect(out.Status.Runtime).To(BeNil())
+		Expect(meta.FindStatusCondition(out.Status.Conditions,
+			airunwayv1alpha1.AgentConditionTypeProviderReady)).To(BeNil())
+	})
+
+	It("cleans exact-owned resources after a crash before provider status was written", func() {
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "kagent-framework-crash", Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "successor"},
+				Model: airunwayv1alpha1.ModelBinding{ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+					Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+		binding := airunwayv1alpha1.ModelBindingStatus{
+			BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
+			BaseURL:     "https://api.openai.com/v1",
+			ModelName:   "gpt-4o-mini",
+		}
+		modelConfig := renderKagentModelConfig(ad, binding)
+		agent := renderKagentAgent(ad, kagentConfig{SystemPrompt: "old provider"}, modelConfig.GetName())
+		for _, obj := range []*unstructured.Unstructured{modelConfig, agent} {
+			Expect(agentprovider.ApplyOwned(ctx, k8sClient, k8sClient, k8sClient.Scheme(), ad,
+				obj, KagentFieldOwner, true)).To(Succeed())
+		}
+		Expect(getAgent(ad.Name).Status.ProviderOwner).To(BeEmpty())
+
+		r := &KagentProviderReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: ad.Name, Namespace: ad.Namespace,
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		Expect(getAgent(ad.Name).Status.ProviderOwner).To(BeEmpty())
+
+		finishUpstreamDelete(kagentModelConfigGVK, modelConfig.GetName())
+		finishUpstreamDelete(kagentAgentGVK, agent.GetName())
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: ad.Name, Namespace: ad.Namespace,
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getAgent(ad.Name).Status.ProviderOwner).To(BeEmpty())
+	})
+
+	It("stops prior resources when the managed keyless Secret is replaced", func() {
+		makeReadyKagentProvider()
+		makeKagentAgent("kagent-keyless-conflict")
+		reconcileCore("kagent-keyless-conflict")
+		reconcileKagent("kagent-keyless-conflict")
+
+		secretKey := types.NamespacedName{
+			Name: agentprovider.KeylessCredentialSecretName("kagent-keyless-conflict"), Namespace: "default",
+		}
+		managed := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, secretKey, managed)).To(Succeed())
+		modelConfig := getUpstream(kagentModelConfigGVK, "kagent-keyless-conflict-model")
+		secretName, _, _ := unstructured.NestedString(modelConfig.Object, "spec", "apiKeySecret")
+		Expect(secretName).To(Equal(secretKey.Name))
+
+		Expect(k8sClient.Delete(ctx, managed)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, secretKey, &corev1.Secret{}))
+		}).Should(BeTrue())
+		foreign := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretKey.Name, Namespace: secretKey.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"password": []byte("foreign")},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+		foreignUID := foreign.UID
+
+		r := &KagentProviderReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: "kagent-keyless-conflict", Namespace: "default",
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		finishUpstreamDelete(kagentModelConfigGVK, "kagent-keyless-conflict-model")
+		finishUpstreamDelete(kagentAgentGVK, "kagent-keyless-conflict")
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: "kagent-keyless-conflict", Namespace: "default",
+		}})
+		Expect(err).To(HaveOccurred())
+		condition := meta.FindStatusCondition(getAgent("kagent-keyless-conflict").Status.Conditions,
+			airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Reason).To(Equal("CredentialProvisionFailed"))
+		preserved := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, secretKey, preserved)).To(Succeed())
+		Expect(preserved.UID).To(Equal(foreignUID))
+		Expect(preserved.OwnerReferences).To(BeEmpty())
+		Expect(preserved.Data).To(Equal(map[string][]byte{"password": []byte("foreign")}))
+	})
+
 	It("reflects the kagent Agent's readiness into ProviderReady", func() {
 		makeReadyKagentProvider()
 		makeKagentAgent("kagent-ready")
@@ -411,5 +781,47 @@ var _ = Describe("Kagent crd provider", func() {
 		pr := meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
 		Expect(pr.Status).To(Equal(metav1.ConditionTrue))
 		Expect(pr.Reason).To(Equal("AgentReady"))
+	})
+
+	It("removes rendered resources when spec.config becomes invalid", func() {
+		makeReadyKagentProvider()
+		makeKagentAgent("kagent-invalid-config")
+		reconcileCore("kagent-invalid-config")
+		reconcileKagent("kagent-invalid-config")
+
+		ad := getAgent("kagent-invalid-config")
+		ad.Spec.Config = &runtime.RawExtension{Raw: []byte(`{"systemPrompt":[]}`)}
+		Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+		reconcileCore(ad.Name)
+		reconcileKagent(ad.Name)
+
+		finishForegroundDelete := func(gvk schema.GroupVersionKind, name string) {
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(gvk)
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, obj)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(obj.GetDeletionTimestamp().IsZero()).To(BeFalse())
+			obj.SetFinalizers(nil)
+			if err := k8sClient.Update(ctx, obj); err != nil {
+				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}
+			Eventually(func() bool {
+				probe := &unstructured.Unstructured{}
+				probe.SetGroupVersionKind(gvk)
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, probe))
+			}).Should(BeTrue())
+		}
+		finishForegroundDelete(kagentModelConfigGVK, "kagent-invalid-config-model")
+		finishForegroundDelete(kagentAgentGVK, "kagent-invalid-config")
+
+		reconcileKagent(ad.Name)
+		out := getAgent(ad.Name)
+		Expect(out.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseFailed))
+		condition := meta.FindStatusCondition(out.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Reason).To(Equal("InvalidConfig"))
 	})
 })

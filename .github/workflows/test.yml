@@ -124,6 +124,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -150,14 +153,69 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
           load: true
           tags: airunway/${{ matrix.image }}:ci
           build-args: ${{ steps.agent_base.outputs.build_arg }}
-          cache-from: type=gha,scope=agent-test-${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=agent-test-${{ matrix.image }}
+          cache-from: type=gha,scope=agent-test-${{ matrix.image }}-amd64
+          cache-to: type=gha,mode=max,scope=agent-test-${{ matrix.image }}-amd64
 
       - name: Run hardened container smoke test
         run: images/agents/smoke.sh "${{ matrix.runtime }}" "airunway/${{ matrix.image }}:ci"
+
+      - name: Build arm64 agent image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/arm64
+          outputs: type=cacheonly
+          build-args: ${{ steps.agent_base.outputs.build_arg }}
+          cache-from: type=gha,scope=agent-test-${{ matrix.image }}-arm64
+          cache-to: type=gha,mode=max,scope=agent-test-${{ matrix.image }}-arm64
+
+  agent-provider-images-docker-build:
+    name: Build ${{ matrix.name }} agent provider image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Container
+            image: agent-container-provider
+            dockerfile: providers/agent-container/Dockerfile
+          - name: Kagent
+            image: agent-kagent-provider
+            dockerfile: providers/agent-kagent/Dockerfile
+          - name: Orka
+            image: agent-orka-provider
+            dockerfile: providers/agent-orka/Dockerfile
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # These controllers need Kubernetes API discovery to run, so PR CI
+      # exercises the complete image build for both release architectures
+      # while provider-go-checks covers the executable behavior and version
+      # injection without requiring a cluster.
+      - name: Build amd64 and arm64 provider image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          outputs: type=cacheonly
+          build-args: |
+            SHIM_VERSION=ci-${{ github.sha }}
+          cache-from: type=gha,scope=agent-provider-test-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=agent-provider-test-${{ matrix.image }}
 
   actionlint:
     runs-on: ubuntu-latest
@@ -178,6 +236,28 @@ jobs:
         run: |
           "$(go env GOPATH)/bin/actionlint" -color .github/workflows/*.yml
 
+      - name: Verify agent runtime publication contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_runtime_tag='type=raw,value=$'
+          expected_runtime_tag+='{{ steps.agent_runtime_version.outputs.value }},priority=1000'
+          if ! grep -Fq "$expected_runtime_tag" .github/workflows/release.yml; then
+            echo "Release runtime images must publish the reported immutable revision tag" >&2
+            exit 1
+          fi
+          for job in controller-docker agent-provider-images-docker; do
+            if ! awk -v job="$job" '
+              $0 == "  " job ":" { in_job = 1; next }
+              in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
+              in_job && $0 == "    needs: agent-images-docker" { found = 1 }
+              END { exit(found ? 0 : 1) }
+            ' .github/workflows/release.yml; then
+              echo "Release job $job must wait for agent-images-docker" >&2
+              exit 1
+            fi
+          done
+
   controller-manifest-check:
     runs-on: ubuntu-latest
 
@@ -195,15 +275,32 @@ jobs:
         run: cd controller && make kustomize
 
       - name: Generate controller manifest
-        run: cd controller && bin/kustomize build config/default > /tmp/controller.yaml
+        run: |
+          cd controller
+          bin/kustomize build config/agentdeployment-webhook-guard > /tmp/agentdeployment-webhook-guard.yaml
+          bin/kustomize build config/default > /tmp/controller.yaml
+          bin/kustomize build config/agentdeployment-webhook > /tmp/agentdeployment-webhook.yaml
 
       - name: Check for manifest drift
         run: |
+          if ! diff -u deploy/agentdeployment-webhook-guard.yaml /tmp/agentdeployment-webhook-guard.yaml; then
+            echo "❌ deploy/agentdeployment-webhook-guard.yaml is out of date."
+            echo "Run 'make generate-deploy-manifests' and commit the result."
+            exit 1
+          fi
           if ! diff -u deploy/controller.yaml /tmp/controller.yaml; then
             echo "❌ deploy/controller.yaml is out of date."
             echo "Run 'make generate-deploy-manifests' and commit the result."
             exit 1
           fi
+          if ! diff -u deploy/agentdeployment-webhook.yaml /tmp/agentdeployment-webhook.yaml; then
+            echo "❌ deploy/agentdeployment-webhook.yaml is out of date."
+            echo "Run 'make generate-deploy-manifests' and commit the result."
+            exit 1
+          fi
+
+      - name: Verify staged webhook configuration
+        run: cd controller && make test-webhook-staging
 
       - name: Generate dashboard manifest
         run: controller/bin/kustomize build backend/config/default > /tmp/dashboard.yaml
@@ -316,19 +413,38 @@ jobs:
 
       - name: Build controller and assert ldflags injection
         # `make controller-build` delegates to controller/Makefile, which
-        # injects -X .../gateway.DefaultGAIEVersion=$(GAIE_VERSION) via
-        # ldflags. Read it back from the binary build info to confirm
-        # the injection actually landed (commit 83c53f8).
+        # injects both the pinned GAIE version and the in-process agent-provider
+        # version via ldflags. Check the emitted link command and then confirm
+        # both injected values actually landed in the binary.
         run: |
           set -euo pipefail
-          source versions.env
-          make controller-build
-          if ! go version -m controller/bin/manager \
-            | grep -F -- "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}"; then
-            echo "❌ ldflags injection of DefaultGAIEVersion=${GAIE_VERSION} did not land in controller/bin/manager"
+          gaie_version=ci-gaie-link-proof
+          agent_provider_version=ci-agent-provider-link-proof
+          build_command="$(
+            make -C controller -n VERIFIED_VERSIONS=1 build \
+              GAIE_VERSION="${gaie_version}" \
+              AGENT_PROVIDER_VERSION="${agent_provider_version}"
+          )"
+          if ! grep -F -- "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${gaie_version}" <<<"${build_command}"; then
+            echo "❌ controller link flags omitted DefaultGAIEVersion=${gaie_version}"
             exit 1
           fi
-          echo "✅ ldflags injection landed: DefaultGAIEVersion=${GAIE_VERSION}"
+          if ! grep -F -- "-X main.agentProviderVersion=${agent_provider_version}" <<<"${build_command}"; then
+            echo "❌ controller link flags omitted agentProviderVersion=${agent_provider_version}"
+            exit 1
+          fi
+          make -C controller VERIFIED_VERSIONS=1 build \
+            GAIE_VERSION="${gaie_version}" \
+            AGENT_PROVIDER_VERSION="${agent_provider_version}"
+          if ! strings controller/bin/manager | grep -Fx -- "${gaie_version}"; then
+            echo "❌ ldflags injection of DefaultGAIEVersion=${gaie_version} did not land in controller/bin/manager"
+            exit 1
+          fi
+          if ! strings controller/bin/manager | grep -Fx -- "${agent_provider_version}"; then
+            echo "❌ ldflags injection of agentProviderVersion=${agent_provider_version} did not land in controller/bin/manager"
+            exit 1
+          fi
+          echo "✅ ldflags injection landed: DefaultGAIEVersion=${gaie_version}, agentProviderVersion=${agent_provider_version}"
 
       - name: Build dynamo provider and assert ldflags injection
         # Mirrors the controller assertion above. providers/dynamo/Makefile

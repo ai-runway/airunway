@@ -52,6 +52,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/internal/controller"
+	"github.com/ai-runway/airunway/controller/internal/credentialadmission"
 	"github.com/ai-runway/airunway/controller/internal/gateway"
 	webhookv1alpha1 "github.com/ai-runway/airunway/controller/internal/webhook/v1alpha1"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -184,7 +185,7 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableProviderSelector, "enable-provider-selector", true,
 		"If set, the controller will run provider selection for ModelDeployments without explicit provider.name")
-	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", false,
+	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", true,
 		"If set, the controller runs the Agent Marketplace controllers (AgentDeployment, AgentProviderConfig, and the in-process framework providers). "+
 			"Disable to turn the feature off without redeploying a different image.")
 	flag.BoolVar(&disableCertRotation, "disable-cert-rotation", false,
@@ -308,16 +309,75 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Credential-bearing AgentDeployments need a durable proof that the user
+	// who submitted the exact object shape passed the SecretAccessReview. A
+	// dedicated stable key signs UID/generation-bound proofs; CREATE uses a
+	// short-lived validating-admission record until reconciliation can persist
+	// the proof on the newly created object.
+	var (
+		credentialAttestor *credentialadmission.Attestor
+		credentialKeyGuard *credentialadmission.KeyGuard
+		credentialRecords  *credentialadmission.RecordStore
+	)
+	podNamespace := os.Getenv("POD_NAMESPACE")
+	if webhooksEnabled {
+		if podNamespace == "" {
+			setupLog.Error(fmt.Errorf("POD_NAMESPACE must be set"), "unable to initialize credential admission attestation")
+			os.Exit(1)
+		}
+		directClient, directClientErr := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+		if directClientErr != nil {
+			setupLog.Error(directClientErr, "unable to create direct client for credential admission attestation")
+			os.Exit(1)
+		}
+		attestationSecretKey := types.NamespacedName{
+			Namespace: podNamespace,
+			Name:      credentialadmission.SigningSecretName,
+		}
+		attestationKey, keyErr := credentialadmission.LoadOrCreateKey(
+			context.Background(),
+			directClient,
+			attestationSecretKey,
+		)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to initialize credential admission attestation key")
+			os.Exit(1)
+		}
+		credentialKeyGuard, err = credentialadmission.NewKeyGuard(
+			context.Background(),
+			mgr.GetAPIReader(),
+			attestationSecretKey,
+			attestationKey,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize credential admission signing-key guard")
+			os.Exit(1)
+		}
+		credentialAttestor, err = credentialadmission.NewGuarded(attestationKey, credentialKeyGuard)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize credential admission attestor")
+			os.Exit(1)
+		}
+		credentialRecords, err = credentialadmission.NewRecordStore(
+			credentialAttestor,
+			mgr.GetAPIReader(),
+			mgr.GetClient(),
+			podNamespace,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize credential admission record store")
+			os.Exit(1)
+		}
+		if err := mgr.Add(&credentialadmission.RecordJanitor{Store: credentialRecords}); err != nil {
+			setupLog.Error(err, "unable to register credential admission record janitor")
+			os.Exit(1)
+		}
+	}
+
 	// Set up cert rotation for webhook TLS certificates.
 	setupFinished := make(chan struct{})
 	if !disableCertRotation && webhooksEnabled {
 		setupLog.Info("setting up cert rotation")
-
-		podNamespace := os.Getenv("POD_NAMESPACE")
-		if podNamespace == "" {
-			setupLog.Error(fmt.Errorf("POD_NAMESPACE must be set"), "unable to determine namespace")
-			os.Exit(1)
-		}
 
 		dnsName := fmt.Sprintf("%s.%s.svc", certServiceName, podNamespace)
 
@@ -331,6 +391,7 @@ func main() {
 			CAOrganization: caOrganization,
 			DNSName:        dnsName,
 			IsReady:        setupFinished,
+			FieldOwner:     controller.AgentCredentialCertRotatorFieldOwner,
 			Webhooks: []rotator.WebhookInfo{
 				{
 					Name: vwhName,
@@ -360,7 +421,14 @@ func main() {
 				setupLog.Error(err, "unable to read cert secret")
 				return
 			}
-			for key, data := range secret.Data {
+			// Only serving-certificate files belong in the webhook TLS directory;
+			// the CA private key must not be materialized there.
+			for _, key := range []string{"tls.crt", "tls.key"} {
+				data, ok := secret.Data[key]
+				if !ok {
+					setupLog.Error(fmt.Errorf("certificate Secret is missing %s", key), "unable to sync cert file")
+					continue
+				}
 				if err := os.WriteFile(filepath.Join(certDir, key), data, 0o644); err != nil {
 					setupLog.Error(err, "unable to write cert file", "file", key)
 				}
@@ -417,16 +485,14 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "ModelDeployment")
 			os.Exit(1)
 		}
-		if err := webhookv1alpha1.SetupAgentDeploymentWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha1.SetupAgentDeploymentWebhookWithManager(mgr, credentialAttestor, podNamespace); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "AgentDeployment")
 			os.Exit(1)
 		}
 	}
 
-	// The Agent Marketplace controllers are opt-in while the alpha API's
-	// ownership, RBAC, and upgrade behavior are being proven. Keeping the
-	// shipped controller inactive also avoids starting informers for the alpha
-	// CRDs before an operator explicitly enables the feature.
+	// The Agent Marketplace controllers are enabled by default. Operators can
+	// still turn the alpha feature off without shipping a different image.
 	if enableAgentMarketplace {
 		if err := (&controller.AgentDeploymentReconciler{
 			Client: mgr.GetClient(),
@@ -443,6 +509,12 @@ func main() {
 					return fmt.Errorf("the webhook server is disabled")
 				}
 				return controller.VerifyAgentCredentialAdmission(ctx, mgr.GetAPIReader())
+			},
+			CredentialAttestationCheck: func(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
+				if credentialRecords == nil {
+					return fmt.Errorf("credential admission record store is not configured")
+				}
+				return credentialRecords.VerifyOrFinalize(ctx, ad)
 			},
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
@@ -510,6 +582,16 @@ func main() {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
+	}
+	if credentialKeyGuard != nil {
+		if err := mgr.AddHealthzCheck("credential-admission-key", credentialKeyGuard.Healthz); err != nil {
+			setupLog.Error(err, "unable to set up credential admission signing-key health check")
+			os.Exit(1)
+		}
+		if err := mgr.AddReadyzCheck("credential-admission-key", credentialKeyGuard.Readyz); err != nil {
+			setupLog.Error(err, "unable to set up credential admission signing-key readiness check")
+			os.Exit(1)
+		}
 	}
 
 	setupLog.Info("starting manager")

@@ -1,7 +1,7 @@
 # AgentDeployment samples — the ways an agent can be described.
 #
-# The alpha Agent Marketplace controllers ship disabled. Set the controller
-# argument --enable-agent-marketplace=true before applying these samples.
+# The Agent Marketplace controllers ship enabled. Operators can set the
+# controller argument --enable-agent-marketplace=false to disable them.
 #
 # An AgentDeployment says three things: which framework runs the agent, which
 # model it talks to, and how that framework should be configured. It never

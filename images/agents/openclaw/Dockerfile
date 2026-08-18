@@ -6,7 +6,7 @@ FROM ${OPENCLAW_BASE}
 ENV HOME=/tmp/airunway-openclaw \
     NODE_ENV=production
 
-COPY --chmod=0555 images/agents/openclaw/entrypoint.mjs /opt/airunway/entrypoint.mjs
+COPY --chmod=0555 images/agents/openclaw/entrypoint.mjs images/agents/openclaw/model_provider.mjs images/agents/openclaw/runtime_proxy.mjs /opt/airunway/
 
 USER 65532:65532
 EXPOSE 18789

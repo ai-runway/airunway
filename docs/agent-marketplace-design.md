@@ -105,9 +105,36 @@ The last row is the exception that proves the rule: authorization needs the requ
 
 **The non-obvious part:** this runs on *every* create and update that carries a reference, not only when the reference changes. A first version skipped unchanged references so routine edits would not fail for non-authors; review showed that left the whole escalation open — keep the reference identical and repoint `spec.config.image` at your own image. Being unable to edit a credential-bearing agent without read access to its credential is the intended policy.
 
+The authorization result is bound to the exact object UID, generation, and spec with an HMAC annotation. UPDATE admission can sign directly from the trusted old object. CREATE admission cannot mutate after Kubernetes assigns the UID, so validating admission writes a short-lived UID-bound ConfigMap in the controller namespace; reconciliation copies the proof to the AgentDeployment and a leader-elected janitor removes abandoned records. Dry-run requests perform authorization but never emit a reusable production proof.
+
+The signing key lives in the dedicated `airunway-credential-admission-key` Secret and must survive controller rollouts. Deleting or replacing that Secret intentionally invalidates existing proofs; credential-bearing AgentDeployments then fail closed until an authorized user resubmits an update. The same resubmission is required once for credential-bearing objects created by a version that predates attestations. Keyless bindings are unaffected.
+
+The credential-attesting mutating route is activated in two deployment phases.
+The normal controller bundle omits only that route while the Deployment rolls,
+because an old pod may still be a webhook Service endpoint and does not serve
+the new path. After rollout completion, the activation manifest installs the
+complete mutating configuration with `failurePolicy: Fail`. This is deployment
+coordination only; it does not weaken admission or change the AgentDeployment
+API/storage contract.
+
 ### 8. Container-backed agent pods carry no ServiceAccount token
 
 The image is author-chosen, so the default token would let someone who can create an AgentDeployment — but not a Pod — execute code as the namespace's default ServiceAccount. Agents talk to a model endpoint, not the API server, so `automountServiceAccountToken: false`.
+
+The container provider uses a dedicated, provider-owned ServiceAccount with no
+token, `secrets`, or `imagePullSecrets`. The delegated-author boundary therefore
+assumes that a principal allowed to create AgentDeployments is **not** also
+allowed to create, update, patch, or delete provider-owned ServiceAccounts.
+Namespace administrators remain outside that boundary because platform-specific
+ServiceAccount annotations can grant workload identity independently of a token.
+
+One-shot agents similarly keep their per-generation claim and terminal outcome
+on the provider-owned agent ConfigMap. That ledger prevents accidental reruns
+across controller restarts and resource deletion, but it is not authenticated
+against a principal that can patch child ConfigMaps directly. AgentDeployment-only
+roles must not include ConfigMap write permissions. Supporting mutually untrusted
+ConfigMap writers would require moving the ledger to a write-protected status or
+admission-backed storage contract rather than another local reconciliation check.
 
 ### 9. A lost binding is held for 10 minutes, then torn down
 

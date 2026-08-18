@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -73,6 +74,15 @@ const (
 	// authorizes the requesting user against a referenced credential Secret.
 	agentCredentialValidatingWebhookConfiguration = "airunway-validating-webhook-configuration"
 	agentCredentialValidatingWebhookName          = "vagentdeployment-v1alpha1.kb.io"
+	agentCredentialUpgradeGuardConfiguration      = "airunway-agentdeployment-upgrade-guard"
+	agentCredentialUpgradeGuardWebhookName        = "agentdeployment-upgrade-guard.airunway.ai"
+	agentCredentialUpgradeGuardServiceName        = "airunway-agentdeployment-upgrade-guard"
+	agentCredentialUpgradeGuardServiceNamespace   = "airunway-system"
+	agentCredentialUpgradeGuardServicePath        = "/deny-agentdeployment-writes-during-controller-rollout"
+
+	// AgentCredentialCertRotatorFieldOwner is the server-side apply field manager
+	// used by cert-controller for webhook certificate and caBundle maintenance.
+	AgentCredentialCertRotatorFieldOwner = "airunway-agent-credential-cert-rotator"
 )
 
 // AgentDeploymentReconciler reconciles the core, framework-neutral concerns
@@ -101,19 +111,18 @@ type AgentDeploymentReconciler struct {
 	// the reconciler directly keep working.
 	APIReader client.Reader
 
-	// CredentialAdmissionActive reports whether the validating webhook — the only
-	// place the requesting user is authorized against a referenced Secret — is
-	// running. When false the reconciler refuses credential-bearing bindings
-	// rather than resolving a Secret nobody checked the requester could read.
-	//
-	// Defaults to false so a caller that forgets to set it fails closed.
-	CredentialAdmissionActive bool
-
 	// CredentialAdmissionCheck verifies that the fail-closed AgentDeployment
-	// validating admission rule is installed. Production wires this to an
-	// uncached ValidatingWebhookConfiguration read; the boolean above remains a
-	// fail-closed fallback for directly-constructed tests.
+	// validating admission rule, or the staged mutating write-blocking guard, is
+	// installed and active.
+	// Production wires this to uncached admission-configuration reads.
+	// A nil check fails closed.
 	CredentialAdmissionCheck func(context.Context) error
+
+	// CredentialAttestationCheck verifies that this exact UID, generation, and
+	// spec passed credential authorization. On CREATE it may atomically consume
+	// the validating-admission record and persist the resulting annotation.
+	// A nil or failed check closes credential resolution.
+	CredentialAttestationCheck func(context.Context, *airunwayv1alpha1.AgentDeployment) error
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentdeployments,verbs=get;list;watch;update;patch
@@ -122,6 +131,7 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get
 
 // secretReader returns the uncached reader for Secret lookups, falling back to
@@ -134,10 +144,33 @@ func (r *AgentDeploymentReconciler) secretReader() client.Reader {
 }
 
 // VerifyAgentCredentialAdmission checks that credential-bearing
-// AgentDeployments are protected by the expected fail-closed admission rule.
-// Merely starting the local webhook server is insufficient: a missing
-// ValidatingWebhookConfiguration means requests never reach it.
+// AgentDeployments are protected by either the expected fail-closed validating
+// admission rule or the exact mutating write-blocking guard used during staged
+// upgrades. Merely starting the local webhook server is insufficient: missing
+// admission configurations mean requests never reach it.
 func VerifyAgentCredentialAdmission(ctx context.Context, reader client.Reader) error {
+	return credentialAdmissionConfiguration(ctx, reader)
+}
+
+// credentialAdmissionConfiguration checks the current credential-admission
+// configuration's fail-closed shape.
+func credentialAdmissionConfiguration(ctx context.Context, reader client.Reader) error {
+	validatorErr := credentialValidatingAdmissionConfiguration(ctx, reader)
+	if validatorErr == nil {
+		return nil
+	}
+	guardErr := credentialAdmissionUpgradeGuard(ctx, reader)
+	if guardErr == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"credential admission is protected by neither the normal validator nor the staged upgrade guard: validator: %v; upgrade guard: %v",
+		validatorErr,
+		guardErr,
+	)
+}
+
+func credentialValidatingAdmissionConfiguration(ctx context.Context, reader client.Reader) error {
 	var config admissionv1.ValidatingWebhookConfiguration
 	key := k8stypes.NamespacedName{Name: agentCredentialValidatingWebhookConfiguration}
 	if err := reader.Get(ctx, key, &config); err != nil {
@@ -162,10 +195,10 @@ func VerifyAgentCredentialAdmission(ctx context.Context, reader client.Reader) e
 		// evaluate those predicates after admission (and, in particular, cannot
 		// reconstruct the requesting user's authorization), so credential
 		// resolution fails closed whenever the credential guard is conditional.
-		if webhook.NamespaceSelector != nil {
+		if !admissionSelectorMatchesAll(webhook.NamespaceSelector) {
 			return fmt.Errorf("credential validating admission webhook must not use namespaceSelector")
 		}
-		if webhook.ObjectSelector != nil {
+		if !admissionSelectorMatchesAll(webhook.ObjectSelector) {
 			return fmt.Errorf("credential validating admission webhook must not use objectSelector")
 		}
 		if len(webhook.MatchConditions) > 0 {
@@ -193,6 +226,75 @@ func VerifyAgentCredentialAdmission(ctx context.Context, reader client.Reader) e
 		return fmt.Errorf("credential validating admission webhook does not cover AgentDeployment CREATE and UPDATE")
 	}
 	return fmt.Errorf("credential validating admission webhook %q is not installed", agentCredentialValidatingWebhookName)
+}
+
+func credentialAdmissionUpgradeGuard(ctx context.Context, reader client.Reader) error {
+	var config admissionv1.MutatingWebhookConfiguration
+	key := k8stypes.NamespacedName{Name: agentCredentialUpgradeGuardConfiguration}
+	if err := reader.Get(ctx, key, &config); err != nil {
+		return fmt.Errorf("read credential admission upgrade guard configuration: %w", err)
+	}
+	if len(config.Webhooks) != 1 {
+		return fmt.Errorf("credential admission upgrade guard must contain exactly one webhook")
+	}
+
+	webhook := &config.Webhooks[0]
+	if webhook.Name != agentCredentialUpgradeGuardWebhookName {
+		return fmt.Errorf("credential admission upgrade guard has unexpected webhook %q", webhook.Name)
+	}
+	if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionv1.Fail {
+		return fmt.Errorf("credential admission upgrade guard must explicitly use failurePolicy Fail")
+	}
+	if webhook.MatchPolicy == nil || *webhook.MatchPolicy != admissionv1.Equivalent {
+		return fmt.Errorf("credential admission upgrade guard must use matchPolicy Equivalent")
+	}
+	if webhook.SideEffects == nil || *webhook.SideEffects != admissionv1.SideEffectClassNone {
+		return fmt.Errorf("credential admission upgrade guard must declare sideEffects None")
+	}
+	if webhook.TimeoutSeconds == nil || *webhook.TimeoutSeconds != 1 {
+		return fmt.Errorf("credential admission upgrade guard must use timeoutSeconds 1")
+	}
+	if !slices.Equal(webhook.AdmissionReviewVersions, []string{"v1"}) {
+		return fmt.Errorf("credential admission upgrade guard must use only admissionReviewVersions v1")
+	}
+	if !admissionSelectorMatchesAll(webhook.NamespaceSelector) {
+		return fmt.Errorf("credential admission upgrade guard must not use namespaceSelector")
+	}
+	if !admissionSelectorMatchesAll(webhook.ObjectSelector) {
+		return fmt.Errorf("credential admission upgrade guard must not use objectSelector")
+	}
+	if len(webhook.MatchConditions) > 0 {
+		return fmt.Errorf("credential admission upgrade guard must not use matchConditions")
+	}
+
+	service := webhook.ClientConfig.Service
+	if webhook.ClientConfig.URL != nil || service == nil ||
+		service.Name != agentCredentialUpgradeGuardServiceName ||
+		service.Namespace != agentCredentialUpgradeGuardServiceNamespace ||
+		service.Path == nil || *service.Path != agentCredentialUpgradeGuardServicePath ||
+		(service.Port != nil && *service.Port != 443) {
+		return fmt.Errorf("credential admission upgrade guard has unexpected service target")
+	}
+
+	if len(webhook.Rules) != 1 {
+		return fmt.Errorf("credential admission upgrade guard must contain exactly one rule")
+	}
+	rule := &webhook.Rules[0]
+	if !slices.Equal(rule.Operations, []admissionv1.OperationType{admissionv1.Create, admissionv1.Update}) ||
+		!slices.Equal(rule.Rule.APIGroups, []string{airunwayv1alpha1.GroupVersion.Group}) ||
+		!slices.Equal(rule.Rule.APIVersions, []string{airunwayv1alpha1.GroupVersion.Version}) ||
+		!slices.Equal(rule.Rule.Resources, []string{"agentdeployments"}) ||
+		rule.Rule.Scope == nil || *rule.Rule.Scope != admissionv1.NamespacedScope {
+		return fmt.Errorf("credential admission upgrade guard must cover only namespaced AgentDeployment CREATE and UPDATE")
+	}
+	return nil
+}
+
+// admissionSelectorMatchesAll accepts both an omitted selector and the empty
+// selector written by admissionregistration.k8s.io/v1 API defaulting. Any
+// label or expression would let a request skip the credential guard.
+func admissionSelectorMatchesAll(selector *metav1.LabelSelector) bool {
+	return selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0)
 }
 
 func admissionRuleContains(values []string, want string) bool {
@@ -301,15 +403,12 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // user edits the spec, the provider's previous ProviderReady=True is still
 // present but describes the old generation — publishing Ready=True from it
 // tells the user their change is live before the provider has even seen it.
-//
-// ObservedGeneration 0 means the condition predates generation tracking; accept
-// it rather than stalling agents written by an older controller.
 func providerReadyForGeneration(conds []metav1.Condition, generation int64) bool {
 	cond := meta.FindStatusCondition(conds, airunwayv1alpha1.AgentConditionTypeProviderReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		return false
 	}
-	return cond.ObservedGeneration == 0 || cond.ObservedGeneration >= generation
+	return cond.ObservedGeneration >= generation
 }
 
 // bindingHoldWindow bounds how long a published binding survives a failure it
@@ -562,17 +661,24 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 	//
 	// Keyless bindings are unaffected — only credential-bearing ones are refused,
 	// so a webhook-less development cluster still runs everything else.
-	admissionErr := error(nil)
-	if r.CredentialAdmissionCheck != nil {
+	var admissionErr error
+	if r.CredentialAdmissionCheck == nil {
+		admissionErr = fmt.Errorf("credential validating admission check is not configured")
+	} else {
 		admissionErr = r.CredentialAdmissionCheck(ctx)
-	} else if !r.CredentialAdmissionActive {
-		admissionErr = fmt.Errorf("credential validating admission is not configured")
+	}
+	if admissionErr == nil {
+		if r.CredentialAttestationCheck == nil {
+			admissionErr = fmt.Errorf("credential admission attestation check is not configured")
+		} else {
+			admissionErr = r.CredentialAttestationCheck(ctx, ad)
+		}
 	}
 	if admissionErr != nil {
-		return st, false, false, "CredentialAuthorizationUnavailable",
-			"credential-bearing bindings are refused because validating admission is unavailable: " + admissionErr.Error() + "; " +
+		return st, false, true, "CredentialAuthorizationUnavailable",
+			"credential-bearing bindings are refused because credential admission is unavailable or unverified: " + admissionErr.Error() + "; " +
 				"this is the only place the requesting user is authorized against the referenced Secret; " +
-				"enable the webhook, or use a binding with no credentialsRef"
+				"enable the webhook and resubmit the AgentDeployment, or use a binding with no credentialsRef"
 	}
 
 	var sec corev1.Secret
@@ -584,6 +690,10 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 				fmt.Sprintf("spec.model.externalAPI.credentialsRef references Secret %s/%s which does not exist", ad.Namespace, ref.Name)
 		}
 		return st, false, true, "CredentialSecretLookupFailed", err.Error()
+	}
+	if !sec.DeletionTimestamp.IsZero() {
+		return st, false, true, "CredentialSecretDeleting",
+			fmt.Sprintf("spec.model.externalAPI.credentialsRef target Secret %s/%s is being deleted", ad.Namespace, ref.Name)
 	}
 	if _, ok := sec.Data[ref.Key]; !ok {
 		return st, false, true, "CredentialKeyNotFound",
@@ -631,6 +741,10 @@ func (r *AgentDeploymentReconciler) resolveGatewayEndpointBinding(
 		}
 		return st, false, true, "GatewayLookupFailed", err.Error()
 	}
+	if !gateway.GetDeletionTimestamp().IsZero() {
+		return st, false, true, "GatewayDeleting",
+			fmt.Sprintf("spec.model.gatewayEndpoint target Gateway %s/%s is being deleted", ns, gw.GatewayRef.Name)
+	}
 
 	baseURL := normalizeOpenAIBaseURL(gatewayStatusAddress(&gateway))
 	if baseURL == "" {
@@ -675,6 +789,10 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 		}
 		return st, false, true, "ModelDeploymentLookupFailed", err.Error()
 	}
+	if !md.DeletionTimestamp.IsZero() {
+		return st, false, true, "ModelDeploymentDeleting",
+			fmt.Sprintf("spec.model target ModelDeployment %s/%s is being deleted", ns, ref.Name)
+	}
 
 	st.ObservedResourceUID = string(md.UID)
 	st.BaseURL, st.ModelName = modelDeploymentEndpoint(&md)
@@ -693,7 +811,10 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 // apply under the core field owner. Provider-owned fields (phase, runtime,
 // replicas, ProviderReady) are omitted, so the API server leaves the
 // provider's writes untouched. The shared conditions list is listType=map
-// keyed by type, so SSA merges core and provider conditions per key.
+// keyed by type, so SSA merges core and provider conditions per key. UID and
+// resourceVersion bind the write to the exact AgentDeployment revision read by
+// this reconcile; resourceVersion is required because CRD status update
+// strategy replaces request metadata before validating the update.
 func (r *AgentDeploymentReconciler) applyCoreStatus(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -701,14 +822,19 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 	binding *airunwayv1alpha1.ModelBindingStatus,
 	conds []metav1.Condition,
 ) error {
+	if ad.UID == "" || ad.ResourceVersion == "" {
+		return fmt.Errorf("apply core status for AgentDeployment %s/%s: UID and resourceVersion are required", ad.Namespace, ad.Name)
+	}
 	apply := &airunwayv1alpha1.AgentDeployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: airunwayv1alpha1.GroupVersion.String(),
 			Kind:       "AgentDeployment",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ad.Name,
-			Namespace: ad.Namespace,
+			Name:            ad.Name,
+			Namespace:       ad.Namespace,
+			UID:             ad.UID,
+			ResourceVersion: ad.ResourceVersion,
 		},
 		Status: airunwayv1alpha1.AgentDeploymentStatus{
 			Framework:          framework,
@@ -722,7 +848,12 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 	// disjoint condition-map entries, so a conflict means a second writer is
 	// genuinely claiming a core-owned field. Forcing would steal it back every
 	// reconcile and turn the documented ownership split into last-writer-wins.
-	return r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(AgentCoreFieldOwner))
+	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(AgentCoreFieldOwner)); err != nil {
+		return err
+	}
+	ad.ResourceVersion = apply.ResourceVersion
+	ad.Status = apply.Status
+	return nil
 }
 
 // coreOwnedConditions filters a condition list down to the types the core
@@ -791,7 +922,7 @@ func modelDeploymentEndpoint(md *airunwayv1alpha1.ModelDeployment) (baseURL, mod
 		if port == 0 {
 			port = 80
 		}
-		return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/v1", ep.Service, md.Namespace, port), modelName
+		return fmt.Sprintf("http://%s.%s.svc:%d/v1", ep.Service, md.Namespace, port), modelName
 	}
 
 	return "", modelName

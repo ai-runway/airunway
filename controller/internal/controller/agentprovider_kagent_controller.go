@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -108,7 +109,7 @@ type kagentConfig struct {
 // (SSA only conflicts on fields another manager owns AND this apply changes;
 // adding a key, labels and an ownerReference is all "added"), which then
 // garbage-collects their Secret when the AgentDeployment is deleted.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
 func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -119,9 +120,26 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Only handle agents for this framework; ignore others. Garbage
-	// collection via owner references handles deletion.
-	if ad.Spec.Framework.Name != KagentFrameworkName || !ad.DeletionTimestamp.IsZero() {
+	if !ad.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+	if ad.Spec.Framework.Name != KagentFrameworkName {
+		// A pre-validation object may still change framework while this provider
+		// owns its status. Standing aside immediately would leave the old Agent and
+		// ModelConfig running and keep the successor blocked on our SSA ownership.
+		if ad.Status.ProviderOwner == KagentFieldOwner {
+			return r.cleanupAndReleaseForFrameworkHandoff(ctx, &ad)
+		}
+		// A crash can occur after the deterministic children are created but before
+		// providerOwner is persisted. Exact controller ownership is sufficient
+		// evidence to clean those children without claiming or releasing status.
+		pending, err := r.cleanupRenderedResources(ctx, &ad)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -201,15 +219,27 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	binding := *ad.Status.ModelBinding
 	binding, err = agentprovider.EnsureBindingCredentials(ctx, r.Client, r.objectReader(), r.Scheme, &ad, binding, KagentFieldOwner)
 	if err != nil {
-		statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
-			metav1.ConditionFalse, "CredentialProvisionFailed", err.Error())
-		if statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return ctrl.Result{}, err
+		return r.failClosedForCredentialProvision(ctx, &ad, err)
 	}
 	cfg, err := parseKagentConfig(ad.Spec.Config)
 	if err != nil {
+		pending, cleanupErr := agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), &ad,
+			agentprovider.UnstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
+			agentprovider.UnstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
+		)
+		if cleanupErr != nil {
+			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+				metav1.ConditionFalse, "InvalidConfigCleanupFailed", cleanupErr.Error())
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, cleanupErr
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.applyProviderStatus(ctx, &ad,
+				airunwayv1alpha1.AgentPhaseFailed, nil, nil, metav1.ConditionFalse,
+				"InvalidConfigCleanup", "Stopping kagent resources after spec.config became invalid")
+		}
 		return ctrl.Result{}, r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "InvalidConfig", err.Error())
 	}
@@ -217,8 +247,29 @@ func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	modelConfig := renderKagentModelConfig(&ad, binding)
 	agent := renderKagentAgent(&ad, cfg, modelConfig.GetName())
 
-	for _, obj := range []*unstructured.Unstructured{modelConfig, agent} {
+	// Check the complete rendered topology before creating either object. In
+	// particular, do not publish a credential-bearing ModelConfig that a foreign
+	// same-named Agent may already reference. ApplyOwned remains the write boundary
+	// for each object after this diagnostic preflight.
+	rendered := []*unstructured.Unstructured{agent, modelConfig}
+	for _, obj := range rendered {
+		if err := agentprovider.VerifyOwnedOrAbsent(ctx, r.objectReader(), r.Scheme, &ad, obj); err != nil {
+			err = r.cleanupAfterRenderedWriteFailure(ctx, &ad, obj, err, false)
+			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+				metav1.ConditionFalse, "OwnershipConflict", err.Error())
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Establish ownership of the non-credential Agent before publishing the
+	// ModelConfig. ApplyOwned's create/resourceVersion guards make a concurrent
+	// foreign Agent fail before any credential reference is written.
+	for i, obj := range rendered {
 		if err := agentprovider.ApplyOwned(ctx, r.Client, r.objectReader(), r.Scheme, &ad, obj, KagentFieldOwner, true); err != nil {
+			err = r.cleanupAfterRenderedWriteFailure(ctx, &ad, obj, err, i > 0)
 			statusErr := r.applyProviderStatus(ctx, &ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 				metav1.ConditionFalse, "OwnershipConflict", err.Error())
 			if statusErr != nil {
@@ -267,6 +318,11 @@ func parseKagentConfig(raw *runtime.RawExtension) (kagentConfig, error) {
 	if err := json.Unmarshal(raw.Raw, &cfg); err != nil {
 		return kagentConfig{}, fmt.Errorf("parse spec.config for the kagent backend: %w", err)
 	}
+	switch cfg.Runtime {
+	case "", "python", "go":
+	default:
+		return kagentConfig{}, fmt.Errorf("spec.config.runtime %q is invalid: must be \"python\" or \"go\"", cfg.Runtime)
+	}
 	return cfg, nil
 }
 
@@ -312,8 +368,9 @@ func kagentProviderFor(binding airunwayv1alpha1.ModelBindingStatus) (provider st
 		provider = "AzureOpenAI"
 		block = map[string]interface{}{
 			"azureOpenAI": map[string]interface{}{
-				"azureEndpoint": binding.BaseURL,
-				"apiVersion":    "2024-02-01",
+				"azureEndpoint":   binding.BaseURL,
+				"azureDeployment": binding.ModelName,
+				"apiVersion":      "2024-02-01",
 			},
 		}
 	case airunwayv1alpha1.ExternalAPITypeAnthropic:
@@ -418,4 +475,95 @@ func (r *KagentProviderReconciler) objectReader() client.Reader {
 		return r.APIReader
 	}
 	return r.Client
+}
+
+func (r *KagentProviderReconciler) cleanupRenderedResources(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+) (bool, error) {
+	return agentprovider.CleanupOwnedAndWait(ctx, r.Client, r.objectReader(), ad,
+		agentprovider.UnstructuredRef(kagentModelConfigGVK, ad.Name+"-model", ad.Namespace),
+		agentprovider.UnstructuredRef(kagentAgentGVK, ad.Name, ad.Namespace),
+	)
+}
+
+func (r *KagentProviderReconciler) cleanupAndReleaseForFrameworkHandoff(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+) (ctrl.Result, error) {
+	pending, err := r.cleanupRenderedResources(ctx, ad)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pending {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.applyProviderStatus(ctx, ad,
+			airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
+			"ProviderHandoffCleanup", "Removing kagent resources after the agent framework changed")
+	}
+	return ctrl.Result{}, agentprovider.ReleaseOwnedStatus(ctx, r.Client, ad, KagentFieldOwner)
+}
+
+func (r *KagentProviderReconciler) failClosedForCredentialProvision(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	cause error,
+) (ctrl.Result, error) {
+	pending, cleanupErr := r.cleanupRenderedResources(ctx, ad)
+	if cleanupErr != nil {
+		statusErr := r.applyProviderStatus(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+			metav1.ConditionFalse, "CredentialCleanupFailed", cleanupErr.Error())
+		if statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, fmt.Errorf("%w; stop kagent resources after credential failure: %v", cause, cleanupErr)
+	}
+	if pending {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.applyProviderStatus(ctx, ad,
+			airunwayv1alpha1.AgentPhaseFailed, nil, nil, metav1.ConditionFalse,
+			"CredentialCleanup", "Stopping kagent resources after keyless credential provisioning failed")
+	}
+	statusErr := r.applyProviderStatus(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
+		metav1.ConditionFalse, "CredentialProvisionFailed", cause.Error())
+	if statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+	return ctrl.Result{}, cause
+}
+
+func (r *KagentProviderReconciler) cleanupAfterRenderedWriteFailure(
+	ctx context.Context,
+	ad *airunwayv1alpha1.AgentDeployment,
+	failed *unstructured.Unstructured,
+	cause error,
+	cleanupDefinitiveFailure bool,
+) error {
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(failed.GroupVersionKind())
+	readErr := r.objectReader().Get(ctx, client.ObjectKeyFromObject(failed), live)
+	foreign := readErr == nil && !agentprovider.IsControlledByAgentDeployment(live, ad)
+	definitivelyIncomplete := cleanupDefinitiveFailure && definitiveCRDResourceWriteFailure(cause)
+	if !foreign && !definitivelyIncomplete {
+		return cause
+	}
+	if _, err := r.cleanupRenderedResources(ctx, ad); err != nil {
+		return fmt.Errorf("%w; clean up incomplete kagent topology after rendered resource write failure: %v", cause, err)
+	}
+	return cause
+}
+
+// definitiveCRDResourceWriteFailure identifies API-server status responses that
+// prove the write was rejected. Transport failures and conflicts remain
+// ambiguous and are retried without tearing down an otherwise healthy topology.
+// Orka uses the same classification for its Agent + Provider pair.
+func definitiveCRDResourceWriteFailure(err error) bool {
+	return apierrors.IsAlreadyExists(err) ||
+		apierrors.IsInvalid(err) ||
+		apierrors.IsBadRequest(err) ||
+		apierrors.IsUnauthorized(err) ||
+		apierrors.IsForbidden(err) ||
+		apierrors.IsTooManyRequests(err) ||
+		apierrors.IsMethodNotSupported(err) ||
+		apierrors.IsNotAcceptable(err) ||
+		apierrors.IsUnsupportedMediaType(err) ||
+		apierrors.IsRequestEntityTooLargeError(err)
 }

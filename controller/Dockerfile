@@ -32,6 +32,7 @@ COPY controller/ controller/
 # Require GAIE_VERSION so hand-run `docker build` cannot silently drift from
 # versions.env. Builds should pass it via --build-arg (the Makefile does this).
 RUN test -n "${GAIE_VERSION}" || (echo "ERROR: GAIE_VERSION build arg is required (see versions.env); pass --build-arg GAIE_VERSION=..." >&2; exit 1)
+RUN test -n "${AGENT_PROVIDER_VERSION}" || (echo "ERROR: AGENT_PROVIDER_VERSION build arg is required; pass --build-arg AGENT_PROVIDER_VERSION=..." >&2; exit 1)
 # the GOARCH has no default value to allow the binary to be built according to the host where the command
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,

@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
@@ -211,6 +212,102 @@ var _ = Describe("AgentProviderConfig readiness controller", func() {
 		apc = get(name)
 		Expect(apc.Status.LastHeartbeat).NotTo(BeNil())
 		Expect(apc.Status.Version).To(BeEmpty())
+	})
+
+	It("releases a previously reported version when the reporter becomes versionless", func() {
+		name := "cap-version-release"
+		apc := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, apc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, apc) })
+
+		reporter := &AgentProviderVersionReconciler{
+			Client: k8sClient, Name: "test-version-release", Version: "v1",
+			Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+		}
+		request := reconcile.Request{NamespacedName: types.NamespacedName{Name: name}}
+		_, err := reporter.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(get(name).Status.Version).To(Equal("v1"))
+
+		reporter.Version = ""
+		_, err = reporter.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(get(name).Status.Version).To(BeEmpty())
+	})
+
+	It("rejects stale reporter writes after a provider config is replaced", func() {
+		name := "cap-reporter-replacement"
+		original := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, original)).To(Succeed())
+		stale := original.DeepCopy()
+		Expect(k8sClient.Delete(ctx, original)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name}, &airunwayv1alpha1.AgentProviderConfig{}))
+		}).Should(BeTrue())
+
+		replacement := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, replacement)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, replacement) })
+
+		reporter := &AgentProviderVersionReconciler{
+			Client: k8sClient, Name: "test-replacement", Version: "stale",
+			Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+		}
+		Expect(reporter.publishHeartbeat(ctx, stale, metav1.Now())).To(HaveOccurred())
+		Expect(reporter.publishVersion(ctx, stale)).To(HaveOccurred())
+
+		current := get(name)
+		Expect(current.UID).NotTo(Equal(stale.UID))
+		Expect(current.Status.LastHeartbeat).To(BeNil())
+		Expect(current.Status.Version).To(BeEmpty())
+	})
+
+	It("rejects a stale readiness verdict after a provider config is replaced", func() {
+		name := "cap-readiness-replacement"
+		original := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, original)).To(Succeed())
+		stale := original.DeepCopy()
+		Expect(k8sClient.Delete(ctx, original)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name}, &airunwayv1alpha1.AgentProviderConfig{}))
+		}).Should(BeTrue())
+
+		replacement := &airunwayv1alpha1.AgentProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: airunwayv1alpha1.AgentProviderConfigSpec{Capabilities: &airunwayv1alpha1.AgentProviderCapabilities{
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+			}},
+		}
+		Expect(k8sClient.Create(ctx, replacement)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, replacement) })
+
+		r := &AgentProviderConfigReconciler{Client: k8sClient}
+		Expect(r.applyReadiness(ctx, stale, true, "Stale", "stale verdict")).To(HaveOccurred())
+
+		current := get(name)
+		Expect(current.UID).NotTo(Equal(stale.UID))
+		Expect(current.Status.Ready).To(BeNil())
+		Expect(current.Status.Conditions).To(BeEmpty())
 	})
 
 	It("marks a crd backend ready only when its operator API group is served", func() {

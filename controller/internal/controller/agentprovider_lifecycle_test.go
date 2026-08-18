@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -204,7 +205,7 @@ var _ = Describe("Container provider workload lifecycle", func() {
 	}
 
 	core := func(name string) {
-		r := &AgentDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), CredentialAdmissionActive: true}
+		r := newCredentialAuthorizedAgentDeploymentReconciler(k8sClient)
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -270,6 +271,67 @@ var _ = Describe("Container provider workload lifecycle", func() {
 		Expect(out.Status.Phase).NotTo(Equal(airunwayv1alpha1.AgentPhaseFailed))
 	})
 
+	It("does not rerun a Job when only the resolved binding changes", func() {
+		provider("job-binding-fw")
+		agent("job-binding-agent", "job-binding-fw", map[string]any{"image": "ghcr.io/x/agent:v1"}, airunwayv1alpha1.AgentLifecycleJob)
+
+		core("job-binding-agent")
+		Expect(container("job-binding-agent")).To(Succeed())
+
+		job := &batchv1.Job{}
+		key := types.NamespacedName{Name: "job-binding-agent", Namespace: "default"}
+		Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+		uid := job.UID
+		hash := job.Annotations[agentTemplateHashAnnotation]
+
+		By("changing only core-owned binding status without changing the AgentDeployment generation")
+		ad := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+		generation := ad.Generation
+		ad.Status.ModelBinding.BaseURL = "https://replacement.example/v1"
+		Expect(k8sClient.Status().Update(ctx, ad)).To(Succeed())
+		Expect(container("job-binding-agent")).To(Succeed())
+
+		current := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, key, current)).To(Succeed())
+		Expect(current.UID).To(Equal(uid))
+		Expect(current.Annotations[agentTemplateHashAnnotation]).To(Equal(hash))
+		Expect(ad.Generation).To(Equal(generation))
+	})
+
+	It("does not recreate a completed Job after it is deleted", func() {
+		provider("job-terminal-fw")
+		agent("job-terminal-agent", "job-terminal-fw", map[string]any{"image": "ghcr.io/x/agent:v1"}, airunwayv1alpha1.AgentLifecycleJob)
+
+		core("job-terminal-agent")
+		Expect(container("job-terminal-agent")).To(Succeed())
+
+		key := types.NamespacedName{Name: "job-terminal-agent", Namespace: "default"}
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+		job.Status.Succeeded = 1
+		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+		Expect(container("job-terminal-agent")).To(Succeed())
+
+		ledger := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "job-terminal-agent-config", Namespace: "default"}, ledger)).To(Succeed())
+		Expect(ledger.Annotations).To(HaveKeyWithValue(agentJobOutcomeAnnotation, agentJobOutcomeCompleted))
+
+		Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+		job.Finalizers = nil
+		Expect(k8sClient.Update(ctx, job)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &batchv1.Job{}))
+		}, 5*time.Second).Should(BeTrue())
+
+		Expect(container("job-terminal-agent")).To(Succeed())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &batchv1.Job{}))).To(BeTrue())
+		out := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, key, out)).To(Succeed())
+		Expect(out.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseCompleted))
+	})
+
 	It("rolls the Deployment when only the mounted config changes", func() {
 		provider("cm-fw")
 		agent("cm-agent", "cm-fw", map[string]any{"image": "ghcr.io/x/agent:v1", "systemPrompt": "old"}, "")
@@ -296,6 +358,98 @@ var _ = Describe("Container provider workload lifecycle", func() {
 		Expect(updated.Spec.Template.Annotations[agentConfigChecksumAnnotation]).NotTo(Equal(firstChecksum),
 			"config-only change must alter the pod template so the workload rolls")
 		Expect(updated.Generation).To(BeNumerically(">", dep.Generation))
+	})
+
+	It("recreates the Deployment when the referenced model credential Secret changes", func() {
+		provider("credential-roll-fw")
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "credential-roll-key", Namespace: "default"},
+			Data:       map[string][]byte{"token": []byte("first")},
+		}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+		raw, _ := json.Marshal(map[string]any{"image": "ghcr.io/x/agent:v1"})
+		ad := &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "credential-roll-agent", Namespace: "default"},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "credential-roll-fw"},
+				Config:    &runtime.RawExtension{Raw: raw},
+				Model: airunwayv1alpha1.ModelBinding{ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+					Type: airunwayv1alpha1.ExternalAPITypeOpenAI, BaseURL: "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
+					CredentialsRef: &airunwayv1alpha1.SecretKeyRef{Name: secret.Name, Key: "token"},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ad)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ad) })
+
+		core(ad.Name)
+		Expect(container(ad.Name)).To(Succeed())
+		dep := &appsv1.Deployment{}
+		key := types.NamespacedName{Name: ad.Name, Namespace: ad.Namespace}
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		first := dep.Spec.Template.Annotations[agentModelCredentialChecksumAnnotation]
+		Expect(first).NotTo(BeEmpty())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}, secret)).To(Succeed())
+		secret.Data["token"] = []byte("second")
+		Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+		Expect(container(ad.Name)).To(Succeed())
+
+		By("foreground-deleting the workload that still carries the old credential")
+		terminating := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, key, terminating)).To(Succeed())
+		Expect(terminating.UID).To(Equal(dep.UID))
+		Expect(terminating.DeletionTimestamp.IsZero()).To(BeFalse())
+		Expect(terminating.Spec.Template.Annotations[agentModelCredentialChecksumAnnotation]).To(Equal(first),
+			"the new credential revision must not be applied while old pods can remain")
+
+		// envtest does not run the garbage collector that completes foreground
+		// deletion, so release the synthetic finalizer before the replacement pass.
+		terminating.Finalizers = nil
+		Expect(k8sClient.Update(ctx, terminating)).To(Succeed())
+		_ = k8sClient.Delete(ctx, terminating)
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, key, &appsv1.Deployment{}))
+		}, 5*time.Second).Should(BeTrue())
+
+		By("creating the replacement only after the stale workload is gone")
+		Expect(container(ad.Name)).To(Succeed())
+		updated := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+		Expect(updated.UID).NotTo(Equal(dep.UID))
+		Expect(updated.Spec.Template.Annotations[agentModelCredentialChecksumAnnotation]).NotTo(Equal(first))
+	})
+
+	It("tears down a stale workload when a config edit becomes terminally invalid", func() {
+		provider("invalid-config-fw")
+		agent("invalid-config-agent", "invalid-config-fw", map[string]any{"image": "ghcr.io/x/agent:v1"}, "")
+
+		core("invalid-config-agent")
+		Expect(container("invalid-config-agent")).To(Succeed())
+		key := types.NamespacedName{Name: "invalid-config-agent", Namespace: "default"}
+		Expect(k8sClient.Get(ctx, key, &appsv1.Deployment{})).To(Succeed())
+
+		ad := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, key, ad)).To(Succeed())
+		ad.Spec.Config = &runtime.RawExtension{Raw: []byte(`{"image":42}`)}
+		Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+		core(ad.Name)
+		Expect(container(ad.Name)).To(Succeed())
+
+		dep := &appsv1.Deployment{}
+		err := k8sClient.Get(ctx, key, dep)
+		if err == nil {
+			Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse())
+		} else {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}
+		out := &airunwayv1alpha1.AgentDeployment{}
+		Expect(k8sClient.Get(ctx, key, out)).To(Succeed())
+		Expect(out.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseFailed))
+		condition := meta.FindStatusCondition(out.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		Expect(condition.Reason).To(Equal("InvalidConfig"))
 	})
 
 	It("renders workloads for an AgentDeployment at the maximum permitted name length", func() {
