@@ -215,7 +215,13 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 		return fmt.Errorf("failed to build annotations: %w", err)
 	}
 
-	if err := shim.RegisterProviderConfig(ctx, m.client, ProviderConfigName, annotations, GetProviderConfigSpec()); err != nil {
+	if err := shim.RegisterProviderConfig(
+		ctx,
+		m.client,
+		ProviderConfigName,
+		annotations,
+		GetProviderConfigSpec(),
+	); err != nil {
 		return err
 	}
 
