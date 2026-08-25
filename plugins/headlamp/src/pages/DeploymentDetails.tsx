@@ -6,30 +6,30 @@
  * Matches the native UI layout with status cards and access info.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useHistory } from 'react-router-dom';
+import type { DeploymentStatus, MetricsResponse, PodLogsResponse, PodStatus } from '@airunway/shared';
+import { buildPortForwardCommand } from '@airunway/shared';
+import { Icon } from '@iconify/react';
+import { Router } from '@kinvolk/headlamp-plugin/lib';
 import {
+  Loader,
   SectionBox,
   SimpleTable,
-  Loader,
   StatusLabel,
   Tabs,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import { Router } from '@kinvolk/headlamp-plugin/lib';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
-import { Icon } from '@iconify/react';
-import { buildPortForwardCommand } from '@airunway/shared';
-import { useApiClient } from '../lib/api-client';
-import type { DeploymentStatus, PodStatus, MetricsResponse, PodLogsResponse } from '@airunway/shared';
-import { MetricsPanel } from '../components/MetricsPanel';
-import { LogsViewer } from '../components/LogsViewer';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useHistory, useParams } from 'react-router-dom';
 import { ConditionsTable } from '../components/ConditionsTable';
-import { StorageVolumesDisplay } from '../components/StorageVolumesDisplay';
 import { ConnectionError } from '../components/ConnectionBanner';
 import { DeleteDialog } from '../components/DeleteDialog';
-import { generateAynaUrl, getDeploymentPhaseColor, copyToClipboard, formatRelativeTime } from '../lib/utils';
+import { LogsViewer } from '../components/LogsViewer';
+import { MetricsPanel } from '../components/MetricsPanel';
+import { StorageVolumesDisplay } from '../components/StorageVolumesDisplay';
+import { useApiClient } from '../lib/api-client';
+import { copyToClipboard, formatRelativeTime, generateAynaUrl, getDeploymentPhaseColor } from '../lib/utils';
 
 export function DeploymentDetails() {
   const { name, namespace } = useParams<{ name: string; namespace: string }>();
@@ -48,7 +48,7 @@ export function DeploymentDetails() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Fetch deployment details
   const fetchDetails = useCallback(async (isInitialLoad = false) => {

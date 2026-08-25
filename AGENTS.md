@@ -106,6 +106,31 @@ For non-trivial code changes, run `$autoreview` (`.agents/skills/autoreview/SKIL
 - If review-triggered fixes change code, rerun focused tests and rerun `$autoreview`.
 - Format before review when formatting can move line locations; focused tests and review may run in parallel only after formatting is stable.
 
+## Definition of Done for Automated Changes
+
+Run the union of the checks for every changed area. If a check cannot run, record why and what remains unverified in the handoff.
+
+Coverage commands must measure every applicable production source file and report the result, but percentage floors are informational unless maintainers explicitly approve making them blocking.
+
+| Changed area | Required checks |
+|--------------|-----------------|
+| Frontend or shared UI types | `bun run test`, `make test-coverage-frontend`, and the production build; run mocked Playwright when user-visible behavior changes |
+| Backend or shared API types | `bun run test`, `make test-coverage-backend`, and the backend production build; run `bun run test:integration` only in the dedicated disposable-cluster workflow when real Kubernetes behavior changes |
+| Headlamp plugin or shared types it consumes | `make headlamp-check` |
+| Controller Go code | `make controller-build` and `make controller-test` |
+| Controller CRD type definitions | Controller checks plus `cd controller && make manifests generate`, then verify generated changes |
+| One provider | That provider's build plus `make provider-test-coverage PROVIDER=<name>` |
+| Test tooling, Make targets, or workflows | Exercise the exact affected local target, verify its intended failure path, and validate workflow syntax |
+| Documentation only | Check links and formatting; run the website build when navigation, rendering, or MD/MDX syntax changes |
+
+Before handoff:
+
+- Add or update behavior-focused regression tests for changed behavior.
+- Report the exact commands run and whether each passed or failed as expected.
+- List skipped suites with the reason; never imply an unrun check passed.
+- State residual risk, especially behavior that requires a real cluster, GPU, cloud account, or browser.
+- Run `git diff --check` and the required continuous review for non-trivial changes.
+
 ## CRD Reference
 
 ### ModelDeployment

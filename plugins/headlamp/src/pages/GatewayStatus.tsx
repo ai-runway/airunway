@@ -4,20 +4,20 @@
  * Shows Gateway API Inference Extension status, endpoint, and model routing table.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import IconButton from '@mui/material/IconButton';
-import Tooltip from '@mui/material/Tooltip';
+import type { GatewayInfo, GatewayModelInfo } from '@airunway/shared';
 import { Icon } from '@iconify/react';
 import {
+  Loader,
   SectionBox,
   SimpleTable,
-  Loader,
   StatusLabel,
   StatusLabelProps,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import type { GatewayInfo, GatewayModelInfo } from '@airunway/shared';
-import { useApiClient } from '../lib/api-client';
+import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
+import { useCallback, useEffect, useState } from 'react';
 import { ConnectionError } from '../components/ConnectionBanner';
+import { useApiClient } from '../lib/api-client';
 
 function getModelStatusColor(ready: boolean): StatusLabelProps['status'] {
   return ready ? 'success' : 'error';

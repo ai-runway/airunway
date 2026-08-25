@@ -12,6 +12,7 @@
     "lint": "headlamp-plugin lint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "tsc": "tsc --noEmit"
   },
   "dependencies": {
@@ -20,18 +21,28 @@
   "devDependencies": {
     "@emotion/react": "^11.11.1",
     "@emotion/styled": "^11.11.0",
+    "@headlamp-k8s/eslint-config": "0.6.0",
     "@iconify/react": "^6.0.2",
     "@kinvolk/headlamp-plugin": "^0.14.0",
     "@mui/material": "^9.0.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.0.0",
-    "@types/react": "^19.2.16",
+    "@types/react": "18.3.28",
     "@types/react-router-dom": "5",
+    "@typescript-eslint/eslint-plugin": "8.60.0",
     "@vitejs/plugin-react": "^6.0.2",
     "@vitest/coverage-v8": "^4.1.7",
+    "eslint": "8.57.1",
+    "eslint-config-prettier": "9.1.2",
+    "eslint-plugin-import": "2.32.0",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "eslint-plugin-react": "7.35.0",
+    "eslint-plugin-react-hooks": "4.6.2",
+    "eslint-plugin-simple-import-sort": "12.1.1",
+    "eslint-plugin-unused-imports": "4.4.1",
     "jsdom": "^29.1.1",
-    "react-router-dom": "7",
-    "typescript": "^6.0.3",
+    "react-router-dom": "5.3.4",
+    "typescript": "5.6.2",
     "vitest": "^4.1.7"
   },
   "peerDependencies": {
@@ -51,6 +62,19 @@
     "llm-d",
     "gateway"
   ],
+  "prettier": "@headlamp-k8s/eslint-config/prettier-config",
+  "eslintConfig": {
+    "extends": [
+      "@headlamp-k8s",
+      "prettier",
+      "plugin:jsx-a11y/recommended"
+    ],
+    "settings": {
+      "react": {
+        "version": "detect"
+      }
+    }
+  },
   "author": "",
   "license": "MIT",
   "repository": {

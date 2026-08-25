@@ -16,9 +16,10 @@
     "compile:darwin-arm64": "bun run scripts/compile.ts --target=bun-darwin-arm64 --outfile=airunway-darwin-arm64",
     "compile:windows-x64": "bun run scripts/compile.ts --target=bun-windows-x64 --outfile=airunway-windows-x64.exe",
     "lint": "eslint src",
-    "test": "bun test",
-    "test:watch": "bun test --watch",
-    "test:coverage": "bun test --coverage"
+    "test": "bun test --path-ignore-patterns=src/integration",
+    "test:watch": "bun test --watch --path-ignore-patterns=src/integration",
+    "test:coverage": "bun test --path-ignore-patterns=src/integration --coverage --coverage-reporter=text --coverage-reporter=lcov",
+    "test:integration": "AIRUNWAY_TEST_MODE=strict bun test ./src/integration/kubernetes.integration.ts"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.8.0",
