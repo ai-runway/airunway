@@ -248,7 +248,10 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if r.EnableProviderSelector {
 		if err := r.selectEngine(ctx, &md, providerConfigs, resolvedServingMode); err != nil {
 			logger.Error(err, "Engine selection failed", "name", md.Name)
-			return r.patchSelectionFailure(ctx, &md, base, airunwayv1alpha1.ConditionTypeEngineSelected, "Engine selection", "engine_selection", err)
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeEngineSelected, metav1.ConditionFalse, "SelectionFailed", err.Error())
+			md.Status.Message = fmt.Sprintf("Engine selection failed: %s", err.Error())
+			r.recordReconcileError(&md, "engine_selection")
+			return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
 		}
 	}
 
@@ -305,7 +308,10 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if r.EnableProviderSelector {
 		if err := r.selectProvider(ctx, &md, providerConfigs, resolvedEngineType, resolvedServingMode); err != nil {
 			logger.Error(err, "Provider selection failed", "name", md.Name)
-			return r.patchSelectionFailure(ctx, &md, base, airunwayv1alpha1.ConditionTypeProviderSelected, "Provider selection", "provider_selection", err)
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionFalse, "SelectionFailed", err.Error())
+			md.Status.Message = fmt.Sprintf("Provider selection failed: %s", err.Error())
+			r.recordReconcileError(&md, "provider_selection")
+			return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
 		}
 	}
 
@@ -735,13 +741,6 @@ func (r *ModelDeploymentReconciler) setImageFieldConflictStatus(md *airunwayv1al
 		Requested: md.Spec.ImageOverride(),
 		Message:   message,
 	}
-}
-
-func (r *ModelDeploymentReconciler) patchSelectionFailure(ctx context.Context, md, base *airunwayv1alpha1.ModelDeployment, conditionType, messagePrefix, metricType string, err error) (ctrl.Result, error) {
-	r.setCondition(md, conditionType, metav1.ConditionFalse, "SelectionFailed", err.Error())
-	md.Status.Message = fmt.Sprintf("%s failed: %s", messagePrefix, err.Error())
-	r.recordReconcileError(md, metricType)
-	return ctrl.Result{}, r.Status().Patch(ctx, md, client.MergeFrom(base))
 }
 
 // setCondition updates a condition on the ModelDeployment.
