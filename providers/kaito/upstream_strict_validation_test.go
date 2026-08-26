@@ -47,8 +47,8 @@ import (
 // server's behaviour — the fake client has no structural schema and cannot prune, which
 // is exactly why no pre-existing test caught this bug.
 //
-// KAITO writes via Create on first reconcile and a merge Patch thereafter (rather than a
-// full replace), so both paths are covered.
+// KAITO writes via Create on first reconcile and SSA Apply patches thereafter, so both
+// paths are covered.
 
 func kaitoTestOwner() []metav1.OwnerReference {
 	return []metav1.OwnerReference{{
@@ -90,7 +90,7 @@ func TestUpstreamCreateUsesStrictFieldValidation(t *testing.T) {
 
 	var got string
 	var called bool
-	c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			called = true
 			o := &client.CreateOptions{}
@@ -98,7 +98,7 @@ func TestUpstreamCreateUsesStrictFieldValidation(t *testing.T) {
 				opt.ApplyToCreate(o)
 			}
 			got = o.FieldValidation
-			return nil
+			return cl.Create(ctx, obj, opts...)
 		},
 	}).Build()
 
@@ -125,7 +125,7 @@ func TestUpstreamPatchUsesStrictFieldValidation(t *testing.T) {
 
 	var got string
 	var called bool
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				called = true
@@ -134,7 +134,7 @@ func TestUpstreamPatchUsesStrictFieldValidation(t *testing.T) {
 					opt.ApplyToPatch(o)
 				}
 				got = o.FieldValidation
-				return nil
+				return cl.Patch(ctx, obj, patch, opts...)
 			},
 		}).Build()
 
