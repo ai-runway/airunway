@@ -21,18 +21,18 @@ func TestRegisterProviderConfigCreatesMissingConfig(t *testing.T) {
 		t.Fatalf("failed to add scheme: %v", err)
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	annotations := map[string]string{"airunway.ai/provider": "test-provider"}
 	spec := airunwayv1alpha1.InferenceProviderConfigSpec{
 		SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "true", Priority: 42}},
 	}
 
-	if err := RegisterProviderConfig(context.Background(), client, "test-provider", annotations, spec); err != nil {
+	if err := RegisterProviderConfig(context.Background(), testClient, "test-provider", annotations, spec); err != nil {
 		t.Fatalf("RegisterProviderConfig() unexpected error: %v", err)
 	}
 
 	var stored airunwayv1alpha1.InferenceProviderConfig
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "test-provider"}, &stored); err != nil {
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: "test-provider"}, &stored); err != nil {
 		t.Fatalf("failed to fetch created config: %v", err)
 	}
 
@@ -53,13 +53,25 @@ func TestRegisterProviderConfigReturnsGetError(t *testing.T) {
 		t.Fatalf("failed to add scheme: %v", err)
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			cl client.WithWatch,
+			key client.ObjectKey,
+			obj client.Object,
+			opts ...client.GetOption,
+		) error {
 			return errors.New("boom")
 		},
 	}).Build()
 
-	err := RegisterProviderConfig(context.Background(), client, "broken-provider", nil, airunwayv1alpha1.InferenceProviderConfigSpec{})
+	err := RegisterProviderConfig(
+		context.Background(),
+		testClient,
+		"broken-provider",
+		nil,
+		airunwayv1alpha1.InferenceProviderConfigSpec{},
+	)
 	if err == nil {
 		t.Fatal("RegisterProviderConfig() expected error, got nil")
 	}
@@ -86,7 +98,7 @@ func TestRegisterProviderConfigUpdatesExistingConfig(t *testing.T) {
 		},
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
 	annotations := map[string]string{
 		"existing": "overwritten",
 		"new":      "value",
@@ -95,12 +107,17 @@ func TestRegisterProviderConfigUpdatesExistingConfig(t *testing.T) {
 		SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "true", Priority: 99}},
 	}
 
-	if err := RegisterProviderConfig(context.Background(), client, "existing-provider", annotations, spec); err != nil {
+	err := RegisterProviderConfig(
+		context.Background(),
+		testClient,
+		"existing-provider",
+		annotations, spec)
+	if err != nil {
 		t.Fatalf("RegisterProviderConfig() unexpected error: %v", err)
 	}
 
 	var stored airunwayv1alpha1.InferenceProviderConfig
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "existing-provider"}, &stored); err != nil {
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: "existing-provider"}, &stored); err != nil {
 		t.Fatalf("failed to fetch updated config: %v", err)
 	}
 
