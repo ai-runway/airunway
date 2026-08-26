@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package shim contains shared helper logic for provider registration and status
+// handling used by provider-specific modules.
 package shim
 
 import (
