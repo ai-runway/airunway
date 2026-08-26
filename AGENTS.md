@@ -115,7 +115,7 @@ Coverage commands must measure every applicable production source file and repor
 | Changed area | Required checks |
 |--------------|-----------------|
 | Frontend or shared UI types | `bun run test`, `make test-coverage-frontend`, and the production build; run mocked Playwright when user-visible behavior changes |
-| Backend or shared API types | `bun run test`, `make test-coverage-backend`, and the backend production build; run `bun run test:integration` only in the dedicated disposable-cluster workflow when real Kubernetes behavior changes |
+| Backend or shared API types | `bun run test`, `make test-coverage-backend`, and the backend production build; run `cd backend && bun run test:integration` only in the dedicated disposable-cluster workflow when real Kubernetes behavior changes |
 | Headlamp plugin or shared types it consumes | `make headlamp-check` |
 | Controller Go code | `make controller-build` and `make controller-test` |
 | Controller CRD type definitions | Controller checks plus `cd controller && make manifests generate`, then verify generated changes |

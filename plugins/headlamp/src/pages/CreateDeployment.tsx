@@ -493,63 +493,67 @@ export function CreateDeployment() {
             return (
               <div
                 key={rtId}
-                role="button"
-                tabIndex={isDisabled ? -1 : 0}
-                aria-disabled={isDisabled}
-                aria-pressed={isSelected}
-                onClick={() => !isDisabled && handleRuntimeChange(rtId)}
-                onKeyDown={(event) => {
-                  if (!isDisabled && (event.key === 'Enter' || event.key === ' ')) {
-                    event.preventDefault();
-                    handleRuntimeChange(rtId);
-                  }
-                }}
                 style={{
-                  padding: '16px',
                   border: isSelected ? '2px solid #1976d2' : '1px solid rgba(128, 128, 128, 0.3)',
                   borderRadius: '8px',
                   backgroundColor: isSelected ? 'rgba(25, 118, 210, 0.1)' : 'transparent',
-                  cursor: isDisabled ? 'not-allowed' : 'pointer',
                   opacity: isDisabled ? 0.5 : 1,
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <div style={{
-                      width: '20px',
-                      height: '20px',
-                      borderRadius: '50%',
-                      border: isSelected ? '2px solid #1976d2' : '2px solid rgba(128, 128, 128, 0.5)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}>
-                      {isSelected && <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#1976d2' }} />}
+                <button
+                  type="button"
+                  disabled={isDisabled}
+                  aria-pressed={isSelected}
+                  onClick={() => handleRuntimeChange(rtId)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    padding: '16px',
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'inherit',
+                    textAlign: 'left',
+                    cursor: isDisabled ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <div style={{
+                        width: '20px',
+                        height: '20px',
+                        borderRadius: '50%',
+                        border: isSelected ? '2px solid #1976d2' : '2px solid rgba(128, 128, 128, 0.5)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}>
+                        {isSelected && <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#1976d2' }} />}
+                      </div>
+                      <span style={{ fontWeight: 500 }}>{info.name}</span>
                     </div>
-                    <span style={{ fontWeight: 500 }}>{info.name}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    {!isCompatible && (
-                      <span style={{ padding: '2px 8px', backgroundColor: getBadgeColors('neutral').bg, borderRadius: '4px', fontSize: '12px' }}>
-                        Not Compatible
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      {!isCompatible && (
+                        <span style={{ padding: '2px 8px', backgroundColor: getBadgeColors('neutral').bg, borderRadius: '4px', fontSize: '12px' }}>
+                          Not Compatible
+                        </span>
+                      )}
+                      <span style={{
+                        padding: '2px 8px',
+                        backgroundColor: isInstalled ? getBadgeColors('success').bg : getBadgeColors('error').bg,
+                        color: isInstalled ? getBadgeColors('success').color : getBadgeColors('error').color,
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                      }}>
+                        {isInstalled ? '✓ Installed' : '⊘ Not Installed'}
                       </span>
-                    )}
-                    <span style={{
-                      padding: '2px 8px',
-                      backgroundColor: isInstalled ? getBadgeColors('success').bg : getBadgeColors('error').bg,
-                      color: isInstalled ? getBadgeColors('success').color : getBadgeColors('error').color,
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                    }}>
-                      {isInstalled ? '✓ Installed' : '⊘ Not Installed'}
-                    </span>
+                    </div>
                   </div>
-                </div>
-                <p style={{ margin: 0, marginLeft: '32px', fontSize: '13px', opacity: 0.7 }}>{info.description}</p>
+                  <p style={{ margin: 0, marginLeft: '32px', fontSize: '13px', opacity: 0.7 }}>{info.description}</p>
+                </button>
                 {/* Show install message with link when selected but not installed */}
                 {isSelected && !isInstalled && (
                   <p style={{
-                    margin: '8px 0 0 32px',
+                    margin: '0 16px 16px 48px',
                     fontSize: '13px',
                     color: '#f57c00',
                   }}>
@@ -557,7 +561,6 @@ export function CreateDeployment() {
                       href={Router.createRouteURL('AI Runway Runtimes')}
                       onClick={(e) => {
                         e.preventDefault();
-                        e.stopPropagation();
                         history.push(Router.createRouteURL('AI Runway Runtimes'));
                       }}
                       style={{

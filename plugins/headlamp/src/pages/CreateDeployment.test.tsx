@@ -90,4 +90,28 @@ describe('CreateDeployment', () => {
       expect(mocks.push).toHaveBeenCalledWith('/ai-runway-deployments');
     });
   });
+
+  it('keeps runtime selection and installation navigation as separate controls', async () => {
+    mocks.getRuntimesStatus.mockResolvedValue({
+      runtimes: [
+        { id: 'dynamo', name: 'NVIDIA Dynamo', installed: false, healthy: false },
+        { id: 'kaito', name: 'KAITO', installed: true, healthy: true },
+      ],
+    });
+
+    render(<CreateDeployment />);
+
+    await screen.findByText('Qwen 3 0.6B');
+    await waitFor(() => expect(screen.getByLabelText('Namespace')).toHaveValue('kaito-workspace'));
+
+    const runtimeButton = screen.getByRole('button', { name: /NVIDIA Dynamo/ });
+    fireEvent.click(runtimeButton);
+
+    await waitFor(() => expect(screen.getByLabelText('Namespace')).toHaveValue('dynamo-system'));
+    const installLink = screen.getByRole('link', { name: 'Install NVIDIA Dynamo' });
+
+    expect(runtimeButton).not.toContainElement(installLink);
+    fireEvent.click(installLink);
+    expect(mocks.push).toHaveBeenCalledWith('/ai-runway-runtimes');
+  });
 });
