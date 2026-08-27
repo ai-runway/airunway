@@ -1,0 +1,133 @@
+package shim
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+)
+
+func TestRegisterProviderConfigCreatesMissingConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add scheme: %v", err)
+	}
+
+	testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	annotations := map[string]string{"airunway.ai/provider": "test-provider"}
+	spec := airunwayv1alpha1.InferenceProviderConfigSpec{
+		SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "true", Priority: 42}},
+	}
+
+	if err := RegisterProviderConfig(context.Background(), testClient, "test-provider", annotations, spec); err != nil {
+		t.Fatalf("RegisterProviderConfig() unexpected error: %v", err)
+	}
+
+	var stored airunwayv1alpha1.InferenceProviderConfig
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: "test-provider"}, &stored); err != nil {
+		t.Fatalf("failed to fetch created config: %v", err)
+	}
+
+	if stored.Name != "test-provider" {
+		t.Fatalf("stored config name = %q, want %q", stored.Name, "test-provider")
+	}
+	if got := stored.Annotations["airunway.ai/provider"]; got != "test-provider" {
+		t.Fatalf("stored annotation = %q, want %q", got, "test-provider")
+	}
+	if len(stored.Spec.SelectionRules) != 1 || stored.Spec.SelectionRules[0].Priority != 42 {
+		t.Fatalf("stored spec selection rules = %#v, want one rule with priority 42", stored.Spec.SelectionRules)
+	}
+}
+
+func TestRegisterProviderConfigReturnsGetError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add scheme: %v", err)
+	}
+
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			cl client.WithWatch,
+			key client.ObjectKey,
+			obj client.Object,
+			opts ...client.GetOption,
+		) error {
+			return errors.New("boom")
+		},
+	}).Build()
+
+	err := RegisterProviderConfig(
+		context.Background(),
+		testClient,
+		"broken-provider",
+		nil,
+		airunwayv1alpha1.InferenceProviderConfigSpec{},
+	)
+	if err == nil {
+		t.Fatal("RegisterProviderConfig() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to get InferenceProviderConfig") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "failed to get InferenceProviderConfig")
+	}
+}
+
+func TestRegisterProviderConfigUpdatesExistingConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add scheme: %v", err)
+	}
+
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "existing-provider",
+			Annotations: map[string]string{
+				"existing": "keep",
+			},
+		},
+		Spec: airunwayv1alpha1.InferenceProviderConfigSpec{
+			SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "false", Priority: 1}},
+		},
+	}
+
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	annotations := map[string]string{
+		"existing": "overwritten",
+		"new":      "value",
+	}
+	spec := airunwayv1alpha1.InferenceProviderConfigSpec{
+		SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "true", Priority: 99}},
+	}
+
+	err := RegisterProviderConfig(
+		context.Background(),
+		testClient,
+		"existing-provider",
+		annotations, spec)
+	if err != nil {
+		t.Fatalf("RegisterProviderConfig() unexpected error: %v", err)
+	}
+
+	var stored airunwayv1alpha1.InferenceProviderConfig
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: "existing-provider"}, &stored); err != nil {
+		t.Fatalf("failed to fetch updated config: %v", err)
+	}
+
+	if got := stored.Annotations["existing"]; got != "overwritten" {
+		t.Fatalf("stored existing annotation = %q, want %q", got, "overwritten")
+	}
+	if got := stored.Annotations["new"]; got != "value" {
+		t.Fatalf("stored new annotation = %q, want %q", got, "value")
+	}
+	if len(stored.Spec.SelectionRules) != 1 || stored.Spec.SelectionRules[0].Priority != 99 {
+		t.Fatalf("stored spec selection rules = %#v, want one rule with priority 99", stored.Spec.SelectionRules)
+	}
+}

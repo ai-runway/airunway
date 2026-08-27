@@ -4,6 +4,7 @@ go 1.25.3
 
 require (
 	github.com/ai-runway/airunway/controller v0.0.0
+	github.com/ai-runway/airunway/providers/pkg/shim v0.0.0
 	k8s.io/api v0.35.3
 	k8s.io/apimachinery v0.35.3
 	k8s.io/client-go v0.35.3
@@ -102,3 +103,5 @@ require (
 )
 
 replace github.com/ai-runway/airunway/controller => ../../controller
+
+replace github.com/ai-runway/airunway/providers/pkg/shim => ../pkg/shim

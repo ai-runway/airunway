@@ -439,39 +439,12 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 				"disaggregated mode requires scaling configuration",
 			))
 		} else {
-			if spec.Scaling.Prefill == nil {
-				allErrs = append(allErrs, field.Required(
-					specPath.Child("scaling", "prefill"),
-					"disaggregated mode requires scaling.prefill",
-				))
-			} else if !isDynamoMocker {
-				// Mocker mode runs the GPU-less python3 -m dynamo.mocker backend,
-				// so a CPU-only disaggregated mocker deployment legitimately omits
-				// scaling.prefill.gpu.count. The prefill block itself is still
-				// required (above) so the dynamo transformer can build the worker.
-				if spec.Scaling.Prefill.GPU == nil || spec.Scaling.Prefill.GPU.Count == 0 {
-					allErrs = append(allErrs, field.Required(
-						specPath.Child("scaling", "prefill", "gpu", "count"),
-						"disaggregated mode requires scaling.prefill.gpu.count > 0",
-					))
-				}
-			}
-
-			if spec.Scaling.Decode == nil {
-				allErrs = append(allErrs, field.Required(
-					specPath.Child("scaling", "decode"),
-					"disaggregated mode requires scaling.decode",
-				))
-			} else if !isDynamoMocker {
-				// See the prefill note above: mocker mode waives the GPU-count
-				// requirement while still requiring the decode block.
-				if spec.Scaling.Decode.GPU == nil || spec.Scaling.Decode.GPU.Count == 0 {
-					allErrs = append(allErrs, field.Required(
-						specPath.Child("scaling", "decode", "gpu", "count"),
-						"disaggregated mode requires scaling.decode.gpu.count > 0",
-					))
-				}
-			}
+			allErrs = append(allErrs,
+				validateDisaggregatedScalingComponent(spec.Scaling.Prefill, specPath, "prefill", isDynamoMocker)...,
+			)
+			allErrs = append(allErrs,
+				validateDisaggregatedScalingComponent(spec.Scaling.Decode, specPath, "decode", isDynamoMocker)...,
+			)
 		}
 	}
 
@@ -482,6 +455,27 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 	allErrs = append(allErrs, validateResourceCeilings(spec, specPath)...)
 
 	return warnings, allErrs
+}
+
+func validateDisaggregatedScalingComponent(component *airunwayv1alpha1.ComponentScalingSpec, specPath *field.Path, componentName string, isDynamoMocker bool) field.ErrorList {
+	componentPath := specPath.Child("scaling", componentName)
+	if component == nil {
+		return field.ErrorList{field.Required(
+			componentPath,
+			fmt.Sprintf("disaggregated mode requires scaling.%s", componentName),
+		)}
+	}
+
+	// Mocker mode runs the GPU-less python3 -m dynamo.mocker backend, so a
+	// CPU-only disaggregated mocker deployment legitimately omits GPU counts.
+	if isDynamoMocker || component.GPU != nil && component.GPU.Count > 0 {
+		return nil
+	}
+
+	return field.ErrorList{field.Required(
+		componentPath.Child("gpu", "count"),
+		fmt.Sprintf("disaggregated mode requires scaling.%s.gpu.count > 0", componentName),
+	)}
 }
 
 // validateResourceCeilings enforces the Max* limits on resource and scaling fields.
