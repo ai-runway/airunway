@@ -46,6 +46,36 @@ func requireValidationErrorDetail(t *testing.T, errs field.ErrorList, detail str
 	t.Fatalf("expected validation error detail %q, got %v", detail, errs)
 }
 
+func TestGatewayPoolRefValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		poolRef string
+		wantErr bool
+	}{
+		{name: "valid DNS subdomain", poolRef: "shared-pool.example"},
+		{name: "invalid resource name", poolRef: "Shared_Pool", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := &airunwayv1alpha1.ModelDeployment{
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{
+					Model:   airunwayv1alpha1.ModelSpec{ID: "Qwen/Qwen3-0.6B"},
+					Gateway: &airunwayv1alpha1.GatewaySpec{PoolRef: tt.poolRef},
+				},
+			}
+			validator := &ModelDeploymentCustomValidator{}
+			_, errs := validator.validateSpec(context.Background(), obj)
+
+			if tt.wantErr {
+				requireValidationErrorField(t, errs, "spec.gateway.poolRef")
+			} else if len(errs) != 0 {
+				t.Fatalf("expected valid poolRef, got %v", errs)
+			}
+		})
+	}
+}
+
 func TestValidateOverrides_BlocksSecurityContext(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
 	overrides := map[string]interface{}{

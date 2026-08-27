@@ -91,16 +91,35 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return nil
 	}
 
-	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
-	// Resolve provider gateway capabilities
-	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
-		logger.V(1).Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
+	var referencedPool *inferencev1.InferencePool
+	if userProvidedPool {
+		if referencedPool, err = r.getUserProvidedInferencePool(ctx, md); err != nil {
+			return err
+		}
+		// A missing referenced pool is an actionable user configuration state,
+		// not a controller failure. The InferencePool watch will enqueue this
+		// ModelDeployment when the pool is created.
+		if referencedPool == nil {
+			return nil
+		}
 	}
 
-	// Ensure model pods have the selector label for InferencePool
-	if err := r.labelModelPods(ctx, md); err != nil {
-		logger.V(1).Info("Could not label model pods", "error", err)
-		// Non-fatal: pods may not exist yet or provider may handle labels
+	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
+	// A user-provided pool takes precedence over provider-managed gateway
+	// resources. Provider capabilities are only needed when the controller must
+	// decide who owns the pool and EPP.
+	if !userProvidedPool {
+		if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
+			logger.V(1).Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+		}
+
+		// Preserve the existing controller/provider-managed behavior when poolRef
+		// is unset. Only a user-provided pool opts out of pod labeling.
+		if err := r.labelModelPods(ctx, md); err != nil {
+			logger.V(1).Info("Could not label model pods", "error", err)
+			// Non-fatal: pods may not exist yet or provider may handle labels.
+		}
 	}
 
 	// If the ModelDeployment is in a different namespace than the Gateway, patch the Gateway
@@ -116,18 +135,23 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	// Determine the HTTPRoute backend via the GAIE InferencePool/EPP path.
 	poolName, poolNamespace := md.Name, md.Namespace
 
-	// Two independent extension points exist:
-	//   1. InferencePool delegation (e.g. Dynamo): the provider's upstream
+	// Three independent extension points exist:
+	//   1. User-provided InferencePool: the user owns the pool and EPP. The
+	//      controller only uses the pool as the HTTPRoute backend.
+	//   2. InferencePool delegation (e.g. Dynamo): the provider's upstream
 	//      operator creates the InferencePool AND the EPP. The controller
 	//      skips both. Opt-in via gatewayCapabilities.ManagesInferencePool.
-	//   2. EPP customization (e.g. llm-d): the controller creates the
+	//   3. EPP customization (e.g. llm-d): the controller creates the
 	//      InferencePool and the EPP scaffolding, but uses the provider-
 	//      supplied EPP image and plugin config. Opt-in via
 	//      gatewayCapabilities.EndpointPicker.
 
-	// Use provider managed inference pool if it exists,
-	// otherwise use the default inference pool.
-	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities); ok && err == nil {
+	providerManagedPool := false
+	if userProvidedPool {
+		poolName = md.Spec.Gateway.PoolRef
+		logger.Info("Using user-provided InferencePool", "pool", poolName, "namespace", poolNamespace)
+	} else if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities); ok && err == nil {
+		providerManagedPool = true
 		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", resolvedProviderName(md))
 
 		// Resolve the InferencePool name for the provider.
@@ -152,7 +176,9 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return err
 	}
 
-	if gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool {
+	if userProvidedPool {
+		logger.V(1).Info("Skipping EPP creation because user provides the InferencePool", "pool", poolName)
+	} else if providerManagedPool {
 		logger.Info("Skipping EPP creation, provider manages EPP", "provider", resolvedProviderName(md))
 	} else { // Use controller-managed EPP (default or provider-customized).
 		var eppOverrides *airunwayv1alpha1.EndpointPickerCapabilities
@@ -192,10 +218,88 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		ModelName:        modelName,
 		GatewayNamespace: gwConfig.GatewayNamespace,
 	}
-	r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionTrue, "GatewayConfigured", "InferencePool and HTTPRoute created")
+	if referencedPool != nil {
+		if message := userProvidedInferencePoolStatusProblem(referencedPool, gwConfig); message != "" {
+			r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "InferencePoolNotReady", message)
+			logger.Info("User-provided InferencePool is not ready", "pool", referencedPool.Name, "reason", message)
+			return nil
+		}
+	}
+	conditionMessage := "InferencePool and HTTPRoute created"
+	if userProvidedPool {
+		conditionMessage = "Gateway routing configured with user-provided InferencePool"
+	}
+	r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionTrue, "GatewayConfigured", conditionMessage)
 
 	logger.Info("Gateway resources reconciled", "name", md.Name, "gateway", gwConfig.GatewayName, "model", modelName)
 	return nil
+}
+
+// getUserProvidedInferencePool verifies that a referenced InferencePool exists.
+// The pool remains entirely user-owned: this function is read-only and
+// deliberately does not validate or mutate its selector or EPP.
+func (r *ModelDeploymentReconciler) getUserProvidedInferencePool(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) (*inferencev1.InferencePool, error) {
+	poolName := md.Spec.Gateway.PoolRef
+	poolKey := client.ObjectKey{Name: poolName, Namespace: md.Namespace}
+	pool := &inferencev1.InferencePool{}
+	if err := r.Get(ctx, poolKey, pool); err != nil {
+		reason := "InferencePoolReadFailed"
+		message := fmt.Sprintf("Could not read referenced InferencePool %q in namespace %q: %v", poolName, md.Namespace, err)
+		if apierrors.IsNotFound(err) {
+			reason = "InferencePoolNotFound"
+			message = fmt.Sprintf("Referenced InferencePool %q was not found in namespace %q", poolName, md.Namespace)
+			r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, reason, message)
+			return nil, nil
+		}
+		r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, reason, message)
+		return nil, fmt.Errorf("validating referenced InferencePool %s: %w", poolKey, err)
+	}
+	return pool, nil
+}
+
+// userProvidedInferencePoolStatusProblem returns an actionable message when a
+// current status entry rejects the pool or reports unresolved references for
+// the selected Gateway. The HTTPRoute is reconciled before this is evaluated so
+// a stale route can still converge to the referenced pool.
+func userProvidedInferencePoolStatusProblem(pool *inferencev1.InferencePool, gwConfig *gateway.GatewayConfig) string {
+	for _, parent := range pool.Status.Parents {
+		if parent.ParentRef.Group != nil && string(*parent.ParentRef.Group) != "gateway.networking.k8s.io" {
+			continue
+		}
+		if parent.ParentRef.Kind != "" && string(parent.ParentRef.Kind) != "Gateway" {
+			continue
+		}
+		parentNamespace := string(parent.ParentRef.Namespace)
+		if parentNamespace == "" {
+			parentNamespace = pool.Namespace
+		}
+		if string(parent.ParentRef.Name) != gwConfig.GatewayName || parentNamespace != gwConfig.GatewayNamespace {
+			continue
+		}
+		for _, condition := range parent.Conditions {
+			if condition.Type != string(inferencev1.InferencePoolConditionAccepted) &&
+				condition.Type != string(inferencev1.InferencePoolConditionResolvedRefs) {
+				continue
+			}
+			if condition.ObservedGeneration > 0 && condition.ObservedGeneration != pool.Generation {
+				continue
+			}
+			if condition.Status != metav1.ConditionFalse {
+				continue
+			}
+
+			message := fmt.Sprintf("Referenced InferencePool %q reports %s=False for Gateway %s/%s", pool.Name, condition.Type, gwConfig.GatewayNamespace, gwConfig.GatewayName)
+			if condition.Message != "" {
+				message += ": " + condition.Message
+			}
+			return message
+		}
+	}
+
+	return ""
 }
 
 // resolveGatewayConfig determines which Gateway to use as the HTTPRoute parent.
@@ -1212,23 +1316,28 @@ func namespaceSelectorFromSet(namespaces map[string]bool) *metav1.LabelSelector 
 // the deployment is no longer running. Also sets GatewayReady=False.
 func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
+	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
 
 	// Resolve provider gateway capabilities. A nil result with nil error means
 	// the provider simply does not declare gateway capabilities — that is the
-	// common case and must NOT log an error every reconcile.
+	// common case and must NOT log an error every reconcile. A user-provided
+	// pool takes precedence, so provider ownership is irrelevant in that mode.
 	var gatewayCapabilities *airunwayv1alpha1.GatewayCapabilities
 	var err error
-	if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
-		logger.V(1).Info("Could not resolve provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+	if !userProvidedPool {
+		if gatewayCapabilities, err = r.resolveProviderGatewayCapabilities(ctx, md); err != nil {
+			logger.V(1).Info("Could not resolve provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
+		}
 	}
-	// Only true delegation (ManagesInferencePool: true) means the provider
-	// owns the pool + EPP. EndpointPicker-only customization still leaves the
-	// pool and EPP scaffolding owned by the controller, so they must be cleaned up here.
+	// A user-provided pool and true provider delegation both place the pool and
+	// EPP outside controller ownership. EndpointPicker-only customization still
+	// leaves the scaffolding controller-owned, so it must be cleaned up here.
 	providerManagedPool := gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool
+	externallyManagedPool := userProvidedPool || providerManagedPool
 
 	eppName := md.Name + "-epp"
 
-	if !providerManagedPool {
+	if !externallyManagedPool {
 		// Delete InferencePool if it exists
 		pool := &inferencev1.InferencePool{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1239,6 +1348,8 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 		if err := r.Delete(ctx, pool); client.IgnoreNotFound(err) != nil {
 			return fmt.Errorf("failed to delete InferencePool: %w", err)
 		}
+	} else if userProvidedPool {
+		logger.V(1).Info("Skipping InferencePool cleanup because user provides the pool", "pool", md.Spec.Gateway.PoolRef)
 	} else {
 		logger.V(1).Info("Skipping InferencePool cleanup because provider manages the pool")
 	}
@@ -1256,7 +1367,7 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 		}
 	}
 
-	if !providerManagedPool {
+	if !externallyManagedPool {
 		// Delete EPP resources
 		eppResources := []client.Object{
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
@@ -1281,6 +1392,8 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 				logger.V(1).Info("Could not delete EPP resource", "resource", obj.GetObjectKind(), "error", err)
 			}
 		}
+	} else if userProvidedPool {
+		logger.V(1).Info("Skipping deletion of EPP resources because user provides the InferencePool", "pool", md.Spec.Gateway.PoolRef)
 	} else {
 		logger.V(1).Info("Skipping deletion of EPP resources because provider manages EPP")
 	}
