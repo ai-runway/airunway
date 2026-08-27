@@ -173,7 +173,7 @@ jobs:
           GOWORK: /tmp/airunway-provider-dupl/go.work
         with:
           version: v2.7.2
-          only-new-issues: false
+          only-new-issues: true
           args: >-
             --config=${{ github.workspace }}/.golangci.yml
             --enable-only=dupl
