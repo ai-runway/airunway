@@ -1007,18 +1007,9 @@ func (r *ModelDeploymentReconciler) discoverModelName(ctx context.Context, servi
 func (r *ModelDeploymentReconciler) ensureGatewayAllowsNamespace(ctx context.Context, gwConfig *gateway.GatewayConfig, namespace string) error {
 	changed, err := r.updateGatewayAllowedNamespaces(ctx, gwConfig, func(crossNs map[string]bool) (map[string]bool, bool) {
 		if crossNs[namespace] {
-			// Already allowed for this namespace — nothing to do.
-			//
-			// Self-heal is deliberately narrow: a Gateway stuck in the pre-#333
-			// broken state (a Selector present but missing its own namespace) is
-			// repaired only when the cross-namespace set actually changes — i.e.
-			// when a genuinely NEW namespace is added here, or when the last
-			// cross-namespace tenant is removed on the cleanup path (which reverts
-			// to `from: Same`). It does NOT heal on a same-namespace re-reconcile
-			// of an already-stuck Gateway: if `namespace` is the only tenant and
-			// it is already listed, this short-circuit returns without a patch and
-			// gateway-ns stays evicted. That single-tenant-after-upgrade case must
-			// be healed by adding another namespace or deleting the MD.
+			// The shared helper still checks the terminal Selector invariant, so
+			// this logical no-op can repair a pre-#333 Selector that is missing the
+			// Gateway's own namespace without causing repeat patch churn.
 			return crossNs, false
 		}
 		crossNs[namespace] = true
@@ -1043,8 +1034,9 @@ func (r *ModelDeploymentReconciler) ensureGatewayAllowsNamespace(ctx context.Con
 //
 // mutate receives the current CROSS-namespace set (the Gateway's own namespace
 // already stripped) and returns the desired cross-namespace set plus whether
-// anything changed. Returning changed=false skips the patch entirely, preserving
-// each caller's early-out semantics.
+// the cross-namespace intent changed. Even when it returns changed=false, the
+// helper repairs a Selector that has cross-namespace entries but omits the
+// Gateway's own namespace. Once repaired, the same logical no-op skips the patch.
 //
 // The terminal rule (issue #333): a listener at the default `from: Same`
 // implicitly allows the Gateway's own namespace, but allowedNamespacesFromGateway
@@ -1073,11 +1065,13 @@ func (r *ModelDeploymentReconciler) updateGatewayAllowedNamespaces(
 
 		// Current allowed set may already include gw.Namespace (post-fix); strip
 		// it so callers reason purely about cross-namespace intent.
-		crossCur := stripNamespace(allowedNamespacesFromGateway(&gw), gw.Namespace)
+		current := allowedNamespacesFromGateway(&gw)
+		crossCur := stripNamespace(current, gw.Namespace)
 
 		desired, didChange := mutate(crossCur)
-		changed = didChange
-		if !didChange {
+		needsGatewayNamespace := len(desired) > 0 && !current[gw.Namespace]
+		changed = didChange || needsGatewayNamespace
+		if !changed {
 			return nil // nothing to patch
 		}
 
