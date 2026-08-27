@@ -94,6 +94,12 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
 	var referencedPool *inferencev1.InferencePool
 	if userProvidedPool {
+		// Switching from controller-managed gateway resources to a referenced
+		// pool is an ownership transition. Retire only objects this
+		// ModelDeployment controls and leave the referenced pool/EPP untouched.
+		if err := r.cleanupControllerManagedResourcesForUserPool(ctx, md); err != nil {
+			return fmt.Errorf("cleaning up controller-managed resources for user-provided InferencePool: %w", err)
+		}
 		if referencedPool, err = r.getUserProvidedInferencePool(ctx, md); err != nil {
 			return err
 		}
@@ -101,7 +107,17 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		// not a controller failure. The InferencePool watch will enqueue this
 		// ModelDeployment when the pool is created.
 		if referencedPool == nil {
+			if err := r.retireControllerManagedHTTPRoute(ctx, md); err != nil {
+				return fmt.Errorf("retiring HTTPRoute for missing user-provided InferencePool: %w", err)
+			}
 			return nil
+		}
+		// If the user also supplies an HTTPRoute, retire any previous managed
+		// route without touching the referenced route itself.
+		if md.Spec.Gateway.HTTPRouteRef != "" {
+			if err := r.retireControllerManagedHTTPRoute(ctx, md); err != nil {
+				return fmt.Errorf("retiring controller-managed HTTPRoute: %w", err)
+			}
 		}
 	}
 
@@ -1063,6 +1079,137 @@ func (r *ModelDeploymentReconciler) labelModelPods(ctx context.Context, md *airu
 	return nil
 }
 
+// cleanupControllerManagedResourcesForUserPool removes resources that belong
+// to the controller-managed InferencePool/EPP path when poolRef takes over.
+// Every deletion is gated by the ModelDeployment controller reference so a
+// colliding user- or provider-owned object is never adopted or removed.
+func (r *ModelDeploymentReconciler) cleanupControllerManagedResourcesForUserPool(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) error {
+	eppName := md.Name + "-epp"
+	resources := []client.Object{
+		&inferencev1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace}},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+		&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
+	}
+
+	// DestinationRule is optional and only registered when Istio is present.
+	if _, err := r.Client.RESTMapper().RESTMapping(schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}); err == nil {
+		dr := &unstructured.Unstructured{}
+		dr.SetGroupVersionKind(schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"})
+		dr.SetName(eppName)
+		dr.SetNamespace(md.Namespace)
+		resources = append(resources, dr)
+	}
+
+	for _, resource := range resources {
+		if err := r.deleteIfControlledByModelDeployment(ctx, md, resource); err != nil {
+			return err
+		}
+	}
+
+	return r.removeControllerManagedPodLabels(ctx, md)
+}
+
+// deleteIfControlledByModelDeployment deletes obj only when its controller
+// owner is md. Objects with the expected generated name but different
+// ownership are deliberately preserved.
+func (r *ModelDeploymentReconciler) deleteIfControlledByModelDeployment(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	obj client.Object,
+) error {
+	key := client.ObjectKeyFromObject(obj)
+	if err := r.Get(ctx, key, obj); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(obj, md) {
+		return nil
+	}
+	if err := r.Delete(ctx, obj); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return nil
+}
+
+// removeControllerManagedPodLabels removes only the exact label value used by
+// this ModelDeployment. Other values and all unrelated pod labels are kept.
+func (r *ModelDeploymentReconciler) removeControllerManagedPodLabels(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) error {
+	labelKey := airunwayv1alpha1.LabelModelDeployment
+	var pods corev1.PodList
+	if err := r.List(
+		ctx,
+		&pods,
+		client.InNamespace(md.Namespace),
+		client.MatchingLabels{labelKey: md.Name},
+	); err != nil {
+		return fmt.Errorf("listing model pods for label cleanup: %w", err)
+	}
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Labels[labelKey] != md.Name {
+			continue
+		}
+		patch := client.MergeFrom(pod.DeepCopy())
+		delete(pod.Labels, labelKey)
+		if err := r.Patch(ctx, pod, patch); err != nil {
+			return fmt.Errorf("removing model-deployment label from pod %s: %w", pod.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// retireControllerManagedHTTPRoute removes the route previously created for
+// this ModelDeployment while preserving a currently referenced HTTPRoute. The
+// creation annotation is cleared so reconciliation can recreate the managed
+// route after the referenced InferencePool becomes available.
+func (r *ModelDeploymentReconciler) retireControllerManagedHTTPRoute(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) error {
+	// Clear the marker first. If that patch fails, keep the stale route for the
+	// next reconcile rather than deleting it while leaving recreation blocked.
+	if err := r.clearHTTPRouteCreatedAnnotation(ctx, md); err != nil {
+		return err
+	}
+
+	referencedRoute := ""
+	if md.Spec.Gateway != nil {
+		referencedRoute = md.Spec.Gateway.HTTPRouteRef
+	}
+	if referencedRoute != md.Name {
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
+		}
+		if err := r.deleteIfControlledByModelDeployment(ctx, md, route); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ModelDeploymentReconciler) clearHTTPRouteCreatedAnnotation(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) error {
+	if md.Annotations[airunwayv1alpha1.HTTPRouteCreated] != "true" {
+		return nil
+	}
+	base := md.DeepCopy()
+	delete(md.Annotations, airunwayv1alpha1.HTTPRouteCreated)
+	return r.Patch(ctx, md, client.MergeFrom(base))
+}
+
 // discoverModelName probes the model server's /v1/models endpoint to find the actual served model name.
 func (r *ModelDeploymentReconciler) discoverModelName(ctx context.Context, service, namespace string, port int32) string {
 	url := fmt.Sprintf("http://%s.%s.svc:%d/v1/models", service, namespace, port)
@@ -1411,12 +1558,8 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 	// Clear the httproute-created annotation so the controller will recreate the
 	// HTTPRoute when the deployment recovers to Running. Without this, a transient
 	// phase change (e.g. crash-loop) would permanently suppress HTTPRoute recreation.
-	if md.Annotations[airunwayv1alpha1.HTTPRouteCreated] == "true" {
-		base := md.DeepCopy()
-		delete(md.Annotations, airunwayv1alpha1.HTTPRouteCreated)
-		if err := r.Patch(ctx, md, client.MergeFrom(base)); err != nil {
-			logger.V(1).Info("Could not clear httproute-created annotation during cleanup", "error", err)
-		}
+	if err := r.clearHTTPRouteCreatedAnnotation(ctx, md); err != nil {
+		logger.V(1).Info("Could not clear httproute-created annotation during cleanup", "error", err)
 	}
 
 	logger.Info("Gateway resources cleaned up", "name", md.Name)

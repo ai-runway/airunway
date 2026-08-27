@@ -47,6 +47,8 @@ import (
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
+const inferencePoolNotFoundReason = "InferencePoolNotFound"
+
 func newTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
@@ -445,7 +447,7 @@ func TestGateway_UserProvidedPoolRefIsUsedWithoutMutation(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &route); err != nil {
 		t.Fatalf("HTTPRoute not found: %v", err)
 	}
-	backend := route.Spec.Rules[0].BackendRefs[0].BackendRef.BackendObjectReference
+	backend := route.Spec.Rules[0].BackendRefs[0].BackendObjectReference
 	if backend.Name != "shared-pool" {
 		t.Errorf("expected backend ref name %q, got %q", "shared-pool", backend.Name)
 	}
@@ -490,6 +492,309 @@ func TestGateway_UserProvidedPoolRefIsUsedWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestGateway_UserProvidedPoolPreservesUnownedGeneratedNameResources(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "shared-pool"}
+
+	referencedPool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-pool", Namespace: md.Namespace},
+		Spec: inferencev1.InferencePoolSpec{
+			TargetPorts: []inferencev1.Port{{Number: 9090}},
+			EndpointPickerRef: inferencev1.EndpointPickerRef{
+				Name: inferencev1.ObjectName(md.Name + "-epp"),
+			},
+		},
+	}
+	unownedGeneratedPool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
+		Spec: inferencev1.InferencePoolSpec{
+			TargetPorts: []inferencev1.Port{{Number: 7777}},
+		},
+	}
+	replicas := int32(4)
+	referencedEPP := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "epp", Image: "example.com/user-epp:v1"}}},
+			},
+		},
+	}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, referencedPool, unownedGeneratedPool, referencedEPP)
+	ctx := context.Background()
+
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("reconcileGateway failed: %v", err)
+	}
+
+	var gotGeneratedPool inferencev1.InferencePool
+	if err := r.Get(ctx, client.ObjectKeyFromObject(unownedGeneratedPool), &gotGeneratedPool); err != nil {
+		t.Fatalf("unowned generated-name InferencePool was deleted: %v", err)
+	}
+	if gotGeneratedPool.Spec.TargetPorts[0].Number != 7777 {
+		t.Errorf("unowned generated-name InferencePool was mutated: %+v", gotGeneratedPool.Spec)
+	}
+	var gotEPP appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKeyFromObject(referencedEPP), &gotEPP); err != nil {
+		t.Fatalf("referenced generated-name EPP was deleted: %v", err)
+	}
+	if gotEPP.Spec.Replicas == nil || *gotEPP.Spec.Replicas != 4 || gotEPP.Spec.Template.Spec.Containers[0].Image != "example.com/user-epp:v1" {
+		t.Errorf("referenced generated-name EPP was mutated: %+v", gotEPP.Spec)
+	}
+}
+
+func TestGateway_SwitchToUserProvidedPoolCleansControllerOwnedResources(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	referencedPool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-pool", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			Selector: inferencev1.LabelSelector{
+				MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{"routing.example.com/tier": "gold"},
+			},
+			TargetPorts: []inferencev1.Port{{Number: 9090}},
+			EndpointPickerRef: inferencev1.EndpointPickerRef{
+				Name: inferencev1.ObjectName("shared-epp"),
+			},
+		},
+	}
+	replicas := int32(3)
+	referencedEPP := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-epp", Namespace: "default"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "epp", Image: "example.com/custom-epp:v1"}}},
+			},
+		},
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model-svc", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "test-model"}},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model-pod", Namespace: "default", Labels: map[string]string{"app": "test-model"}},
+	}
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, referencedPool, referencedEPP, service, pod)
+	ctx := context.Background()
+
+	// Start in controller-managed mode so every stale resource exists before
+	// poolRef takes ownership of the gateway backend.
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("initial managed reconcile failed: %v", err)
+	}
+	preservedLabelPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-model-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				airunwayv1alpha1.LabelModelDeployment: "other-model",
+			},
+		},
+	}
+	if err := r.Create(ctx, preservedLabelPod); err != nil {
+		t.Fatalf("create pod with unrelated model label: %v", err)
+	}
+
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: referencedPool.Name}
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("user-provided pool reconcile failed: %v", err)
+	}
+
+	controllerResources := []client.Object{
+		&inferencev1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace}},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace}},
+	}
+	for _, resource := range controllerResources {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(resource), resource); !apierrors.IsNotFound(err) {
+			t.Errorf("expected controller-owned %T to be deleted, got %v", resource, err)
+		}
+	}
+
+	var gotPool inferencev1.InferencePool
+	if err := r.Get(ctx, client.ObjectKeyFromObject(referencedPool), &gotPool); err != nil {
+		t.Fatalf("referenced InferencePool was deleted: %v", err)
+	}
+	if gotPool.Spec.TargetPorts[0].Number != 9090 || gotPool.Spec.EndpointPickerRef.Name != "shared-epp" {
+		t.Errorf("referenced InferencePool was mutated: %+v", gotPool.Spec)
+	}
+	var gotEPP appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKeyFromObject(referencedEPP), &gotEPP); err != nil {
+		t.Fatalf("referenced EPP was deleted: %v", err)
+	}
+	if gotEPP.Spec.Replicas == nil || *gotEPP.Spec.Replicas != 3 || gotEPP.Spec.Template.Spec.Containers[0].Image != "example.com/custom-epp:v1" {
+		t.Errorf("referenced EPP was mutated: %+v", gotEPP.Spec)
+	}
+
+	var gotPod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &gotPod); err != nil {
+		t.Fatalf("model pod not found: %v", err)
+	}
+	if _, found := gotPod.Labels[airunwayv1alpha1.LabelModelDeployment]; found {
+		t.Errorf("controller model label was not removed: %v", gotPod.Labels)
+	}
+	var gotPreservedLabelPod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKeyFromObject(preservedLabelPod), &gotPreservedLabelPod); err != nil {
+		t.Fatalf("pod with unrelated model label not found: %v", err)
+	}
+	if got := gotPreservedLabelPod.Labels[airunwayv1alpha1.LabelModelDeployment]; got != "other-model" {
+		t.Errorf("unrelated model label was changed: %q", got)
+	}
+
+	var route gatewayv1.HTTPRoute
+	if err := r.Get(ctx, types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &route); err != nil {
+		t.Fatalf("controller-managed HTTPRoute should be updated, not deleted: %v", err)
+	}
+	backend := route.Spec.Rules[0].BackendRefs[0].BackendObjectReference
+	if backend.Name != gatewayv1.ObjectName(referencedPool.Name) {
+		t.Errorf("expected route backend %q, got %q", referencedPool.Name, backend.Name)
+	}
+}
+
+func TestGateway_MissingUserProvidedPoolRetiresManagedRouteUntilRecovery(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model-svc", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "test-model"}},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model-pod", Namespace: "default", Labels: map[string]string{"app": "test-model"}},
+	}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, service, pod)
+	ctx := context.Background()
+
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("initial managed reconcile failed: %v", err)
+	}
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "missing-pool"}
+	if err := r.Update(ctx, md); err != nil {
+		t.Fatalf("persist poolRef transition: %v", err)
+	}
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("missing pool reconcile failed: %v", err)
+	}
+
+	var route gatewayv1.HTTPRoute
+	routeKey := types.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+	if err := r.Get(ctx, routeKey, &route); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale controller-managed HTTPRoute to be deleted, got %v", err)
+	}
+	if md.Annotations[airunwayv1alpha1.HTTPRouteCreated] != "" {
+		t.Errorf("expected HTTPRoute creation annotation to be cleared, got %v", md.Annotations)
+	}
+	var storedMD airunwayv1alpha1.ModelDeployment
+	if err := r.Get(ctx, client.ObjectKeyFromObject(md), &storedMD); err != nil {
+		t.Fatalf("get ModelDeployment after route retirement: %v", err)
+	}
+	if storedMD.Annotations[airunwayv1alpha1.HTTPRouteCreated] != "" {
+		t.Errorf("expected persisted HTTPRoute creation annotation to be cleared, got %v", storedMD.Annotations)
+	}
+
+	recoveredPool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-pool", Namespace: md.Namespace},
+	}
+	if err := r.Create(ctx, recoveredPool); err != nil {
+		t.Fatalf("create recovered InferencePool: %v", err)
+	}
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("reconcile after pool recovery failed: %v", err)
+	}
+	route = gatewayv1.HTTPRoute{}
+	if err := r.Get(ctx, routeKey, &route); err != nil {
+		t.Fatalf("expected HTTPRoute to be recreated after pool recovery: %v", err)
+	}
+	backend := route.Spec.Rules[0].BackendRefs[0].BackendObjectReference
+	if backend.Name != "missing-pool" {
+		t.Errorf("expected recovered route backend %q, got %q", "missing-pool", backend.Name)
+	}
+}
+
+func TestGateway_MissingUserProvidedPoolPreservesReferencedHTTPRoute(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Annotations = map[string]string{airunwayv1alpha1.HTTPRouteCreated: "true"}
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{
+		PoolRef:      "missing-pool",
+		HTTPRouteRef: "custom-route",
+	}
+	managedRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
+	}
+	if err := ctrl.SetControllerReference(md, managedRoute, scheme); err != nil {
+		t.Fatalf("set managed route controller reference: %v", err)
+	}
+	referencedRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: md.Spec.Gateway.HTTPRouteRef, Namespace: md.Namespace},
+	}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, managedRoute, referencedRoute)
+	ctx := context.Background()
+
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("missing pool reconcile failed: %v", err)
+	}
+	var gotManagedRoute gatewayv1.HTTPRoute
+	if err := r.Get(ctx, client.ObjectKeyFromObject(managedRoute), &gotManagedRoute); !apierrors.IsNotFound(err) {
+		t.Errorf("expected stale managed route to be deleted, got %v", err)
+	}
+	var gotReferencedRoute gatewayv1.HTTPRoute
+	if err := r.Get(ctx, client.ObjectKeyFromObject(referencedRoute), &gotReferencedRoute); err != nil {
+		t.Errorf("referenced HTTPRoute was deleted: %v", err)
+	}
+}
+
+func TestGateway_MissingUserProvidedPoolKeepsManagedRouteWhenMarkerClearFails(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Annotations = map[string]string{airunwayv1alpha1.HTTPRouteCreated: "true"}
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "missing-pool"}
+	managedRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
+	}
+	if err := ctrl.SetControllerReference(md, managedRoute, scheme); err != nil {
+		t.Fatalf("set managed route controller reference: %v", err)
+	}
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{}).
+		WithObjects(md, managedRoute).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*airunwayv1alpha1.ModelDeployment); ok {
+				return errors.New("marker patch failed")
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := &ModelDeploymentReconciler{
+		Client:           c,
+		Scheme:           scheme,
+		GatewayDetector:  detector,
+		ProviderResolver: gateway.NewInferenceProviderConfigResolver(c),
+	}
+
+	err := r.reconcileGateway(context.Background(), md)
+	if err == nil || !strings.Contains(err.Error(), "marker patch failed") {
+		t.Fatalf("expected marker patch failure, got %v", err)
+	}
+	var gotRoute gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(managedRoute), &gotRoute); err != nil {
+		t.Errorf("managed route was deleted despite marker patch failure: %v", err)
+	}
+}
+
 func TestGateway_UserProvidedPoolRefNotFound(t *testing.T) {
 	scheme := newTestScheme()
 	md := newModelDeployment("test-model", "default")
@@ -506,7 +811,7 @@ func TestGateway_UserProvidedPoolRefNotFound(t *testing.T) {
 	if condition == nil {
 		t.Fatal("expected GatewayReady condition")
 	}
-	if condition.Status != metav1.ConditionFalse || condition.Reason != "InferencePoolNotFound" {
+	if condition.Status != metav1.ConditionFalse || condition.Reason != inferencePoolNotFoundReason {
 		t.Errorf("expected GatewayReady=False/InferencePoolNotFound, got %s/%s", condition.Status, condition.Reason)
 	}
 	if !strings.Contains(condition.Message, "missing-pool") || !strings.Contains(condition.Message, "default") {
@@ -542,7 +847,7 @@ func TestGateway_UserProvidedPoolRefNotFoundConditionPersistsThroughReconcile(t 
 	if condition == nil {
 		t.Fatal("expected persisted GatewayReady condition")
 	}
-	if condition.Status != metav1.ConditionFalse || condition.Reason != "InferencePoolNotFound" {
+	if condition.Status != metav1.ConditionFalse || condition.Reason != inferencePoolNotFoundReason {
 		t.Errorf("expected persisted GatewayReady=False/InferencePoolNotFound, got %s/%s", condition.Status, condition.Reason)
 	}
 }
@@ -590,7 +895,7 @@ func TestGateway_UserProvidedPoolRefSurfacesRejectedStatus(t *testing.T) {
 	if err := r.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &route); err != nil {
 		t.Fatalf("expected HTTPRoute to converge despite rejected pool status: %v", err)
 	}
-	backend := route.Spec.Rules[0].BackendRefs[0].BackendRef.BackendObjectReference
+	backend := route.Spec.Rules[0].BackendRefs[0].BackendObjectReference
 	if backend.Name != "shared-pool" {
 		t.Errorf("expected backend ref name %q, got %q", "shared-pool", backend.Name)
 	}
