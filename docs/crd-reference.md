@@ -102,6 +102,25 @@ Each entry is a `StorageVolume`. Maximum 8 volumes per deployment.
 | `storageClassName` | string | no | StorageClass for controller-created PVCs. Omit to use the cluster default. Set to `""` to disable dynamic provisioning. Only used when `size` is set. |
 | `accessMode` | string | no | PVC access mode for controller-created PVCs. One of `ReadWriteOnce`, `ReadWriteMany`, `ReadOnlyMany`, `ReadWriteOncePod`. Default: `ReadWriteMany`. Only used when `size` is set. |
 
+`claimName` and `size` select two different lifecycle modes:
+
+- With `claimName` and no `size`, AI Runway verifies that the existing claim is `Bound` and never adopts or deletes it.
+- With `size`, AI Runway creates `<deployment-name>-<volume-name>` in the `ModelDeployment` namespace. The claim is owned by the deployment and is deleted with it. A different `claimName` cannot be supplied for managed storage.
+
+PVC references are always same-namespace. Kubernetes pod volumes cannot reference a claim in another namespace, so move or provision the claim in the `ModelDeployment` namespace instead of relying on a provider's installation namespace. `storageClassName` is passed to Kubernetes without an admission-time existence check; provisioning and binding errors are reported through the claim and `StorageReady` condition.
+
+For a writable HuggingFace `modelCache`, AI Runway downloads the model before creating the provider workload and sets `HF_HOME` to the mounted path. The engine's model argument remains the HuggingFace model ID, allowing the HuggingFace client to resolve weights from the persistent cache. An explicit `spec.env` entry for `HF_HOME` takes precedence. AI Runway does not infer a model-file argument for `custom` volumes.
+
+| Provider | Persistent storage behavior |
+|---|---|
+| Dynamo | Claims and mounts are rendered on aggregated, prefill, and decode workers. Dynamo compilation-cache metadata is set for `compilationCache`. |
+| KubeRay | Claims are mounted on the Ray head and every aggregated, prefill, or decode worker group. |
+| llm-d | Claims are mounted on every aggregated, prefill, or decode Deployment. |
+| Direct vLLM | Claims are mounted on the aggregated Deployment. Direct vLLM advertises aggregated serving only. |
+| KAITO | Not supported. KAITO presets do not expose a pod template, and the portable API does not define the exact llama.cpp model file inside a claim. The provider reports an explicit transform error instead of ignoring storage. |
+
+For workloads that can place consumers on different nodes—including disaggregated serving, multiple replicas, and Dynamo `multinode` overrides—the claim must support the required simultaneous mounts. Managed claims default to `ReadWriteMany`. For existing claims, AI Runway cannot derive or change the claim's access modes; choosing a suitable claim remains the operator's responsibility. StorageClass capability and topology also determine whether a requested access mode can bind.
+
 ## InferenceProviderConfig
 
 Cluster-scoped resource for provider registration. Each provider controller self-registers its `InferenceProviderConfig` at startup, declaring capabilities and selection rules in `spec`, and display, installation, health, and documentation metadata in `metadata.annotations`:

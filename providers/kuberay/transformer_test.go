@@ -8,6 +8,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -493,6 +494,114 @@ func TestBuildAggregatedWorkerGroupCustomGPU(t *testing.T) {
 	}
 	if limits["memory"] != "64Gi" {
 		t.Errorf("expected memory=64Gi, got %v", limits["memory"])
+	}
+}
+
+func TestTransformMountsExistingStorageOnHeadAndAggregatedWorkers(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "team-models")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name:      "model-cache",
+			ClaimName: "shared-model-cache",
+			MountPath: "/model-cache",
+			Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+			ReadOnly:  true,
+		},
+	}}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rs := resources[0]
+	if rs.GetNamespace() != "team-models" {
+		t.Fatalf("expected RayService in ModelDeployment namespace, got %q", rs.GetNamespace())
+	}
+	head, _, _ := unstructured.NestedMap(rs.Object, "spec", "rayClusterConfig", "headGroupSpec")
+	assertRayTemplateStorage(t, head["template"].(map[string]any), "shared-model-cache", true)
+	workerGroups, _, _ := unstructured.NestedSlice(rs.Object, "spec", "rayClusterConfig", "workerGroupSpecs")
+	worker := workerGroups[0].(map[string]any)
+	assertRayTemplateStorage(t, worker["template"].(map[string]any), "shared-model-cache", true)
+}
+
+func TestTransformDisaggregatedMountsManagedStorageOnEveryRayGroup(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "team-models")
+	storageSize := resource.MustParse("20Gi")
+	md.Spec.Serving = &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated}
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1, GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
+		Decode:  &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1, GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
+	}
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name: "model-cache", MountPath: "/model-cache",
+			Purpose: airunwayv1alpha1.VolumePurposeModelCache, Size: &storageSize,
+		},
+	}}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rs := resources[0]
+	head, _, _ := unstructured.NestedMap(rs.Object, "spec", "rayClusterConfig", "headGroupSpec")
+	assertRayTemplateStorage(t, head["template"].(map[string]any), "test-model-model-cache", false)
+	workerGroups, _, _ := unstructured.NestedSlice(rs.Object, "spec", "rayClusterConfig", "workerGroupSpecs")
+	if len(workerGroups) != 2 {
+		t.Fatalf("expected prefill and decode worker groups, got %d", len(workerGroups))
+	}
+	for _, item := range workerGroups {
+		group := item.(map[string]any)
+		assertRayTemplateStorage(t, group["template"].(map[string]any), "test-model-model-cache", false)
+	}
+}
+
+func TestTransformWithoutStorageOmitsRayVolumes(t *testing.T) {
+	resources, err := NewTransformer().Transform(context.Background(), newTestMD("test-model", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	head, _, _ := unstructured.NestedMap(resources[0].Object, "spec", "rayClusterConfig", "headGroupSpec")
+	template := head["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	if _, found := podSpec["volumes"]; found {
+		t.Fatalf("expected no volumes when storage is omitted, got %v", podSpec["volumes"])
+	}
+}
+
+func assertRayTemplateStorage(t *testing.T, template map[string]any, claimName string, readOnly bool) {
+	t.Helper()
+	podSpec := template["spec"].(map[string]any)
+	volumes := podSpec["volumes"].([]any)
+	if len(volumes) != 1 {
+		t.Fatalf("expected one storage volume, got %v", volumes)
+	}
+	claim := volumes[0].(map[string]any)["persistentVolumeClaim"].(map[string]any)
+	if claim["claimName"] != claimName {
+		t.Fatalf("expected claim %q, got %v", claimName, claim)
+	}
+	container := podSpec["containers"].([]any)[0].(map[string]any)
+	mounts := container["volumeMounts"].([]any)
+	if len(mounts) != 1 {
+		t.Fatalf("expected one storage mount, got %v", mounts)
+	}
+	if got, found := mounts[0].(map[string]any)["readOnly"]; readOnly && (!found || got != true) {
+		t.Fatalf("expected readOnly mount, got %v", mounts[0])
+	} else if !readOnly && found {
+		t.Fatalf("expected writable mount, got %v", mounts[0])
+	}
+	env := container["env"].([]any)
+	foundHFHome := false
+	for _, item := range env {
+		entry := item.(map[string]any)
+		if entry["name"] == "HF_HOME" && entry["value"] == "/model-cache" {
+			foundHFHome = true
+		}
+	}
+	if !foundHFHome {
+		t.Fatalf("expected HF_HOME=/model-cache, got %v", env)
 	}
 }
 

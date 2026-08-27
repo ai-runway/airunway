@@ -1675,6 +1675,55 @@ func TestTransformDisaggregatedBothWorkersGetVolumeMounts(t *testing.T) {
 	}
 }
 
+func TestTransformMultinodeOverridePreservesExistingClaimMount(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "team-models")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name:      "model-cache",
+			ClaimName: "shared-rwx-cache",
+			MountPath: "/model-cache",
+			Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+			ReadOnly:  true,
+		},
+	}}
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: "dynamo",
+		Overrides: &runtime.RawExtension{Raw: []byte(`{
+			"spec": {
+				"services": {
+					"VllmWorker": {"multinode": {"nodeCount": 2}}
+				}
+			}
+		}`)},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dgd := resources[0]
+	if dgd.GetNamespace() != "team-models" {
+		t.Fatalf("expected same-namespace DGD, got %q", dgd.GetNamespace())
+	}
+	worker, found, err := unstructured.NestedMap(dgd.Object, "spec", "services", "VllmWorker")
+	if err != nil || !found {
+		t.Fatalf("expected VllmWorker: found=%v err=%v", found, err)
+	}
+	multinode := worker["multinode"].(map[string]any)
+	if multinode["nodeCount"] != float64(2) {
+		t.Fatalf("expected multinode nodeCount=2, got %v", multinode)
+	}
+	mounts := worker["volumeMounts"].([]any)
+	if len(mounts) != 1 {
+		t.Fatalf("expected storage mount to survive override merge, got %v", mounts)
+	}
+	mount := mounts[0].(map[string]any)
+	if mount["name"] != "shared-rwx-cache" || mount["readOnly"] != true {
+		t.Fatalf("expected shared read-only claim mount, got %v", mount)
+	}
+}
+
 func TestTransformWithReadOnlyVolume(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")

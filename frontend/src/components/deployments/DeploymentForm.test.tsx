@@ -68,7 +68,7 @@ vi.mock('./CostEstimate', () => ({
 }))
 
 vi.mock('./StorageVolumesSection', () => ({
-  StorageVolumesSection: () => null,
+  StorageVolumesSection: () => <div data-testid="storage-volumes-section" />,
 }))
 
 function createModel(overrides: Partial<Model> = {}): Model {
@@ -178,6 +178,28 @@ describe('DeploymentForm', () => {
 
     expect(kuberayCard).toHaveAttribute('aria-checked', 'true')
     expect(kaitoCard).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('shows persistent storage only for runtimes with portable pod storage support', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'kaito', name: 'KAITO', installed: true, healthy: true }),
+            createRuntime({ id: 'kuberay', name: 'KubeRay', installed: true, healthy: true }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByTestId('storage-volumes-section')).toBeInTheDocument()
+
+    const kaitoCard = screen.getByText('KAITO').closest('[role="radio"]') as HTMLElement
+    fireEvent.click(kaitoCard)
+
+    expect(screen.queryByTestId('storage-volumes-section')).not.toBeInTheDocument()
   })
 
   it('disables disaggregated mode when a custom runtime only advertises aggregated serving', () => {

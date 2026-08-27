@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 const (
@@ -295,6 +296,13 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderCompatible, metav1.ConditionTrue, "CompatibilityVerified", "Configuration compatible with vLLM")
+
+	// The core controller owns portable PVC/download lifecycle. Do not create
+	// inference pods until conditions for this generation show the cache is ready.
+	if !storage.WorkloadReady(&md) {
+		logger.Info("Waiting for model storage preparation", "name", md.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 	if err := r.setImageResolutionStatus(ctx, &md); err != nil {
 		logger.Error(err, "Failed to resolve vLLM image", "name", md.Name)
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed

@@ -7,6 +7,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1382,6 +1383,7 @@ func TestTransformMountsModelStorageVolumes(t *testing.T) {
 				Name:      "model-cache",
 				ClaimName: "shared-model-cache",
 				MountPath: "/model-cache",
+				Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
 				ReadOnly:  true,
 			},
 		},
@@ -1418,4 +1420,92 @@ func TestTransformMountsModelStorageVolumes(t *testing.T) {
 	if pvc["claimName"] != "shared-model-cache" {
 		t.Errorf("expected claimName shared-model-cache, got %v", pvc["claimName"])
 	}
+	if deploy.GetNamespace() != "default" {
+		t.Errorf("expected workload in ModelDeployment namespace, got %q", deploy.GetNamespace())
+	}
+
+	env, _ := container["env"].([]any)
+	if !hasEnvValue(env, "HF_HOME", "/model-cache") {
+		t.Errorf("expected HF_HOME=/model-cache, got %v", env)
+	}
+}
+
+func TestTransformMountsManagedStorageWithGeneratedClaimName(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "team-models")
+	storageSize := resource.MustParse("20Gi")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{
+			{
+				Name: "model-cache", MountPath: "/model-cache",
+				Purpose: airunwayv1alpha1.VolumePurposeModelCache, Size: &storageSize,
+			},
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resources) != 2 {
+		t.Fatalf("expected one Deployment and one Service, got %d resources", len(resources))
+	}
+	deploy := resources[0]
+	if deploy.GetNamespace() != "team-models" {
+		t.Errorf("expected %s in team-models, got %q", deploy.GetName(), deploy.GetNamespace())
+	}
+	container := getContainer(t, deploy)
+	mounts, _ := container["volumeMounts"].([]any)
+	if len(mounts) != 1 {
+		t.Fatalf("expected one mount on %s, got %v", deploy.GetName(), mounts)
+	}
+	volumes, found, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+	if !found || len(volumes) != 1 {
+		t.Fatalf("expected model-cache volume on %s, got %v", deploy.GetName(), volumes)
+	}
+	cacheVolume := volumes[0].(map[string]any)
+	claim := cacheVolume["persistentVolumeClaim"].(map[string]any)
+	if claim["claimName"] != "test-model-model-cache" {
+		t.Errorf("expected managed claim name on %s, got %v", deploy.GetName(), claim)
+	}
+}
+
+func TestTransformModelCacheHonorsHFHomeOverride(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name: "model-cache", ClaimName: "shared",
+			Purpose: airunwayv1alpha1.VolumePurposeModelCache, MountPath: "/model-cache",
+		},
+	}}
+	md.Spec.Env = []corev1.EnvVar{{Name: "HF_HOME", Value: "/custom-cache"}}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	env, _ := getContainer(t, resources[0])["env"].([]any)
+	if !hasEnvValue(env, "HF_HOME", "/custom-cache") {
+		t.Fatalf("expected user HF_HOME override, got %v", env)
+	}
+	count := 0
+	for _, item := range env {
+		if item.(map[string]any)["name"] == "HF_HOME" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one HF_HOME entry, got %v", env)
+	}
+}
+
+func hasEnvValue(env []any, name, value string) bool {
+	for _, item := range env {
+		entry, ok := item.(map[string]any)
+		if ok && entry["name"] == name && entry["value"] == value {
+			return true
+		}
+	}
+	return false
 }

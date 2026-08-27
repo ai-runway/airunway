@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 const (
@@ -279,6 +280,11 @@ func (r *LLMDProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderCompatible, metav1.ConditionTrue, "CompatibilityVerified", "Configuration compatible with llm-d")
+
+	if !storage.WorkloadReady(&md) {
+		logger.Info("Waiting for model storage preparation", "name", md.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 
 	// Transform ModelDeployment to Deployments + Services
 	resources, err := r.Transformer.Transform(ctx, &md)

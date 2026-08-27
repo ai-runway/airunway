@@ -7,6 +7,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -980,6 +981,111 @@ func TestTransformUserLabelsCannotClobberSelectors(t *testing.T) {
 	if podLabels["my-label"] != "my-value" {
 		t.Errorf("custom label my-label not preserved, got %v", podLabels["my-label"])
 	}
+}
+
+func TestTransformMountsExistingModelCache(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "team-models")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name:      "model-cache",
+			ClaimName: "shared-model-cache",
+			MountPath: "/model-cache",
+			Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+			ReadOnly:  true,
+		},
+	}}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	deploy := resources[0]
+	if deploy.GetNamespace() != "team-models" {
+		t.Fatalf("expected same-namespace workload, got %q", deploy.GetNamespace())
+	}
+	container := getContainer(t, deploy)
+	mounts := container["volumeMounts"].([]any)
+	if len(mounts) != 1 || mounts[0].(map[string]any)["readOnly"] != true {
+		t.Fatalf("expected read-only model cache mount, got %v", mounts)
+	}
+	volumes, found, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+	if !found || len(volumes) != 1 {
+		t.Fatalf("expected one PVC volume, got %v", volumes)
+	}
+	claim := volumes[0].(map[string]any)["persistentVolumeClaim"].(map[string]any)
+	if claim["claimName"] != "shared-model-cache" {
+		t.Fatalf("expected existing claim, got %v", claim)
+	}
+	if !hasEnvValue(container["env"].([]any), "HF_HOME", "/model-cache") {
+		t.Fatalf("expected HF_HOME cache behavior, got %v", container["env"])
+	}
+}
+
+func TestTransformDisaggregatedMountsManagedStorageOnBothWorkers(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "team-models")
+	storageSize := resource.MustParse("20Gi")
+	md.Spec.Serving = &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated}
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1, GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
+		Decode:  &airunwayv1alpha1.ComponentScalingSpec{Replicas: 1, GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
+	}
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name: "model-cache", MountPath: "/model-cache",
+			Purpose: airunwayv1alpha1.VolumePurposeModelCache, Size: &storageSize,
+		},
+	}}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, deploy := range resources[:2] {
+		container := getContainer(t, deploy)
+		if len(container["volumeMounts"].([]any)) != 1 {
+			t.Fatalf("expected storage mount on %s, got %v", deploy.GetName(), container["volumeMounts"])
+		}
+		volumes, _, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+		claim := volumes[0].(map[string]any)["persistentVolumeClaim"].(map[string]any)
+		if claim["claimName"] != "test-model-model-cache" {
+			t.Errorf("expected generated managed claim on %s, got %v", deploy.GetName(), claim)
+		}
+	}
+}
+
+func TestTransformWithoutStorageOmitsVolumesAndMounts(t *testing.T) {
+	resources, err := NewTransformer().Transform(context.Background(), newTestMD("test-model", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	container := getContainer(t, resources[0])
+	if _, found := container["volumeMounts"]; found {
+		t.Fatalf("expected no mounts when storage is omitted, got %v", container["volumeMounts"])
+	}
+	if _, found, _ := unstructured.NestedSlice(resources[0].Object, "spec", "template", "spec", "volumes"); found {
+		t.Fatal("expected no volumes when storage is omitted")
+	}
+}
+
+func getContainer(t *testing.T, deploy *unstructured.Unstructured) map[string]any {
+	t.Helper()
+	containers, found, err := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "containers")
+	if err != nil || !found || len(containers) == 0 {
+		t.Fatalf("expected container on %s: found=%v err=%v", deploy.GetName(), found, err)
+	}
+	return containers[0].(map[string]any)
+}
+
+func hasEnvValue(env []any, name, value string) bool {
+	for _, item := range env {
+		entry, ok := item.(map[string]any)
+		if ok && entry["name"] == name && entry["value"] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func assertFlag(t *testing.T, args []string, flag string) {

@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 const (
@@ -248,6 +249,11 @@ func (r *KubeRayProviderReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderCompatible, metav1.ConditionTrue, "CompatibilityVerified", "Configuration compatible with KubeRay")
+
+	if !storage.WorkloadReady(&md) {
+		logger.Info("Waiting for model storage preparation", "name", md.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 
 	// Transform ModelDeployment to RayService
 	resources, err := r.Transformer.Transform(ctx, &md)
