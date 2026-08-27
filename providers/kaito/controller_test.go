@@ -29,6 +29,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+const (
+	testUID                       = "test-uid"
+	testPrivateAccessMode         = "private"
+	testLinuxOS                   = "linux"
+	testModelDeploymentAPIVersion = "airunway.ai/v1alpha1"
+	testModelDeploymentKind       = "ModelDeployment"
+	testCreateFailedReason        = "CreateFailed"
+	testResourceConflictReason    = "ResourceConflict"
+)
+
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(s)
@@ -391,10 +401,15 @@ func TestReconcileNilProvider(t *testing.T) {
 func TestReconcileSuccessfulCreate(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = "test-uid"
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).WithReturnManagedFields().Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md).
+		WithStatusSubresource(md).
+		WithReturnManagedFields().
+		Build()
 	deploy := newReadyKaitoDeployment()
 	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
 	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
@@ -423,7 +438,7 @@ func TestReconcileSuccessfulCreate(t *testing.T) {
 func TestReconcileAlreadyRunning(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = "test-uid"
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
 
 	// Create an upstream workspace that matches what the transformer would produce
@@ -433,13 +448,13 @@ func TestReconcileAlreadyRunning(t *testing.T) {
 	ws.SetName("test")
 	ws.SetNamespace("default")
 	ws.SetOwnerReferences([]metav1.OwnerReference{
-		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+		{UID: testUID, APIVersion: testModelDeploymentAPIVersion, Kind: testModelDeploymentKind, Name: "test"},
 	})
 	ws.Object["resource"] = map[string]interface{}{
 		"count": int64(1),
 		"labelSelector": map[string]interface{}{
 			"matchLabels": map[string]interface{}{
-				"kubernetes.io/os": "linux",
+				"kubernetes.io/os": testLinuxOS,
 			},
 		},
 	}
@@ -459,7 +474,12 @@ func TestReconcileAlreadyRunning(t *testing.T) {
 
 	deploy := newReadyKaitoDeployment()
 	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, ws).WithStatusSubresource(md).WithReturnManagedFields().Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, ws).
+		WithStatusSubresource(md).
+		WithReturnManagedFields().
+		Build()
 	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -485,7 +505,7 @@ func TestReconcileAlreadyRunning(t *testing.T) {
 func TestReconcileRunningUpdatesMessage(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = "test-uid"
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
 	// Simulate a prior reconcile loop that left the deploying-phase message.
 	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
@@ -496,13 +516,13 @@ func TestReconcileRunningUpdatesMessage(t *testing.T) {
 	ws.SetName("test")
 	ws.SetNamespace("default")
 	ws.SetOwnerReferences([]metav1.OwnerReference{
-		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+		{UID: testUID, APIVersion: testModelDeploymentAPIVersion, Kind: testModelDeploymentKind, Name: "test"},
 	})
 	ws.Object["resource"] = map[string]interface{}{
 		"count": int64(1),
 		"labelSelector": map[string]interface{}{
 			"matchLabels": map[string]interface{}{
-				"kubernetes.io/os": "linux",
+				"kubernetes.io/os": testLinuxOS,
 			},
 		},
 	}
@@ -522,7 +542,12 @@ func TestReconcileRunningUpdatesMessage(t *testing.T) {
 
 	deploy := newReadyKaitoDeployment()
 	directC := probeClientBuilderWithWorkspace(t).WithObjects(deploy).Build()
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, ws).WithStatusSubresource(md).WithReturnManagedFields().Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, ws).
+		WithStatusSubresource(md).
+		WithReturnManagedFields().
+		Build()
 	r := NewKaitoProviderReconciler(c, scheme, directC, record.NewFakeRecorder(10))
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -643,7 +668,7 @@ func TestReconcileDeletionWithUpstreamUnavailableDeleteRemovesFinalizer(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := newScheme()
 			md := newMDForController("test", "default")
-			md.UID = "test-uid"
+			md.UID = testUID
 			controllerutil.AddFinalizer(md, FinalizerName)
 			now := metav1.Now()
 			md.DeletionTimestamp = &now
@@ -653,7 +678,7 @@ func TestReconcileDeletionWithUpstreamUnavailableDeleteRemovesFinalizer(t *testi
 			ws.SetName("test")
 			ws.SetNamespace("default")
 			ws.SetOwnerReferences([]metav1.OwnerReference{
-				{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+				{UID: testUID, APIVersion: testModelDeploymentAPIVersion, Kind: testModelDeploymentKind, Name: "test"},
 			})
 
 			interceptorFuncs := interceptor.Funcs{
@@ -804,7 +829,7 @@ func TestReconcileDeletionNoFinalizer(t *testing.T) {
 func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = "test-uid"
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
 	now := metav1.Now()
 	md.DeletionTimestamp = &now
@@ -815,7 +840,7 @@ func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	ws.SetName("test")
 	ws.SetNamespace("default")
 	ws.SetOwnerReferences([]metav1.OwnerReference{
-		{UID: "test-uid", APIVersion: "airunway.ai/v1alpha1", Kind: "ModelDeployment", Name: "test"},
+		{UID: testUID, APIVersion: testModelDeploymentAPIVersion, Kind: testModelDeploymentKind, Name: "test"},
 	})
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, ws).WithStatusSubresource(md).Build()
@@ -854,9 +879,14 @@ func TestCreateOrUpdateResourceCreatesAtomicallyWithStableFieldManager(t *testin
 				}
 				return c.Create(ctx, obj, opts...)
 			},
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
-				content := obj.(interface{ UnstructuredContent() map[string]interface{} }).UnstructuredContent()
+				content := obj.(interface{ UnstructuredContent() map[string]any }).UnstructuredContent()
 				annotations, _, err := unstructured.NestedStringMap(content, "metadata", "annotations")
 				if err != nil {
 					return err
@@ -879,11 +909,21 @@ func TestCreateOrUpdateResourceCreatesAtomicallyWithStableFieldManager(t *testin
 		Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest("private"), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(testPrivateAccessMode),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("createOrUpdateResource: %v", err)
 	}
 	if createCalls != 1 || controllerApplyCalls != 2 || preservedApplyCalls != 3 {
-		t.Fatalf("expected one Create, migration/final rendered Applies, and preservation seed/release/finish Applies; got create=%d rendered=%d preserved=%d", createCalls, controllerApplyCalls, preservedApplyCalls)
+		t.Fatalf(
+			"expected one Create, migration/final rendered Applies, and preservation seed/release/finish Applies; "+
+				"got create=%d rendered=%d preserved=%d",
+			createCalls,
+			controllerApplyCalls,
+			preservedApplyCalls,
+		)
 	}
 	if gotOptions.FieldManager != FieldManager {
 		t.Fatalf("expected field manager %q, got %q", FieldManager, gotOptions.FieldManager)
@@ -916,7 +956,13 @@ func TestCreateOrUpdateResourceRecoversInterruptedCreateMigration(t *testing.T) 
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
 				if patch.Type() == types.JSONPatchType && failMigration {
 					failMigration = false
 					return wantErr
@@ -965,7 +1011,12 @@ func TestCreateOrUpdateResourceCreateRaceDoesNotAdoptForeignWorkspace(t *testing
 				}
 				return c.Create(ctx, obj, opts...)
 			},
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				applyCalls++
 				return c.Apply(ctx, obj, opts...)
 			}),
@@ -1000,7 +1051,12 @@ func TestCreateOrUpdateResourceCreateRaceContinuesForSameOwner(t *testing.T) {
 				}
 				return c.Create(ctx, obj, opts...)
 			},
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				applyCalls++
 				return c.Apply(ctx, obj, opts...)
 			}),
@@ -1008,7 +1064,11 @@ func TestCreateOrUpdateResourceCreateRaceContinuesForSameOwner(t *testing.T) {
 		Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("expected same-owner create race to reconcile successfully, got %v", err)
 	}
 	if applyCalls == 0 {
@@ -1030,7 +1090,12 @@ func TestCreateOrUpdateResourceApplyRejectsWorkspaceReplacement(t *testing.T) {
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if replaceOnApply && options.FieldManager == FieldManager {
 					replaceOnApply = false
@@ -1050,12 +1115,20 @@ func TestCreateOrUpdateResourceApplyRejectsWorkspaceReplacement(t *testing.T) {
 		}).
 		Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("create Workspace: %v", err)
 	}
 
 	replaceOnApply = true
-	err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest("private"), newSSADeploymentForTest())
+	err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(testPrivateAccessMode),
+		newSSADeploymentForTest(),
+	)
 	if !apierrors.IsConflict(err) || isResourceConflict(err) {
 		t.Fatalf("expected optimistic conflict for replaced Workspace, got %v", err)
 	}
@@ -1063,7 +1136,12 @@ func TestCreateOrUpdateResourceApplyRejectsWorkspaceReplacement(t *testing.T) {
 	if replacement.GetOwnerReferences()[0].UID != "replacement-owner-uid" {
 		t.Fatalf("expected replacement owner to remain unchanged, got %v", replacement.GetOwnerReferences())
 	}
-	if _, found, err := unstructured.NestedString(replacement.Object, "inference", "preset", "accessMode"); err != nil || found {
+	if _, found, err := unstructured.NestedString(
+		replacement.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
 		t.Fatalf("expected stale Apply not to mutate replacement, found=%v err=%v", found, err)
 	}
 }
@@ -1075,7 +1153,12 @@ func TestCreateOrUpdateResourceStableDesiredIsNoOp(t *testing.T) {
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if options.FieldManager == FieldManager {
 					applyCalls++
@@ -1086,14 +1169,26 @@ func TestCreateOrUpdateResourceStableDesiredIsNoOp(t *testing.T) {
 		Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("create Workspace: %v", err)
 	}
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("adopt Workspace with SSA: %v", err)
 	}
 	before := getWorkspaceForTest(t, c)
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("stable createOrUpdateResource: %v", err)
 	}
 	after := getWorkspaceForTest(t, c)
@@ -1113,7 +1208,12 @@ func TestCreateOrUpdateResourceDefaultedFieldsDoNotChurn(t *testing.T) {
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if options.FieldManager == FieldManager {
 					controllerApplyCalls++
@@ -1124,17 +1224,25 @@ func TestCreateOrUpdateResourceDefaultedFieldsDoNotChurn(t *testing.T) {
 		Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("create Workspace: %v", err)
 	}
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("adopt Workspace with SSA: %v", err)
 	}
 	defaulted := workspaceApplyForTest()
-	defaulted.Object["inference"] = map[string]interface{}{
+	defaulted.Object["inference"] = map[string]any{
 		"preset": map[string]interface{}{
 			"accessMode": "public",
-			"presetOptions": map[string]interface{}{
+			"presetOptions": map[string]any{
 				"modelAccessSecret": "operator-default",
 			},
 		},
@@ -1142,7 +1250,11 @@ func TestCreateOrUpdateResourceDefaultedFieldsDoNotChurn(t *testing.T) {
 	applyAsManagerForTest(t, c, defaulted, "kaito-defaults", false)
 	before := getWorkspaceForTest(t, c)
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("stable reconcile: %v", err)
 	}
 	after := getWorkspaceForTest(t, c)
@@ -1150,7 +1262,11 @@ func TestCreateOrUpdateResourceDefaultedFieldsDoNotChurn(t *testing.T) {
 		t.Fatalf("expected defaulted fields not to trigger another controller apply, got %d", controllerApplyCalls)
 	}
 	if after.GetResourceVersion() != before.GetResourceVersion() {
-		t.Fatalf("expected no write after defaults, resourceVersion changed from %q to %q", before.GetResourceVersion(), after.GetResourceVersion())
+		t.Fatalf(
+			"expected no write after defaults, resourceVersion changed from %q to %q",
+			before.GetResourceVersion(),
+			after.GetResourceVersion(),
+		)
 	}
 	assertKaitoDefaultsForTest(t, after)
 	accessMode, found, err := unstructured.NestedString(after.Object, "inference", "preset", "accessMode")
@@ -1160,12 +1276,12 @@ func TestCreateOrUpdateResourceDefaultedFieldsDoNotChurn(t *testing.T) {
 }
 
 func TestDesiredSubsetMatchesTreatsLabelSelectorAtomically(t *testing.T) {
-	desired := map[string]interface{}{
-		"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux"},
+	desired := map[string]any{
+		"matchLabels": map[string]any{"kubernetes.io/os": testLinuxOS},
 	}
-	live := map[string]interface{}{
-		"matchLabels": map[string]interface{}{
-			"kubernetes.io/os":          "linux",
+	live := map[string]any{
+		"matchLabels": map[string]any{
+			"kubernetes.io/os":          testLinuxOS,
 			"topology.example.com/pool": "blue",
 		},
 	}
@@ -1185,7 +1301,11 @@ func TestCreateOrUpdateResourceExtraOwnerReferenceDoesNotChurn(t *testing.T) {
 		Build()
 	initialReconciler := NewKaitoProviderReconciler(initialClient, scheme, initialClient, record.NewFakeRecorder(10))
 	desired := newSSAWorkspaceForTest("")
-	if err := initialReconciler.createOrUpdateResource(context.Background(), desired.DeepCopy(), newSSADeploymentForTest()); err != nil {
+	if err := initialReconciler.createOrUpdateResource(
+		context.Background(),
+		desired.DeepCopy(),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("create Workspace: %v", err)
 	}
 
@@ -1204,15 +1324,16 @@ func TestCreateOrUpdateResourceExtraOwnerReferenceDoesNotChurn(t *testing.T) {
 	managedFields := live.GetManagedFields()
 	foundStableManager := false
 	for index := range managedFields {
-		if managedFields[index].Manager != FieldManager || managedFields[index].Operation != metav1.ManagedFieldsOperationApply {
+		if managedFields[index].Manager != FieldManager ||
+			managedFields[index].Operation != metav1.ManagedFieldsOperationApply {
 			continue
 		}
-		var fields map[string]interface{}
+		var fields map[string]any
 		if err := json.Unmarshal(managedFields[index].FieldsV1.Raw, &fields); err != nil {
 			t.Fatalf("decode stable managedFields: %v", err)
 		}
-		if err := unstructured.SetNestedMap(fields, map[string]interface{}{
-			`k:{"uid":"test-uid"}`: map[string]interface{}{},
+		if err := unstructured.SetNestedMap(fields, map[string]any{
+			fmt.Sprintf(`k:{"uid":%q}`, testUID): map[string]any{},
 		}, "f:metadata", "f:ownerReferences"); err != nil {
 			t.Fatalf("set atomic owner-reference managedFields: %v", err)
 		}
@@ -1233,7 +1354,12 @@ func TestCreateOrUpdateResourceExtraOwnerReferenceDoesNotChurn(t *testing.T) {
 		WithObjects(live).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				controllerApplyCalls++
 				return c.Apply(ctx, obj, opts...)
 			}),
@@ -1273,7 +1399,11 @@ func TestCreateOrUpdateResourceDoesNotMigrateUnrelatedUpdateManagerAfterSSA(t *t
 	if err := c.Update(context.Background(), external, client.FieldOwner("external-update-manager")); err != nil {
 		t.Fatalf("update Workspace as external manager: %v", err)
 	}
-	fields, err := managedFieldsForManager(getWorkspaceForTest(t, c), "external-update-manager", metav1.ManagedFieldsOperationUpdate)
+	fields, err := managedFieldsForManager(
+		getWorkspaceForTest(t, c),
+		"external-update-manager",
+		metav1.ManagedFieldsOperationUpdate,
+	)
 	if err != nil || fields == nil {
 		t.Fatalf("expected external Update manager before reconcile, fields=%v err=%v", fields, err)
 	}
@@ -1371,26 +1501,48 @@ func TestCreateOrUpdateResourceRemovedOwnedFieldIsCleared(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest("private"), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(testPrivateAccessMode),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("create Workspace: %v", err)
 	}
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest("private"), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(testPrivateAccessMode),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("adopt Workspace with SSA: %v", err)
 	}
 	defaulted := workspaceApplyForTest()
-	defaulted.Object["inference"] = map[string]interface{}{
-		"preset": map[string]interface{}{
-			"presetOptions": map[string]interface{}{"modelAccessSecret": "operator-default"},
+	defaulted.Object["inference"] = map[string]any{
+		"preset": map[string]any{
+			"presetOptions": map[string]any{"modelAccessSecret": "operator-default"},
 		},
 	}
 	applyAsManagerForTest(t, c, defaulted, "kaito-defaults", false)
 
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("remove accessMode: %v", err)
 	}
 	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); err != nil || found {
-		t.Fatalf("expected owned accessMode to be removed, found=%v err=%v object=%v", found, err, updated.Object["inference"])
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
+		t.Fatalf(
+			"expected owned accessMode to be removed, found=%v err=%v object=%v",
+			found,
+			err,
+			updated.Object["inference"],
+		)
 	}
 	presetOptions, found, err := unstructured.NestedMap(updated.Object, "inference", "preset", "presetOptions")
 	if err != nil || !found || presetOptions["modelAccessSecret"] != "operator-default" {
@@ -1400,7 +1552,7 @@ func TestCreateOrUpdateResourceRemovedOwnedFieldIsCleared(t *testing.T) {
 
 func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *testing.T) {
 	scheme := newScheme()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	existing.SetLabels(map[string]string{
 		"airunway.example.com/stale":     "true",
 		"operator.example.com/defaulted": "true",
@@ -1409,20 +1561,20 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 		"airunway.example.com/stale":     "true",
 		"operator.example.com/defaulted": "true",
 	})
-	existing.Object["resource"] = map[string]interface{}{
+	existing.Object["resource"] = map[string]any{
 		"count": int64(1),
-		"labelSelector": map[string]interface{}{
-			"matchLabels": map[string]interface{}{
-				"kubernetes.io/os":          "linux",
+		"labelSelector": map[string]any{
+			"matchLabels": map[string]any{
+				"kubernetes.io/os":          testLinuxOS,
 				"topology.example.com/pool": "stale",
 			},
 		},
 	}
-	existing.Object["inference"] = map[string]interface{}{
-		"preset": map[string]interface{}{
+	existing.Object["inference"] = map[string]any{
+		"preset": map[string]any{
 			"name":       "test-model",
-			"accessMode": "private",
-			"presetOptions": map[string]interface{}{
+			"accessMode": testPrivateAccessMode,
+			"presetOptions": map[string]any{
 				"modelAccessSecret": "operator-default",
 			},
 		},
@@ -1430,13 +1582,13 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 	setLastAppliedForTestWithMetadata(
 		t,
 		existing,
-		map[string]interface{}{
+		map[string]any{
 			"count": int64(1),
-			"labelSelector": map[string]interface{}{
-				"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux"},
+			"labelSelector": map[string]any{
+				"matchLabels": map[string]any{"kubernetes.io/os": testLinuxOS},
 			},
 		},
-		map[string]interface{}{"preset": map[string]interface{}{"name": "test-model", "accessMode": "private"}},
+		map[string]any{"preset": map[string]any{"name": "test-model", "accessMode": testPrivateAccessMode}},
 		map[string]string{"airunway.example.com/stale": "true"},
 		map[string]string{"airunway.example.com/stale": "true"},
 	)
@@ -1446,7 +1598,12 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if options.FieldManager == FieldManager {
 					controllerApplyCalls++
@@ -1464,10 +1621,10 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
 	desired := newSSAWorkspaceForTest("")
-	desired.Object["resource"] = map[string]interface{}{
+	desired.Object["resource"] = map[string]any{
 		"count": int64(1),
-		"labelSelector": map[string]interface{}{
-			"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux"},
+		"labelSelector": map[string]any{
+			"matchLabels": map[string]any{"kubernetes.io/os": testLinuxOS},
 		},
 	}
 	desired.SetLabels(map[string]string{"airunway.example.com/keep": "true"})
@@ -1493,14 +1650,30 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 	if _, found, _ := unstructured.NestedString(adopted.Object, "inference", "preset", "accessMode"); found {
 		t.Fatalf("expected legacy owned accessMode to be removed, got %v", adopted.Object["inference"])
 	}
-	if adopted.GetLabels()["airunway.example.com/stale"] != "" || adopted.GetAnnotations()["airunway.example.com/stale"] != "" {
-		t.Fatalf("expected legacy owned metadata to be removed, labels=%v annotations=%v", adopted.GetLabels(), adopted.GetAnnotations())
+	if adopted.GetLabels()["airunway.example.com/stale"] != "" ||
+		adopted.GetAnnotations()["airunway.example.com/stale"] != "" {
+		t.Fatalf(
+			"expected legacy owned metadata to be removed, labels=%v annotations=%v",
+			adopted.GetLabels(),
+			adopted.GetAnnotations(),
+		)
 	}
-	if adopted.GetLabels()["operator.example.com/defaulted"] != "true" || adopted.GetAnnotations()["operator.example.com/defaulted"] != "true" {
-		t.Fatalf("expected non-owned metadata to survive adoption, labels=%v annotations=%v", adopted.GetLabels(), adopted.GetAnnotations())
+	if adopted.GetLabels()["operator.example.com/defaulted"] != "true" ||
+		adopted.GetAnnotations()["operator.example.com/defaulted"] != "true" {
+		t.Fatalf(
+			"expected non-owned metadata to survive adoption, labels=%v annotations=%v",
+			adopted.GetLabels(),
+			adopted.GetAnnotations(),
+		)
 	}
 	assertKaitoDefaultsForTest(t, adopted)
-	if _, found, err := unstructured.NestedString(adopted.Object, "resource", "labelSelector", "matchLabels", "topology.example.com/pool"); err != nil || found {
+	if _, found, err := unstructured.NestedString(
+		adopted.Object,
+		"resource",
+		"labelSelector",
+		"matchLabels",
+		"topology.example.com/pool",
+	); err != nil || found {
 		t.Fatalf("expected stale key in atomic selector to be removed, found=%v err=%v", found, err)
 	}
 
@@ -1520,7 +1693,7 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 func TestCreateOrUpdateResourceMigratesLegacyFieldsAcrossAPIVersions(t *testing.T) {
 	scheme := newScheme()
 	seedClient := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().Build()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	if err := setLastAppliedManagedFields(existing); err != nil {
 		t.Fatalf("set legacy last-applied state: %v", err)
 	}
@@ -1530,7 +1703,8 @@ func TestCreateOrUpdateResourceMigratesLegacyFieldsAcrossAPIVersions(t *testing.
 	live := getWorkspaceForTest(t, seedClient)
 	managedFields := live.GetManagedFields()
 	for index := range managedFields {
-		if managedFields[index].Manager == "legacy-kaito-provider" && managedFields[index].Operation == metav1.ManagedFieldsOperationUpdate {
+		if managedFields[index].Manager == "legacy-kaito-provider" &&
+			managedFields[index].Operation == metav1.ManagedFieldsOperationUpdate {
 			managedFields[index].APIVersion = "kaito.sh/v1alpha1"
 		}
 	}
@@ -1538,12 +1712,27 @@ func TestCreateOrUpdateResourceMigratesLegacyFieldsAcrossAPIVersions(t *testing.
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(live).WithReturnManagedFields().Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("adopt cross-version legacy Workspace: %v", err)
 	}
 	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); err != nil || found {
-		t.Fatalf("expected cross-version stale field to be removed, found=%v err=%v annotations=%v managedFields=%v", found, err, updated.GetAnnotations(), updated.GetManagedFields())
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
+		t.Fatalf(
+			"expected cross-version stale field to be removed, found=%v err=%v annotations=%v managedFields=%v",
+			found,
+			err,
+			updated.GetAnnotations(),
+			updated.GetManagedFields(),
+		)
 	}
 	if managers, err := updateManagersOwningMigrationState(updated); err != nil || len(managers) != 0 {
 		t.Fatalf("expected cross-version Update ownership to be removed, managers=%v err=%v", managers, err)
@@ -1555,22 +1744,22 @@ func TestCreateOrUpdateResourceMigratesLegacyFieldsAcrossAPIVersions(t *testing.
 
 func TestCreateOrUpdateResourceAdoptsPreAnnotationWorkspace(t *testing.T) {
 	scheme := newScheme()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	existing.SetAnnotations(nil)
-	existing.Object["resource"] = map[string]interface{}{
+	existing.Object["resource"] = map[string]any{
 		"count": int64(2),
-		"labelSelector": map[string]interface{}{
-			"matchLabels": map[string]interface{}{
-				"kubernetes.io/os": "linux",
+		"labelSelector": map[string]any{
+			"matchLabels": map[string]any{
+				"kubernetes.io/os": testLinuxOS,
 				"airunway.ai/old":  "true",
 			},
 		},
 	}
-	existing.Object["inference"] = map[string]interface{}{
-		"preset": map[string]interface{}{
+	existing.Object["inference"] = map[string]any{
+		"preset": map[string]any{
 			"name":       "test-model",
 			"accessMode": "public",
-			"presetOptions": map[string]interface{}{
+			"presetOptions": map[string]any{
 				"modelAccessSecret": "operator-default",
 			},
 		},
@@ -1580,11 +1769,11 @@ func TestCreateOrUpdateResourceAdoptsPreAnnotationWorkspace(t *testing.T) {
 		t.Fatalf("create pre-annotation Workspace: %v", err)
 	}
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
-	desired := newSSAWorkspaceForTest("private")
-	desired.Object["resource"] = map[string]interface{}{
+	desired := newSSAWorkspaceForTest(testPrivateAccessMode)
+	desired.Object["resource"] = map[string]any{
 		"count": int64(1),
-		"labelSelector": map[string]interface{}{
-			"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux"},
+		"labelSelector": map[string]any{
+			"matchLabels": map[string]any{"kubernetes.io/os": testLinuxOS},
 		},
 	}
 
@@ -1607,22 +1796,36 @@ func TestCreateOrUpdateResourceAdoptsPreAnnotationWorkspace(t *testing.T) {
 		t.Fatalf("expected desired count to replace pre-annotation value, got %d found=%v err=%v", count, found, err)
 	}
 	accessMode, found, err := unstructured.NestedString(adopted.Object, "inference", "preset", "accessMode")
-	if err != nil || !found || accessMode != "private" {
-		t.Fatalf("expected desired accessMode to replace pre-annotation value, got %q found=%v err=%v", accessMode, found, err)
+	if err != nil || !found || accessMode != testPrivateAccessMode {
+		t.Fatalf(
+			"expected desired accessMode to replace pre-annotation value, got %q found=%v err=%v",
+			accessMode,
+			found,
+			err,
+		)
 	}
 	matchLabels, found, err := unstructured.NestedStringMap(adopted.Object, "resource", "labelSelector", "matchLabels")
-	if err != nil || !found || len(matchLabels) != 1 || matchLabels["kubernetes.io/os"] != "linux" {
+	if err != nil || !found || len(matchLabels) != 1 || matchLabels["kubernetes.io/os"] != testLinuxOS {
 		t.Fatalf("expected stale pre-annotation selector to be removed, got %v found=%v err=%v", matchLabels, found, err)
 	}
 	assertKaitoDefaultsForTest(t, adopted)
 
 	desiredWithoutAccessMode := desired.DeepCopy()
 	unstructured.RemoveNestedField(desiredWithoutAccessMode.Object, "inference", "preset", "accessMode")
-	if err := r.createOrUpdateResource(context.Background(), desiredWithoutAccessMode, newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		desiredWithoutAccessMode,
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("remove field after pre-annotation adoption: %v", err)
 	}
 	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); err != nil || found {
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
 		t.Fatalf("expected adopted accessMode to be removed, found=%v err=%v", found, err)
 	}
 	assertKaitoDefaultsForTest(t, updated)
@@ -1630,7 +1833,7 @@ func TestCreateOrUpdateResourceAdoptsPreAnnotationWorkspace(t *testing.T) {
 
 func TestCreateOrUpdateResourceRecoversPreAnnotationOwnershipMigration(t *testing.T) {
 	scheme := newScheme()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	existing.SetAnnotations(nil)
 	wantErr := errors.New("managedFields migration interrupted")
 	failMigration := true
@@ -1638,7 +1841,13 @@ func TestCreateOrUpdateResourceRecoversPreAnnotationOwnershipMigration(t *testin
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
 				if patch.Type() == types.JSONPatchType && failMigration {
 					failMigration = false
 					return wantErr
@@ -1652,18 +1861,35 @@ func TestCreateOrUpdateResourceRecoversPreAnnotationOwnershipMigration(t *testin
 	}
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
-	err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest("private"), newSSADeploymentForTest())
+	err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(testPrivateAccessMode),
+		newSSADeploymentForTest(),
+	)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected interrupted ownership migration, got %v", err)
 	}
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest("private"), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(testPrivateAccessMode),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("retry ownership migration: %v", err)
 	}
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("remove field after recovered migration: %v", err)
 	}
 	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); err != nil || found {
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
 		t.Fatalf("expected recovered ownership to remove accessMode, found=%v err=%v", found, err)
 	}
 	if _, found := updated.GetAnnotations()[migrationManagersAnnotation]; found {
@@ -1673,7 +1899,7 @@ func TestCreateOrUpdateResourceRecoversPreAnnotationOwnershipMigration(t *testin
 
 func TestCreateOrUpdateResourceRecoversUnchangedAnnotatedMigration(t *testing.T) {
 	scheme := newScheme()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	if err := setLastAppliedManagedFields(existing); err != nil {
 		t.Fatalf("set annotated legacy Workspace state: %v", err)
 	}
@@ -1683,7 +1909,13 @@ func TestCreateOrUpdateResourceRecoversUnchangedAnnotatedMigration(t *testing.T)
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
 				if patch.Type() == types.JSONPatchType && failMigration {
 					failMigration = false
 					return wantErr
@@ -1696,7 +1928,7 @@ func TestCreateOrUpdateResourceRecoversUnchangedAnnotatedMigration(t *testing.T)
 		t.Fatalf("create annotated legacy Workspace: %v", err)
 	}
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
-	desired := newSSAWorkspaceForTest("private")
+	desired := newSSAWorkspaceForTest(testPrivateAccessMode)
 
 	err := r.createOrUpdateResource(context.Background(), desired.DeepCopy(), newSSADeploymentForTest())
 	if !errors.Is(err, wantErr) {
@@ -1723,7 +1955,7 @@ func TestCreateOrUpdateResourceRecoversUnchangedAnnotatedMigration(t *testing.T)
 
 func TestCreateOrUpdateResourceRecoveryRemovesFieldDroppedDuringMigration(t *testing.T) {
 	scheme := newScheme()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	if err := setLastAppliedManagedFields(existing); err != nil {
 		t.Fatalf("set annotated legacy Workspace state: %v", err)
 	}
@@ -1733,10 +1965,20 @@ func TestCreateOrUpdateResourceRecoveryRemovesFieldDroppedDuringMigration(t *tes
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
-				workspace := obj.(interface{ UnstructuredContent() map[string]interface{} })
-				_, hasAccessMode, err := unstructured.NestedString(workspace.UnstructuredContent(), "inference", "preset", "accessMode")
+				workspace := obj.(interface{ UnstructuredContent() map[string]any })
+				_, hasAccessMode, err := unstructured.NestedString(
+					workspace.UnstructuredContent(),
+					"inference",
+					"preset",
+					"accessMode",
+				)
 				if err != nil {
 					return err
 				}
@@ -1757,11 +1999,20 @@ func TestCreateOrUpdateResourceRecoveryRemovesFieldDroppedDuringMigration(t *tes
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected interrupted preservation release, got %v", err)
 	}
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("resume migration with removed accessMode: %v", err)
 	}
 	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); err != nil || found {
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
 		t.Fatalf("expected field removed during interrupted migration to be cleared, found=%v err=%v", found, err)
 	}
 	if _, found := updated.GetAnnotations()[migrationManagersAnnotation]; found {
@@ -1775,7 +2026,7 @@ func TestCreateOrUpdateResourceRecoveryRemovesFieldDroppedDuringMigration(t *tes
 func TestCreateOrUpdateResourceRetainsMigrationStateUntilStaleCleanupSucceeds(t *testing.T) {
 	scheme := newScheme()
 	seedClient := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().Build()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	if err := setLastAppliedManagedFields(existing); err != nil {
 		t.Fatalf("set legacy last-applied state: %v", err)
 	}
@@ -1785,7 +2036,8 @@ func TestCreateOrUpdateResourceRetainsMigrationStateUntilStaleCleanupSucceeds(t 
 	live := getWorkspaceForTest(t, seedClient)
 	managedFields := live.GetManagedFields()
 	for index := range managedFields {
-		if managedFields[index].Manager == "legacy-kaito-provider" && managedFields[index].Operation == metav1.ManagedFieldsOperationUpdate {
+		if managedFields[index].Manager == "legacy-kaito-provider" &&
+			managedFields[index].Operation == metav1.ManagedFieldsOperationUpdate {
 			managedFields[index].APIVersion = "kaito.sh/v1alpha1"
 		}
 	}
@@ -1799,7 +2051,13 @@ func TestCreateOrUpdateResourceRetainsMigrationStateUntilStaleCleanupSucceeds(t 
 		WithObjects(live).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
 				if patch.Type() == types.ApplyPatchType {
 					options := &client.PatchOptions{}
 					for _, opt := range opts {
@@ -1850,7 +2108,12 @@ func TestCreateOrUpdateResourceRetainsMigrationStateUntilStaleCleanupSucceeds(t 
 		t.Fatalf("retry stale cleanup: %v", err)
 	}
 	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode"); err != nil || found {
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
 		t.Fatalf("expected retry to remove stale field, found=%v err=%v", found, err)
 	}
 	if _, found := updated.GetAnnotations()[migrationManagersAnnotation]; found {
@@ -1873,18 +2136,28 @@ func TestCreateOrUpdateResourceHandsOffNewlyRenderedPreservedFieldBeforeRelease(
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if enforceHandoff {
 					applyManagers = append(applyManagers, options.FieldManager)
-					workspace := obj.(interface{ UnstructuredContent() map[string]interface{} })
-					accessMode, found, err := unstructured.NestedString(workspace.UnstructuredContent(), "inference", "preset", "accessMode")
+					workspace := obj.(interface{ UnstructuredContent() map[string]any })
+					accessMode, found, err := unstructured.NestedString(
+						workspace.UnstructuredContent(),
+						"inference",
+						"preset",
+						"accessMode",
+					)
 					if err != nil {
 						return err
 					}
 					switch options.FieldManager {
 					case FieldManager:
-						if found && accessMode == "private" {
+						if found && accessMode == testPrivateAccessMode {
 							stableClaimed = true
 						}
 					case preservedFieldsManager:
@@ -1901,12 +2174,16 @@ func TestCreateOrUpdateResourceHandsOffNewlyRenderedPreservedFieldBeforeRelease(
 		t.Fatalf("create legacy Workspace: %v", err)
 	}
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
-	if err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest()); err != nil {
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		newSSAWorkspaceForTest(""),
+		newSSADeploymentForTest(),
+	); err != nil {
 		t.Fatalf("adopt preserved accessMode: %v", err)
 	}
 
 	enforceHandoff = true
-	desired := newSSAWorkspaceForTest("private")
+	desired := newSSAWorkspaceForTest(testPrivateAccessMode)
 	if err := r.createOrUpdateResource(context.Background(), desired, newSSADeploymentForTest()); err != nil {
 		t.Fatalf("hand off newly rendered accessMode: %v", err)
 	}
@@ -1916,7 +2193,7 @@ func TestCreateOrUpdateResourceHandsOffNewlyRenderedPreservedFieldBeforeRelease(
 	}
 	updated := getWorkspaceForTest(t, c)
 	accessMode, found, err := unstructured.NestedString(updated.Object, "inference", "preset", "accessMode")
-	if err != nil || !found || accessMode != "private" {
+	if err != nil || !found || accessMode != testPrivateAccessMode {
 		t.Fatalf("expected handed-off accessMode private, got %q found=%v err=%v", accessMode, found, err)
 	}
 	overlaps, err := managerOwnsAnyDesired(updated, preservedFieldsManager, desired)
@@ -1932,7 +2209,12 @@ func TestCreateOrUpdateResourceReappliesWhenRenderedOwnershipIsLost(t *testing.T
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if options.FieldManager == FieldManager {
 					controllerApplyCalls++
@@ -1942,18 +2224,18 @@ func TestCreateOrUpdateResourceReappliesWhenRenderedOwnershipIsLost(t *testing.T
 		}).
 		Build()
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
-	desired := newSSAWorkspaceForTest("private")
+	desired := newSSAWorkspaceForTest(testPrivateAccessMode)
 	if err := r.createOrUpdateResource(context.Background(), desired.DeepCopy(), newSSADeploymentForTest()); err != nil {
 		t.Fatalf("create Workspace: %v", err)
 	}
 
 	external := workspaceApplyForTest()
-	external.Object["inference"] = map[string]interface{}{
-		"preset": map[string]interface{}{"accessMode": "public"},
+	external.Object["inference"] = map[string]any{
+		"preset": map[string]any{"accessMode": "public"},
 	}
 	applyAsManagerForTest(t, c, external, "external-access-manager", true)
-	external.Object["inference"] = map[string]interface{}{
-		"preset": map[string]interface{}{"accessMode": "private"},
+	external.Object["inference"] = map[string]any{
+		"preset": map[string]any{"accessMode": testPrivateAccessMode},
 	}
 	applyAsManagerForTest(t, c, external, "external-access-manager", false)
 
@@ -1979,7 +2261,12 @@ func TestCreateOrUpdateResourceDoesNotAdoptUnownedWorkspace(t *testing.T) {
 		WithObjects(existing).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				applyCalls++
 				return c.Apply(ctx, obj, opts...)
 			}),
@@ -2007,7 +2294,7 @@ func TestCreateOrUpdateResourceDoesNotOverwriteUnrelatedSSAOwnerDuringAdoption(t
 		t.Fatalf("create legacy Workspace: %v", err)
 	}
 	external := workspaceApplyForTest()
-	external.Object["resource"] = map[string]interface{}{"count": int64(2)}
+	external.Object["resource"] = map[string]any{"count": int64(2)}
 	applyAsManagerForTest(t, c, external, "external-count-manager", true)
 	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
 
@@ -2034,7 +2321,7 @@ func TestCreateOrUpdateResourceSurfacesSSAConflict(t *testing.T) {
 		t.Fatalf("adopt Workspace with SSA: %v", err)
 	}
 	conflicting := workspaceApplyForTest()
-	conflicting.Object["resource"] = map[string]interface{}{"count": int64(2)}
+	conflicting.Object["resource"] = map[string]any{"count": int64(2)}
 	applyAsManagerForTest(t, c, conflicting, "other-manager", true)
 
 	err := r.createOrUpdateResource(context.Background(), newSSAWorkspaceForTest(""), newSSADeploymentForTest())
@@ -2049,7 +2336,12 @@ func TestCreateOrUpdateResourceSurfacesApplyError(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				context.Context,
+				client.WithWatch,
+				runtime.ApplyConfiguration,
+				...client.ApplyOption,
+			) error {
 				return wantErr
 			}),
 		}).
@@ -2067,12 +2359,12 @@ func TestCreateOrUpdateResourceSurfacesApplyError(t *testing.T) {
 
 func TestCreateOrUpdateResourceSurfacesLegacyMigrationError(t *testing.T) {
 	scheme := newScheme()
-	existing := newSSAWorkspaceForTest("private")
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	setLastAppliedForTest(
 		t,
 		existing,
-		map[string]interface{}{"count": int64(1)},
-		map[string]interface{}{"preset": map[string]interface{}{"name": "test-model", "accessMode": "private"}},
+		map[string]any{"count": int64(1)},
+		map[string]any{"preset": map[string]any{"name": "test-model", "accessMode": testPrivateAccessMode}},
 	)
 	wantErr := errors.New("migration patch failed")
 	c := fake.NewClientBuilder().
@@ -2105,7 +2397,12 @@ func TestCreateOrUpdateResourceRejectsMalformedLegacyAnnotation(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(existing).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj runtime.ApplyConfiguration,
+				opts ...client.ApplyOption,
+			) error {
 				applyCalls++
 				return c.Apply(ctx, obj, opts...)
 			}),
@@ -2129,7 +2426,13 @@ func TestCreateOrUpdateResourceSurfacesManagedFieldsMigrationError(t *testing.T)
 		WithScheme(scheme).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
 				if patch.Type() == types.JSONPatchType {
 					return wantErr
 				}
@@ -2148,18 +2451,33 @@ func TestCreateOrUpdateResourceSurfacesManagedFieldsMigrationError(t *testing.T)
 	}
 }
 
-func TestReconcileSurfacesSSAConflictInStatus(t *testing.T) {
+func TestReconcileSSAConflictWritesStatusOnceAndRetriesSlowly(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.APIVersion = "airunway.ai/v1alpha1"
-	md.Kind = "ModelDeployment"
-	md.UID = "test-uid"
+	md.APIVersion = testModelDeploymentAPIVersion
+	md.Kind = testModelDeploymentKind
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
+	statusUpdates := 0
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(md).
 		WithStatusSubresource(md).
 		WithReturnManagedFields().
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(
+				ctx context.Context,
+				c client.Client,
+				subResourceName string,
+				obj client.Object,
+				opts ...client.SubResourceUpdateOption,
+			) error {
+				if subResourceName == "status" {
+					statusUpdates++
+				}
+				return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
 		Build()
 	direct := probeClientBuilderWithWorkspace(t).WithObjects(newReadyKaitoDeployment()).Build()
 	r := NewKaitoProviderReconciler(c, scheme, direct, record.NewFakeRecorder(10))
@@ -2175,15 +2493,18 @@ func TestReconcileSurfacesSSAConflictInStatus(t *testing.T) {
 		t.Fatalf("adopt Workspace with SSA: %v", err)
 	}
 	conflicting := workspaceApplyForTest()
-	conflicting.Object["resource"] = map[string]interface{}{"count": int64(2)}
+	conflicting.Object["resource"] = map[string]any{"count": int64(2)}
 	applyAsManagerForTest(t, c, conflicting, "other-manager", true)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(md)})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
-		t.Fatalf("expected conflict to be surfaced without a blind retry, got %#v", result)
+	if result.RequeueAfter != ExternalRecoveryInterval {
+		t.Fatalf("expected conflict to use the external-recovery retry, got %#v", result)
+	}
+	if statusUpdates != 1 {
+		t.Fatalf("expected the conflict transition to write status once, got %d updates", statusUpdates)
 	}
 	var got airunwayv1alpha1.ModelDeployment
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(md), &got); err != nil {
@@ -2193,17 +2514,28 @@ func TestReconcileSurfacesSSAConflictInStatus(t *testing.T) {
 		t.Fatalf("expected failed phase, got %q", got.Status.Phase)
 	}
 	condition := apimeta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
-	if condition == nil || condition.Reason != "ResourceConflict" || condition.Status != metav1.ConditionFalse {
+	if condition == nil || condition.Reason != testResourceConflictReason || condition.Status != metav1.ConditionFalse {
 		t.Fatalf("expected ResourceConflict condition, got %#v", condition)
+	}
+
+	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(md)})
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if result.RequeueAfter != ExternalRecoveryInterval {
+		t.Fatalf("expected persistent conflict to retain the external-recovery retry, got %#v", result)
+	}
+	if statusUpdates != 1 {
+		t.Fatalf("expected unchanged conflict not to write status again, got %d updates", statusUpdates)
 	}
 }
 
 func TestReconcileRetriesOptimisticManagedFieldsConflict(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.APIVersion = "airunway.ai/v1alpha1"
-	md.Kind = "ModelDeployment"
-	md.UID = "test-uid"
+	md.APIVersion = testModelDeploymentAPIVersion
+	md.Kind = testModelDeploymentKind
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -2211,7 +2543,13 @@ func TestReconcileRetriesOptimisticManagedFieldsConflict(t *testing.T) {
 		WithStatusSubresource(md).
 		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
 				if patch.Type() == types.JSONPatchType {
 					return apierrors.NewConflict(
 						schema.GroupResource{Group: KaitoAPIGroup, Resource: "workspaces"},
@@ -2230,7 +2568,7 @@ func TestReconcileRetriesOptimisticManagedFieldsConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != time.Second {
+	if result.RequeueAfter != time.Second {
 		t.Fatalf("expected optimistic conflict to retry promptly, got %#v", result)
 	}
 	var got airunwayv1alpha1.ModelDeployment
@@ -2241,7 +2579,7 @@ func TestReconcileRetriesOptimisticManagedFieldsConflict(t *testing.T) {
 		t.Fatalf("expected unverified create-migration conflict to fail closed, got %#v", got.Status)
 	}
 	condition := apimeta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
-	if condition == nil || condition.Reason != "CreateFailed" || condition.Status != metav1.ConditionFalse {
+	if condition == nil || condition.Reason != testCreateFailedReason || condition.Status != metav1.ConditionFalse {
 		t.Fatalf("expected surfaced optimistic conflict condition, got %#v", condition)
 	}
 }
@@ -2249,9 +2587,9 @@ func TestReconcileRetriesOptimisticManagedFieldsConflict(t *testing.T) {
 func TestReconcileSurfacesApplyErrorInStatus(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.APIVersion = "airunway.ai/v1alpha1"
-	md.Kind = "ModelDeployment"
-	md.UID = "test-uid"
+	md.APIVersion = testModelDeploymentAPIVersion
+	md.Kind = testModelDeploymentKind
+	md.UID = testUID
 	controllerutil.AddFinalizer(md, FinalizerName)
 	wantErr := errors.New("apply transport failed")
 	resources, err := NewTransformer().Transform(context.Background(), md)
@@ -2267,7 +2605,12 @@ func TestReconcileSurfacesApplyErrorInStatus(t *testing.T) {
 		WithObjects(md, existing).
 		WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: interceptApplyPatch(func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
+			Patch: interceptApplyPatch(func(
+				context.Context,
+				client.WithWatch,
+				runtime.ApplyConfiguration,
+				...client.ApplyOption,
+			) error {
 				return wantErr
 			}),
 		}).
@@ -2279,18 +2622,19 @@ func TestReconcileSurfacesApplyErrorInStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != ExternalRecoveryInterval {
+	if result.RequeueAfter != ExternalRecoveryInterval {
 		t.Fatalf("expected apply error to be recorded with an external-recovery retry, got %#v", result)
 	}
 	var got airunwayv1alpha1.ModelDeployment
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(md), &got); err != nil {
 		t.Fatalf("get ModelDeployment: %v", err)
 	}
-	if got.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed || !strings.Contains(got.Status.Message, wantErr.Error()) {
+	if got.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed ||
+		!strings.Contains(got.Status.Message, wantErr.Error()) {
 		t.Fatalf("expected failed apply status, phase=%q message=%q", got.Status.Phase, got.Status.Message)
 	}
 	condition := apimeta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
-	if condition == nil || condition.Reason != "CreateFailed" || condition.Status != metav1.ConditionFalse {
+	if condition == nil || condition.Reason != testCreateFailedReason || condition.Status != metav1.ConditionFalse {
 		t.Fatalf("expected CreateFailed condition, got %#v", condition)
 	}
 }
@@ -2314,9 +2658,9 @@ func TestSetLastAppliedManagedFieldsCopiesAnnotations(t *testing.T) {
 }
 
 func TestExtractManagedFieldsListKeepsOnlyOwnedSetValues(t *testing.T) {
-	live := []interface{}{"airunway.ai/owned", "external.example.com/other"}
-	fields := map[string]interface{}{
-		`v:"airunway.ai/owned"`: map[string]interface{}{},
+	live := []any{"airunway.ai/owned", "external.example.com/other"}
+	fields := map[string]any{
+		`v:"airunway.ai/owned"`: map[string]any{},
 	}
 
 	extracted := extractManagedFieldsList(live, fields)
@@ -2325,22 +2669,44 @@ func TestExtractManagedFieldsListKeepsOnlyOwnedSetValues(t *testing.T) {
 	}
 }
 
+func TestMergeManagedFieldValuesUnionsListsWithoutDuplicates(t *testing.T) {
+	target := map[string]any{
+		"metadata": map[string]any{
+			"finalizers": []any{"shared", "first"},
+		},
+	}
+	source := map[string]any{
+		"metadata": map[string]any{
+			"finalizers": []any{"shared", "second"},
+		},
+	}
+
+	merged := mergeManagedFieldValues(target, source)
+	finalizers, found, err := unstructured.NestedStringSlice(merged, "metadata", "finalizers")
+	if err != nil || !found {
+		t.Fatalf("get merged finalizers: found=%v err=%v", found, err)
+	}
+	if !slices.Equal(finalizers, []string{"shared", "first", "second"}) {
+		t.Fatalf("expected a stable union of list values, got %v", finalizers)
+	}
+}
+
 func TestExtractManagedFieldsListCopiesWholeOwnedKeyedItem(t *testing.T) {
-	live := []interface{}{map[string]interface{}{
+	live := []any{map[string]any{
 		"apiVersion": "example.com/v1",
 		"kind":       "ExternalOwner",
 		"name":       "external",
 		"uid":        "external-owner-uid",
 	}}
-	for _, children := range []map[string]interface{}{
+	for _, children := range []map[string]any{
 		{},
-		{".": map[string]interface{}{}},
+		{".": map[string]any{}},
 	} {
-		fields := map[string]interface{}{
+		fields := map[string]any{
 			`k:{"uid":"external-owner-uid"}`: children,
 		}
 		extracted := extractManagedFieldsList(live, fields)
-		if !slices.EqualFunc(extracted, live, func(left, right interface{}) bool {
+		if !slices.EqualFunc(extracted, live, func(left, right any) bool {
 			return equality.Semantic.DeepEqual(left, right)
 		}) {
 			t.Fatalf("expected full keyed item for fields %v, got %v", children, extracted)
@@ -2353,13 +2719,13 @@ func TestManagedFieldsOwnOwnerReferencesTreatsAtomicItemsAsWhole(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("get desired owner references: found=%v err=%v", found, err)
 	}
-	for name, children := range map[string]map[string]interface{}{
+	for name, children := range map[string]map[string]any{
 		"empty item": {},
-		"dot item":   {".": map[string]interface{}{}},
+		"dot item":   {".": map[string]any{}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fields := map[string]interface{}{
-				`k:{"uid":"test-uid"}`: children,
+			fields := map[string]any{
+				fmt.Sprintf(`k:{"uid":%q}`, testUID): children,
 			}
 			if !managedFieldsOwnOwnerReferences(desired, fields) {
 				t.Fatalf("expected atomic item fields %v to own the full owner reference", children)
@@ -2402,7 +2768,7 @@ func TestPreservedFieldsHandoffPreservesNonRenderedOwnerReferences(t *testing.T)
 	for _, reference := range got {
 		namesByUID[reference.UID] = reference.Name
 	}
-	if namesByUID["test-uid"] != "test" {
+	if namesByUID[testUID] != "test" {
 		t.Fatalf("expected rendered owner reference to use desired value, got %v", got)
 	}
 	if namesByUID["external-owner-uid"] != "external" {
@@ -2412,16 +2778,16 @@ func TestPreservedFieldsHandoffPreservesNonRenderedOwnerReferences(t *testing.T)
 
 func TestPreservedFieldsHandoffRelinquishesAtomicSelectorOwnedByStableManager(t *testing.T) {
 	live := newSSAWorkspaceForTest("")
-	live.Object["resource"] = map[string]interface{}{
+	live.Object["resource"] = map[string]any{
 		"count": int64(1),
-		"labelSelector": map[string]interface{}{
-			"matchLabels": map[string]interface{}{"kubernetes.io/os": "linux"},
+		"labelSelector": map[string]any{
+			"matchLabels": map[string]any{"kubernetes.io/os": testLinuxOS},
 		},
 	}
 	desired := live.DeepCopy()
-	desired.Object["resource"].(map[string]interface{})["labelSelector"] = map[string]interface{}{
-		"matchLabels": map[string]interface{}{
-			"kubernetes.io/os": "linux",
+	desired.Object["resource"].(map[string]any)["labelSelector"] = map[string]any{
+		"matchLabels": map[string]any{
+			"kubernetes.io/os": testLinuxOS,
 			"airunway.ai/new":  "true",
 		},
 	}
@@ -2448,7 +2814,12 @@ func TestPreservedFieldsHandoffRelinquishesAtomicSelectorOwnedByStableManager(t 
 		t.Fatalf("build interrupted selector handoff: %v", err)
 	}
 	if _, found, err := unstructured.NestedMap(handoff.Object, "resource", "labelSelector"); err != nil || found {
-		t.Fatalf("expected preservation manager to relinquish the whole atomic selector, found=%v err=%v object=%v", found, err, handoff.Object)
+		t.Fatalf(
+			"expected preservation manager to relinquish the whole atomic selector, found=%v err=%v object=%v",
+			found,
+			err,
+			handoff.Object,
+		)
 	}
 }
 
@@ -2457,7 +2828,7 @@ func newSSADeploymentForTest() *airunwayv1alpha1.ModelDeployment {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
 			Namespace: "default",
-			UID:       "test-uid",
+			UID:       testUID,
 		},
 	}
 }
@@ -2467,20 +2838,20 @@ func newSSAWorkspaceForTest(accessMode string) *unstructured.Unstructured {
 	controller := true
 	workspace.SetOwnerReferences([]metav1.OwnerReference{
 		{
-			APIVersion: "airunway.ai/v1alpha1",
-			Kind:       "ModelDeployment",
+			APIVersion: testModelDeploymentAPIVersion,
+			Kind:       testModelDeploymentKind,
 			Name:       "test",
-			UID:        "test-uid",
+			UID:        testUID,
 			Controller: &controller,
 		},
 	})
 	workspace.SetLabels(map[string]string{"airunway.ai/managed-by": "airunway"})
-	workspace.Object["resource"] = map[string]interface{}{"count": int64(1)}
-	preset := map[string]interface{}{"name": "test-model"}
+	workspace.Object["resource"] = map[string]any{"count": int64(1)}
+	preset := map[string]any{"name": "test-model"}
 	if accessMode != "" {
 		preset["accessMode"] = accessMode
 	}
-	workspace.Object["inference"] = map[string]interface{}{"preset": preset}
+	workspace.Object["inference"] = map[string]any{"preset": preset}
 	return workspace
 }
 
@@ -2501,8 +2872,16 @@ func getWorkspaceForTest(t *testing.T, c client.Client) *unstructured.Unstructur
 	return workspace
 }
 
-func interceptApplyPatch(callback func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error) func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
-	return func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+func interceptApplyPatch(
+	callback func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error,
+) func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+	return func(
+		ctx context.Context,
+		c client.WithWatch,
+		obj client.Object,
+		patch client.Patch,
+		opts ...client.PatchOption,
+	) error {
 		if patch.Type() != types.ApplyPatchType {
 			return c.Patch(ctx, obj, patch, opts...)
 		}
@@ -2522,7 +2901,13 @@ func interceptApplyPatch(callback func(context.Context, client.WithWatch, runtim
 	}
 }
 
-func applyAsManagerForTest(t *testing.T, c client.Client, workspace *unstructured.Unstructured, manager string, force bool) {
+func applyAsManagerForTest(
+	t *testing.T,
+	c client.Client,
+	workspace *unstructured.Unstructured,
+	manager string,
+	force bool,
+) {
 	t.Helper()
 	options := []client.ApplyOption{client.FieldOwner(manager)}
 	if force {
