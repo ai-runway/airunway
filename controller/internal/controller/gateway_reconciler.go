@@ -1098,14 +1098,7 @@ func (r *ModelDeploymentReconciler) cleanupControllerManagedResourcesForUserPool
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
 	}
 
-	// DestinationRule is optional and only registered when Istio is present.
-	if _, err := r.Client.RESTMapper().RESTMapping(schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}); err == nil {
-		dr := &unstructured.Unstructured{}
-		dr.SetGroupVersionKind(schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"})
-		dr.SetName(eppName)
-		dr.SetNamespace(md.Namespace)
-		resources = append(resources, dr)
-	}
+	resources = r.appendEPPDestinationRuleIfAvailable(resources, eppName, md.Namespace)
 
 	for _, resource := range resources {
 		if err := r.deleteIfControlledByModelDeployment(ctx, md, resource); err != nil {
@@ -1114,6 +1107,23 @@ func (r *ModelDeploymentReconciler) cleanupControllerManagedResourcesForUserPool
 	}
 
 	return r.removeControllerManagedPodLabels(ctx, md)
+}
+
+// appendEPPDestinationRuleIfAvailable adds the optional Istio resource to a
+// cleanup list only when the DestinationRule kind is registered.
+func (r *ModelDeploymentReconciler) appendEPPDestinationRuleIfAvailable(
+	resources []client.Object,
+	eppName, eppNamespace string,
+) []client.Object {
+	if _, err := r.Client.RESTMapper().RESTMapping(schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}); err != nil {
+		return resources
+	}
+
+	dr := &unstructured.Unstructured{}
+	dr.SetGroupVersionKind(schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"})
+	dr.SetName(eppName)
+	dr.SetNamespace(eppNamespace)
+	return append(resources, dr)
 }
 
 // deleteIfControlledByModelDeployment deletes obj only when its controller
@@ -1525,14 +1535,7 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: eppName, Namespace: md.Namespace}},
 		}
 
-		// Conditionally delete the DestinationRule if Istio is present
-		if _, err := r.Client.RESTMapper().RESTMapping(schema.GroupKind{Group: "networking.istio.io", Kind: "DestinationRule"}); err == nil {
-			dr := &unstructured.Unstructured{}
-			dr.SetGroupVersionKind(schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"})
-			dr.SetName(eppName)
-			dr.SetNamespace(md.Namespace)
-			eppResources = append(eppResources, dr)
-		}
+		eppResources = r.appendEPPDestinationRuleIfAvailable(eppResources, eppName, md.Namespace)
 
 		for _, obj := range eppResources {
 			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
