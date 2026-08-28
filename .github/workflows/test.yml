@@ -98,7 +98,7 @@ jobs:
         with:
           version: v2.7.2
           working-directory: controller
-          only-new-issues: true
+          only-new-issues: false
           args: --config=${{ github.workspace }}/.golangci.yml
 
   provider-lint:
