@@ -11,7 +11,7 @@ export interface K8sApiError {
   };
   body?: K8sErrorBody | string;
   message?: string;
-  code?: string;
+  code?: string | number;
 }
 
 /**

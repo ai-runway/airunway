@@ -252,6 +252,23 @@ describe('Hono Routes', () => {
       });
     });
 
+    test('GET /api/deployments surfaces Kubernetes listing failures', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => {
+          throw { code: 500, message: 'HTTP request failed' };
+        }),
+      );
+
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(500);
+
+      const data = await res.json();
+      expect(data.error).toEqual({
+        message: 'Internal Server Error',
+        statusCode: 500,
+      });
+    });
+
     test('POST /api/deployments/:name/chat streams proxied chat completions', async () => {
       let capturedModelLookupArgs: unknown[] | undefined;
       let capturedChatProxyArgs: unknown[] | undefined;

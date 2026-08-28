@@ -135,6 +135,62 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 });
 
 
+describe('KubernetesService - deployment listing', () => {
+  test('returns an empty list when the ModelDeployment CRD is absent', async () => {
+    const service = asMockable();
+    const originalCustomObjectsApi = service.customObjectsApi;
+
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => {
+        throw { code: 404, message: 'HTTP request failed' };
+      },
+    };
+
+    try {
+      expect(await kubernetesService.listDeployments()).toEqual([]);
+    } finally {
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('propagates cluster-wide Kubernetes API server failures', async () => {
+    const service = asMockable();
+    const originalCustomObjectsApi = service.customObjectsApi;
+    const apiError = { code: 500, message: 'HTTP request failed' };
+
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => {
+        throw apiError;
+      },
+    };
+
+    try {
+      await expect(kubernetesService.listDeployments()).rejects.toBe(apiError);
+    } finally {
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('propagates namespace-scoped Kubernetes API server failures', async () => {
+    const service = asMockable();
+    const originalCustomObjectsApi = service.customObjectsApi;
+    const apiError = { code: 500, message: 'HTTP request failed' };
+
+    service.customObjectsApi = {
+      listNamespacedCustomObject: async () => {
+        throw apiError;
+      },
+    };
+
+    try {
+      await expect(kubernetesService.listDeployments('default')).rejects.toBe(apiError);
+    } finally {
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+});
+
+
 describe('KubernetesService - deployment pod lookup', () => {
   test('aggregates and de-duplicates pods across exact supported selectors', async () => {
     const service = asMockable();
