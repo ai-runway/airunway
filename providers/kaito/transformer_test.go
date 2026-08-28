@@ -492,6 +492,59 @@ func TestTransformWithPodTemplateAnnotationsCopiesMap(t *testing.T) {
 	}
 }
 
+func TestTransformStripsReservedMigrationAnnotationsFromPodTemplate(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.PodTemplate = &airunwayv1alpha1.PodTemplateSpec{
+		Metadata: &airunwayv1alpha1.PodTemplateMetadata{
+			Annotations: map[string]string{
+				"custom-annotation":               "custom-value",
+				lastAppliedWorkspaceAnnotation:    "untrusted-fingerprint",
+				migrationManagersAnnotation:       "foo",
+				migrationPreviousFieldsAnnotation: `{"annotations":{"attacker":"true"}}`,
+			},
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+
+	annotations := resources[0].GetAnnotations()
+	if annotations["custom-annotation"] != "custom-value" {
+		t.Fatalf("expected ordinary annotation to survive, got %v", annotations)
+	}
+	for _, key := range []string{
+		lastAppliedWorkspaceAnnotation,
+		migrationManagersAnnotation,
+		migrationPreviousFieldsAnnotation,
+	} {
+		if _, found := annotations[key]; found {
+			t.Fatalf("expected reserved annotation %q to be stripped, got %v", key, annotations)
+		}
+	}
+}
+
+func TestTransformProviderOverridesCannotInjectReservedMigrationAnnotations(t *testing.T) {
+	md := newTestMD("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Overrides: &runtime.RawExtension{Raw: []byte(`{
+			"metadata": {
+				"annotations": {
+					"airunway.ai/kaito-migration-managers": "[\"attacker\"]",
+					"airunway.ai/kaito-migration-previous-fields": "{}"
+				}
+			}
+		}`)},
+	}
+
+	_, err := NewTransformer().Transform(context.Background(), md)
+	if err == nil || !strings.Contains(err.Error(), `overriding "metadata" is not allowed`) {
+		t.Fatalf("expected metadata override to be rejected, got %v", err)
+	}
+}
+
 func TestBuildResourceRequests(t *testing.T) {
 	tr := NewTransformer()
 

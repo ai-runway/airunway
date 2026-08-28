@@ -1808,7 +1808,10 @@ func mergeDesiredOwnerReferences(existing, desired []any) []any {
 	return merged
 }
 
-func managedAnnotations(annotations map[string]string) map[string]string {
+// sanitizedDesiredAnnotations copies user-rendered Workspace annotations while
+// removing the reconciler's private ownership-migration state. Only the
+// reconciler may add these keys after desired state has been fingerprinted.
+func sanitizedDesiredAnnotations(annotations map[string]string) map[string]string {
 	if len(annotations) == 0 {
 		return nil
 	}
@@ -1860,9 +1863,10 @@ func withoutLastAppliedWorkspaceAnnotation(resource *unstructured.Unstructured) 
 // AI Runway. SSA owns the annotation with the rest of the desired configuration;
 // future reconciles use it to detect removals without comparing KAITO defaults.
 func setLastAppliedManagedFields(resource *unstructured.Unstructured) error {
+	annotations := sanitizedDesiredAnnotations(resource.GetAnnotations())
 	managedFields := map[string]interface{}{
 		"labels":      copyStringMap(resource.GetLabels()),
-		"annotations": copyStringMap(managedAnnotations(resource.GetAnnotations())),
+		"annotations": copyStringMap(annotations),
 	}
 	if resourceSpec, found, _ := unstructured.NestedMap(resource.Object, "resource"); found {
 		managedFields["resource"] = resourceSpec
@@ -1876,7 +1880,7 @@ func setLastAppliedManagedFields(resource *unstructured.Unstructured) error {
 		return fmt.Errorf("failed to marshal last-applied Workspace fields: %w", err)
 	}
 
-	annotations := copyStringMap(resource.GetAnnotations())
+	annotations = copyStringMap(annotations)
 	annotations[lastAppliedWorkspaceAnnotation] = string(data)
 	resource.SetAnnotations(annotations)
 	return nil

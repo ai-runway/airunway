@@ -948,6 +948,91 @@ func TestCreateOrUpdateResourceCreatesAtomicallyWithStableFieldManager(t *testin
 	}
 }
 
+func TestCreateOrUpdateResourceStripsUntrustedMigrationAnnotations(t *testing.T) {
+	tests := []struct {
+		name              string
+		migrationManagers string
+		previousFields    string
+	}{
+		{
+			name:              "malformed internal state",
+			migrationManagers: "foo",
+			previousFields:    "{",
+		},
+		{
+			name:              "valid-looking internal state",
+			migrationManagers: `["attacker"]`,
+			previousFields:    `{"annotations":{"attacker":"true"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newScheme()
+			applyCalls := 0
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithReturnManagedFields().
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: interceptApplyPatch(func(
+						ctx context.Context,
+						c client.WithWatch,
+						obj runtime.ApplyConfiguration,
+						opts ...client.ApplyOption,
+					) error {
+						applyCalls++
+						return c.Apply(ctx, obj, opts...)
+					}),
+				}).
+				Build()
+			r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
+
+			newInjectedDesired := func() *unstructured.Unstructured {
+				desired := newSSAWorkspaceForTest(testPrivateAccessMode)
+				desired.SetAnnotations(map[string]string{
+					"example.com/keep":                "true",
+					migrationManagersAnnotation:       tt.migrationManagers,
+					migrationPreviousFieldsAnnotation: tt.previousFields,
+				})
+				return desired
+			}
+
+			if err := r.createOrUpdateResource(
+				context.Background(),
+				newInjectedDesired(),
+				newSSADeploymentForTest(),
+			); err != nil {
+				t.Fatalf("initial createOrUpdateResource: %v", err)
+			}
+			workspace := getWorkspaceForTest(t, c)
+			if workspace.GetAnnotations()["example.com/keep"] != "true" {
+				t.Fatalf("expected ordinary annotation to be applied, got %v", workspace.GetAnnotations())
+			}
+			for _, key := range []string{migrationManagersAnnotation, migrationPreviousFieldsAnnotation} {
+				if _, found := workspace.GetAnnotations()[key]; found {
+					t.Fatalf("expected injected migration annotation %q to be absent, got %v", key, workspace.GetAnnotations())
+				}
+			}
+
+			applyCallsAfterCreate := applyCalls
+			if err := r.createOrUpdateResource(
+				context.Background(),
+				newInjectedDesired(),
+				newSSADeploymentForTest(),
+			); err != nil {
+				t.Fatalf("stable createOrUpdateResource: %v", err)
+			}
+			if applyCalls != applyCallsAfterCreate {
+				t.Fatalf(
+					"expected stable reconcile not to apply injected state, calls before=%d after=%d",
+					applyCallsAfterCreate,
+					applyCalls,
+				)
+			}
+		})
+	}
+}
+
 func TestCreateOrUpdateResourceRecoversInterruptedCreateMigration(t *testing.T) {
 	scheme := newScheme()
 	wantErr := errors.New("managedFields migration interrupted")
@@ -2642,18 +2727,37 @@ func TestReconcileSurfacesApplyErrorInStatus(t *testing.T) {
 func TestSetLastAppliedManagedFieldsCopiesAnnotations(t *testing.T) {
 	ws := &unstructured.Unstructured{}
 	ws.SetName("test")
-	original := map[string]string{"operator.example.com/defaulted": "true"}
+	original := map[string]string{
+		"operator.example.com/defaulted":  "true",
+		lastAppliedWorkspaceAnnotation:    "untrusted-fingerprint",
+		migrationManagersAnnotation:       "foo",
+		migrationPreviousFieldsAnnotation: "{",
+	}
 	ws.SetAnnotations(original)
 
 	if err := setLastAppliedManagedFields(ws); err != nil {
 		t.Fatalf("setLastAppliedManagedFields: %v", err)
 	}
-	if _, ok := original[lastAppliedWorkspaceAnnotation]; ok {
+	if original[lastAppliedWorkspaceAnnotation] != "untrusted-fingerprint" ||
+		original[migrationManagersAnnotation] != "foo" ||
+		original[migrationPreviousFieldsAnnotation] != "{" {
 		t.Fatalf("expected caller annotations not to be mutated, got %v", original)
 	}
 	original["operator.example.com/defaulted"] = "mutated"
 	if ws.GetAnnotations()["operator.example.com/defaulted"] != "true" {
 		t.Fatalf("expected copied annotations, got %v", ws.GetAnnotations())
+	}
+	for _, key := range []string{migrationManagersAnnotation, migrationPreviousFieldsAnnotation} {
+		if _, found := ws.GetAnnotations()[key]; found {
+			t.Fatalf("expected reserved annotation %q to be removed from desired state, got %v", key, ws.GetAnnotations())
+		}
+	}
+	_, _, _, annotations, err := lastAppliedManagedFields(ws)
+	if err != nil {
+		t.Fatalf("lastAppliedManagedFields: %v", err)
+	}
+	if !equality.Semantic.DeepEqual(annotations, map[string]string{"operator.example.com/defaulted": "true"}) {
+		t.Fatalf("expected fingerprint to contain only ordinary annotations, got %v", annotations)
 	}
 }
 
