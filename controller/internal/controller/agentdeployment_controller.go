@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -116,7 +117,7 @@ type AgentDeploymentReconciler struct {
 	// installed and active.
 	// Production wires this to uncached admission-configuration reads.
 	// A nil check fails closed.
-	CredentialAdmissionCheck func(context.Context) error
+	CredentialAdmissionCheck func(context.Context, *airunwayv1alpha1.AgentDeployment) error
 
 	// CredentialAttestationCheck verifies that this exact UID, generation, and
 	// spec passed credential authorization. On CREATE it may atomically consume
@@ -131,6 +132,7 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get
 
@@ -149,17 +151,42 @@ func (r *AgentDeploymentReconciler) secretReader() client.Reader {
 // upgrades. Merely starting the local webhook server is insufficient: missing
 // admission configurations mean requests never reach it.
 func VerifyAgentCredentialAdmission(ctx context.Context, reader client.Reader) error {
-	return credentialAdmissionConfiguration(ctx, reader)
+	return credentialAdmissionConfiguration(ctx, reader, nil)
+}
+
+// VerifyAgentCredentialAdmissionForAgent verifies that admission protects the
+// namespace containing ad. Managed Kubernetes distributions may inject a
+// namespaceSelector that excludes their own control-plane namespaces. That is
+// safe for an AgentDeployment only when the selector still matches the
+// AgentDeployment's current namespace; the per-object attestation check that
+// follows proves the request actually traversed admission.
+func VerifyAgentCredentialAdmissionForAgent(
+	ctx context.Context,
+	reader client.Reader,
+	ad *airunwayv1alpha1.AgentDeployment,
+) error {
+	if ad == nil || ad.Namespace == "" {
+		return fmt.Errorf("credential admission check requires an AgentDeployment namespace")
+	}
+	var namespace corev1.Namespace
+	if err := reader.Get(ctx, k8stypes.NamespacedName{Name: ad.Namespace}, &namespace); err != nil {
+		return fmt.Errorf("read AgentDeployment namespace %q for credential admission: %w", ad.Namespace, err)
+	}
+	namespaceLabels := labels.Set(namespace.Labels)
+	if namespaceLabels == nil {
+		namespaceLabels = labels.Set{}
+	}
+	return credentialAdmissionConfiguration(ctx, reader, namespaceLabels)
 }
 
 // credentialAdmissionConfiguration checks the current credential-admission
 // configuration's fail-closed shape.
-func credentialAdmissionConfiguration(ctx context.Context, reader client.Reader) error {
-	validatorErr := credentialValidatingAdmissionConfiguration(ctx, reader)
+func credentialAdmissionConfiguration(ctx context.Context, reader client.Reader, namespaceLabels labels.Set) error {
+	validatorErr := credentialValidatingAdmissionConfiguration(ctx, reader, namespaceLabels)
 	if validatorErr == nil {
 		return nil
 	}
-	guardErr := credentialAdmissionUpgradeGuard(ctx, reader)
+	guardErr := credentialAdmissionUpgradeGuard(ctx, reader, namespaceLabels)
 	if guardErr == nil {
 		return nil
 	}
@@ -170,7 +197,11 @@ func credentialAdmissionConfiguration(ctx context.Context, reader client.Reader)
 	)
 }
 
-func credentialValidatingAdmissionConfiguration(ctx context.Context, reader client.Reader) error {
+func credentialValidatingAdmissionConfiguration(
+	ctx context.Context,
+	reader client.Reader,
+	namespaceLabels labels.Set,
+) error {
 	var config admissionv1.ValidatingWebhookConfiguration
 	key := k8stypes.NamespacedName{Name: agentCredentialValidatingWebhookConfiguration}
 	if err := reader.Get(ctx, key, &config); err != nil {
@@ -191,12 +222,16 @@ func credentialValidatingAdmissionConfiguration(ctx context.Context, reader clie
 		}
 		// Selectors and CEL match conditions can cause the API server to skip the
 		// webhook for a particular AgentDeployment even though the rule below
-		// appears to cover the resource globally. The controller cannot safely
-		// evaluate those predicates after admission (and, in particular, cannot
-		// reconstruct the requesting user's authorization), so credential
-		// resolution fails closed whenever the credential guard is conditional.
-		if !admissionSelectorMatchesAll(webhook.NamespaceSelector) {
-			return fmt.Errorf("credential validating admission webhook must not use namespaceSelector")
+		// appears to cover the resource globally. A namespace selector can be
+		// evaluated against the live namespace; object selectors and match
+		// conditions remain rejected because the controller cannot reconstruct
+		// every admission-time input after the request has persisted.
+		namespaceCovered, err := admissionNamespaceSelectorCovers(webhook.NamespaceSelector, namespaceLabels)
+		if err != nil {
+			return fmt.Errorf("credential validating admission webhook has invalid namespaceSelector: %w", err)
+		}
+		if !namespaceCovered {
+			return fmt.Errorf("credential validating admission webhook namespaceSelector does not match the AgentDeployment namespace")
 		}
 		if !admissionSelectorMatchesAll(webhook.ObjectSelector) {
 			return fmt.Errorf("credential validating admission webhook must not use objectSelector")
@@ -228,7 +263,7 @@ func credentialValidatingAdmissionConfiguration(ctx context.Context, reader clie
 	return fmt.Errorf("credential validating admission webhook %q is not installed", agentCredentialValidatingWebhookName)
 }
 
-func credentialAdmissionUpgradeGuard(ctx context.Context, reader client.Reader) error {
+func credentialAdmissionUpgradeGuard(ctx context.Context, reader client.Reader, namespaceLabels labels.Set) error {
 	var config admissionv1.MutatingWebhookConfiguration
 	key := k8stypes.NamespacedName{Name: agentCredentialUpgradeGuardConfiguration}
 	if err := reader.Get(ctx, key, &config); err != nil {
@@ -257,8 +292,12 @@ func credentialAdmissionUpgradeGuard(ctx context.Context, reader client.Reader) 
 	if !slices.Equal(webhook.AdmissionReviewVersions, []string{"v1"}) {
 		return fmt.Errorf("credential admission upgrade guard must use only admissionReviewVersions v1")
 	}
-	if !admissionSelectorMatchesAll(webhook.NamespaceSelector) {
-		return fmt.Errorf("credential admission upgrade guard must not use namespaceSelector")
+	namespaceCovered, err := admissionNamespaceSelectorCovers(webhook.NamespaceSelector, namespaceLabels)
+	if err != nil {
+		return fmt.Errorf("credential admission upgrade guard has invalid namespaceSelector: %w", err)
+	}
+	if !namespaceCovered {
+		return fmt.Errorf("credential admission upgrade guard namespaceSelector does not match the AgentDeployment namespace")
 	}
 	if !admissionSelectorMatchesAll(webhook.ObjectSelector) {
 		return fmt.Errorf("credential admission upgrade guard must not use objectSelector")
@@ -297,6 +336,23 @@ func admissionSelectorMatchesAll(selector *metav1.LabelSelector) bool {
 	return selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0)
 }
 
+func admissionNamespaceSelectorCovers(selector *metav1.LabelSelector, namespaceLabels labels.Set) (bool, error) {
+	if admissionSelectorMatchesAll(selector) {
+		return true, nil
+	}
+	// The manifest-level verifier has no concrete namespace and deliberately
+	// remains strict. Production uses VerifyAgentCredentialAdmissionForAgent,
+	// which supplies the live namespace labels.
+	if namespaceLabels == nil {
+		return false, nil
+	}
+	compiled, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return false, err
+	}
+	return compiled.Matches(namespaceLabels), nil
+}
+
 func admissionRuleContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want || value == "*" {
@@ -320,7 +376,11 @@ func admissionRuleCoversNamespacedResources(scope *admissionv1.ScopeType) bool {
 }
 
 // Reconcile resolves framework and model bindings for an AgentDeployment.
-func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
+	}()
+
 	logger := log.FromContext(ctx)
 
 	var ad airunwayv1alpha1.AgentDeployment
@@ -343,7 +403,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Ready. Only core-owned condition types are applied back (see below).
 	conds := ad.Status.Conditions
 
-	result := ctrl.Result{}
+	result = ctrl.Result{}
 	framework, frameworkReady := r.resolveFramework(ctx, &ad, &conds)
 
 	var binding *airunwayv1alpha1.ModelBindingStatus
@@ -665,7 +725,7 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 	if r.CredentialAdmissionCheck == nil {
 		admissionErr = fmt.Errorf("credential validating admission check is not configured")
 	} else {
-		admissionErr = r.CredentialAdmissionCheck(ctx)
+		admissionErr = r.CredentialAdmissionCheck(ctx, ad)
 	}
 	if admissionErr == nil {
 		if r.CredentialAttestationCheck == nil {
@@ -849,7 +909,7 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 	// genuinely claiming a core-owned field. Forcing would steal it back every
 	// reconcile and turn the documented ownership split into last-writer-wins.
 	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(AgentCoreFieldOwner)); err != nil {
-		return err
+		return agentprovider.StatusWriteError(err)
 	}
 	ad.ResourceVersion = apply.ResourceVersion
 	ad.Status = apply.Status
@@ -1086,7 +1146,8 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&airunwayv1alpha1.AgentDeployment{}).
+		For(&airunwayv1alpha1.AgentDeployment{},
+			ctrlbuilder.WithPredicates(agentprovider.CoreAgentDeploymentRelevantChange())).
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),

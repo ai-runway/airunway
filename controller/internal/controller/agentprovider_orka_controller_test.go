@@ -198,6 +198,76 @@ func TestRenderOrkaAgent(t *testing.T) {
 	if prompt != "coordinate specialists" {
 		t.Errorf("systemPrompt.inline = %q", prompt)
 	}
+	tools, found, err := unstructured.NestedSlice(agent.Object, "spec", "tools")
+	if err != nil || !found || len(tools) != 0 {
+		t.Errorf("spec.tools = %#v (found=%v, err=%v), want explicit empty list", tools, found, err)
+	}
+	coordination, found, err := unstructured.NestedMap(agent.Object, "spec", "coordination")
+	if err != nil || !found {
+		t.Fatalf("spec.coordination missing: found=%v, err=%v", found, err)
+	}
+	if coordination["enabled"] != false || coordination["autonomous"] != false ||
+		coordination["maxConcurrentChildren"] != int64(orkaDefaultMaxConcurrentChildren) ||
+		coordination["maxDepth"] != int64(orkaDefaultMaxDepth) || coordination["maxIterations"] != int64(0) {
+		t.Errorf("coordination defaults = %#v", coordination)
+	}
+	if len(coordination["allowedAgents"].([]interface{})) != 0 || len(coordination["approvalRequiredTools"].([]interface{})) != 0 {
+		t.Errorf("coordination lists = %#v, want explicit empty lists", coordination)
+	}
+}
+
+func TestRenderOrkaAgent_AdvancedConfig(t *testing.T) {
+	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
+	binding := airunwayv1alpha1.ModelBindingStatus{ModelName: "claude-opus-5"}
+	enabled, autonomous := true, true
+	maxChildren, maxDepth, maxIterations := int32(2), int32(1), int32(24)
+	agent := renderOrkaAgent(ad, orkaAgentConfig{
+		Tools: []orkaToolReference{{Name: "record-action", Enabled: &enabled}},
+		Coordination: &orkaCoordinationConfig{
+			Enabled: true,
+			AllowedAgents: []orkaAllowedAgent{
+				{Name: "math-specialist"},
+				{Name: "risk-specialist", Namespace: "specialists"},
+			},
+			ApprovalRequiredTools: []string{"record-action"},
+			Autonomous:            &autonomous,
+			MaxConcurrentChildren: &maxChildren,
+			MaxDepth:              &maxDepth,
+			MaxIterations:         &maxIterations,
+		},
+	}, binding, "swarm-provider")
+
+	tools, found, err := unstructured.NestedSlice(agent.Object, "spec", "tools")
+	if err != nil || !found || len(tools) != 1 {
+		t.Fatalf("spec.tools = %#v (found=%v, err=%v), want one tool", tools, found, err)
+	}
+	tool := tools[0].(map[string]interface{})
+	if tool["name"] != "record-action" || tool["enabled"] != true {
+		t.Errorf("spec.tools[0] = %#v, want enabled record-action", tool)
+	}
+
+	coordination, found, err := unstructured.NestedMap(agent.Object, "spec", "coordination")
+	if err != nil || !found {
+		t.Fatalf("spec.coordination missing: found=%v, err=%v", found, err)
+	}
+	if coordination["enabled"] != true || coordination["autonomous"] != true {
+		t.Errorf("coordination flags = %#v, want enabled autonomous mode", coordination)
+	}
+	if coordination["maxConcurrentChildren"] != int64(2) || coordination["maxDepth"] != int64(1) || coordination["maxIterations"] != int64(24) {
+		t.Errorf("coordination limits = %#v, want 2/1/24", coordination)
+	}
+	allowed := coordination["allowedAgents"].([]interface{})
+	if len(allowed) != 2 || allowed[0].(map[string]interface{})["name"] != "math-specialist" {
+		t.Errorf("coordination.allowedAgents = %#v", allowed)
+	}
+	risk := allowed[1].(map[string]interface{})
+	if risk["name"] != "risk-specialist" || risk["namespace"] != "specialists" {
+		t.Errorf("coordination.allowedAgents[1] = %#v", risk)
+	}
+	requiredTools := coordination["approvalRequiredTools"].([]interface{})
+	if len(requiredTools) != 1 || requiredTools[0] != "record-action" {
+		t.Errorf("coordination.approvalRequiredTools = %#v", requiredTools)
+	}
 }
 
 // --- envtest reconcile specs -----------------------------------------------
@@ -384,6 +454,75 @@ var _ = Describe("Orka crd provider", func() {
 		Expect(ad.Status.Phase).To(Equal(airunwayv1alpha1.AgentPhaseRunning))
 		Expect(meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady).Status).
 			To(Equal(metav1.ConditionTrue))
+	})
+
+	It("clears removed tools and coordination options", func() {
+		makeOrkaProviderConfig()
+		makeOrkaAgent("orka-config-pruning")
+
+		enabled, autonomous := true, true
+		maxChildren, maxDepth, maxIterations := int32(2), int32(1), int32(24)
+		initial, err := json.Marshal(orkaAgentConfig{
+			SystemPrompt: "advanced prompt",
+			Tools:        []orkaToolReference{{Name: "record-action", Enabled: &enabled}},
+			Coordination: &orkaCoordinationConfig{
+				Enabled:               true,
+				AllowedAgents:         []orkaAllowedAgent{{Name: "specialist"}},
+				ApprovalRequiredTools: []string{"record-action"},
+				Autonomous:            &autonomous,
+				MaxConcurrentChildren: &maxChildren,
+				MaxDepth:              &maxDepth,
+				MaxIterations:         &maxIterations,
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		ad := getAgent("orka-config-pruning")
+		ad.Spec.Config = &runtime.RawExtension{Raw: initial}
+		Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+		reconcileCore(ad.Name)
+		reconcileOrka(ad.Name)
+
+		agent := getUpstream(orkaAgentGVK, ad.Name)
+		requiredTools, found, err := unstructured.NestedStringSlice(agent.Object, "spec", "coordination", "approvalRequiredTools")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(requiredTools).To(Equal([]string{"record-action"}))
+
+		autonomous = false
+		updated, err := json.Marshal(orkaAgentConfig{
+			Coordination: &orkaCoordinationConfig{Enabled: true, Autonomous: &autonomous},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		ad = getAgent(ad.Name)
+		ad.Spec.Config = &runtime.RawExtension{Raw: updated}
+		Expect(k8sClient.Update(ctx, ad)).To(Succeed())
+		reconcileCore(ad.Name)
+		reconcileOrka(ad.Name)
+
+		agent = getUpstream(orkaAgentGVK, ad.Name)
+		prompt, found, err := unstructured.NestedString(agent.Object, "spec", "systemPrompt", "inline")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(prompt).To(BeEmpty())
+		tools, found, err := unstructured.NestedSlice(agent.Object, "spec", "tools")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(tools).To(BeEmpty())
+		allowedAgents, found, err := unstructured.NestedSlice(agent.Object, "spec", "coordination", "allowedAgents")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(allowedAgents).To(BeEmpty())
+		requiredTools, found, err = unstructured.NestedStringSlice(agent.Object, "spec", "coordination", "approvalRequiredTools")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(requiredTools).To(BeEmpty())
+		coordination, found, err := unstructured.NestedMap(agent.Object, "spec", "coordination")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(coordination).To(HaveKeyWithValue("autonomous", false))
+		Expect(coordination).To(HaveKeyWithValue("maxConcurrentChildren", int64(orkaDefaultMaxConcurrentChildren)))
+		Expect(coordination).To(HaveKeyWithValue("maxDepth", int64(orkaDefaultMaxDepth)))
+		Expect(coordination).To(HaveKeyWithValue("maxIterations", int64(0)))
 	})
 
 	It("stops the Agent after a definitive Provider create rejection", func() {

@@ -417,7 +417,11 @@ func containerPort(cfg containerConfig) int32 {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;delete
 
 // Reconcile renders the container workload for a container-backed AgentDeployment.
-func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
+	}()
+
 	var ad airunwayv1alpha1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &ad); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -2376,14 +2380,14 @@ func (r *ContainerProviderReconciler) reportRecordedJobOutcome(
 
 func liveJobStatus(job *batchv1.Job) (*airunwayv1alpha1.AgentRuntimeStatus, *airunwayv1alpha1.AgentReplicaStatus) {
 	return &airunwayv1alpha1.AgentRuntimeStatus{
-			WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
-				APIVersion: "batch/v1", Kind: "Job", Name: job.Name, Namespace: job.Namespace,
-			},
-		}, &airunwayv1alpha1.AgentReplicaStatus{
-			Desired:   ptr.Deref(job.Spec.Parallelism, 1),
-			Ready:     job.Status.Active,
-			Available: job.Status.Succeeded,
-		}
+		WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
+			APIVersion: "batch/v1", Kind: "Job", Name: job.Name, Namespace: job.Namespace,
+		},
+	}, &airunwayv1alpha1.AgentReplicaStatus{
+		Desired:   ptr.Deref(job.Spec.Parallelism, 1),
+		Ready:     job.Status.Active,
+		Available: job.Status.Succeeded,
+	}
 }
 
 func recordedJobStatus(ad *airunwayv1alpha1.AgentDeployment) (*airunwayv1alpha1.AgentRuntimeStatus, *airunwayv1alpha1.AgentReplicaStatus) {
@@ -4025,7 +4029,8 @@ func (r *ContainerProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&airunwayv1alpha1.AgentDeployment{}).
+		For(&airunwayv1alpha1.AgentDeployment{},
+			ctrlbuilder.WithPredicates(agentprovider.ProviderAgentDeploymentRelevantChange())).
 		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.Service{}).

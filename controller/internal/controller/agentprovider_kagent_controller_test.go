@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -86,7 +87,20 @@ func (c *recordingKagentResourceWriteClient) writesFor(gvk schema.GroupVersionKi
 // --- Pure render-function unit tests (no cluster) --------------------------
 
 func TestParseKagentConfig(t *testing.T) {
-	raw := &runtime.RawExtension{Raw: []byte(`{"systemPrompt":"be concise","description":"sre agent","runtime":"go"}`)}
+	raw := &runtime.RawExtension{Raw: []byte(`{
+		"systemPrompt":"be concise",
+		"description":"sre agent",
+		"runtime":"go",
+		"tools":[{
+			"type":"McpServer",
+			"mcpServer":{
+				"apiGroup":"kagent.dev",
+				"kind":"RemoteMCPServer",
+				"name":"readonly-kubernetes",
+				"toolNames":["k8s_get_resources"]
+			}
+		}]
+	}`)}
 	cfg, err := parseKagentConfig(raw)
 	if err != nil {
 		t.Fatalf("parseKagentConfig: %v", err)
@@ -99,6 +113,9 @@ func TestParseKagentConfig(t *testing.T) {
 	}
 	if cfg.Runtime != "go" {
 		t.Errorf("runtime = %q, want go", cfg.Runtime)
+	}
+	if len(cfg.Tools) != 1 || cfg.Tools[0].MCPServer == nil || cfg.Tools[0].MCPServer.Name != "readonly-kubernetes" {
+		t.Fatalf("tools = %#v, want the configured MCP server", cfg.Tools)
 	}
 
 	// nil / empty config must not panic and yields an empty config.
@@ -114,6 +131,17 @@ func TestParseKagentConfig(t *testing.T) {
 	if _, err := parseKagentConfig(&runtime.RawExtension{Raw: []byte(`{"runtime":"rust"}`)}); err == nil {
 		t.Fatal("undocumented kagent runtime must be rejected")
 	}
+	for name, config := range map[string]string{
+		"unsupported type": `{"tools":[{"type":"Agent","agent":{"name":"helper"}}]}`,
+		"missing server":   `{"tools":[{"type":"McpServer"}]}`,
+		"missing name":     `{"tools":[{"type":"McpServer","mcpServer":{}}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseKagentConfig(&runtime.RawExtension{Raw: []byte(config)}); err == nil {
+				t.Fatalf("config %s must be rejected", config)
+			}
+		})
+	}
 }
 
 func TestRenderKagentAgent(t *testing.T) {
@@ -121,7 +149,20 @@ func TestRenderKagentAgent(t *testing.T) {
 	ad.Name = "k8s-sre"
 	ad.Namespace = "agent-poc"
 
-	cfg := kagentConfig{SystemPrompt: "You are an SRE."}
+	cfg := kagentConfig{
+		SystemPrompt: "You are an SRE.",
+		Tools: []kagentToolRef{{
+			Type: "McpServer",
+			MCPServer: &kagentMCPServerToolRef{
+				APIGroup:        "kagent.dev",
+				Kind:            "RemoteMCPServer",
+				Name:            "readonly-kubernetes",
+				Namespace:       "agent-tools",
+				ToolNames:       []string{"k8s_get_resources", "k8s_get_events"},
+				RequireApproval: []string{"k8s_get_events"},
+			},
+		}},
+	}
 	agent := renderKagentAgent(ad, cfg, "k8s-sre-model")
 
 	if agent.GetAPIVersion() != kagentAPIVersion || agent.GetKind() != "Agent" {
@@ -144,6 +185,20 @@ func TestRenderKagentAgent(t *testing.T) {
 	if mc != "k8s-sre-model" {
 		t.Errorf("declarative.modelConfig = %q, want k8s-sre-model", mc)
 	}
+	tools, found, err := unstructured.NestedSlice(agent.Object, "spec", "declarative", "tools")
+	if err != nil || !found || len(tools) != 1 {
+		t.Fatalf("declarative.tools = %#v, found=%v, err=%v", tools, found, err)
+	}
+	mcpServer, found, err := unstructured.NestedMap(tools[0].(map[string]interface{}), "mcpServer")
+	if err != nil || !found {
+		t.Fatalf("declarative.tools[0].mcpServer missing: err=%v", err)
+	}
+	if mcpServer["name"] != "readonly-kubernetes" || mcpServer["namespace"] != "agent-tools" {
+		t.Errorf("mcpServer = %#v, want configured name and namespace", mcpServer)
+	}
+	if got := mcpServer["toolNames"]; !reflect.DeepEqual(got, []interface{}{"k8s_get_resources", "k8s_get_events"}) {
+		t.Errorf("mcpServer.toolNames = %#v", got)
+	}
 }
 
 func TestRenderKagentAgent_NoSystemPrompt(t *testing.T) {
@@ -155,6 +210,9 @@ func TestRenderKagentAgent_NoSystemPrompt(t *testing.T) {
 	// systemMessage must be absent (not an empty string) when no prompt is set.
 	if _, found, _ := unstructured.NestedString(agent.Object, "spec", "declarative", "systemMessage"); found {
 		t.Error("systemMessage should be absent when no systemPrompt is configured")
+	}
+	if _, found, _ := unstructured.NestedSlice(agent.Object, "spec", "declarative", "tools"); found {
+		t.Error("tools should be absent when none are configured")
 	}
 }
 

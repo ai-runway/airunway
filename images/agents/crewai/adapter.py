@@ -41,6 +41,10 @@ def _conversation(messages: list[dict[str, Any]]) -> str:
 class CrewAIAdapter:
     def invoke(self, messages: list[dict[str, Any]], config: dict[str, Any]) -> str:
         llm = _llm()
+        configured_system = config.get("systemPrompt")
+        if isinstance(configured_system, str) and configured_system.strip():
+            if not messages or messages[0].get("role") != "system":
+                messages = [{"role": "system", "content": configured_system}, *messages]
         definitions = config.get("agents")
         if not isinstance(definitions, list) or not definitions:
             definitions = [

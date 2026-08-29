@@ -504,11 +504,11 @@ func main() {
 			// Starting the local webhook server does not prove the admission rule is
 			// installed. Verify the fail-closed configuration live before resolving
 			// every credential-bearing binding.
-			CredentialAdmissionCheck: func(ctx context.Context) error {
+			CredentialAdmissionCheck: func(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
 				if !webhooksEnabled {
 					return fmt.Errorf("the webhook server is disabled")
 				}
-				return controller.VerifyAgentCredentialAdmission(ctx, mgr.GetAPIReader())
+				return controller.VerifyAgentCredentialAdmissionForAgent(ctx, mgr.GetAPIReader(), ad)
 			},
 			CredentialAttestationCheck: func(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
 				if credentialRecords == nil {

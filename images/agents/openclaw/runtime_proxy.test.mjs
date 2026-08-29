@@ -73,6 +73,113 @@ test("accepts case-insensitive Bearer schemes but rejects other credentials", as
   }
 });
 
+test("isolates chat requests while preserving complete OpenAI request bodies", async (t) => {
+  const received = [];
+  const upstream = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received.push({
+        headers: request.headers,
+        body: JSON.parse(Buffer.concat(chunks).toString()),
+      });
+      response.end("ok");
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxy(upstreamPort);
+  const proxyPort = await listen(proxy);
+  t.after(async () => {
+    proxy.closeAllConnections();
+    upstream.closeAllConnections();
+    await Promise.all([close(proxy), close(upstream)]);
+  });
+
+  const payload = {
+    model: "openclaw",
+    user: "ordinary-user-42",
+    messages: [
+      { role: "system", content: "Return a concise project assessment." },
+      { role: "user", content: "Compare options A and B." },
+      { role: "assistant", content: "What constraints should I use?" },
+      { role: "user", content: "Optimize for reliability, then cost." },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "assessment",
+        schema: {
+          type: "object",
+          properties: { recommendation: { type: "string" } },
+          required: ["recommendation"],
+          additionalProperties: false,
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(payload);
+  for (let index = 0; index < 2; index += 1) {
+    const response = await call(proxyPort, {
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer access-token",
+        "content-length": String(Buffer.byteLength(body)),
+        "content-type": "application/json",
+      },
+      body,
+    });
+    assert.equal(response.status, 200);
+  }
+
+  assert.equal(received.length, 2);
+  assert.deepEqual(received[0].body, payload);
+  assert.deepEqual(received[1].body, payload);
+  assert.equal(received[0].headers.authorization, "Bearer gateway-token");
+  assert.match(received[0].headers["x-openclaw-session-key"], /^airunway:/);
+  assert.match(received[1].headers["x-openclaw-session-key"], /^airunway:/);
+  assert.notEqual(
+    received[0].headers["x-openclaw-session-key"],
+    received[1].headers["x-openclaw-session-key"],
+  );
+});
+
+test("rejects caller-provided OpenClaw session keys", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = http.createServer((_request, response) => {
+    upstreamCalls += 1;
+    response.end("unexpected");
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxy(upstreamPort);
+  const proxyPort = await listen(proxy);
+  t.after(async () => {
+    proxy.closeAllConnections();
+    upstream.closeAllConnections();
+    await Promise.all([close(proxy), close(upstream)]);
+  });
+
+  const body = JSON.stringify({
+    model: "openclaw",
+    messages: [{ role: "user", content: "Remember this across requests." }],
+  });
+  const response = await call(proxyPort, {
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: {
+      authorization: "Bearer access-token",
+      "content-length": String(Buffer.byteLength(body)),
+      "content-type": "application/json",
+      "x-openclaw-session-key": "shared-session",
+    },
+    body,
+  });
+
+  assert.equal(response.status, 400);
+  assert.match(response.body, /x-openclaw-session-key is not supported/);
+  assert.equal(upstreamCalls, 0);
+});
+
 test("uses independent work and health request budgets", async (t) => {
   let releaseFirst;
   let firstReceived;

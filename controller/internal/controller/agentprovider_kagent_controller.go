@@ -98,7 +98,26 @@ type kagentConfig struct {
 	// the project publishes reliably (the "go" golang-adk image has had its
 	// pinned digests disappear from cr.kagent.dev). Override to "go" only when
 	// the faster-startup Go ADK is required and its image is known-good.
-	Runtime string `json:"runtime,omitempty"`
+	Runtime string          `json:"runtime,omitempty"`
+	Tools   []kagentToolRef `json:"tools,omitempty"`
+}
+
+// kagentToolRef is the supported subset of kagent's declarative ToolProvider.
+// Airunway advertises MCP for the kagent backend, so users must be able to bind
+// an existing ToolServer or RemoteMCPServer through AgentDeployment config
+// instead of patching the rendered child Agent out of band.
+type kagentToolRef struct {
+	Type      string                  `json:"type"`
+	MCPServer *kagentMCPServerToolRef `json:"mcpServer,omitempty"`
+}
+
+type kagentMCPServerToolRef struct {
+	APIGroup        string   `json:"apiGroup,omitempty"`
+	Kind            string   `json:"kind,omitempty"`
+	Name            string   `json:"name"`
+	Namespace       string   `json:"namespace,omitempty"`
+	ToolNames       []string `json:"toolNames,omitempty"`
+	RequireApproval []string `json:"requireApproval,omitempty"`
 }
 
 // +kubebuilder:rbac:groups=kagent.dev,resources=agents;modelconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -112,7 +131,11 @@ type kagentConfig struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
-func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
+	}()
+
 	logger := log.FromContext(ctx)
 
 	var ad airunwayv1alpha1.AgentDeployment
@@ -323,6 +346,17 @@ func parseKagentConfig(raw *runtime.RawExtension) (kagentConfig, error) {
 	default:
 		return kagentConfig{}, fmt.Errorf("spec.config.runtime %q is invalid: must be \"python\" or \"go\"", cfg.Runtime)
 	}
+	for i, tool := range cfg.Tools {
+		if tool.Type != "McpServer" {
+			return kagentConfig{}, fmt.Errorf("spec.config.tools[%d].type %q is invalid: only \"McpServer\" is supported", i, tool.Type)
+		}
+		if tool.MCPServer == nil {
+			return kagentConfig{}, fmt.Errorf("spec.config.tools[%d].mcpServer is required", i)
+		}
+		if tool.MCPServer.Name == "" {
+			return kagentConfig{}, fmt.Errorf("spec.config.tools[%d].mcpServer.name is required", i)
+		}
+	}
 	return cfg, nil
 }
 
@@ -409,6 +443,9 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 	if cfg.SystemPrompt != "" {
 		declarative["systemMessage"] = cfg.SystemPrompt
 	}
+	if len(cfg.Tools) > 0 {
+		declarative["tools"] = renderKagentTools(cfg.Tools)
+	}
 
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"spec": map[string]interface{}{
@@ -421,6 +458,43 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 	obj.SetName(ad.Name)
 	obj.SetNamespace(ad.Namespace)
 	return obj
+}
+
+func renderKagentTools(tools []kagentToolRef) []interface{} {
+	rendered := make([]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		mcpServer := map[string]interface{}{
+			"name": tool.MCPServer.Name,
+		}
+		if tool.MCPServer.APIGroup != "" {
+			mcpServer["apiGroup"] = tool.MCPServer.APIGroup
+		}
+		if tool.MCPServer.Kind != "" {
+			mcpServer["kind"] = tool.MCPServer.Kind
+		}
+		if tool.MCPServer.Namespace != "" {
+			mcpServer["namespace"] = tool.MCPServer.Namespace
+		}
+		if len(tool.MCPServer.ToolNames) > 0 {
+			mcpServer["toolNames"] = stringSliceToInterfaces(tool.MCPServer.ToolNames)
+		}
+		if len(tool.MCPServer.RequireApproval) > 0 {
+			mcpServer["requireApproval"] = stringSliceToInterfaces(tool.MCPServer.RequireApproval)
+		}
+		rendered = append(rendered, map[string]interface{}{
+			"type":      tool.Type,
+			"mcpServer": mcpServer,
+		})
+	}
+	return rendered
+}
+
+func stringSliceToInterfaces(values []string) []interface{} {
+	rendered := make([]interface{}, len(values))
+	for i, value := range values {
+		rendered[i] = value
+	}
+	return rendered
 }
 
 // applyProviderStatus writes the provider-owned status via the shared SSA
@@ -458,7 +532,8 @@ func (r *KagentProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&airunwayv1alpha1.AgentDeployment{}).
+		For(&airunwayv1alpha1.AgentDeployment{},
+			ctrlbuilder.WithPredicates(agentprovider.ProviderAgentDeploymentRelevantChange())).
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),

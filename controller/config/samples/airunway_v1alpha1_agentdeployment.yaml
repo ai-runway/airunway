@@ -61,6 +61,18 @@ spec:
     systemPrompt: |
       You are a Kubernetes SRE assistant. Diagnose pod, deployment, and
       networking issues. Prefer minimal-blast-radius actions.
+    # Attach an existing kagent ToolServer or RemoteMCPServer when the agent
+    # needs live tools. The tool server's own ServiceAccount and RBAC determine
+    # what it can access; prefer namespace-scoped, read-only permissions.
+    # tools:
+    #   - type: McpServer
+    #     mcpServer:
+    #       apiGroup: kagent.dev
+    #       kind: RemoteMCPServer
+    #       name: readonly-kubernetes
+    #       toolNames:
+    #         - k8s_get_resources
+    #         - k8s_get_events
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # Binding through the gateway by served model name.
@@ -119,6 +131,23 @@ spec:
       name: llama-8b-example
   config:
     systemPrompt: "Decompose the task and coordinate specialist agents."
+    # Orka tools are existing Tool CRs. Coordination can delegate to existing
+    # Orka Agents; approvalRequiredTools prevents named tools from running
+    # until a user approves them through Orka's Task approval API.
+    # tools:
+    #   - name: incident-recorder
+    #     enabled: true
+    # coordination:
+    #   enabled: true
+    #   autonomous: true
+    #   allowedAgents:
+    #     - name: research-specialist
+    #     - name: risk-specialist
+    #   approvalRequiredTools:
+    #     - incident-recorder
+    #   maxConcurrentChildren: 2
+    #   maxDepth: 1
+    #   maxIterations: 24
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # A one-shot agent: run to completion, then stop.

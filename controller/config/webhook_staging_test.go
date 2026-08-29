@@ -255,6 +255,20 @@ func TestManagerAdmissionConfigurationRBAC(t *testing.T) {
 			t.Fatalf("generated manager role does not allow get on %s", resource)
 		}
 	}
+
+	foundNamespaceGet := false
+	for _, rule := range role.Rules {
+		if !containsString(rule.APIGroups, "") || !containsString(rule.Resources, "namespaces") {
+			continue
+		}
+		if !reflect.DeepEqual(rule.Verbs, []string{"get"}) {
+			t.Fatalf("generated manager namespace verbs = %v, want only get", rule.Verbs)
+		}
+		foundNamespaceGet = true
+	}
+	if !foundNamespaceGet {
+		t.Fatal("generated manager role does not allow get on namespaces for selector evaluation")
+	}
 }
 
 func TestControllerDeployOrdersAdmissionGuard(t *testing.T) {

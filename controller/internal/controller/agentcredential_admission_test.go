@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -120,7 +121,7 @@ func newCredentialAuthorizedAgentDeploymentReconciler(c client.Client) *AgentDep
 		Client:    c,
 		Scheme:    c.Scheme(),
 		APIReader: reader,
-		CredentialAdmissionCheck: func(ctx context.Context) error {
+		CredentialAdmissionCheck: func(ctx context.Context, _ *airunwayv1alpha1.AgentDeployment) error {
 			return VerifyAgentCredentialAdmission(ctx, reader)
 		},
 		CredentialAttestationCheck: func(context.Context, *airunwayv1alpha1.AgentDeployment) error { return nil },
@@ -157,6 +158,22 @@ func TestVerifyAgentCredentialAdmission(t *testing.T) {
 		}
 		return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).WithReturnManagedFields()
 	}
+	newAgentReader := func(objects ...runtime.Object) client.Client {
+		scheme := runtime.NewScheme()
+		if err := admissionv1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		if err := corev1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).WithReturnManagedFields().Build()
+	}
+	aksNamespaceSelector := func() *metav1.LabelSelector {
+		return &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: "control-plane", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"true"}},
+			{Key: "kubernetes.azure.com/managedby", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"aks"}},
+		}}
+	}
 
 	t.Run("accepts the installed fail-closed AgentDeployment rule", func(t *testing.T) {
 		reader := newReader(valid()).Build()
@@ -189,6 +206,74 @@ func TestVerifyAgentCredentialAdmission(t *testing.T) {
 		reader := newReader(normal, guard).Build()
 		if err := VerifyAgentCredentialAdmission(context.Background(), reader); err != nil {
 			t.Fatalf("empty match-all selectors on the staged guard should be accepted: %v", err)
+		}
+	})
+
+	t.Run("accepts a managed-cluster namespace selector for a covered AgentDeployment namespace", func(t *testing.T) {
+		config := valid()
+		config.Webhooks[0].NamespaceSelector = aksNamespaceSelector()
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant-agents"}}
+		ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name: "credential-agent", Namespace: namespace.Name,
+		}}
+		reader := newAgentReader(config, namespace)
+
+		if err := VerifyAgentCredentialAdmissionForAgent(context.Background(), reader, ad); err != nil {
+			t.Fatalf("matching managed-cluster namespace selector should cover the AgentDeployment: %v", err)
+		}
+		if err := VerifyAgentCredentialAdmission(context.Background(), reader); err == nil {
+			t.Fatal("manifest-level verification without a concrete namespace must remain strict")
+		}
+	})
+
+	t.Run("rejects a managed-cluster namespace selector for an excluded AgentDeployment namespace", func(t *testing.T) {
+		config := valid()
+		config.Webhooks[0].NamespaceSelector = aksNamespaceSelector()
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: "managed-agents",
+			Labels: map[string]string{
+				"kubernetes.azure.com/managedby": "aks",
+			},
+		}}
+		ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name: "credential-agent", Namespace: namespace.Name,
+		}}
+
+		if err := VerifyAgentCredentialAdmissionForAgent(
+			context.Background(), newAgentReader(config, namespace), ad,
+		); err == nil {
+			t.Fatal("an excluded namespace must not authorize credential resolution")
+		}
+	})
+
+	t.Run("applies namespace selector evaluation to the staged upgrade guard", func(t *testing.T) {
+		normal := valid()
+		normal.Webhooks[0].Name = "vmodeldeployment-v1alpha1.kb.io"
+		guard := validAgentCredentialAdmissionUpgradeGuard()
+		guard.Webhooks[0].NamespaceSelector = aksNamespaceSelector()
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant-agents"}}
+		ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name: "credential-agent", Namespace: namespace.Name,
+		}}
+
+		if err := VerifyAgentCredentialAdmissionForAgent(
+			context.Background(), newAgentReader(normal, guard, namespace), ad,
+		); err != nil {
+			t.Fatalf("matching staged guard namespace selector should cover the AgentDeployment: %v", err)
+		}
+	})
+
+	t.Run("fails closed when the AgentDeployment namespace cannot be read", func(t *testing.T) {
+		config := valid()
+		config.Webhooks[0].NamespaceSelector = aksNamespaceSelector()
+		ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name: "credential-agent", Namespace: "missing-namespace",
+		}}
+
+		if err := VerifyAgentCredentialAdmissionForAgent(
+			context.Background(), newAgentReader(config), ad,
+		); err == nil {
+			t.Fatal("a namespace read failure must not authorize credential resolution")
 		}
 	})
 
@@ -229,7 +314,7 @@ func TestVerifyAgentCredentialAdmission(t *testing.T) {
 		reader := newReader().Build()
 		r := &AgentDeploymentReconciler{
 			Client: reader,
-			CredentialAdmissionCheck: func(context.Context) error {
+			CredentialAdmissionCheck: func(context.Context, *airunwayv1alpha1.AgentDeployment) error {
 				return nil
 			},
 		}
@@ -263,7 +348,7 @@ func TestVerifyAgentCredentialAdmission(t *testing.T) {
 		reader := newReader(valid()).Build()
 		r := &AgentDeploymentReconciler{
 			Client: reader,
-			CredentialAdmissionCheck: func(ctx context.Context) error {
+			CredentialAdmissionCheck: func(ctx context.Context, _ *airunwayv1alpha1.AgentDeployment) error {
 				return VerifyAgentCredentialAdmission(ctx, reader)
 			},
 			CredentialAttestationCheck: func(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {

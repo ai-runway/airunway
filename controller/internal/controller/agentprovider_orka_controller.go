@@ -43,6 +43,9 @@ const (
 	// OrkaFieldOwner is this provider's server-side apply field manager.
 	OrkaFieldOwner = "airunway-agents-orka"
 
+	orkaDefaultMaxConcurrentChildren int32 = 5
+	orkaDefaultMaxDepth              int32 = 3
+
 	// orkaAPIVersion is the Orka CRD group/version this provider renders
 	// against (github.com/orka-agents/orka).
 	orkaAPIVersion = "core.orka.ai/v1alpha1"
@@ -77,7 +80,35 @@ type OrkaProviderReconciler struct {
 
 // orkaAgentConfig is the Orka-specific spec.config contract.
 type orkaAgentConfig struct {
-	SystemPrompt string `json:"systemPrompt,omitempty"`
+	SystemPrompt string                  `json:"systemPrompt,omitempty"`
+	Tools        []orkaToolReference     `json:"tools,omitempty"`
+	Coordination *orkaCoordinationConfig `json:"coordination,omitempty"`
+}
+
+// orkaToolReference mirrors the supported fields in Orka v0.1.3's
+// core.orka.ai/v1alpha1 ToolReference. The enabled pointer preserves omission
+// so Orka can apply its default (true).
+type orkaToolReference struct {
+	Name    string `json:"name"`
+	Enabled *bool  `json:"enabled,omitempty"`
+}
+
+// orkaCoordinationConfig mirrors Orka v0.1.3's coordination contract. Optional
+// scalars use pointers so the renderer can distinguish explicit values from
+// omission and substitute Orka's documented defaults canonically.
+type orkaCoordinationConfig struct {
+	Enabled               bool               `json:"enabled"`
+	AllowedAgents         []orkaAllowedAgent `json:"allowedAgents,omitempty"`
+	ApprovalRequiredTools []string           `json:"approvalRequiredTools,omitempty"`
+	Autonomous            *bool              `json:"autonomous,omitempty"`
+	MaxConcurrentChildren *int32             `json:"maxConcurrentChildren,omitempty"`
+	MaxDepth              *int32             `json:"maxDepth,omitempty"`
+	MaxIterations         *int32             `json:"maxIterations,omitempty"`
+}
+
+type orkaAllowedAgent struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers;agents,verbs=get;list;watch;create;update;patch;delete
@@ -91,7 +122,11 @@ type orkaAgentConfig struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
-func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
+	}()
+
 	var ad airunwayv1alpha1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &ad); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -334,17 +369,64 @@ func orkaProviderType(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1al
 }
 
 // renderOrkaAgent builds an Orka Agent CR referencing the rendered Provider and
-// carrying the mapped system prompt (Orka's systemPrompt.inline).
+// carrying the mapped system prompt, tools, and coordination configuration.
 func renderOrkaAgent(ad *airunwayv1alpha1.AgentDeployment, cfg orkaAgentConfig, binding airunwayv1alpha1.ModelBindingStatus, providerName string) *unstructured.Unstructured {
 	spec := map[string]interface{}{
-		"providerRef": map[string]interface{}{"name": providerName},
+		"providerRef":  map[string]interface{}{"name": providerName},
+		"systemPrompt": map[string]interface{}{"inline": cfg.SystemPrompt},
 	}
 	if binding.ModelName != "" {
 		spec["model"] = map[string]interface{}{"name": binding.ModelName}
 	}
-	if cfg.SystemPrompt != "" {
-		spec["systemPrompt"] = map[string]interface{}{"inline": cfg.SystemPrompt}
+	tools := make([]interface{}, 0, len(cfg.Tools))
+	for _, tool := range cfg.Tools {
+		rendered := map[string]interface{}{"name": tool.Name}
+		if tool.Enabled != nil {
+			rendered["enabled"] = *tool.Enabled
+		}
+		tools = append(tools, rendered)
 	}
+	spec["tools"] = tools
+
+	coordination := map[string]interface{}{
+		"allowedAgents":         []interface{}{},
+		"approvalRequiredTools": []interface{}{},
+		"autonomous":            false,
+		"enabled":               false,
+		"maxConcurrentChildren": int64(orkaDefaultMaxConcurrentChildren),
+		"maxDepth":              int64(orkaDefaultMaxDepth),
+		"maxIterations":         int64(0),
+	}
+	if cfg.Coordination != nil {
+		coordination["enabled"] = cfg.Coordination.Enabled
+		allowedAgents := make([]interface{}, 0, len(cfg.Coordination.AllowedAgents))
+		for _, allowed := range cfg.Coordination.AllowedAgents {
+			rendered := map[string]interface{}{"name": allowed.Name}
+			if allowed.Namespace != "" {
+				rendered["namespace"] = allowed.Namespace
+			}
+			allowedAgents = append(allowedAgents, rendered)
+		}
+		coordination["allowedAgents"] = allowedAgents
+		approvalRequiredTools := make([]interface{}, 0, len(cfg.Coordination.ApprovalRequiredTools))
+		for _, toolName := range cfg.Coordination.ApprovalRequiredTools {
+			approvalRequiredTools = append(approvalRequiredTools, toolName)
+		}
+		coordination["approvalRequiredTools"] = approvalRequiredTools
+		if cfg.Coordination.Autonomous != nil {
+			coordination["autonomous"] = *cfg.Coordination.Autonomous
+		}
+		if cfg.Coordination.MaxConcurrentChildren != nil {
+			coordination["maxConcurrentChildren"] = int64(*cfg.Coordination.MaxConcurrentChildren)
+		}
+		if cfg.Coordination.MaxDepth != nil {
+			coordination["maxDepth"] = int64(*cfg.Coordination.MaxDepth)
+		}
+		if cfg.Coordination.MaxIterations != nil {
+			coordination["maxIterations"] = int64(*cfg.Coordination.MaxIterations)
+		}
+	}
+	spec["coordination"] = coordination
 
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
 	obj.SetGroupVersionKind(orkaAgentGVK)
@@ -384,7 +466,8 @@ func (r *OrkaProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&airunwayv1alpha1.AgentDeployment{}).
+		For(&airunwayv1alpha1.AgentDeployment{},
+			ctrlbuilder.WithPredicates(agentprovider.ProviderAgentDeploymentRelevantChange())).
 		Watches(
 			&airunwayv1alpha1.AgentProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToAgentDeployments),

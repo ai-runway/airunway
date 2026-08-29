@@ -85,10 +85,19 @@ export function createRuntimeProxy({
       }
 
       const healthRequest = request.url === "/healthz" || request.url === "/readyz";
+      const chatRequest = request.method === "POST" && request.url === "/v1/chat/completions";
       if (!healthRequest && !authorized(request, accessToken)) {
         jsonError(response, 401, "valid bearer authentication is required", {
           "www-authenticate": "Bearer",
         });
+        return;
+      }
+      if (chatRequest && request.headers["x-openclaw-session-key"] !== undefined) {
+        jsonError(
+          response,
+          400,
+          "x-openclaw-session-key is not supported; send conversation history in messages",
+        );
         return;
       }
       if (request.headers["transfer-encoding"]) {
@@ -140,6 +149,14 @@ export function createRuntimeProxy({
 
       const headers = { ...request.headers, authorization: `Bearer ${gatewayToken}` };
       delete headers.host;
+      delete headers["x-openclaw-session-key"];
+      if (chatRequest) {
+        // OpenClaw otherwise treats the standard OpenAI `user` field as a
+        // durable session identifier. Chat Completions is stateless: callers
+        // provide the complete conversation in `messages`, so isolate every
+        // request from prior OpenClaw transcript state.
+        headers["x-openclaw-session-key"] = `airunway:${crypto.randomUUID()}`;
+      }
 
       let downstreamClosed = false;
       let upstream;

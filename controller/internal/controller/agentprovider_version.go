@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 const agentProviderReporterHeartbeatInterval = 30 * time.Second
@@ -106,7 +107,11 @@ func (r *AgentProviderVersionReconciler) serves(apc *airunwayv1alpha1.AgentProvi
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs/status,verbs=get;update;patch
 
 // Reconcile publishes the provider version for its framework.
-func (r *AgentProviderVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *AgentProviderVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
+	}()
+
 	var apc airunwayv1alpha1.AgentProviderConfig
 	if err := r.Get(ctx, req.NamespacedName, &apc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -152,7 +157,7 @@ func (r *AgentProviderVersionReconciler) publishHeartbeat(
 		client.FieldOwner(AgentProviderHeartbeatFieldOwner(r.Name)),
 		client.ForceOwnership,
 	); err != nil {
-		return fmt.Errorf("publish provider heartbeat for %q: %w", apc.Name, err)
+		return fmt.Errorf("publish provider heartbeat for %q: %w", apc.Name, agentprovider.StatusWriteError(err))
 	}
 	apc.ResourceVersion = heartbeat.ResourceVersion
 	apc.Status.LastHeartbeat = &now
@@ -179,7 +184,7 @@ func (r *AgentProviderVersionReconciler) publishVersion(ctx context.Context, apc
 			},
 		}}
 		if err := r.Status().Patch(ctx, release, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
-			return fmt.Errorf("release provider version for %q: %w", apc.Name, err)
+			return fmt.Errorf("release provider version for %q: %w", apc.Name, agentprovider.StatusWriteError(err))
 		}
 		return nil
 	}
@@ -197,7 +202,7 @@ func (r *AgentProviderVersionReconciler) publishVersion(ctx context.Context, apc
 		Status: airunwayv1alpha1.AgentProviderConfigStatus{Version: r.Version},
 	}
 	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
-		return fmt.Errorf("publish provider version for %q: %w", apc.Name, err)
+		return fmt.Errorf("publish provider version for %q: %w", apc.Name, agentprovider.StatusWriteError(err))
 	}
 	return nil
 }

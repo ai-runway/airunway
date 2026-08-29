@@ -503,3 +503,43 @@ func TestProviderConfigReadinessTriggerDropsSelfCausedUpdates(t *testing.T) {
 		}
 	})
 }
+
+func TestProviderConfigReadinessCurrent(t *testing.T) {
+	ready := true
+	apc := &airunwayv1alpha1.AgentProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Generation: 4},
+		Status: airunwayv1alpha1.AgentProviderConfigStatus{
+			Ready: &ready,
+			Conditions: []metav1.Condition{{
+				Type:               agentProviderReadyCondition,
+				Status:             metav1.ConditionTrue,
+				Reason:             "ProviderRunning",
+				Message:            "Container rendering provider is available",
+				ObservedGeneration: 4,
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+
+	if !providerConfigReadinessCurrent(apc, true, metav1.ConditionTrue,
+		"ProviderRunning", "Container rendering provider is available") {
+		t.Fatal("unchanged readiness must skip its status write")
+	}
+
+	now := metav1.Now()
+	apc.Status.LastHeartbeat = &now
+	if !providerConfigReadinessCurrent(apc, true, metav1.ConditionTrue,
+		"ProviderRunning", "Container rendering provider is available") {
+		t.Fatal("heartbeat-only changes must not force a readiness status write")
+	}
+
+	if providerConfigReadinessCurrent(apc, true, metav1.ConditionTrue,
+		"OperatorInstalled", "Container rendering provider is available") {
+		t.Fatal("a changed reason must be published")
+	}
+	apc.Generation++
+	if providerConfigReadinessCurrent(apc, true, metav1.ConditionTrue,
+		"ProviderRunning", "Container rendering provider is available") {
+		t.Fatal("readiness must be republished for a new spec generation")
+	}
+}

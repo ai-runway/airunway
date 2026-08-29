@@ -1924,6 +1924,11 @@ var _ = Describe("Container provider", func() {
 			&airunwayv1alpha1.AgentRuntimeStatus{Address: "http://stale.default.svc"}, nil,
 			metav1.ConditionTrue, "StaleWrite", "must not reach the replacement")
 		Expect(apierrors.IsConflict(err)).To(BeTrue(), "expected resourceVersion conflict, got %v", err)
+		retry, handledErr := agentprovider.ResolveStatusWriteConflict(
+			reconcile.Result{RequeueAfter: time.Minute}, err)
+		Expect(handledErr).NotTo(HaveOccurred())
+		Expect(retry.Requeue).To(BeTrue(), "a concurrent status writer must trigger a fresh reconcile")
+		Expect(retry.RequeueAfter).To(BeZero())
 
 		live := getAgent(replacement.Name)
 		Expect(live.UID).To(Equal(replacement.UID))

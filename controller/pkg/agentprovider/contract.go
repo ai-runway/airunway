@@ -68,10 +68,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -253,7 +255,7 @@ func ApplyOwnedStatus(
 	}
 
 	if err := c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
-		return err
+		return StatusWriteError(err)
 	}
 	// Patch decodes the authoritative response into apply. Carry its status and
 	// resourceVersion forward so a provider that intentionally publishes more
@@ -286,6 +288,47 @@ func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1
 		return existing.LastTransitionTime
 	}
 	return metav1.Now()
+}
+
+// concurrentStatusWriteError marks a resource-version conflict from a status
+// subresource write. It keeps the original API error in the unwrap chain so
+// apierrors.IsConflict continues to work in callers and tests.
+type concurrentStatusWriteError struct {
+	err error
+}
+
+func (e *concurrentStatusWriteError) Error() string { return e.err.Error() }
+func (e *concurrentStatusWriteError) Unwrap() error { return e.err }
+
+// StatusWriteError classifies an optimistic status-write conflict so the
+// reconciler can restart from a fresh object without logging a failed
+// reconcile. Server-side apply ownership conflicts remain ordinary errors:
+// rereading cannot resolve two field managers claiming the same field.
+func StatusWriteError(err error) error {
+	if err == nil || !apierrors.IsConflict(err) || apierrors.HasStatusCause(err, metav1.CauseTypeFieldManagerConflict) {
+		return err
+	}
+	var alreadyMarked *concurrentStatusWriteError
+	if errors.As(err, &alreadyMarked) {
+		return err
+	}
+	return &concurrentStatusWriteError{err: err}
+}
+
+// ResolveStatusWriteConflict turns an optimistic status conflict into an
+// immediate clean requeue, which rereads and recomputes from the winning
+// revision. For every other error it clears result because controller-runtime
+// ignores explicit requeue settings when err is non-nil and warns if both are
+// returned.
+func ResolveStatusWriteConflict(result ctrl.Result, err error) (ctrl.Result, error) {
+	var conflict *concurrentStatusWriteError
+	if errors.As(err, &conflict) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	return result, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -574,7 +617,7 @@ func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alph
 		},
 	}}
 	if err := c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
-		return err
+		return StatusWriteError(err)
 	}
 	var updated airunwayv1alpha1.AgentDeployment
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(apply.Object, &updated); err != nil {
@@ -861,6 +904,71 @@ func HashJSON(v any) (string, error) {
 // -----------------------------------------------------------------------------
 // Watches and framework gating
 // -----------------------------------------------------------------------------
+
+// CoreAgentDeploymentRelevantChange filters the core controller's primary
+// watch. Provider phase/runtime refreshes do not affect core resolution; only
+// a ProviderReady freshness change can alter core's aggregate Ready condition.
+func CoreAgentDeploymentRelevantChange() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldAD, okOld := e.ObjectOld.(*airunwayv1alpha1.AgentDeployment)
+			newAD, okNew := e.ObjectNew.(*airunwayv1alpha1.AgentDeployment)
+			if !okOld || !okNew {
+				return true
+			}
+			if agentDeploymentInputsChanged(oldAD, newAD) {
+				return true
+			}
+			return conditionFreshnessChanged(oldAD.Status.Conditions, newAD.Status.Conditions,
+				airunwayv1alpha1.AgentConditionTypeProviderReady)
+		},
+	}
+}
+
+// ProviderAgentDeploymentRelevantChange filters provider primary watches down
+// to spec/metadata changes and status fields owned by core or another provider.
+// A provider's own phase/runtime refresh is paced by its explicit requeue and
+// child watches, so feeding that write straight back into every controller only
+// creates reconcile races.
+func ProviderAgentDeploymentRelevantChange() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldAD, okOld := e.ObjectOld.(*airunwayv1alpha1.AgentDeployment)
+			newAD, okNew := e.ObjectNew.(*airunwayv1alpha1.AgentDeployment)
+			if !okOld || !okNew {
+				return true
+			}
+			if agentDeploymentInputsChanged(oldAD, newAD) {
+				return true
+			}
+			if oldAD.Status.ProviderOwner != newAD.Status.ProviderOwner ||
+				!apiequality.Semantic.DeepEqual(oldAD.Status.Framework, newAD.Status.Framework) ||
+				!apiequality.Semantic.DeepEqual(oldAD.Status.ModelBinding, newAD.Status.ModelBinding) {
+				return true
+			}
+			return conditionFreshnessChanged(oldAD.Status.Conditions, newAD.Status.Conditions,
+				airunwayv1alpha1.AgentConditionTypeModelBound)
+		},
+	}
+}
+
+func agentDeploymentInputsChanged(oldAD, newAD *airunwayv1alpha1.AgentDeployment) bool {
+	return oldAD.Generation != newAD.Generation ||
+		!apiequality.Semantic.DeepEqual(oldAD.Spec, newAD.Spec) ||
+		!apiequality.Semantic.DeepEqual(oldAD.Annotations, newAD.Annotations) ||
+		!apiequality.Semantic.DeepEqual(oldAD.Labels, newAD.Labels) ||
+		!apiequality.Semantic.DeepEqual(oldAD.DeletionTimestamp, newAD.DeletionTimestamp)
+}
+
+func conditionFreshnessChanged(oldConditions, newConditions []metav1.Condition, conditionType string) bool {
+	oldCondition := meta.FindStatusCondition(oldConditions, conditionType)
+	newCondition := meta.FindStatusCondition(newConditions, conditionType)
+	if oldCondition == nil || newCondition == nil {
+		return oldCondition != newCondition
+	}
+	return oldCondition.Status != newCondition.Status ||
+		oldCondition.ObservedGeneration != newCondition.ObservedGeneration
+}
 
 // ProviderConfigRelevantChange filters AgentProviderConfig watch events down to
 // the changes that can alter how an AgentDeployment renders: a spec change, a

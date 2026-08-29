@@ -18,17 +18,23 @@ package agentprovider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
@@ -144,6 +150,127 @@ func TestProviderHandoffPending(t *testing.T) {
 	if ProviderHandoffPending(ad, FieldOwner("orka")) {
 		t.Fatal("an unowned provider status must not block initial rendering")
 	}
+}
+
+func TestResolveStatusWriteConflict(t *testing.T) {
+	resourceVersionConflict := apierrors.NewConflict(
+		schema.GroupResource{Group: airunwayv1alpha1.GroupVersion.Group, Resource: "agentdeployments"},
+		"agent", fmt.Errorf("the object has been modified"))
+	marked := StatusWriteError(resourceVersionConflict)
+	if !apierrors.IsConflict(marked) {
+		t.Fatalf("marked error must preserve the Kubernetes conflict, got %v", marked)
+	}
+	result, err := ResolveStatusWriteConflict(ctrl.Result{RequeueAfter: time.Minute}, marked)
+	if err != nil || !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("resource-version conflict resolved to (%+v, %v), want immediate clean requeue", result, err)
+	}
+
+	fieldManagerConflict := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status: metav1.StatusFailure,
+		Reason: metav1.StatusReasonConflict,
+		Code:   409,
+		Details: &metav1.StatusDetails{Causes: []metav1.StatusCause{{
+			Type:    metav1.CauseTypeFieldManagerConflict,
+			Message: "conflict with another field manager",
+		}}},
+	}}
+	result, err = ResolveStatusWriteConflict(ctrl.Result{RequeueAfter: time.Minute}, StatusWriteError(fieldManagerConflict))
+	if err == nil || !apierrors.HasStatusCause(err, metav1.CauseTypeFieldManagerConflict) {
+		t.Fatalf("field-manager conflict must remain an error, got %v", err)
+	}
+	if result != (ctrl.Result{}) {
+		t.Fatalf("result with a real error must be cleared, got %+v", result)
+	}
+
+	ordinary := errors.New("ordinary failure")
+	result, err = ResolveStatusWriteConflict(ctrl.Result{RequeueAfter: time.Minute}, ordinary)
+	if !errors.Is(err, ordinary) || result != (ctrl.Result{}) {
+		t.Fatalf("ordinary error resolved to (%+v, %v), want zero result and original error", result, err)
+	}
+}
+
+func TestAgentDeploymentRelevantChangePredicates(t *testing.T) {
+	base := func() *airunwayv1alpha1.AgentDeployment {
+		return &airunwayv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "agent", Namespace: "default", Generation: 3,
+				Labels: map[string]string{"team": "agents"},
+			},
+			Spec: airunwayv1alpha1.AgentDeploymentSpec{
+				Framework: airunwayv1alpha1.AgentFrameworkRef{Name: "crewai"},
+			},
+			Status: airunwayv1alpha1.AgentDeploymentStatus{
+				ProviderOwner: FieldOwner("container"),
+				Framework:     &airunwayv1alpha1.AgentFrameworkStatus{Name: "crewai"},
+				ModelBinding:  &airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://model/v1", ModelName: "model"},
+				Phase:         airunwayv1alpha1.AgentPhaseRunning,
+				Conditions: []metav1.Condition{
+					{Type: airunwayv1alpha1.AgentConditionTypeModelBound, Status: metav1.ConditionTrue, ObservedGeneration: 3},
+					{Type: airunwayv1alpha1.AgentConditionTypeProviderReady, Status: metav1.ConditionTrue, ObservedGeneration: 3},
+					{Type: airunwayv1alpha1.AgentConditionTypeReady, Status: metav1.ConditionTrue, ObservedGeneration: 3},
+				},
+			},
+		}
+	}
+	coreRelevant := CoreAgentDeploymentRelevantChange()
+	providerRelevant := ProviderAgentDeploymentRelevantChange()
+	update := func(p interface{ Update(event.UpdateEvent) bool }, before, after *airunwayv1alpha1.AgentDeployment) bool {
+		return p.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after})
+	}
+
+	t.Run("provider refresh does not feed back into either controller", func(t *testing.T) {
+		before, after := base(), base()
+		after.Status.Phase = airunwayv1alpha1.AgentPhaseDeploying
+		after.Status.Runtime = &airunwayv1alpha1.AgentRuntimeStatus{Address: "http://agent.default.svc"}
+		providerReady := meta.FindStatusCondition(after.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady)
+		providerReady.Reason = "PeriodicRefresh"
+		providerReady.LastTransitionTime = metav1.Now()
+		if update(coreRelevant, before, after) || update(providerRelevant, before, after) {
+			t.Fatal("provider-owned status refresh must not enqueue core or provider again")
+		}
+	})
+
+	t.Run("ProviderReady freshness enqueues only core", func(t *testing.T) {
+		before, after := base(), base()
+		meta.FindStatusCondition(after.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady).Status = metav1.ConditionFalse
+		if !update(coreRelevant, before, after) {
+			t.Fatal("core must aggregate a ProviderReady change")
+		}
+		if update(providerRelevant, before, after) {
+			t.Fatal("provider must not requeue itself for its own ProviderReady write")
+		}
+	})
+
+	t.Run("core binding change enqueues only providers", func(t *testing.T) {
+		before, after := base(), base()
+		after.Status.ModelBinding.ModelName = "new-model"
+		if update(coreRelevant, before, after) {
+			t.Fatal("core must not requeue itself for its own binding write")
+		}
+		if !update(providerRelevant, before, after) {
+			t.Fatal("provider must rerender when the resolved binding changes")
+		}
+	})
+
+	t.Run("spec change enqueues both", func(t *testing.T) {
+		before, after := base(), base()
+		after.Generation++
+		after.Spec.Framework.Name = "langgraph"
+		if !update(coreRelevant, before, after) || !update(providerRelevant, before, after) {
+			t.Fatal("spec change must enqueue core and provider")
+		}
+	})
+
+	t.Run("provider handoff enqueues providers", func(t *testing.T) {
+		before, after := base(), base()
+		after.Status.ProviderOwner = ""
+		if update(coreRelevant, before, after) {
+			t.Fatal("provider ownership alone does not affect core resolution")
+		}
+		if !update(providerRelevant, before, after) {
+			t.Fatal("provider ownership release must wake a successor")
+		}
+	})
 }
 
 func TestBoundedNamesRespectKubernetesLimits(t *testing.T) {

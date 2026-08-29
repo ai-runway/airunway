@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
 const (
@@ -94,7 +95,11 @@ type AgentProviderConfigReconciler struct {
 // +kubebuilder:rbac:groups=airunway.ai,resources=agentproviderconfigs/status,verbs=get;update;patch
 
 // Reconcile evaluates and publishes readiness for one AgentProviderConfig.
-func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *AgentProviderConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
+	}()
+
 	var apc airunwayv1alpha1.AgentProviderConfig
 	if err := r.Get(ctx, req.NamespacedName, &apc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -282,6 +287,9 @@ func (r *AgentProviderConfigReconciler) applyReadiness(
 	if ready {
 		condStatus = metav1.ConditionTrue
 	}
+	if providerConfigReadinessCurrent(apc, ready, condStatus, reason, msg) {
+		return nil
+	}
 
 	apply := &airunwayv1alpha1.AgentProviderConfig{
 		TypeMeta: metav1.TypeMeta{
@@ -306,10 +314,27 @@ func (r *AgentProviderConfigReconciler) applyReadiness(
 		},
 	}
 
-	return r.Status().Patch(ctx, apply, client.Apply,
+	return agentprovider.StatusWriteError(r.Status().Patch(ctx, apply, client.Apply,
 		client.FieldOwner(AgentProviderReadinessFieldOwner),
 		client.ForceOwnership,
-	)
+	))
+}
+
+func providerConfigReadinessCurrent(
+	apc *airunwayv1alpha1.AgentProviderConfig,
+	ready bool,
+	conditionStatus metav1.ConditionStatus,
+	reason, message string,
+) bool {
+	if apc.Status.Ready == nil || *apc.Status.Ready != ready {
+		return false
+	}
+	condition := meta.FindStatusCondition(apc.Status.Conditions, agentProviderReadyCondition)
+	return condition != nil &&
+		condition.Status == conditionStatus &&
+		condition.Reason == reason &&
+		condition.Message == message &&
+		condition.ObservedGeneration == apc.Generation
 }
 
 // providerConfigReadyTransition preserves the Ready condition's existing
