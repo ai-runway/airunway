@@ -83,6 +83,17 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return nil
 	}
 
+	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
+	if userProvidedPool {
+		// Switching from controller-managed gateway resources to a referenced
+		// pool is an ownership transition. Retire only objects this
+		// ModelDeployment controls before Gateway resolution so a missing or
+		// ambiguous Gateway cannot block cleanup.
+		if err := r.cleanupControllerManagedResourcesForUserPool(ctx, md); err != nil {
+			return fmt.Errorf("cleaning up controller-managed resources for user-provided InferencePool: %w", err)
+		}
+	}
+
 	// Resolve gateway configuration
 	gwConfig, err := r.resolveGatewayConfig(ctx)
 	if err != nil {
@@ -91,15 +102,8 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		return nil
 	}
 
-	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
 	var referencedPool *inferencev1.InferencePool
 	if userProvidedPool {
-		// Switching from controller-managed gateway resources to a referenced
-		// pool is an ownership transition. Retire only objects this
-		// ModelDeployment controls and leave the referenced pool/EPP untouched.
-		if err := r.cleanupControllerManagedResourcesForUserPool(ctx, md); err != nil {
-			return fmt.Errorf("cleaning up controller-managed resources for user-provided InferencePool: %w", err)
-		}
 		if referencedPool, err = r.getUserProvidedInferencePool(ctx, md); err != nil {
 			return err
 		}
@@ -1474,6 +1478,15 @@ func namespaceSelectorFromSet(namespaces map[string]bool) *metav1.LabelSelector 
 func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
 	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
+	if userProvidedPool {
+		// poolRef marks the referenced pool/EPP as external, but a single spec
+		// update can also transition an existing managed deployment into this
+		// mode while disabling the gateway. Retire only resources still owned by
+		// this ModelDeployment before the external-resource cleanup skips below.
+		if err := r.cleanupControllerManagedResourcesForUserPool(ctx, md); err != nil {
+			return fmt.Errorf("cleaning up controller-managed resources for user-provided InferencePool: %w", err)
+		}
+	}
 
 	// Resolve provider gateway capabilities. A nil result with nil error means
 	// the provider simply does not declare gateway capabilities — that is the

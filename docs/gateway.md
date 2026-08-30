@@ -284,8 +284,8 @@ Each `ModelDeployment` can override gateway behavior:
 ```yaml
 spec:
   gateway:
-    # Disable gateway integration for this specific deployment
-    enabled: false
+    # Enable gateway integration for the references below
+    enabled: true
     # Override the model name used in routing (defaults to auto-discovered from /v1/models, or spec.model.id)
     modelName: "my-custom-model-name"
     # Use an existing InferencePool in this ModelDeployment's namespace

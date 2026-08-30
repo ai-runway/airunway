@@ -100,6 +100,119 @@ func newModelDeployment(name, ns string) *airunwayv1alpha1.ModelDeployment {
 	}
 }
 
+func setModelDeploymentControllerOwner(
+	t *testing.T,
+	scheme *runtime.Scheme,
+	md *airunwayv1alpha1.ModelDeployment,
+	objects ...client.Object,
+) {
+	t.Helper()
+	for _, obj := range objects {
+		if err := ctrl.SetControllerReference(md, obj, scheme); err != nil {
+			t.Fatalf("set ModelDeployment controller reference on %T: %v", obj, err)
+		}
+	}
+}
+
+type poolRefCleanupFixture struct {
+	referencedPool    *inferencev1.InferencePool
+	referencedEPP     *appsv1.Deployment
+	managedPool       *inferencev1.InferencePool
+	managedEPP        *appsv1.Deployment
+	managedEPPService *corev1.Service
+	pod               *corev1.Pod
+}
+
+func newPoolRefCleanupFixture(
+	t *testing.T,
+	scheme *runtime.Scheme,
+	md *airunwayv1alpha1.ModelDeployment,
+) *poolRefCleanupFixture {
+	t.Helper()
+	if md.Spec.Gateway == nil || md.Spec.Gateway.PoolRef == "" {
+		t.Fatal("poolRef cleanup fixture requires a user-provided pool")
+	}
+
+	fixture := &poolRefCleanupFixture{
+		referencedPool: &inferencev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{Name: md.Spec.Gateway.PoolRef, Namespace: md.Namespace},
+			Spec: inferencev1.InferencePoolSpec{
+				EndpointPickerRef: inferencev1.EndpointPickerRef{Name: "shared-epp"},
+			},
+		},
+		referencedEPP: &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-epp", Namespace: md.Namespace},
+		},
+		managedPool: &inferencev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
+		},
+		managedEPP: &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace},
+		},
+		managedEPPService: &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace},
+		},
+		pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-model-pod",
+				Namespace: md.Namespace,
+				Labels: map[string]string{
+					airunwayv1alpha1.LabelModelDeployment: md.Name,
+				},
+			},
+		},
+	}
+	setModelDeploymentControllerOwner(
+		t,
+		scheme,
+		md,
+		fixture.managedPool,
+		fixture.managedEPP,
+		fixture.managedEPPService,
+	)
+	return fixture
+}
+
+func (f *poolRefCleanupFixture) clientObjects(md *airunwayv1alpha1.ModelDeployment) []client.Object {
+	return []client.Object{
+		md,
+		f.referencedPool,
+		f.referencedEPP,
+		f.managedPool,
+		f.managedEPP,
+		f.managedEPPService,
+		f.pod,
+	}
+}
+
+func (f *poolRefCleanupFixture) assertOwnershipBoundary(t *testing.T, ctx context.Context, r *ModelDeploymentReconciler) {
+	t.Helper()
+	for _, obj := range []client.Object{
+		&inferencev1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: f.managedPool.Name, Namespace: f.managedPool.Namespace}},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: f.managedEPP.Name, Namespace: f.managedEPP.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: f.managedEPPService.Name, Namespace: f.managedEPPService.Namespace}},
+	} {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); !apierrors.IsNotFound(err) {
+			t.Errorf("expected stale controller-owned %T to be deleted, got %v", obj, err)
+		}
+	}
+	for _, obj := range []client.Object{
+		&inferencev1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: f.referencedPool.Name, Namespace: f.referencedPool.Namespace}},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: f.referencedEPP.Name, Namespace: f.referencedEPP.Namespace}},
+	} {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+			t.Errorf("referenced user-owned %T was deleted: %v", obj, err)
+		}
+	}
+	var gotPod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKeyFromObject(f.pod), &gotPod); err != nil {
+		t.Fatalf("get model pod: %v", err)
+	}
+	if _, found := gotPod.Labels[airunwayv1alpha1.LabelModelDeployment]; found {
+		t.Errorf("controller model label was not removed: %v", gotPod.Labels)
+	}
+}
+
 // fakeDetector returns a Detector with explicit gateway config and availability set.
 func fakeDetector(available bool, gwName, gwNs string) *gateway.Detector {
 	dc := &fakediscovery.FakeDiscovery{Fake: &k8stesting.Fake{}}
@@ -659,6 +772,29 @@ func TestGateway_SwitchToUserProvidedPoolCleansControllerOwnedResources(t *testi
 	}
 }
 
+func TestGateway_SwitchToUserProvidedPoolCleansBeforeGatewayResolution(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "shared-pool"}
+	fixture := newPoolRefCleanupFixture(t, scheme, md)
+
+	// The GAIE CRDs are available, but there is no configured or discoverable
+	// Gateway. Cleanup must complete before resolveGatewayConfig reports that.
+	detector := fakeDetector(true, "", "")
+	r := newTestReconciler(scheme, detector, fixture.clientObjects(md)...)
+	ctx := context.Background()
+
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("reconcileGateway failed: %v", err)
+	}
+
+	fixture.assertOwnershipBoundary(t, ctx, r)
+	condition := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeGatewayReady)
+	if condition == nil || condition.Reason != "NoGateway" {
+		t.Fatalf("expected NoGateway condition after cleanup, got %#v", condition)
+	}
+}
+
 func TestGateway_MissingUserProvidedPoolRetiresManagedRouteUntilRecovery(t *testing.T) {
 	scheme := newTestScheme()
 	md := newModelDeployment("test-model", "default")
@@ -1019,6 +1155,26 @@ func TestGateway_DisabledCleansUpExistingResources(t *testing.T) {
 	if !found {
 		t.Error("expected GatewayReady condition to be set after cleanup")
 	}
+}
+
+func TestGateway_DisabledWithPoolRefCleansStaleControllerOwnedResources(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{
+		Enabled: boolPtr(false),
+		PoolRef: "shared-pool",
+	}
+	fixture := newPoolRefCleanupFixture(t, scheme, md)
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, fixture.clientObjects(md)...)
+	ctx := context.Background()
+
+	if err := r.cleanupGatewayResources(ctx, md); err != nil {
+		t.Fatalf("cleanupGatewayResources failed: %v", err)
+	}
+
+	fixture.assertOwnershipBoundary(t, ctx, r)
 }
 
 func TestGateway_CleanupPreservesUserProvidedPoolAndEPP(t *testing.T) {
