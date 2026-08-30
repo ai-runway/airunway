@@ -120,7 +120,7 @@ jobs:
             sleep 5
           done
 
-      - name: Create two ModelDeployments with distinct gateway model names
+      - name: Create ModelDeployments with automatic and explicit gateway model names
         run: |
           kubectl apply -f controller/test/e2e/testdata/gateway-modeldeployments.yaml
 
@@ -267,7 +267,7 @@ jobs:
           verify_model_resources llama-gw-e2e llama-3.2-1b-instruct
           verify_model_resources gemma-gw-e2e gemma-2-2b-instruct
 
-      - name: Verify gateway status has two distinct model names
+      - name: Verify automatic and explicit gateway model names are distinct
         run: |
           set -euo pipefail
 
@@ -294,20 +294,26 @@ jobs:
             -o jsonpath='{.status.gateway.modelName}')
           gemma_model=$(kubectl get modeldeployment gemma-gw-e2e -n default \
             -o jsonpath='{.status.gateway.modelName}')
+          llama_model_override=$(kubectl get modeldeployment llama-gw-e2e -n default \
+            -o jsonpath='{.spec.gateway.modelName}')
 
+          if [ -n "$llama_model_override" ]; then
+            echo "❌ llama-gw-e2e must omit spec.gateway.modelName to exercise auto-discovery"
+            exit 1
+          fi
           if [ "$llama_model" != "llama-3.2-1b-instruct" ]; then
-            echo "❌ llama-gw-e2e gateway model name mismatch: ${llama_model}"
+            echo "❌ llama-gw-e2e auto-discovered model name mismatch: ${llama_model}"
             exit 1
           fi
           if [ "$gemma_model" != "gemma-2-2b-instruct" ]; then
-            echo "❌ gemma-gw-e2e gateway model name mismatch: ${gemma_model}"
+            echo "❌ gemma-gw-e2e explicit gateway model name mismatch: ${gemma_model}"
             exit 1
           fi
           if [ "$llama_model" = "$gemma_model" ]; then
             echo "❌ Gateway model names must be distinct"
             exit 1
           fi
-          echo "✅ Gateway status exposes distinct model names: ${llama_model}, ${gemma_model}"
+          echo "✅ Gateway status exposes auto-discovered ${llama_model} and explicit ${gemma_model}"
 
       - name: Install Body-Based Router (BBR)
         run: |

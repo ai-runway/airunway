@@ -11,7 +11,7 @@ spec:
   image: "ghcr.io/kaito-project/aikit/llama3.2:1b"
   gateway:
     enabled: true
-    modelName: "llama-3.2-1b-instruct"
+    # modelName intentionally omitted to exercise discovery from /v1/models.
 ---
 apiVersion: airunway.ai/v1alpha1
 kind: ModelDeployment
