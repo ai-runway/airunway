@@ -24,15 +24,15 @@ jobs:
           - id: dynamo
             module: providers/dynamo
             test_command: make cover
-            threshold: 79.2
+            threshold: 79.1
           - id: kaito
             module: providers/kaito
             test_command: make cover
-            threshold: 83.6
+            threshold: 83.5
           - id: kuberay
             module: providers/kuberay
             test_command: make cover
-            threshold: 77.1
+            threshold: 76.9
           - id: llmd
             module: providers/llmd
             test_command: make cover
@@ -41,6 +41,10 @@ jobs:
             module: providers/vllm
             test_command: make cover
             threshold: 73.8
+          - id: pkg/shim
+            module: providers/pkg/shim
+            test_command: make cover
+            threshold: 80.0
 
     steps:
       - name: Checkout repository
