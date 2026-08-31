@@ -1098,15 +1098,32 @@ func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (stri
 	}
 
 	scheme := agentGatewayHTTPScheme
+	host := address
+	listenerHostname := ""
+	if selected.Hostname != nil {
+		listenerHostname = strings.TrimSpace(string(*selected.Hostname))
+		// A status address identifies where the Gateway is reachable, but a
+		// listener hostname identifies the HTTP Host and HTTPS SNI/certificate
+		// identity. Prefer that exact hostname whenever the listener declares it.
+		if strings.Contains(listenerHostname, "*") {
+			return "", fmt.Errorf("listener %q hostname %q is a wildcard; a concrete hostname is required", selected.Name, listenerHostname)
+		}
+		if listenerHostname != "" {
+			host = listenerHostname
+		}
+	}
 	if selected.Protocol == gatewayv1.HTTPSProtocolType {
 		scheme = agentGatewayHTTPSScheme
+		if listenerHostname == "" {
+			return "", fmt.Errorf("HTTPS listener %q has no concrete hostname for TLS verification", selected.Name)
+		}
 	}
-	if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
-		address = strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	}
 	endpoint := url.URL{
 		Scheme: scheme,
-		Host:   net.JoinHostPort(address, strconv.Itoa(int(selected.Port))),
+		Host:   net.JoinHostPort(host, strconv.Itoa(int(selected.Port))),
 		Path:   "/v1",
 	}
 	return endpoint.String(), nil

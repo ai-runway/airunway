@@ -45,6 +45,9 @@ const (
 
 	orkaDefaultMaxConcurrentChildren int32 = 5
 	orkaDefaultMaxDepth              int32 = 3
+	orkaProviderTypeAnthropic              = "anthropic"
+	orkaProviderTypeOpenAI                 = "openai"
+	orkaProviderTypeAzureOpenAI            = "azure-openai"
 
 	// orkaAPIVersion is the Orka CRD group/version this provider renders
 	// against (github.com/orka-agents/orka).
@@ -319,7 +322,7 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 	if binding.ModelName != "" {
 		spec["defaultModel"] = binding.ModelName
 	}
-	if orkaProviderType(ad, binding) == "azure-openai" {
+	if orkaProviderType(ad, binding) == orkaProviderTypeAzureOpenAI {
 		// Orka does not use defaultModel as Azure's deployment selector. Its
 		// controller requires the provider-specific deploymentName field and marks
 		// the Provider unready when it is absent.
@@ -353,21 +356,21 @@ func orkaProviderType(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1al
 	if binding.BindingMode == airunwayv1alpha1.ModelBindingModeExternalAPI {
 		switch binding.APIType {
 		case airunwayv1alpha1.ExternalAPITypeAnthropic:
-			return "anthropic"
+			return orkaProviderTypeAnthropic
 		case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
-			return "azure-openai"
+			return orkaProviderTypeAzureOpenAI
 		}
 		// Fallback for older status objects that may not yet carry apiType.
 		if ad.Spec.Model.ExternalAPI != nil {
 			switch ad.Spec.Model.ExternalAPI.Type {
 			case airunwayv1alpha1.ExternalAPITypeAnthropic:
-				return "anthropic"
+				return orkaProviderTypeAnthropic
 			case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
-				return "azure-openai"
+				return orkaProviderTypeAzureOpenAI
 			}
 		}
 	}
-	return "openai"
+	return orkaProviderTypeOpenAI
 }
 
 // renderOrkaAgent builds an Orka Agent CR referencing the rendered Provider and

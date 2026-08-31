@@ -805,6 +805,12 @@ func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 	listener := func(name string, protocol gatewayv1.ProtocolType, port gatewayv1.PortNumber) gatewayv1.Listener {
 		return gatewayv1.Listener{Name: gatewayv1.SectionName(name), Protocol: protocol, Port: port}
 	}
+	listenerWithHostname := func(name string, protocol gatewayv1.ProtocolType, port gatewayv1.PortNumber, hostname string) gatewayv1.Listener {
+		l := listener(name, protocol, port)
+		h := gatewayv1.Hostname(hostname)
+		l.Hostname = &h
+		return l
+	}
 
 	tests := []struct {
 		name      string
@@ -819,19 +825,37 @@ func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 			want:    "http://gateway.example.com:80/v1",
 		},
 		{
-			name: "named HTTPS listener supplies scheme and non-default port",
-			gateway: newGateway("gateway.example.com",
+			name: "named HTTPS listener supplies hostname scheme and non-default port",
+			gateway: newGateway("10.0.0.5",
 				listener("http", gatewayv1.HTTPProtocolType, 80),
-				listener("secure", gatewayv1.HTTPSProtocolType, 8443),
+				listenerWithHostname("secure", gatewayv1.HTTPSProtocolType, 8443, "models.example.com"),
 			),
 			selection: "secure",
-			want:      "https://gateway.example.com:8443/v1",
+			want:      "https://models.example.com:8443/v1",
 		},
 		{
 			name:      "IPv6 address is bracketed with listener port",
-			gateway:   newGateway("2001:db8::1", listener("secure", gatewayv1.HTTPSProtocolType, 443)),
+			gateway:   newGateway("2001:db8::1", listener("http", gatewayv1.HTTPProtocolType, 8080)),
+			selection: "http",
+			want:      "http://[2001:db8::1]:8080/v1",
+		},
+		{
+			name:      "HTTP listener hostname is used for Host routing",
+			gateway:   newGateway("10.0.0.5", listenerWithHostname("http", gatewayv1.HTTPProtocolType, 8080, "models.example.com")),
+			selection: "http",
+			want:      "http://models.example.com:8080/v1",
+		},
+		{
+			name:      "HTTPS listener without a hostname is rejected",
+			gateway:   newGateway("10.0.0.5", listener("secure", gatewayv1.HTTPSProtocolType, 443)),
 			selection: "secure",
-			want:      "https://[2001:db8::1]:443/v1",
+			wantErr:   "no concrete hostname",
+		},
+		{
+			name:      "wildcard listener hostname is rejected",
+			gateway:   newGateway("10.0.0.5", listenerWithHostname("secure", gatewayv1.HTTPSProtocolType, 443, "*.example.com")),
+			selection: "secure",
+			wantErr:   "wildcard",
 		},
 		{
 			name: "multiple compatible listeners require a selection",
