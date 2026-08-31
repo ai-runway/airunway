@@ -147,6 +147,7 @@ spec:
                         description: baseURL is the OpenAI-compatible base URL, e.g.
                           "https://api.openai.com/v1".
                         minLength: 1
+                        pattern: ^[hH][tT][tT][pP][sS]?://[^[:space:]/?#][^[:space:]]*$
                         type: string
                       credentialsRef:
                         description: credentialsRef points at a Secret holding the
@@ -193,6 +194,13 @@ spec:
                         description: gatewayRef points at the Gateway resource that
                           serves the model.
                         properties:
+                          listenerName:
+                            description: |-
+                              listenerName selects the HTTP or HTTPS Gateway listener used to derive
+                              the model endpoint scheme and port. It may be omitted when the Gateway
+                              has exactly one HTTP(S) listener.
+                            minLength: 1
+                            type: string
                           name:
                             description: name of the Gateway resource.
                             minLength: 1

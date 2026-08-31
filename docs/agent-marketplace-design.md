@@ -154,7 +154,7 @@ Reversed mid-review. See decision 2 — gating readiness on it destroyed every r
 
 ### 13. Gateway addresses come from published status, never derived DNS
 
-Three review comments asked for `deploymentRef` to resolve to `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`. **Declined, and the docs were corrected instead.** A Gateway resource name is not a Service DNS name — Gateway API does not require an implementation to name its data-plane Service after the Gateway, so that address does not resolve on some clusters. `resolveGatewayEndpoint` reads `Gateway.status.addresses`, the address the implementation itself publishes. `gatewayName`/`gatewayNamespace` are recorded for diagnostics only. IPv6 literals from that status are bracketed before use.
+Three review comments asked for `deploymentRef` to resolve to `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`. **Declined, and the docs were corrected instead.** A Gateway resource name is not a Service DNS name — Gateway API does not require an implementation to name its data-plane Service after the Gateway, so that address does not resolve on some clusters. `resolveGatewayEndpoint` reads `Gateway.status.addresses`, the address the implementation itself publishes, and combines it with the selected HTTP(S) listener's protocol and port. `gatewayRef.listenerName` is required when more than one HTTP(S) listener exists. `gatewayName`/`gatewayNamespace` are recorded for diagnostics only. IPv6 literals from that status are bracketed before use.
 
 ## Task breakdown
 

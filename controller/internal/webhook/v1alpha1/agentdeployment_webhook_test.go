@@ -333,3 +333,51 @@ func TestAgentDeploymentCustomValidator_AllowsMaxLengthName(t *testing.T) {
 		t.Fatalf("expected a %d-character name to be allowed, got: %v", agentDeploymentMaxNameLength, err)
 	}
 }
+
+func TestAgentDeploymentCustomValidator_ValidatesExternalAPIBaseURLOnCreateAndUpdate(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+
+	for _, valid := range []string{
+		"https://api.openai.com/v1",
+		"http://localhost:8080/v1",
+		"https://[2001:db8::1]:8443/v1",
+	} {
+		t.Run("create accepts "+valid, func(t *testing.T) {
+			obj := makeMinimalAgentDeployment("kagent")
+			obj.Name = "valid-agent"
+			obj.Spec.Model.ExternalAPI.BaseURL = valid
+			if _, err := validator.ValidateCreate(context.Background(), obj); err != nil {
+				t.Fatalf("expected %q to be accepted: %v", valid, err)
+			}
+		})
+	}
+
+	for _, invalid := range []string{
+		"/v1",
+		"api.example.com/v1",
+		"ftp://api.example.com/v1",
+		"https:///v1",
+		" https://api.example.com/v1",
+	} {
+		t.Run("create rejects "+invalid, func(t *testing.T) {
+			obj := makeMinimalAgentDeployment("kagent")
+			obj.Name = "invalid-agent"
+			obj.Spec.Model.ExternalAPI.BaseURL = invalid
+			_, err := validator.ValidateCreate(context.Background(), obj)
+			if err == nil || !strings.Contains(err.Error(), "spec.model.externalAPI.baseURL") {
+				t.Fatalf("expected %q to be rejected at baseURL, got %v", invalid, err)
+			}
+		})
+	}
+
+	t.Run("update rejects an invalid replacement", func(t *testing.T) {
+		oldObj := makeMinimalAgentDeployment("kagent")
+		oldObj.Name = "updated-agent"
+		newObj := oldObj.DeepCopy()
+		newObj.Spec.Model.ExternalAPI.BaseURL = "relative/v1"
+		_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
+		if err == nil || !strings.Contains(err.Error(), "spec.model.externalAPI.baseURL") {
+			t.Fatalf("expected invalid update baseURL to be rejected, got %v", err)
+		}
+	})
+}

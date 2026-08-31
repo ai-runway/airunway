@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
@@ -788,6 +789,91 @@ func TestNormalizeOpenAIBaseURLHandlesIPv6(t *testing.T) {
 		if got := normalizeOpenAIBaseURL(c.in); got != c.want {
 			t.Errorf("normalizeOpenAIBaseURL(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
+	newGateway := func(address string, listeners ...gatewayv1.Listener) *gatewayv1.Gateway {
+		gw := &gatewayv1.Gateway{Spec: gatewayv1.GatewaySpec{Listeners: listeners}}
+		if address != "" {
+			gw.Status.Addresses = []gatewayv1.GatewayStatusAddress{{Value: address}}
+		}
+		return gw
+	}
+	listener := func(name string, protocol gatewayv1.ProtocolType, port gatewayv1.PortNumber) gatewayv1.Listener {
+		return gatewayv1.Listener{Name: gatewayv1.SectionName(name), Protocol: protocol, Port: port}
+	}
+
+	tests := []struct {
+		name      string
+		gateway   *gatewayv1.Gateway
+		selection string
+		want      string
+		wantErr   string
+	}{
+		{
+			name:    "single HTTP listener can be inferred",
+			gateway: newGateway("gateway.example.com", listener("http", gatewayv1.HTTPProtocolType, 80)),
+			want:    "http://gateway.example.com:80/v1",
+		},
+		{
+			name: "named HTTPS listener supplies scheme and non-default port",
+			gateway: newGateway("gateway.example.com",
+				listener("http", gatewayv1.HTTPProtocolType, 80),
+				listener("secure", gatewayv1.HTTPSProtocolType, 8443),
+			),
+			selection: "secure",
+			want:      "https://gateway.example.com:8443/v1",
+		},
+		{
+			name:      "IPv6 address is bracketed with listener port",
+			gateway:   newGateway("2001:db8::1", listener("secure", gatewayv1.HTTPSProtocolType, 443)),
+			selection: "secure",
+			want:      "https://[2001:db8::1]:443/v1",
+		},
+		{
+			name: "multiple compatible listeners require a selection",
+			gateway: newGateway("gateway.example.com",
+				listener("http", gatewayv1.HTTPProtocolType, 80),
+				listener("secure", gatewayv1.HTTPSProtocolType, 443),
+			),
+			wantErr: "listenerName",
+		},
+		{
+			name:      "unknown selected listener is rejected",
+			gateway:   newGateway("gateway.example.com", listener("http", gatewayv1.HTTPProtocolType, 80)),
+			selection: "missing",
+			wantErr:   "does not exist",
+		},
+		{
+			name:      "non-HTTP selected listener is rejected",
+			gateway:   newGateway("gateway.example.com", listener("tcp", gatewayv1.TCPProtocolType, 9000)),
+			selection: "tcp",
+			wantErr:   "only HTTP and HTTPS",
+		},
+		{
+			name:    "missing status address remains not ready",
+			gateway: newGateway("", listener("http", gatewayv1.HTTPProtocolType, 80)),
+			wantErr: errGatewayStatusAddressMissing.Error(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := gatewayOpenAIBaseURL(tc.gateway, tc.selection)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("gatewayOpenAIBaseURL() error = %v, want error containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("gatewayOpenAIBaseURL() unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("gatewayOpenAIBaseURL() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -231,6 +231,17 @@ status:
 
 ## AgentDeployment model binding behavior
 
+For `spec.model.gatewayEndpoint`, the core controller combines the first
+published `Gateway.status.addresses` value with an HTTP(S) listener's protocol
+and port. Set `gatewayRef.listenerName` when the Gateway has more than one
+HTTP(S) listener; it may be omitted when exactly one compatible listener
+exists. Only HTTP and HTTPS listeners are supported, and the resolved URL
+always includes the listener port and the OpenAI-compatible `/v1` path.
+
+For `spec.model.externalAPI`, `baseURL` must be an absolute `http` or `https`
+URL with a host. Relative, hostless, and non-HTTP(S) values are rejected during
+admission on both create and update.
+
 For `spec.model.deploymentRef`, the core controller resolves the model binding in this order:
 
 1. If `ModelDeployment.status.gateway.endpoint` is present, use that endpoint (normalized to an OpenAI-compatible `/v1` base URL). This is the address the gateway implementation itself published in `Gateway.status.addresses`, so requests follow the same BBR/gateway route as a `gatewayEndpoint` binding.

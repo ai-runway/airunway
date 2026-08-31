@@ -25,7 +25,7 @@ Both crd providers reflect the upstream operator's own readiness (`status.condit
 
 ## Model binding modes
 
-`externalAPI` (OpenAI/Anthropic/Azure OpenAI/custom), `deploymentRef` (an in-cluster `ModelDeployment`, resolved to its service or gateway endpoint), and `gatewayEndpoint`. The core controller validates each binding's mode against the provider's declared `capabilities.modelBindingModes` and refuses unsupported combinations. The resolved binding is injected into container agents as the environment family matching `status.modelBinding.apiType` — `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` for openai, custom and keyless in-cluster bindings, and the `ANTHROPIC_*` / `AZURE_OPENAI_*` equivalents for those types — and into crd agents via the framework's native model config.
+`externalAPI` (OpenAI/Anthropic/Azure OpenAI/custom), `deploymentRef` (an in-cluster `ModelDeployment`, resolved to its service or gateway endpoint), and `gatewayEndpoint`. External base URLs must be absolute HTTP(S) URLs. A direct Gateway binding combines its published status address with a selected HTTP(S) listener's protocol and port; `gatewayRef.listenerName` may be omitted only when exactly one compatible listener exists. The core controller validates each binding's mode against the provider's declared `capabilities.modelBindingModes` and refuses unsupported combinations. The resolved binding is injected into container agents as the environment family matching `status.modelBinding.apiType` — `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` for openai, custom and keyless in-cluster bindings, and the `ANTHROPIC_*` / `AZURE_OPENAI_*` equivalents for those types — and into crd agents via the framework's native model config.
 
 ## `spec.config` — the framework contract
 
@@ -73,6 +73,6 @@ No off-the-shelf framework image honors the mounted-`agent.json` + `OPENAI_*` co
 ## Deferred follow-ups
 
 - Complete the runtime cutover to load provider shims fully out-of-tree (the shim modules now exist, but the main manager still wires providers in-process).
-- Advanced GAIE endpoint discovery for `gatewayEndpoint` bindings (listener/port/path selection beyond the current Gateway status address).
+- Advanced GAIE path selection beyond the current OpenAI-compatible `/v1` endpoint.
 - MCP tool wiring, A2A dependencies, and the egress `NetworkPolicy`.
 - Publish/point at real wrapped framework images (CrewAI wrapper first) so the container backend runs an actual agent end-to-end.

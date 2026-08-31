@@ -100,6 +100,7 @@ spec:
       gatewayRef:
         name: airunway-gateway
         # namespace defaults to this AgentDeployment's namespace
+        listenerName: http
       modelName: llama-3-8b
   config:
     systemPrompt: "You are a concise assistant."

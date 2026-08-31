@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -180,6 +181,7 @@ const agentDeploymentMaxNameLength = 63
 func (v *AgentDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(obj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
 	allErrs = append(allErrs, validateAgentDeploymentName(obj)...)
+	allErrs = append(allErrs, validateExternalAPIBaseURL(obj)...)
 	allErrs = append(allErrs, v.validateCredentialAccess(ctx, obj)...)
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
@@ -222,6 +224,29 @@ func validateAgentDeploymentName(obj *airunwayv1alpha1.AgentDeployment) field.Er
 	return nil
 }
 
+func validateExternalAPIBaseURL(obj *airunwayv1alpha1.AgentDeployment) field.ErrorList {
+	if obj.Spec.Model.ExternalAPI == nil {
+		return nil
+	}
+
+	baseURL := obj.Spec.Model.ExternalAPI.BaseURL
+	parsed, err := url.Parse(baseURL)
+	if err == nil &&
+		baseURL == strings.TrimSpace(baseURL) &&
+		parsed.IsAbs() &&
+		parsed.Host != "" &&
+		parsed.Hostname() != "" &&
+		(strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) {
+		return nil
+	}
+
+	return field.ErrorList{field.Invalid(
+		field.NewPath("spec", "model", "externalAPI", "baseURL"),
+		baseURL,
+		"must be an absolute http or https URL with a host",
+	)}
+}
+
 // ValidateUpdate validates AgentDeployment on update.
 func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	return v.validateUpdate(ctx, oldObj, newObj)
@@ -229,6 +254,7 @@ func (v *AgentDeploymentCustomValidator) ValidateUpdate(ctx context.Context, old
 
 func (v *AgentDeploymentCustomValidator) validateUpdate(ctx context.Context, oldObj, newObj *airunwayv1alpha1.AgentDeployment) (admission.Warnings, error) {
 	allErrs := validateAgentProviderOverrides(newObj.Spec.Provider, field.NewPath("spec", "provider", "overrides"))
+	allErrs = append(allErrs, validateExternalAPIBaseURL(newObj)...)
 	allErrs = append(allErrs, v.validateCredentialAccess(ctx, newObj)...)
 	if oldObj != nil && oldObj.Spec.Framework.Name != newObj.Spec.Framework.Name {
 		allErrs = append(allErrs, field.Forbidden(

@@ -18,8 +18,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,10 +43,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
+
+var errGatewayStatusAddressMissing = errors.New("gateway has no published status address")
 
 const (
 	// AgentCoreFieldOwner is the server-side apply field manager for the
@@ -806,10 +813,19 @@ func (r *AgentDeploymentReconciler) resolveGatewayEndpointBinding(
 			fmt.Sprintf("spec.model.gatewayEndpoint target Gateway %s/%s is being deleted", ns, gw.GatewayRef.Name)
 	}
 
-	baseURL := normalizeOpenAIBaseURL(gatewayStatusAddress(&gateway))
-	if baseURL == "" {
+	var typedGateway gatewayv1.Gateway
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(gateway.Object, &typedGateway); err != nil {
+		return st, false, true, "GatewayInvalid",
+			fmt.Sprintf("spec.model.gatewayEndpoint target Gateway %s/%s could not be decoded: %v", ns, gw.GatewayRef.Name, err)
+	}
+	baseURL, err := gatewayOpenAIBaseURL(&typedGateway, gw.GatewayRef.ListenerName)
+	if errors.Is(err, errGatewayStatusAddressMissing) {
 		return st, false, true, "GatewayNotReady",
 			fmt.Sprintf("spec.model.gatewayEndpoint target Gateway %s/%s has no published status address", ns, gw.GatewayRef.Name)
+	}
+	if err != nil {
+		return st, false, true, "GatewayListenerUnresolved",
+			fmt.Sprintf("spec.model.gatewayEndpoint target Gateway %s/%s cannot resolve a listener: %v", ns, gw.GatewayRef.Name, err)
 	}
 	st.BaseURL = baseURL
 	return st, true, false, "", ""
@@ -1029,22 +1045,65 @@ func bracketBareIPv6(host string) string {
 	return "[" + host + "]"
 }
 
-func gatewayStatusAddress(gw *unstructured.Unstructured) string {
-	addresses, found, err := unstructured.NestedSlice(gw.Object, "status", "addresses")
-	if err != nil || !found {
-		return ""
-	}
-	for _, raw := range addresses {
-		addr, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		value, ok := addr["value"].(string)
-		if ok && strings.TrimSpace(value) != "" {
-			return value
+func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (string, error) {
+	address := ""
+	for _, candidate := range gw.Status.Addresses {
+		if value := strings.TrimSpace(candidate.Value); value != "" {
+			address = value
+			break
 		}
 	}
-	return ""
+	if address == "" {
+		return "", errGatewayStatusAddressMissing
+	}
+
+	compatible := make([]gatewayv1.Listener, 0, len(gw.Spec.Listeners))
+	for _, listener := range gw.Spec.Listeners {
+		if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType {
+			compatible = append(compatible, listener)
+		}
+	}
+
+	var selected *gatewayv1.Listener
+	if requestedListener != "" {
+		for i := range gw.Spec.Listeners {
+			listener := &gw.Spec.Listeners[i]
+			if string(listener.Name) != requestedListener {
+				continue
+			}
+			if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
+				return "", fmt.Errorf("listener %q uses protocol %q; only HTTP and HTTPS listeners are supported", requestedListener, listener.Protocol)
+			}
+			selected = listener
+			break
+		}
+		if selected == nil {
+			return "", fmt.Errorf("listener %q does not exist", requestedListener)
+		}
+	} else {
+		switch len(compatible) {
+		case 0:
+			return "", fmt.Errorf("gateway has no HTTP or HTTPS listeners")
+		case 1:
+			selected = &compatible[0]
+		default:
+			return "", fmt.Errorf("gateway has %d HTTP(S) listeners; set spec.model.gatewayEndpoint.gatewayRef.listenerName", len(compatible))
+		}
+	}
+
+	scheme := "http"
+	if selected.Protocol == gatewayv1.HTTPSProtocolType {
+		scheme = "https"
+	}
+	if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
+		address = strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")
+	}
+	endpoint := url.URL{
+		Scheme: scheme,
+		Host:   net.JoinHostPort(address, strconv.Itoa(int(selected.Port))),
+		Path:   "/v1",
+	}
+	return endpoint.String(), nil
 }
 
 // setAgentCondition upserts a condition, preserving LastTransitionTime on
