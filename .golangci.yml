@@ -24,6 +24,8 @@ linters:
     - unparam
     - unused
   settings:
+    dupl:
+      threshold: 50
     revive:
       rules:
         - name: comment-spacings
@@ -38,9 +40,11 @@ linters:
           - lll
         path: ^controller/api/
       - linters:
-          - dupl
           - lll
         path: ^controller/internal/
+      - linters:
+          - dupl
+        path: _test\.go$
     paths:
       - ^controller/(third_party|builtin|examples)(/|$)
 formatters:

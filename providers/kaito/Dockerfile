@@ -16,12 +16,18 @@ ENV GOWORK=off
 # Copy controller dependency (referenced by go.mod replace directive)
 COPY controller/go.mod controller/go.sum controller/
 
+# Copy shared provider shim dependency (referenced by go.mod replace directive)
+COPY providers/pkg/shim/go.mod providers/pkg/shim/go.sum providers/pkg/shim/
+
 # Copy provider module manifests and download dependencies
 COPY providers/kaito/go.mod providers/kaito/go.sum providers/kaito/
 RUN cd providers/kaito && go mod download
 
 # Copy the controller Go source
 COPY controller/ controller/
+
+# Copy the shared provider shim source
+COPY providers/pkg/shim/ providers/pkg/shim/
 
 # Copy the provider Go source
 COPY providers/kaito/ providers/kaito/
