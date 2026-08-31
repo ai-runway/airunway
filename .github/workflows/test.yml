@@ -237,8 +237,9 @@ jobs:
         with:
           version: v2.7.2
           working-directory: controller
-          only-new-issues: true
-          args: --config=${{ github.workspace }}/.golangci.yml
+          args: >-
+            --config=${{ github.workspace }}/.golangci.yml
+            --new-from-rev=${{ github.event.pull_request.base.sha || github.event.before }}
 
   provider-lint:
     runs-on: ubuntu-latest
@@ -266,8 +267,9 @@ jobs:
         with:
           version: v2.7.2
           working-directory: providers/${{ matrix.provider }}
-          only-new-issues: true
-          args: --config=${{ github.workspace }}/.golangci.yml
+          args: >-
+            --config=${{ github.workspace }}/.golangci.yml
+            --new-from-rev=${{ github.event.pull_request.base.sha || github.event.before }}
 
   provider-shim-checks:
     runs-on: ubuntu-latest
@@ -289,8 +291,9 @@ jobs:
         with:
           version: v2.7.2
           working-directory: providers/pkg/shim
-          only-new-issues: true
-          args: --config=${{ github.workspace }}/.golangci.yml
+          args: >-
+            --config=${{ github.workspace }}/.golangci.yml
+            --new-from-rev=${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Test provider shim
         run: go test -C providers/pkg/shim ./...
