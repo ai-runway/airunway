@@ -37,6 +37,7 @@ const (
 	testModelDeploymentKind       = "ModelDeployment"
 	testCreateFailedReason        = "CreateFailed"
 	testResourceConflictReason    = "ResourceConflict"
+	testPreservedAnnotationValue  = "preserve-me"
 )
 
 func newScheme() *runtime.Scheme {
@@ -1479,7 +1480,7 @@ func TestCreateOrUpdateResourceDoesNotMigrateUnrelatedUpdateManagerAfterSSA(t *t
 
 	external := getWorkspaceForTest(t, c)
 	annotations := external.GetAnnotations()
-	annotations["external.example.com/value"] = "preserve-me"
+	annotations["external.example.com/value"] = testPreservedAnnotationValue
 	external.SetAnnotations(annotations)
 	if err := c.Update(context.Background(), external, client.FieldOwner("external-update-manager")); err != nil {
 		t.Fatalf("update Workspace as external manager: %v", err)
@@ -1501,8 +1502,64 @@ func TestCreateOrUpdateResourceDoesNotMigrateUnrelatedUpdateManagerAfterSSA(t *t
 	if err != nil || fields == nil {
 		t.Fatalf("expected unrelated Update manager ownership to survive, fields=%v err=%v", fields, err)
 	}
-	if got := after.GetAnnotations()["external.example.com/value"]; got != "preserve-me" {
+	if got := after.GetAnnotations()["external.example.com/value"]; got != testPreservedAnnotationValue {
 		t.Fatalf("expected unrelated field to survive, got %q", got)
+	}
+}
+
+func TestCreateOrUpdateResourceDoesNotMigrateUnrelatedPreAnnotationIdentityManager(t *testing.T) {
+	scheme := newScheme()
+	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
+	existing.SetLabels(map[string]string{
+		"airunway.ai/managed-by":       "airunway",
+		"airunway.ai/model-deployment": "test",
+	})
+	existing.SetAnnotations(map[string]string{"external.example.com/value": "external-value"})
+	existing.SetManagedFields([]metav1.ManagedFieldsEntry{
+		{
+			Manager:    "legacy-kaito-provider",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:ownerReferences":{"k:{\"uid\":\"test-uid\"}":{}}},` +
+					`"f:inference":{"f:preset":{"f:accessMode":{}}}}`,
+			)},
+		},
+		{
+			Manager:    "external-label-manager",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:annotations":{"f:external.example.com/value":{}},` +
+					`"f:labels":{"f:airunway.ai/managed-by":{},` +
+					`"f:airunway.ai/model-deployment":{}}}}`,
+			)},
+		},
+	})
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithReturnManagedFields().Build()
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
+	desired := newSSAWorkspaceForTest("")
+	desired.SetLabels(map[string]string{
+		"airunway.ai/managed-by":       "airunway",
+		"airunway.ai/model-deployment": "test",
+	})
+
+	if err := r.createOrUpdateResource(context.Background(), desired, newSSADeploymentForTest()); err != nil {
+		t.Fatalf("adopt Workspace with unrelated identity-label manager: %v", err)
+	}
+	after := getWorkspaceForTest(t, c)
+	fields, err := managedFieldsForManager(
+		after,
+		"external-label-manager",
+		metav1.ManagedFieldsOperationUpdate,
+	)
+	if err != nil || fields == nil {
+		t.Fatalf("expected unrelated identity-label manager to survive, fields=%v err=%v", fields, err)
+	}
+	if got := after.GetAnnotations()["external.example.com/value"]; got != "external-value" {
+		t.Fatalf("expected unrelated annotation to survive, got %q", got)
 	}
 }
 
@@ -1547,8 +1604,121 @@ func TestLegacyUpdateManagersPreferLastAppliedOwner(t *testing.T) {
 	}
 }
 
-func TestLegacyUpdateManagersMatchVerifiedOwnerReference(t *testing.T) {
+func TestLegacyUpdateManagersRejectSoleIdentityLabelOwnerWithoutVerifiedOwnerReference(t *testing.T) {
 	live := newSSAWorkspaceForTest("")
+	live.SetLabels(map[string]string{
+		"airunway.ai/managed-by":       "airunway",
+		"airunway.ai/model-deployment": "test",
+	})
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{
+		{
+			Manager:    "legacy-kaito-provider",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:ownerReferences":{"k:{\"uid\":\"test-uid\"}":{}}},"f:resource":{"f:count":{}}}`,
+			)},
+		},
+		{
+			Manager:    "external-label-manager",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:labels":{"f:airunway.ai/managed-by":{},` +
+					`"f:airunway.ai/model-deployment":{}}},"f:resource":{"f:count":{}}}`,
+			)},
+		},
+	})
+
+	managers, err := legacyUpdateManagers(live, newSSADeploymentForTest().UID)
+	if err != nil {
+		t.Fatalf("discover legacy manager: %v", err)
+	}
+	if len(managers) != 0 {
+		t.Fatalf("expected sole label owner without verified owner reference to be rejected, got %v", managers)
+	}
+}
+
+func TestLegacyUpdateManagersRequireEveryPresentIdentityLabel(t *testing.T) {
+	live := newSSAWorkspaceForTest("")
+	live.SetLabels(map[string]string{
+		"airunway.ai/managed-by":       "airunway",
+		"airunway.ai/model-deployment": "test",
+	})
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{
+		{
+			Manager:    "legacy-kaito-provider",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:labels":{"f:airunway.ai/managed-by":{}},"f:ownerReferences":{"k:{\"uid\":\"test-uid\"}":{}}}}`,
+			)},
+		},
+		{
+			Manager:    "external-label-manager",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:labels":{"f:airunway.ai/model-deployment":{}}}}`,
+			)},
+		},
+	})
+
+	managers, err := legacyUpdateManagers(live, newSSADeploymentForTest().UID)
+	if err != nil {
+		t.Fatalf("discover legacy manager: %v", err)
+	}
+	if len(managers) != 0 {
+		t.Fatalf("expected split identity-label ownership to be rejected, got %v", managers)
+	}
+}
+
+func TestLegacyUpdateManagersMatchAllIdentityLabelsAndVerifiedOwnerReference(t *testing.T) {
+	live := newSSAWorkspaceForTest("")
+	live.SetLabels(map[string]string{
+		"airunway.ai/managed-by":       "airunway",
+		"airunway.ai/model-deployment": "test",
+	})
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{
+		{
+			Manager:    "legacy-kaito-provider",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{Raw: []byte(
+				`{"f:metadata":{"f:labels":{"f:airunway.ai/managed-by":{},` +
+					`"f:airunway.ai/model-deployment":{}},` +
+					`"f:ownerReferences":{"k:{\"uid\":\"test-uid\"}":{}}}}`,
+			)},
+		},
+		{
+			Manager:    "external-manager",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "kaito.sh/v1beta1",
+			FieldsType: "FieldsV1",
+			FieldsV1:   &metav1.FieldsV1{Raw: []byte(`{"f:resource":{"f:count":{}}}`)},
+		},
+	})
+
+	managers, err := legacyUpdateManagers(live, newSSADeploymentForTest().UID)
+	if err != nil {
+		t.Fatalf("discover legacy manager: %v", err)
+	}
+	if len(managers) != 1 {
+		t.Fatalf("expected exactly one fully verified identity manager, got %v", managers)
+	}
+	if _, found := managers["legacy-kaito-provider"]; !found {
+		t.Fatalf("expected fully verified legacy manager, got %v", managers)
+	}
+}
+
+func TestLegacyUpdateManagersMatchVerifiedOwnerReferenceWithoutIdentityLabels(t *testing.T) {
+	live := newSSAWorkspaceForTest("")
+	live.SetLabels(nil)
 	live.SetManagedFields([]metav1.ManagedFieldsEntry{
 		{
 			Manager:    "legacy-kaito-provider",
@@ -1831,6 +2001,10 @@ func TestCreateOrUpdateResourceAdoptsPreAnnotationWorkspace(t *testing.T) {
 	scheme := newScheme()
 	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	existing.SetAnnotations(nil)
+	existing.SetLabels(map[string]string{
+		"airunway.ai/managed-by":       "airunway",
+		"airunway.ai/model-deployment": "test",
+	})
 	existing.Object["resource"] = map[string]any{
 		"count": int64(2),
 		"labelSelector": map[string]any{
@@ -2035,6 +2209,131 @@ func TestCreateOrUpdateResourceRecoversUnchangedAnnotatedMigration(t *testing.T)
 	}
 	if managers, err := updateManagersOwningMigrationState(updated); err != nil || len(managers) != 0 {
 		t.Fatalf("expected controller Update migration ownership to be removed, managers=%v err=%v", managers, err)
+	}
+}
+
+func TestCreateOrUpdateResourceRecoversWhenOperatorReownsMigrationMarker(t *testing.T) {
+	scheme := newScheme()
+	controllerApplyCalls := 0
+	failClear := false
+	applyPatch := interceptApplyPatch(func(
+		ctx context.Context,
+		c client.WithWatch,
+		obj runtime.ApplyConfiguration,
+		opts ...client.ApplyOption,
+	) error {
+		options := (&client.ApplyOptions{}).ApplyOptions(opts)
+		if options.FieldManager == FieldManager {
+			controllerApplyCalls++
+		}
+		return c.Apply(ctx, obj, opts...)
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithReturnManagedFields().
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(
+				ctx context.Context,
+				c client.WithWatch,
+				obj client.Object,
+				patch client.Patch,
+				opts ...client.PatchOption,
+			) error {
+				if patch.Type() == types.MergePatchType && failClear {
+					if _, markerPresent := obj.GetAnnotations()[migrationManagersAnnotation]; !markerPresent {
+						failClear = false
+						return apierrors.NewConflict(
+							schema.GroupResource{Group: KaitoAPIGroup, Resource: "workspaces"},
+							obj.GetName(),
+							errors.New("simulated concurrent KAITO annotation update"),
+						)
+					}
+				}
+				return applyPatch(ctx, c, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	stable := newSSAWorkspaceForTest("")
+	if err := setLastAppliedManagedFields(stable); err != nil {
+		t.Fatalf("set stable applied state: %v", err)
+	}
+	if err := c.Apply(
+		context.Background(),
+		client.ApplyConfigurationFromUnstructured(stable),
+		client.FieldOwner(FieldManager),
+	); err != nil {
+		t.Fatalf("seed stable applied Workspace: %v", err)
+	}
+	live := getWorkspaceForTest(t, c)
+	base := live.DeepCopy()
+	annotations := copyStringMap(live.GetAnnotations())
+	delete(annotations, lastAppliedWorkspaceAnnotation)
+	annotations[migrationManagersAnnotation] = `["kaito-provider"]`
+	annotations["external.example.com/value"] = testPreservedAnnotationValue
+	live.SetAnnotations(annotations)
+	if err := c.Patch(
+		context.Background(),
+		live,
+		client.MergeFrom(base),
+		client.FieldOwner("kaito-workspace"),
+	); err != nil {
+		t.Fatalf("simulate KAITO annotation update: %v", err)
+	}
+	interrupted := getWorkspaceForTest(t, c)
+	if fields, err := managedFieldsForManager(
+		interrupted,
+		preservedFieldsManager,
+		metav1.ManagedFieldsOperationApply,
+	); err != nil || fields != nil {
+		t.Fatalf("expected missing preservation manager, fields=%v err=%v", fields, err)
+	}
+
+	r := NewKaitoProviderReconciler(c, scheme, c, record.NewFakeRecorder(10))
+	desired := newSSAWorkspaceForTest("")
+	failClear = true
+	err := r.createOrUpdateResource(
+		context.Background(),
+		desired.DeepCopy(),
+		newSSADeploymentForTest(),
+	)
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected migration cleanup conflict to surface, got %v", err)
+	}
+	if _, found := getWorkspaceForTest(t, c).GetAnnotations()[migrationManagersAnnotation]; !found {
+		t.Fatal("expected migration marker to remain after failed cleanup")
+	}
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		desired.DeepCopy(),
+		newSSADeploymentForTest(),
+	); err != nil {
+		t.Fatalf("resume operator-owned migration marker: %v", err)
+	}
+	recovered := getWorkspaceForTest(t, c)
+	if _, found := recovered.GetAnnotations()[migrationManagersAnnotation]; found {
+		t.Fatalf("expected migration marker to be cleared, got %v", recovered.GetAnnotations())
+	}
+	if recovered.GetAnnotations()["external.example.com/value"] != testPreservedAnnotationValue {
+		t.Fatalf("expected unrelated annotation to survive, got %v", recovered.GetAnnotations())
+	}
+	if recovered.GetAnnotations()[lastAppliedWorkspaceAnnotation] == "" {
+		t.Fatalf("expected stable applied fingerprint, got %v", recovered.GetAnnotations())
+	}
+	applyCallsAfterRecovery := controllerApplyCalls
+	if err := r.createOrUpdateResource(
+		context.Background(),
+		desired.DeepCopy(),
+		newSSADeploymentForTest(),
+	); err != nil {
+		t.Fatalf("stable reconcile after recovery: %v", err)
+	}
+	if controllerApplyCalls != applyCallsAfterRecovery {
+		t.Fatalf(
+			"expected stable reconcile after recovery to be a no-op, apply calls %d -> %d",
+			applyCallsAfterRecovery,
+			controllerApplyCalls,
+		)
 	}
 }
 

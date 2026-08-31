@@ -753,18 +753,22 @@ func legacyUpdateManagers(resource *unstructured.Unstructured, ownerUID types.UI
 	if err != nil || len(managers) > 0 {
 		return managers, err
 	}
-	labelManagers, err := updateManagersOwningAnyField(resource, [][]string{
-		{"f:metadata", "f:labels", "f:airunway.ai/managed-by"},
-		{"f:metadata", "f:labels", "f:airunway.ai/model-deployment"},
-	})
-	if err != nil || len(labelManagers) == 1 {
-		return labelManagers, err
+	identityLabelPaths := make([][]string, 0, 2)
+	labels := resource.GetLabels()
+	for _, label := range []string{"airunway.ai/managed-by", "airunway.ai/model-deployment"} {
+		if _, present := labels[label]; present {
+			identityLabelPaths = append(identityLabelPaths, []string{"f:metadata", "f:labels", "f:" + label})
+		}
+	}
+	labelManagers, err := updateManagersOwningAllFields(resource, identityLabelPaths)
+	if err != nil {
+		return nil, err
 	}
 	ownerManagers, err := updateManagersOwningOwnerReferenceUID(resource, ownerUID)
 	if err != nil {
 		return nil, err
 	}
-	if len(labelManagers) == 0 {
+	if len(identityLabelPaths) == 0 {
 		if len(ownerManagers) == 1 {
 			return ownerManagers, nil
 		}
@@ -784,12 +788,45 @@ func legacyUpdateManagers(resource *unstructured.Unstructured, ownerUID types.UI
 	return map[string]struct{}{}, nil
 }
 
+func updateManagersOwningAllFields(
+	resource *unstructured.Unstructured,
+	fieldPaths [][]string,
+) (map[string]struct{}, error) {
+	intersection := map[string]struct{}{}
+	for index, fieldPath := range fieldPaths {
+		owners, err := updateManagersOwningAnyField(resource, [][]string{fieldPath})
+		if err != nil {
+			return nil, err
+		}
+		if index == 0 {
+			intersection = owners
+			continue
+		}
+		for manager := range intersection {
+			if _, ownsField := owners[manager]; !ownsField {
+				delete(intersection, manager)
+			}
+		}
+	}
+	return intersection, nil
+}
+
 func updateManagersOwningOwnerReferenceUID(
 	resource *unstructured.Unstructured,
 	ownerUID types.UID,
 ) (map[string]struct{}, error) {
 	managers := map[string]struct{}{}
 	if ownerUID == "" {
+		return managers, nil
+	}
+	ownerReferencePresent := false
+	for _, ownerReference := range resource.GetOwnerReferences() {
+		if ownerReference.UID == ownerUID {
+			ownerReferencePresent = true
+			break
+		}
+	}
+	if !ownerReferencePresent {
 		return managers, nil
 	}
 	for _, entry := range resource.GetManagedFields() {
@@ -809,6 +846,13 @@ func updateManagersOwningOwnerReferenceUID(
 			)
 		}
 		if !found {
+			continue
+		}
+		// The API server may represent metadata.ownerReferences as an atomic
+		// list. In that form the manager owns the verified live list as a whole,
+		// so FieldsV1 has no per-UID child.
+		if len(ownerReferences) == 0 {
+			managers[entry.Manager] = struct{}{}
 			continue
 		}
 		for fieldKey := range ownerReferences {
@@ -917,6 +961,31 @@ func (r *KaitoProviderReconciler) completeOwnershipMigration(
 		}
 		stableApplied = true
 	}
+	preservedFields, err := managedFieldsForManager(
+		live,
+		preservedFieldsManager,
+		metav1.ManagedFieldsOperationApply,
+	)
+	if err != nil {
+		return false, err
+	}
+	if preservedFields == nil {
+		// KAITO updates the complete annotations map. It can therefore become
+		// the Update owner of our pending marker after the preservation manager
+		// has already relinquished its last field. Resume by cleaning only stale
+		// fields that no manager owns, then remove our private marker with an
+		// optimistic patch. Original external managers still own every value we
+		// deliberately declined to migrate.
+		return r.finishMigrationWithoutPreservedFields(
+			ctx,
+			live,
+			desired,
+			migrationDesired,
+			previouslyRendered,
+			migrationPending,
+			stableApplied,
+		)
+	}
 	preserved, err := preservedFieldsConfiguration(live, migrationDesired, previouslyRendered, true)
 	if err != nil {
 		return false, err
@@ -955,6 +1024,10 @@ func (r *KaitoProviderReconciler) completeOwnershipMigration(
 			)
 		}
 	}
+	cleaned, err = r.clearWorkspaceMigrationState(ctx, cleaned)
+	if err != nil {
+		return false, err
+	}
 	if migrationPending {
 		if _, err := r.applyWorkspace(ctx, desired, cleaned.GetResourceVersion()); err != nil {
 			return false, fmt.Errorf(
@@ -967,6 +1040,67 @@ func (r *KaitoProviderReconciler) completeOwnershipMigration(
 		stableApplied = true
 	}
 	return stableApplied, nil
+}
+
+func (r *KaitoProviderReconciler) finishMigrationWithoutPreservedFields(
+	ctx context.Context,
+	live, desired, migrationDesired, previouslyRendered *unstructured.Unstructured,
+	migrationPending, stableApplied bool,
+) (bool, error) {
+	cleaned := live
+	var err error
+	if previouslyRendered != nil {
+		cleaned, err = r.removeUnownedPreviouslyRenderedFields(ctx, live, migrationDesired, previouslyRendered)
+		if err != nil {
+			return false, err
+		}
+	}
+	cleaned, err = r.clearWorkspaceMigrationState(ctx, cleaned)
+	if err != nil {
+		return false, err
+	}
+	if !migrationPending {
+		return stableApplied, nil
+	}
+	if _, err := r.applyWorkspace(ctx, desired, cleaned.GetResourceVersion()); err != nil {
+		return false, fmt.Errorf(
+			"failed to record Workspace %s/%s applied configuration: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	return true, nil
+}
+
+func (r *KaitoProviderReconciler) clearWorkspaceMigrationState(
+	ctx context.Context,
+	live *unstructured.Unstructured,
+) (*unstructured.Unstructured, error) {
+	base := live.DeepCopy()
+	updated := live.DeepCopy()
+	annotations := copyStringMap(updated.GetAnnotations())
+	delete(annotations, migrationManagersAnnotation)
+	delete(annotations, migrationPreviousFieldsAnnotation)
+	updated.SetAnnotations(annotations)
+	if equality.Semantic.DeepEqual(base.Object, updated.Object) {
+		return live, nil
+	}
+	if err := r.Patch(
+		ctx,
+		updated,
+		client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+		client.FieldOwner(FieldManager),
+		strictFieldValidation,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"failed to clear Workspace %s/%s ownership migration state: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	return updated, nil
 }
 
 func (r *KaitoProviderReconciler) migrateCapturedUpdateManagers(
