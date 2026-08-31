@@ -217,6 +217,84 @@ jobs:
           cache-from: type=gha,scope=agent-provider-test-${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=agent-provider-test-${{ matrix.image }}
 
+  controller-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: controller/go.mod
+          cache-dependency-path: controller/go.sum
+
+      - name: Lint changed controller code
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.7.2
+          working-directory: controller
+          only-new-issues: true
+          args: --config=${{ github.workspace }}/.golangci.yml
+
+  provider-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [dynamo, kaito, kuberay, llmd, vllm]
+
+    name: provider-lint (${{ matrix.provider }})
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: providers/${{ matrix.provider }}/go.mod
+          cache-dependency-path: providers/${{ matrix.provider }}/go.sum
+
+      - name: Lint changed provider code
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.7.2
+          working-directory: providers/${{ matrix.provider }}
+          only-new-issues: true
+          args: --config=${{ github.workspace }}/.golangci.yml
+
+  provider-shim-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: providers/pkg/shim/go.mod
+          cache-dependency-path: providers/pkg/shim/go.sum
+
+      - name: Lint changed provider shim code
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        with:
+          version: v2.7.2
+          working-directory: providers/pkg/shim
+          only-new-issues: true
+          args: --config=${{ github.workspace }}/.golangci.yml
+
+      - name: Test provider shim
+        run: go test -C providers/pkg/shim ./...
+
   actionlint:
     runs-on: ubuntu-latest
 
