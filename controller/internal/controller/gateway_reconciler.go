@@ -33,10 +33,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -128,7 +127,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 
 	// Use provider managed inference pool if it exists,
 	// otherwise use the default inference pool.
-	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities, gwConfig); ok && err == nil {
+	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities); ok && err == nil {
 		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", resolvedProviderName(md))
 
 		// Resolve the InferencePool name for the provider.
@@ -137,7 +136,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		poolNamespace = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace, md.Namespace)
 
 		// Use provider-managed InferencePool
-		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace, gwConfig.GetBBRNamespace())
+		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace)
 		if err != nil {
 			logger.Info("Error reconciling provider-managed InferencePool", "error", err)
 			return err
@@ -238,21 +237,16 @@ func (r *ModelDeploymentReconciler) resolveGatewayConfig(ctx context.Context) (*
 	}
 }
 
-// gatewayConfigFromResource builds a GatewayConfig from a Gateway resource,
-// reading the optional airunway.ai/bbr-namespace annotation.
+// gatewayConfigFromResource builds a GatewayConfig from a Gateway resource.
 func gatewayConfigFromResource(gw *gatewayv1.Gateway) *gateway.GatewayConfig {
-	cfg := &gateway.GatewayConfig{
+	return &gateway.GatewayConfig{
 		GatewayName:      gw.Name,
 		GatewayNamespace: gw.Namespace,
 	}
-	if gw.Annotations != nil {
-		cfg.BBRNamespace = gw.Annotations[gateway.AnnotationBBRNamespace]
-	}
-	return cfg
 }
 
 // reconcileInferencePool creates or updates the InferencePool for a ModelDeployment.
-func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, port int32, bbrNamespace string) error {
+func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, port int32) error {
 	pool := &inferencev1.InferencePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      md.Name,
@@ -287,19 +281,11 @@ func (r *ModelDeploymentReconciler) reconcileInferencePool(ctx context.Context, 
 
 	log.FromContext(ctx).V(1).Info("InferencePool reconciled", "name", pool.Name, "result", result)
 
-	// When a new InferencePool is created, restart the BBR deployment (if present) so it
-	// discovers the new model. BBR watches ConfigMaps via controller-runtime and rebuilds
-	// its internal model registry on startup.
-	if result == controllerutil.OperationResultCreated {
-		if err := r.restartBBRIfPresent(ctx, bbrNamespace); err != nil {
-			log.FromContext(ctx).Info("Could not restart BBR deployment (non-fatal)", "error", err)
-		}
-	}
 	return nil
 }
 
 func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx context.Context,
-	md *airunwayv1alpha1.ModelDeployment, poolName, poolNamespace, bbrNamespace string,
+	md *airunwayv1alpha1.ModelDeployment, poolName, poolNamespace string,
 ) (string, error) {
 	logger := log.FromContext(ctx)
 	mdNamespace := md.Namespace
@@ -319,27 +305,6 @@ func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx co
 	}
 
 	logger.V(1).Info("Found provider-managed InferencePool", "pool", poolKey)
-
-	// BBR builds its internal model registry from HTTPRoute headers at startup and
-	// needs a rolling restart whenever a new model is added. For default (airunway-
-	// managed) pools, reconcileInferencePool handles this when CreateOrUpdate reports
-	// Created. Provider-managed pools are created by the provider's operator, so
-	// there's no Created signal. This is gated on a one-shot annotation instead,
-	// restart BBR exactly once per ModelDeployment, not on every reconcile.
-	if md.Annotations[airunwayv1alpha1.BBRRestarted] != "true" {
-		if err := r.restartBBRIfPresent(ctx, bbrNamespace); err != nil {
-			logger.Info("Could not restart BBR deployment (non-fatal)", "error", err)
-		} else {
-			mdBase := md.DeepCopy()
-			if md.Annotations == nil {
-				md.Annotations = map[string]string{}
-			}
-			md.Annotations[airunwayv1alpha1.BBRRestarted] = "true"
-			if patchErr := r.Patch(ctx, md, client.MergeFrom(mdBase)); patchErr != nil {
-				logger.V(1).Info("Could not annotate ModelDeployment after BBR restart", "error", patchErr)
-			}
-		}
-	}
 
 	// Use it as HTTPRoute backend ref (cross-namespace ref + ReferenceGrant).
 	// Create ReferenceGrant in the inference pool namespace.
@@ -1040,37 +1005,132 @@ func (r *ModelDeploymentReconciler) discoverModelName(ctx context.Context, servi
 // matchExpressions In-list so that multiple cross-namespace ModelDeployments
 // can coexist.
 func (r *ModelDeploymentReconciler) ensureGatewayAllowsNamespace(ctx context.Context, gwConfig *gateway.GatewayConfig, namespace string) error {
-	var gw gatewayv1.Gateway
-	if err := r.Get(ctx, client.ObjectKey{Name: gwConfig.GatewayName, Namespace: gwConfig.GatewayNamespace}, &gw); err != nil {
-		return fmt.Errorf("getting Gateway: %w", err)
-	}
-
-	existing := allowedNamespacesFromGateway(&gw)
-	if existing[namespace] {
-		return nil // already allowed
-	}
-	existing[namespace] = true
-
-	if err := r.patchGatewayListenerSelector(ctx, gwConfig, existing); err != nil {
+	changed, err := r.updateGatewayAllowedNamespaces(ctx, gwConfig, func(crossNs map[string]bool) (map[string]bool, bool) {
+		if crossNs[namespace] {
+			// Already allowed for this namespace — nothing to do.
+			//
+			// Self-heal is deliberately narrow: a Gateway stuck in the pre-#333
+			// broken state (a Selector present but missing its own namespace) is
+			// repaired only when the cross-namespace set actually changes — i.e.
+			// when a genuinely NEW namespace is added here, or when the last
+			// cross-namespace tenant is removed on the cleanup path (which reverts
+			// to `from: Same`). It does NOT heal on a same-namespace re-reconcile
+			// of an already-stuck Gateway: if `namespace` is the only tenant and
+			// it is already listed, this short-circuit returns without a patch and
+			// gateway-ns stays evicted. That single-tenant-after-upgrade case must
+			// be healed by adding another namespace or deleting the MD.
+			return crossNs, false
+		}
+		crossNs[namespace] = true
+		return crossNs, true
+	})
+	if err != nil {
 		return err
 	}
-
-	log.FromContext(ctx).Info("Patched Gateway listeners to allow routes from namespace",
-		"gateway", gwConfig.GatewayName, "namespace", namespace)
+	if changed {
+		log.FromContext(ctx).Info("Patched Gateway listeners to allow routes from namespace",
+			"gateway", gwConfig.GatewayName, "namespace", namespace)
+	}
 	return nil
 }
 
-// patchGatewayListenerSelector fetches the Gateway fresh and patches the listener selectors.
-func (r *ModelDeploymentReconciler) patchGatewayListenerSelector(ctx context.Context, gwConfig *gateway.GatewayConfig, namespaces map[string]bool) error {
-	var gw gatewayv1.Gateway
-	if err := r.Get(ctx, client.ObjectKey{Name: gwConfig.GatewayName, Namespace: gwConfig.GatewayNamespace}, &gw); err != nil {
-		return fmt.Errorf("getting Gateway: %w", err)
+// updateGatewayAllowedNamespaces is the single, race-safe entry point for
+// mutating a Gateway's allowed-namespace set. It re-Gets the Gateway inside a
+// RetryOnConflict loop (so a 409 picks up a concurrent writer's changes before
+// retrying) and patches with an optimistic lock — without the lock the atomic
+// selector array would merge unconditionally and last-writer-wins would silently
+// drop namespaces.
+//
+// mutate receives the current CROSS-namespace set (the Gateway's own namespace
+// already stripped) and returns the desired cross-namespace set plus whether
+// anything changed. Returning changed=false skips the patch entirely, preserving
+// each caller's early-out semantics.
+//
+// The terminal rule (issue #333): a listener at the default `from: Same`
+// implicitly allows the Gateway's own namespace, but allowedNamespacesFromGateway
+// only reads an explicit Selector. So we always fold gw.Namespace back into any
+// Selector we write, and we decide Same-vs-Selector on the CROSS-namespace set:
+//   - crossNs empty  -> revert every listener to `from: Same` (nil Selector),
+//     which re-grants the Gateway namespace implicitly.
+//   - otherwise      -> `from: Selector` with a sorted In-list of
+//     (crossNs ∪ {gw.Namespace}), so the Gateway's own routes are never evicted.
+//
+// Unlike the migration RetryOnConflict loop, a persistent conflict is returned
+// as an error rather than treated as a soft success: a lost add would leave
+// routes evicted while falsely reporting success, so the caller must be able to
+// requeue.
+func (r *ModelDeploymentReconciler) updateGatewayAllowedNamespaces(
+	ctx context.Context,
+	gwConfig *gateway.GatewayConfig,
+	mutate func(crossNs map[string]bool) (desired map[string]bool, changed bool),
+) (bool, error) {
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var gw gatewayv1.Gateway
+		if err := r.Get(ctx, client.ObjectKey{Name: gwConfig.GatewayName, Namespace: gwConfig.GatewayNamespace}, &gw); err != nil {
+			return err
+		}
+
+		// Current allowed set may already include gw.Namespace (post-fix); strip
+		// it so callers reason purely about cross-namespace intent.
+		crossCur := stripNamespace(allowedNamespacesFromGateway(&gw), gw.Namespace)
+
+		desired, didChange := mutate(crossCur)
+		changed = didChange
+		if !didChange {
+			return nil // nothing to patch
+		}
+
+		base := gw.DeepCopy()
+		// desired is already free of gw.Namespace: crossCur was stripped above and
+		// none of the callbacks add the Gateway's own namespace (the caller only
+		// invokes this for cross-namespace MDs), so applyAllowedRoutes's
+		// precondition holds without re-stripping here.
+		applyAllowedRoutes(&gw, desired, gw.Namespace)
+		return r.Patch(ctx, &gw, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+	if err != nil {
+		// The wrapped error may originate from either the Get or the Patch inside
+		// the retry closure, so keep the phrasing neutral ("reconciling") rather
+		// than implying the write specifically failed.
+		return changed, fmt.Errorf("reconciling Gateway allowedRoutes: %w", err)
+	}
+	return changed, nil
+}
+
+// applyAllowedRoutes rewrites every listener's allowedRoutes to reflect the
+// desired cross-namespace set, applying the Same-vs-Selector terminal rule. It
+// writes ALL listeners uniformly (the read side only inspects the first, but the
+// writer keeps them convergent).
+//
+// Precondition: crossNs must NOT contain gwNamespace — it is the cross-namespace
+// set only. The Selector branch folds gwNamespace back in itself; passing it in
+// crossNs would be harmless (it dedupes) but violates the intended contract.
+func applyAllowedRoutes(gw *gatewayv1.Gateway, crossNs map[string]bool, gwNamespace string) {
+	if len(crossNs) == 0 {
+		// No cross-namespace routes remain — revert to SameNamespace, which
+		// implicitly re-grants the Gateway's own namespace.
+		fromSame := gatewayv1.NamespacesFromSame
+		for i := range gw.Spec.Listeners {
+			if gw.Spec.Listeners[i].AllowedRoutes != nil {
+				gw.Spec.Listeners[i].AllowedRoutes.Namespaces = &gatewayv1.RouteNamespaces{
+					From: &fromSame,
+				}
+			}
+		}
+		return
 	}
 
-	base := gw.DeepCopy()
-	fromSelector := gatewayv1.NamespacesFromSelector
-	selector := namespaceSelectorFromSet(namespaces)
+	// Fold the Gateway's own namespace back in so converting Same->Selector never
+	// drops the routes living alongside the Gateway (issue #333).
+	withGateway := make(map[string]bool, len(crossNs)+1)
+	for ns := range crossNs {
+		withGateway[ns] = true
+	}
+	withGateway[gwNamespace] = true
 
+	fromSelector := gatewayv1.NamespacesFromSelector
+	selector := namespaceSelectorFromSet(withGateway)
 	for i := range gw.Spec.Listeners {
 		if gw.Spec.Listeners[i].AllowedRoutes == nil {
 			gw.Spec.Listeners[i].AllowedRoutes = &gatewayv1.AllowedRoutes{}
@@ -1080,14 +1140,31 @@ func (r *ModelDeploymentReconciler) patchGatewayListenerSelector(ctx context.Con
 			Selector: selector,
 		}
 	}
-	if err := r.Patch(ctx, &gw, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("patching Gateway listeners: %w", err)
+}
+
+// stripNamespace returns a copy of set with the given namespace removed, leaving
+// the original untouched.
+func stripNamespace(set map[string]bool, namespace string) map[string]bool {
+	out := make(map[string]bool, len(set))
+	for ns := range set {
+		if ns == namespace {
+			continue
+		}
+		out[ns] = true
 	}
-	return nil
+	return out
 }
 
 // allowedNamespacesFromGateway extracts the set of namespaces currently allowed
 // by the Gateway's listener selectors (supports both matchLabels and matchExpressions).
+//
+// This reads only the FIRST listener that carries a Selector and then breaks,
+// assuming all listeners share one allowedRoutes policy — which holds because
+// applyAllowedRoutes always writes every listener uniformly. A Gateway whose
+// listeners were hand-authored with DIFFERENT per-listener allowedRoutes is not
+// supported: the first Selector wins on read and every listener is converged to
+// it on the next write. Handling heterogeneous per-listener policy is out of
+// scope for the cross-namespace patching feature.
 func allowedNamespacesFromGateway(gw *gatewayv1.Gateway) map[string]bool {
 	ns := make(map[string]bool)
 	for _, l := range gw.Spec.Listeners {
@@ -1233,7 +1310,7 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 	return nil
 }
 
-func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities, gwConfig *gateway.GatewayConfig) (bool, error) {
+func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, gatewayCapabilitities *airunwayv1alpha1.GatewayCapabilities) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	// Only treat the pool as provider-managed when the provider has explicitly
@@ -1263,7 +1340,7 @@ func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(c
 	}
 
 	// Create or update InferencePool
-	if err := r.reconcileInferencePool(ctx, md, port, gwConfig.GetBBRNamespace()); err != nil {
+	if err := r.reconcileInferencePool(ctx, md, port); err != nil {
 		r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "InferencePoolFailed", err.Error())
 		return false, fmt.Errorf("reconciling InferencePool: %w", err)
 	}
@@ -1304,39 +1381,22 @@ func (r *ModelDeploymentReconciler) cleanupGatewayAllowedRoutes(ctx context.Cont
 	}
 
 	// No other MDs need gateway in this namespace — remove it from the In-list.
-	var gw gatewayv1.Gateway
-	if err := r.Get(ctx, client.ObjectKey{Name: gwConfig.GatewayName, Namespace: gwConfig.GatewayNamespace}, &gw); err != nil {
-		return fmt.Errorf("getting Gateway: %w", err)
-	}
-
-	existing := allowedNamespacesFromGateway(&gw)
-	if !existing[md.Namespace] {
-		return nil // not in the list, nothing to do
-	}
-	delete(existing, md.Namespace)
-
-	if len(existing) == 0 {
-		// No cross-namespace routes remain — revert to SameNamespace.
-		fromSame := gatewayv1.NamespacesFromSame
-		base := gw.DeepCopy()
-		for i := range gw.Spec.Listeners {
-			if gw.Spec.Listeners[i].AllowedRoutes != nil {
-				gw.Spec.Listeners[i].AllowedRoutes.Namespaces = &gatewayv1.RouteNamespaces{
-					From: &fromSame,
-				}
-			}
+	// The shared helper owns the terminal rule: once the cross-namespace set
+	// empties it reverts every listener to `from: Same`, which re-grants the
+	// Gateway's own namespace implicitly.
+	changed, err := r.updateGatewayAllowedNamespaces(ctx, gwConfig, func(crossNs map[string]bool) (map[string]bool, bool) {
+		if !crossNs[md.Namespace] {
+			return crossNs, false // not in the list, nothing to do
 		}
-		if err := r.Patch(ctx, &gw, client.MergeFrom(base)); err != nil {
-			return fmt.Errorf("reverting Gateway listeners: %w", err)
-		}
-	} else {
-		// Other namespaces still need access — update the In-list without this namespace.
-		if err := r.patchGatewayListenerSelector(ctx, gwConfig, existing); err != nil {
-			return fmt.Errorf("updating Gateway listeners: %w", err)
-		}
+		delete(crossNs, md.Namespace)
+		return crossNs, true
+	})
+	if err != nil {
+		return err
 	}
-
-	logger.Info("Removed namespace from Gateway allowedRoutes", "gateway", gwConfig.GatewayName, "namespace", md.Namespace)
+	if changed {
+		logger.Info("Removed namespace from Gateway allowedRoutes", "gateway", gwConfig.GatewayName, "namespace", md.Namespace)
+	}
 	return nil
 }
 
@@ -1374,59 +1434,27 @@ func (r *ModelDeploymentReconciler) cleanupGatewayAllowedRoutesForNamespace(ctx 
 		}
 	}
 
-	// No MDs need gateway in this namespace — remove it from the In-list.
-	var gw gatewayv1.Gateway
-	if err := r.Get(ctx, client.ObjectKey{Name: gwConfig.GatewayName, Namespace: gwConfig.GatewayNamespace}, &gw); err != nil {
-		logger.V(1).Info("Could not get Gateway for cleanup", "error", err)
+	// No MDs need gateway in this namespace — remove it from the In-list. The
+	// shared helper reverts to `from: Same` once the cross-namespace set empties.
+	changed, err := r.updateGatewayAllowedNamespaces(ctx, gwConfig, func(crossNs map[string]bool) (map[string]bool, bool) {
+		if !crossNs[namespace] {
+			return crossNs, false
+		}
+		delete(crossNs, namespace)
+		return crossNs, true
+	})
+	if err != nil {
+		// Best-effort path: this function is void and its caller (the MD-NotFound
+		// branch) returns nil without requeuing, so a conflict that survives all
+		// RetryOnConflict attempts is NOT retried later. That leaves `namespace`
+		// stranded in the Selector until unrelated MD churn re-runs cleanup. The
+		// impact is benign — a namespace with no ModelDeployments exposes no
+		// routes — but log at default level (not V(1)) so the leak is diagnosable.
+		logger.Info("Could not remove namespace from Gateway allowedRoutes after MD deletion; it may remain stranded until the next cleanup",
+			"gateway", gwConfig.GatewayName, "namespace", namespace, "error", err)
 		return
 	}
-
-	existing := allowedNamespacesFromGateway(&gw)
-	if !existing[namespace] {
-		return
+	if changed {
+		logger.Info("Removed namespace from Gateway allowedRoutes after MD deletion", "gateway", gwConfig.GatewayName, "namespace", namespace)
 	}
-	delete(existing, namespace)
-
-	if len(existing) == 0 {
-		fromSame := gatewayv1.NamespacesFromSame
-		base := gw.DeepCopy()
-		for i := range gw.Spec.Listeners {
-			if gw.Spec.Listeners[i].AllowedRoutes != nil {
-				gw.Spec.Listeners[i].AllowedRoutes.Namespaces = &gatewayv1.RouteNamespaces{
-					From: &fromSame,
-				}
-			}
-		}
-		if err := r.Patch(ctx, &gw, client.MergeFrom(base)); err != nil {
-			logger.V(1).Info("Could not revert Gateway listeners", "error", err)
-			return
-		}
-	} else {
-		if err := r.patchGatewayListenerSelector(ctx, gwConfig, existing); err != nil {
-			logger.V(1).Info("Could not update Gateway listeners", "error", err)
-			return
-		}
-	}
-
-	logger.Info("Removed namespace from Gateway allowedRoutes after MD deletion", "gateway", gwConfig.GatewayName, "namespace", namespace)
-}
-
-// restartBBRIfPresent triggers a rolling restart of the body-based-router Deployment (if present
-// in the given namespace) by updating its restart annotation. This is necessary because BBR builds
-// its internal model registry on startup and does not dynamically watch InferencePools.
-//
-// The namespace is resolved by GatewayConfig.GetBBRNamespace(), which reads the
-// airunway.ai/bbr-namespace annotation from the Gateway resource, falling back to the
-// Gateway's own namespace.
-func (r *ModelDeploymentReconciler) restartBBRIfPresent(ctx context.Context, namespace string) error {
-	var bbr appsv1.Deployment
-	if err := r.Get(ctx, client.ObjectKey{Name: "body-based-router", Namespace: namespace}, &bbr); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"airunway.ai/restartedAt":"` + time.Now().UTC().Format(time.RFC3339) + `"}}}}}`)
-	if err := r.Patch(ctx, &bbr, client.RawPatch(types.StrategicMergePatchType, patch)); err != nil {
-		return fmt.Errorf("patching body-based-router: %w", err)
-	}
-	log.FromContext(ctx).Info("Triggered BBR rolling restart to discover new InferencePool", "namespace", namespace)
-	return nil
 }

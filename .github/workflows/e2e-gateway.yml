@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load component versions
         run: |
@@ -28,7 +28,7 @@ jobs:
           echo "KAITO_VERSION=${KAITO_VERSION}" >> "$GITHUB_ENV"
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.25"
           cache-dependency-path: controller/go.sum
@@ -290,7 +290,7 @@ jobs:
           echo "Sending inference request through gateway at http://${GW_IP}..."
           for i in $(seq 1 18); do
             HTTP_CODE=$(curl -s -o /tmp/response.json -w '%{http_code}' --max-time 30 \
-              http://${GW_IP}/v1/chat/completions \
+              "http://${GW_IP}/v1/chat/completions" \
               -H "Content-Type: application/json" \
               -d "{
                 \"model\": \"$MODEL_NAME\",
@@ -304,7 +304,7 @@ jobs:
               echo "✅ Inference through gateway succeeded"
               exit 0
             fi
-            echo "Attempt $i/18: HTTP=$HTTP_CODE body=$(echo $RESPONSE | head -c 200)"
+            echo "Attempt $i/18: HTTP=$HTTP_CODE body=$(printf '%s' "$RESPONSE" | head -c 200)"
             sleep 10
           done
           echo "❌ Inference through gateway failed"
