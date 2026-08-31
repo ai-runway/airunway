@@ -69,8 +69,8 @@ export interface BunTlsOptions {
  * e.g. one gaining SNI support while the other silently misses it.
  *
  * It asks the SDK for the same `https.Agent` options its Node path would use
- * (`applyToHTTPSOptions`, verified against `@kubernetes/client-node@1.4.0`
- * `config.js`), then re-maps the subset Bun honours:
+ * (`applyToHTTPSOptions`, retained as a public API in
+ * `@kubernetes/client-node@2.0.0`), then re-maps the subset Bun honours:
  *   - `ca`/`cert`/`key`            — CA bundle + client cert/key
  *   - `passphrase`                 — passphrase for an encrypted client key
  *   - `servername` → `serverName`  — SNI / hostname-verification override
@@ -122,13 +122,10 @@ export async function kubeConfigToBunTls(kc: k8s.KubeConfig): Promise<BunTlsOpti
  * Bun-compatible HTTP library for `@kubernetes/client-node`.
  *
  * WHY THIS EXISTS:
- * The client's default `IsomorphicFetchHttpLibrary` imports `node-fetch` and
- * passes the kubeconfig CA (and client cert/key) as a Node.js `https.Agent`
- * (`request.getAgent()`). Bun's runtime resolves `node-fetch` to its native
- * `fetch`, which **ignores** the Node `https.Agent` entirely — it only honours
- * TLS material supplied via the per-request `tls` option. The CA therefore never
- * reaches the TLS stack, so every request to a cluster whose API server uses a
- * private CA (e.g. AKS) fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
+ * The client's default `IsomorphicFetchHttpLibrary` uses Undici and supplies
+ * kubeconfig TLS material through an Undici dispatcher. This backend uses
+ * Bun's native `fetch`, which instead honours TLS material supplied through
+ * Bun's non-standard per-request `tls` option.
  *
  * This subclass overrides `send()` to call Bun's native `fetch` directly,
  * translating the kubeconfig's TLS material (via {@link kubeConfigToBunTls})
@@ -147,7 +144,7 @@ export async function kubeConfigToBunTls(kc: k8s.KubeConfig): Promise<BunTlsOpti
  *
  * The response is wrapped exactly as the upstream library does: an `Observable`
  * constructed from a `Promise<ResponseContext>` (see `rxjsStub`), with a
- * `ResponseBody` exposing `text()` and `binary()`.
+ * `ResponseBody` exposing `text()`, `binary()`, and `stream()`.
  */
 export class BunTlsHttpLibrary extends k8s.IsomorphicFetchHttpLibrary {
   private tlsPromise?: Promise<BunTlsOptions | undefined>;
@@ -193,6 +190,7 @@ export class BunTlsHttpLibrary extends k8s.IsomorphicFetchHttpLibrary {
       return new k8s.ResponseContext(response.status, headers, {
         text: () => response.text(),
         binary: async () => Buffer.from(await response.arrayBuffer()),
+        stream: () => response.body,
       });
     })();
 
@@ -215,7 +213,7 @@ export class BunTlsHttpLibrary extends k8s.IsomorphicFetchHttpLibrary {
  *
  * NOTE (SDK coupling): this hand-reproduces the SDK's own `makeApiClient` wiring
  * (`createConfiguration` + `ServerConfiguration`) and subclasses
- * `IsomorphicFetchHttpLibrary`. Verified against `@kubernetes/client-node@1.4.0`.
+ * `IsomorphicFetchHttpLibrary`. Verified against `@kubernetes/client-node@2.0.0`.
  * These are generated/internal surfaces — re-check this wiring (and the
  * `kubeConfigToBunTls` field mapping) when bumping the SDK across a major version.
  */

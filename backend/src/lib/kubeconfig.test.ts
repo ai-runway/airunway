@@ -164,6 +164,16 @@ describe('BunTlsHttpLibrary.send', () => {
     expect(await res.body.text()).toContain('Status');
   });
 
+  it('exposes the response body stream required by client-node v2', async () => {
+    stubFetch(200, 'stream-body');
+    const lib = new BunTlsHttpLibrary(makeKubeConfig({ token: 'tok' }));
+    const res = await lib.send(makeRequest()).toPromise();
+
+    const stream = res.body.stream();
+    expect(stream).not.toBeNull();
+    expect(await new Response(stream).text()).toBe('stream-body');
+  });
+
   it('resolves the kubeconfig TLS material only once across multiple requests', async () => {
     stubFetch();
     const kc = makeKubeConfig({ withClientCert: true });
