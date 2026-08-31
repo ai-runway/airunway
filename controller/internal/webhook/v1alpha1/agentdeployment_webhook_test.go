@@ -42,7 +42,7 @@ func makeMinimalAgentDeployment(framework string) *airunwayv1alpha1.AgentDeploym
 	}
 }
 
-func makeAgentProviderSpecWithOverrides(t *testing.T, overrides map[string]interface{}) *airunwayv1alpha1.AgentProviderSpec {
+func makeAgentProviderSpecWithOverrides(t *testing.T, overrides map[string]any) *airunwayv1alpha1.AgentProviderSpec {
 	t.Helper()
 	raw, err := json.Marshal(overrides)
 	if err != nil {
@@ -54,22 +54,22 @@ func makeAgentProviderSpecWithOverrides(t *testing.T, overrides map[string]inter
 }
 
 func TestValidateAgentProviderOverrides_AllowsSecurityContextOverrides(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"podSecurityContext": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
 				"runAsUser":    1000,
 				"runAsGroup":   1000,
 				"runAsNonRoot": true,
 				"fsGroup":      1000,
-				"seccompProfile": map[string]interface{}{
+				"seccompProfile": map[string]any{
 					"type": "RuntimeDefault",
 				},
 			},
-			"securityContext": map[string]interface{}{
+			"securityContext": map[string]any{
 				"allowPrivilegeEscalation": false,
 				"readOnlyRootFilesystem":   true,
-				"capabilities": map[string]interface{}{
-					"drop": []interface{}{"ALL"},
+				"capabilities": map[string]any{
+					"drop": []any{"ALL"},
 				},
 			},
 		},
@@ -81,17 +81,17 @@ func TestValidateAgentProviderOverrides_AllowsSecurityContextOverrides(t *testin
 }
 
 func TestValidateAgentProviderOverrides_RejectsUnsupportedRootKey(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"random": map[string]interface{}{},
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"random": map[string]any{},
 	})
 	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
 	requireValidationErrorField(t, errs, "spec.provider.overrides.random")
 }
 
 func TestValidateAgentProviderOverrides_RejectsUnsupportedSecurityContextKey(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"securityContext": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
 				"privileged": true,
 			},
 		},
@@ -101,11 +101,11 @@ func TestValidateAgentProviderOverrides_RejectsUnsupportedSecurityContextKey(t *
 }
 
 func TestValidateAgentProviderOverrides_RejectsCapabilitiesAdd(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"securityContext": map[string]interface{}{
-				"capabilities": map[string]interface{}{
-					"add": []interface{}{"SYS_ADMIN"},
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"capabilities": map[string]any{
+					"add": []any{"SYS_ADMIN"},
 				},
 			},
 		},
@@ -133,9 +133,9 @@ func TestValidateAgentProviderOverrides_RejectsNonObjectJSON(t *testing.T) {
 }
 
 func TestValidateAgentProviderOverrides_RejectsAllowPrivilegeEscalationTrue(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"securityContext": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
 				"allowPrivilegeEscalation": true,
 			},
 		},
@@ -145,9 +145,9 @@ func TestValidateAgentProviderOverrides_RejectsAllowPrivilegeEscalationTrue(t *t
 }
 
 func TestValidateAgentProviderOverrides_RejectsRunAsNonRootFalse(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"podSecurityContext": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
 				"runAsNonRoot": false,
 			},
 		},
@@ -157,11 +157,11 @@ func TestValidateAgentProviderOverrides_RejectsRunAsNonRootFalse(t *testing.T) {
 }
 
 func TestValidateAgentProviderOverrides_RejectsCapabilitiesDropWithoutALL(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"securityContext": map[string]interface{}{
-				"capabilities": map[string]interface{}{
-					"drop": []interface{}{"NET_RAW"},
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"capabilities": map[string]any{
+					"drop": []any{"NET_RAW"},
 				},
 			},
 		},
@@ -171,10 +171,10 @@ func TestValidateAgentProviderOverrides_RejectsCapabilitiesDropWithoutALL(t *tes
 }
 
 func TestValidateAgentProviderOverrides_RejectsLocalhostSeccompWithoutProfile(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"podSecurityContext": map[string]interface{}{
-				"seccompProfile": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
+				"seccompProfile": map[string]any{
 					"type": "Localhost",
 				},
 			},
@@ -202,12 +202,12 @@ func TestAgentDeploymentCustomValidator_AllowsUpdateWhenFrameworkUnchanged(t *te
 	validator := &AgentDeploymentCustomValidator{}
 	oldObj := makeMinimalAgentDeployment("kagent")
 	newObj := oldObj.DeepCopy()
-	newObj.Spec.Provider = makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"securityContext": map[string]interface{}{
+	newObj.Spec.Provider = makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
 				"allowPrivilegeEscalation": false,
-				"capabilities": map[string]interface{}{
-					"drop": []interface{}{"ALL"},
+				"capabilities": map[string]any{
+					"drop": []any{"ALL"},
 				},
 			},
 		},
@@ -220,9 +220,9 @@ func TestAgentDeploymentCustomValidator_AllowsUpdateWhenFrameworkUnchanged(t *te
 }
 
 func TestValidateAgentProviderOverrides_RejectsRunAsUserZero(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"podSecurityContext": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
 				"runAsUser": 0,
 			},
 		},
@@ -232,9 +232,9 @@ func TestValidateAgentProviderOverrides_RejectsRunAsUserZero(t *testing.T) {
 }
 
 func TestValidateAgentProviderOverrides_AllowsRunAsGroupZero(t *testing.T) {
-	provider := makeAgentProviderSpecWithOverrides(t, map[string]interface{}{
-		"workload": map[string]interface{}{
-			"podSecurityContext": map[string]interface{}{
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
 				"runAsUser":  1000,
 				"runAsGroup": 0,
 				"fsGroup":    0,

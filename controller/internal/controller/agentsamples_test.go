@@ -39,6 +39,8 @@ import (
 // config/samples` is a documented step. A sample that fails admission is worse
 // than no sample, so every document is applied against the real CRDs and put
 // through the validating webhook here.
+//
+//nolint:goconst // Kubernetes kind names are repeated to keep sample assertions explicit.
 var _ = Describe("Agent samples", func() {
 	ctx := context.Background()
 
@@ -79,7 +81,7 @@ var _ = Describe("Agent samples", func() {
 			raw, err := os.ReadFile(f)
 			Expect(err).NotTo(HaveOccurred(), "reading %s", f)
 
-			for _, doc := range strings.Split(string(raw), "\n---\n") {
+			for doc := range strings.SplitSeq(string(raw), "\n---\n") {
 				u := &unstructured.Unstructured{}
 				if err := yaml.Unmarshal([]byte(doc), u); err != nil || u.GetKind() == "" {
 					continue // comment-only block between documents
@@ -89,7 +91,7 @@ var _ = Describe("Agent samples", func() {
 				}
 
 				By("applying " + u.GetKind() + "/" + u.GetName())
-				Expect(k8sClient.Patch(ctx, u, client.Apply,
+				Expect(k8sClient.Patch(ctx, u, client.Apply, //nolint:staticcheck
 					client.FieldOwner("sample-validation"), client.ForceOwnership),
 				).To(Succeed(), "%s/%s was rejected by the API server", u.GetKind(), u.GetName())
 				applied++
@@ -119,14 +121,14 @@ var _ = Describe("Agent samples", func() {
 		configured := map[string]bool{}
 		cfgRaw, err := os.ReadFile(sampleFiles[0])
 		Expect(err).NotTo(HaveOccurred())
-		for _, doc := range strings.Split(string(cfgRaw), "\n---\n") {
+		for doc := range strings.SplitSeq(string(cfgRaw), "\n---\n") {
 			u := &unstructured.Unstructured{}
 			if err := yaml.Unmarshal([]byte(doc), u); err == nil && u.GetKind() == "AgentProviderConfig" {
 				configured[u.GetName()] = true
 			}
 		}
 
-		for _, doc := range strings.Split(string(raw), "\n---\n") {
+		for doc := range strings.SplitSeq(string(raw), "\n---\n") {
 			ad := &airunwayv1alpha1.AgentDeployment{}
 			if err := yaml.Unmarshal([]byte(doc), ad); err != nil || ad.Kind != "AgentDeployment" {
 				continue

@@ -225,7 +225,11 @@ func ApplyOwnedStatus(
 	reason, message string,
 ) error {
 	if ad.UID == "" || ad.ResourceVersion == "" {
-		return fmt.Errorf("apply provider status for AgentDeployment %s/%s: UID and resourceVersion are required", ad.Namespace, ad.Name)
+		return fmt.Errorf(
+			"apply provider status for AgentDeployment %s/%s: UID and resourceVersion are required",
+			ad.Namespace,
+			ad.Name,
+		)
 	}
 	apply := &airunwayv1alpha1.AgentDeployment{
 		TypeMeta: metav1.TypeMeta{
@@ -254,7 +258,9 @@ func ApplyOwnedStatus(
 		},
 	}
 
-	if err := c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+	// Generated CRD types do not yet expose ApplyConfiguration values.
+	if err := c.Status().Patch(ctx, apply, client.Apply, //nolint:staticcheck
+		client.FieldOwner(fieldOwner)); err != nil {
 		return StatusWriteError(err)
 	}
 	// Patch decodes the authoritative response into apply. Carry its status and
@@ -284,7 +290,11 @@ func FieldOwner(framework string) string {
 // LastTransitionTime when the status is unchanged, so repeated reconciles do
 // not churn the timestamp — SSA re-applies the whole condition entry.
 func providerReadyTransition(ad *airunwayv1alpha1.AgentDeployment, status metav1.ConditionStatus) metav1.Time {
-	if existing := meta.FindStatusCondition(ad.Status.Conditions, airunwayv1alpha1.AgentConditionTypeProviderReady); existing != nil && existing.Status == status {
+	existing := meta.FindStatusCondition(
+		ad.Status.Conditions,
+		airunwayv1alpha1.AgentConditionTypeProviderReady,
+	)
+	if existing != nil && existing.Status == status {
 		return existing.LastTransitionTime
 	}
 	return metav1.Now()
@@ -323,7 +333,8 @@ func StatusWriteError(err error) error {
 func ResolveStatusWriteConflict(result ctrl.Result, err error) (ctrl.Result, error) {
 	var conflict *concurrentStatusWriteError
 	if errors.As(err, &conflict) {
-		return ctrl.Result{Requeue: true}, nil
+		// Requeue is intentionally immediate; RequeueAfter changes queue timing.
+		return ctrl.Result{Requeue: true}, nil //nolint:staticcheck
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -371,7 +382,13 @@ func isControlledByOwner(obj, owner metav1.Object) bool {
 // itself: another object can be created or replaced between this read and a
 // later patch. Providers should use ApplyOwned, which couples the check to a
 // create or resource-version-preconditioned apply.
-func VerifyOwnedOrAbsent(ctx context.Context, c client.Reader, scheme *runtime.Scheme, owner metav1.Object, obj client.Object) error {
+func VerifyOwnedOrAbsent(
+	ctx context.Context,
+	c client.Reader,
+	scheme *runtime.Scheme,
+	owner metav1.Object,
+	obj client.Object,
+) error {
 	gvk, err := apiutil.GVKForObject(obj, scheme)
 	if err != nil {
 		// Unregistered types (an upstream CRD the provider renders as
@@ -457,7 +474,8 @@ func ApplyOwned(
 	if forceOwnership {
 		options = append(options, client.ForceOwnership)
 	}
-	if err := c.Patch(ctx, obj, client.Apply, options...); err != nil {
+	// The ownership guard relies on resourceVersion, which typed apply does not expose.
+	if err := c.Patch(ctx, obj, client.Apply, options...); err != nil { //nolint:staticcheck
 		return fmt.Errorf("apply owned %s %s: %w", gvk.Kind, key, err)
 	}
 	return nil
@@ -511,7 +529,13 @@ func DeleteOwned(ctx context.Context, c client.Client, owner metav1.Object, obj 
 // until the exact owned object is gone. The authoritative read plus UID
 // precondition prevents a stale cache entry from deleting a same-named
 // replacement. Unowned, missing, or unserved objects are complete no-ops.
-func DeleteOwnedAndWait(ctx context.Context, c client.Client, reader client.Reader, owner metav1.Object, obj client.Object) (bool, error) {
+func DeleteOwnedAndWait(
+	ctx context.Context,
+	c client.Client,
+	reader client.Reader,
+	owner metav1.Object,
+	obj client.Object,
+) (bool, error) {
 	if reader == nil {
 		reader = c
 	}
@@ -592,9 +616,18 @@ func DeleteOwnedAndWait(ctx context.Context, c client.Client, reader client.Read
 // It is built unstructured because a typed apply cannot express "a status
 // claiming nothing": a zero-valued condition slice is indistinguishable from one
 // the caller wants removed.
-func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, fieldOwner string) error {
+func ReleaseOwnedStatus(
+	ctx context.Context,
+	c client.Client,
+	ad *airunwayv1alpha1.AgentDeployment,
+	fieldOwner string,
+) error {
 	if ad.UID == "" || ad.ResourceVersion == "" {
-		return fmt.Errorf("release provider status for AgentDeployment %s/%s: UID and resourceVersion are required", ad.Namespace, ad.Name)
+		return fmt.Errorf(
+			"release provider status for AgentDeployment %s/%s: UID and resourceVersion are required",
+			ad.Namespace,
+			ad.Name,
+		)
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": airunwayv1alpha1.GroupVersion.String(),
@@ -616,7 +649,9 @@ func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alph
 			"conditions": []any{},
 		},
 	}}
-	if err := c.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+	// The unstructured apply is required to release status fields by omission.
+	if err := c.Status().Patch(ctx, apply, client.Apply, //nolint:staticcheck
+		client.FieldOwner(fieldOwner)); err != nil {
 		return StatusWriteError(err)
 	}
 	var updated airunwayv1alpha1.AgentDeployment
@@ -636,7 +671,12 @@ func ReleaseOwnedStatus(ctx context.Context, c client.Client, ad *airunwayv1alph
 // here: it holds only a placeholder token, deleting it would require the Secret
 // read access providers deliberately drop, and it is garbage-collected via its
 // owner reference when the AgentDeployment goes away.
-func CleanupOwned(ctx context.Context, c client.Client, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) error {
+func CleanupOwned(
+	ctx context.Context,
+	c client.Client,
+	ad *airunwayv1alpha1.AgentDeployment,
+	objs ...client.Object,
+) error {
 	for _, obj := range objs {
 		if err := DeleteOwned(ctx, c, ad, obj); err != nil {
 			return err
@@ -647,7 +687,13 @@ func CleanupOwned(ctx context.Context, c client.Client, ad *airunwayv1alpha1.Age
 
 // CleanupOwnedAndWait starts foreground deletion for every rendered object and
 // reports pending until all owned objects and their dependants are gone.
-func CleanupOwnedAndWait(ctx context.Context, c client.Client, reader client.Reader, ad *airunwayv1alpha1.AgentDeployment, objs ...client.Object) (bool, error) {
+func CleanupOwnedAndWait(
+	ctx context.Context,
+	c client.Client,
+	reader client.Reader,
+	ad *airunwayv1alpha1.AgentDeployment,
+	objs ...client.Object,
+) (bool, error) {
 	pending := false
 	for _, obj := range objs {
 		deleting, err := DeleteOwnedAndWait(ctx, c, reader, ad, obj)
@@ -687,7 +733,7 @@ func UpstreamObjectReady(u *unstructured.Unstructured) (bool, error) {
 		return false, nil
 	}
 	for _, raw := range conds {
-		cm, ok := raw.(map[string]interface{})
+		cm, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -712,7 +758,12 @@ func UpstreamObjectReady(u *unstructured.Unstructured) (bool, error) {
 // Returns false when the CR is missing, has no Ready condition, or carries a
 // Ready=True left over from a previous generation — checked via the condition's
 // observedGeneration where the operator records one.
-func ReadUpstreamCRReady(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind, name, namespace string) (bool, error) {
+func ReadUpstreamCRReady(
+	ctx context.Context,
+	c client.Reader,
+	gvk schema.GroupVersionKind,
+	name, namespace string,
+) (bool, error) {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(gvk)
 	if err := c.Get(ctx, k8stypes.NamespacedName{Name: name, Namespace: namespace}, u); err != nil {
@@ -736,7 +787,7 @@ func UpstreamCRReady(ctx context.Context, c client.Client, gvk schema.GroupVersi
 // conditionObservedGeneration extracts a status condition's observedGeneration.
 // The unstructured decoder yields JSON numbers as int64 or float64, so both are
 // handled. Reports false when the operator does not record one.
-func conditionObservedGeneration(cm map[string]interface{}) (int64, bool) {
+func conditionObservedGeneration(cm map[string]any) (int64, bool) {
 	switch n := cm["observedGeneration"].(type) {
 	case int64:
 		return n, true
@@ -1070,7 +1121,12 @@ func AgentsForFramework(ctx context.Context, c client.Client, framework string) 
 // framework registered as a container backend but named after a crd-backed
 // provider would be rendered by both, and the two would fight over the
 // provider-owned ProviderReady condition.
-func FrameworkUsesBackend(ctx context.Context, c client.Client, framework string, backend airunwayv1alpha1.AgentProviderBackend) (bool, error) {
+func FrameworkUsesBackend(
+	ctx context.Context,
+	c client.Client,
+	framework string,
+	backend airunwayv1alpha1.AgentProviderBackend,
+) (bool, error) {
 	var apc airunwayv1alpha1.AgentProviderConfig
 	if err := c.Get(ctx, k8stypes.NamespacedName{Name: framework}, &apc); err != nil {
 		if apierrors.IsNotFound(err) {

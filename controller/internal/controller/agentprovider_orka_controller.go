@@ -122,6 +122,8 @@ type orkaAllowedAgent struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 
 // Reconcile renders the Orka-native resources for an Orka AgentDeployment.
+//
+//nolint:gocyclo,dupl // Reconcile mirrors the audited CRD-provider lifecycle while retaining Orka-specific resources.
 func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	defer func() {
 		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
@@ -308,7 +310,7 @@ func (r *OrkaProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // keeps the API key in a Kubernetes Secret referenced by name+key, and takes a
 // baseURL override for OpenAI-compatible / proxy endpoints.
 func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1alpha1.ModelBindingStatus) *unstructured.Unstructured {
-	spec := map[string]interface{}{
+	spec := map[string]any{
 		"type": orkaProviderType(ad, binding),
 	}
 	if binding.BaseURL != "" {
@@ -321,7 +323,7 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 		// Orka does not use defaultModel as Azure's deployment selector. Its
 		// controller requires the provider-specific deploymentName field and marks
 		// the Provider unready when it is absent.
-		spec["azure"] = map[string]interface{}{
+		spec["azure"] = map[string]any{
 			"deploymentName": binding.ModelName,
 		}
 	}
@@ -332,12 +334,12 @@ func renderOrkaProvider(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1
 	if binding.CredentialsRef != nil {
 		secretName, secretKey = binding.CredentialsRef.Name, binding.CredentialsRef.Key
 	}
-	spec["secretRef"] = map[string]interface{}{
+	spec["secretRef"] = map[string]any{
 		"name": secretName,
 		"key":  secretKey,
 	}
 
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
+	obj := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	obj.SetGroupVersionKind(orkaProviderGVK)
 	obj.SetName(ad.Name + "-provider")
 	obj.SetNamespace(ad.Namespace)
@@ -371,16 +373,16 @@ func orkaProviderType(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1al
 // renderOrkaAgent builds an Orka Agent CR referencing the rendered Provider and
 // carrying the mapped system prompt, tools, and coordination configuration.
 func renderOrkaAgent(ad *airunwayv1alpha1.AgentDeployment, cfg orkaAgentConfig, binding airunwayv1alpha1.ModelBindingStatus, providerName string) *unstructured.Unstructured {
-	spec := map[string]interface{}{
-		"providerRef":  map[string]interface{}{"name": providerName},
-		"systemPrompt": map[string]interface{}{"inline": cfg.SystemPrompt},
+	spec := map[string]any{
+		"providerRef":  map[string]any{"name": providerName},
+		"systemPrompt": map[string]any{"inline": cfg.SystemPrompt},
 	}
 	if binding.ModelName != "" {
-		spec["model"] = map[string]interface{}{"name": binding.ModelName}
+		spec["model"] = map[string]any{"name": binding.ModelName}
 	}
-	tools := make([]interface{}, 0, len(cfg.Tools))
+	tools := make([]any, 0, len(cfg.Tools))
 	for _, tool := range cfg.Tools {
-		rendered := map[string]interface{}{"name": tool.Name}
+		rendered := map[string]any{"name": tool.Name}
 		if tool.Enabled != nil {
 			rendered["enabled"] = *tool.Enabled
 		}
@@ -388,9 +390,9 @@ func renderOrkaAgent(ad *airunwayv1alpha1.AgentDeployment, cfg orkaAgentConfig, 
 	}
 	spec["tools"] = tools
 
-	coordination := map[string]interface{}{
-		"allowedAgents":         []interface{}{},
-		"approvalRequiredTools": []interface{}{},
+	coordination := map[string]any{
+		"allowedAgents":         []any{},
+		"approvalRequiredTools": []any{},
 		"autonomous":            false,
 		"enabled":               false,
 		"maxConcurrentChildren": int64(orkaDefaultMaxConcurrentChildren),
@@ -399,16 +401,16 @@ func renderOrkaAgent(ad *airunwayv1alpha1.AgentDeployment, cfg orkaAgentConfig, 
 	}
 	if cfg.Coordination != nil {
 		coordination["enabled"] = cfg.Coordination.Enabled
-		allowedAgents := make([]interface{}, 0, len(cfg.Coordination.AllowedAgents))
+		allowedAgents := make([]any, 0, len(cfg.Coordination.AllowedAgents))
 		for _, allowed := range cfg.Coordination.AllowedAgents {
-			rendered := map[string]interface{}{"name": allowed.Name}
+			rendered := map[string]any{"name": allowed.Name}
 			if allowed.Namespace != "" {
 				rendered["namespace"] = allowed.Namespace
 			}
 			allowedAgents = append(allowedAgents, rendered)
 		}
 		coordination["allowedAgents"] = allowedAgents
-		approvalRequiredTools := make([]interface{}, 0, len(cfg.Coordination.ApprovalRequiredTools))
+		approvalRequiredTools := make([]any, 0, len(cfg.Coordination.ApprovalRequiredTools))
 		for _, toolName := range cfg.Coordination.ApprovalRequiredTools {
 			approvalRequiredTools = append(approvalRequiredTools, toolName)
 		}
@@ -428,7 +430,7 @@ func renderOrkaAgent(ad *airunwayv1alpha1.AgentDeployment, cfg orkaAgentConfig, 
 	}
 	spec["coordination"] = coordination
 
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
+	obj := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	obj.SetGroupVersionKind(orkaAgentGVK)
 	obj.SetName(ad.Name)
 	obj.SetNamespace(ad.Namespace)
@@ -486,6 +488,7 @@ func (r *OrkaProviderReconciler) objectReader() client.Reader {
 	return r.Client
 }
 
+//nolint:dupl // The ordered resource list is provider-specific and deliberately explicit.
 func (r *OrkaProviderReconciler) cleanupRenderedResources(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -539,6 +542,7 @@ func (r *OrkaProviderReconciler) failClosedForCredentialProvision(
 	return ctrl.Result{}, cause
 }
 
+//nolint:dupl // CRD providers apply the same fail-closed ownership proof to distinct topologies.
 func (r *OrkaProviderReconciler) cleanupAfterRenderedWriteFailure(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -550,7 +554,7 @@ func (r *OrkaProviderReconciler) cleanupAfterRenderedWriteFailure(
 	live.SetGroupVersionKind(failed.GroupVersionKind())
 	readErr := r.objectReader().Get(ctx, client.ObjectKeyFromObject(failed), live)
 	foreign := readErr == nil && !agentprovider.IsControlledByAgentDeployment(live, ad)
-	definitivelyIncomplete := cleanupDefinitiveFailure && definitiveCRDResourceWriteFailure(cause)
+	definitivelyIncomplete := cleanupDefinitiveFailure && definitiveResourceWriteFailure(cause)
 	if !foreign && !definitivelyIncomplete {
 		return cause
 	}

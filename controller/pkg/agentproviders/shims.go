@@ -73,7 +73,12 @@ func NewOrkaReconciler(c client.Client, apiReader client.Reader, scheme *runtime
 // different versions to status.version under different SSA field owners — so one
 // of them loses a conflict on every reconcile, forever. Naming both narrows this
 // reporter to the framework/backend pair it actually serves.
-func NewFrameworkVersionReporter(c client.Client, name, framework string, backend airunwayv1alpha1.AgentProviderBackend, version string) Reconciler {
+func NewFrameworkVersionReporter(
+	c client.Client,
+	name, framework string,
+	backend airunwayv1alpha1.AgentProviderBackend,
+	version string,
+) Reconciler {
 	return &internalcontroller.AgentProviderVersionReconciler{
 		Client:    c,
 		Name:      name,

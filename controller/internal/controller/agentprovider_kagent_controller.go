@@ -20,9 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -131,6 +131,8 @@ type kagentMCPServerToolRef struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;patch
 
 // Reconcile renders the kagent-native resources for a kagent AgentDeployment.
+//
+//nolint:dupl // CRD providers share lifecycle invariants while rendering different upstream resources.
 func (r *KagentProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	defer func() {
 		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
@@ -367,15 +369,13 @@ func parseKagentConfig(raw *runtime.RawExtension) (kagentConfig, error) {
 func renderKagentModelConfig(ad *airunwayv1alpha1.AgentDeployment, binding airunwayv1alpha1.ModelBindingStatus) *unstructured.Unstructured {
 	provider, providerBlock := kagentProviderFor(binding)
 
-	spec := map[string]interface{}{
+	spec := map[string]any{
 		"provider": provider,
 		"model":    binding.ModelName,
 	}
 	if len(providerBlock) > 0 {
 		// e.g. "openAI": {"baseUrl": "..."} or "azureOpenAI": {...}
-		for k, v := range providerBlock {
-			spec[k] = v
-		}
+		maps.Copy(spec, providerBlock)
 	}
 	if binding.CredentialsRef != nil {
 		// kagent v1alpha2 renamed this field from v1alpha1's apiKeySecretRef to
@@ -385,7 +385,7 @@ func renderKagentModelConfig(ad *airunwayv1alpha1.AgentDeployment, binding airun
 		spec["apiKeySecretKey"] = binding.CredentialsRef.Key
 	}
 
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
+	obj := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	obj.SetGroupVersionKind(kagentModelConfigGVK)
 	obj.SetName(ad.Name + "-model")
 	obj.SetNamespace(ad.Namespace)
@@ -396,12 +396,12 @@ func renderKagentModelConfig(ad *airunwayv1alpha1.AgentDeployment, binding airun
 // and the matching provider-specific config block. Base URL is carried on the
 // provider block so any OpenAI-compatible endpoint (including in-cluster
 // models) works.
-func kagentProviderFor(binding airunwayv1alpha1.ModelBindingStatus) (provider string, block map[string]interface{}) {
+func kagentProviderFor(binding airunwayv1alpha1.ModelBindingStatus) (provider string, block map[string]any) {
 	switch binding.APIType {
 	case airunwayv1alpha1.ExternalAPITypeAzureOpenAI:
 		provider = "AzureOpenAI"
-		block = map[string]interface{}{
-			"azureOpenAI": map[string]interface{}{
+		block = map[string]any{
+			"azureOpenAI": map[string]any{
 				"azureEndpoint":   binding.BaseURL,
 				"azureDeployment": binding.ModelName,
 				"apiVersion":      "2024-02-01",
@@ -409,16 +409,16 @@ func kagentProviderFor(binding airunwayv1alpha1.ModelBindingStatus) (provider st
 		}
 	case airunwayv1alpha1.ExternalAPITypeAnthropic:
 		provider = "Anthropic"
-		block = map[string]interface{}{
-			"anthropic": map[string]interface{}{
+		block = map[string]any{
+			"anthropic": map[string]any{
 				"baseUrl": binding.BaseURL,
 			},
 		}
 	default:
 		provider = "OpenAI"
-		block = map[string]interface{}{}
+		block = map[string]any{}
 		if binding.BaseURL != "" {
-			block["openAI"] = map[string]interface{}{"baseUrl": binding.BaseURL}
+			block["openAI"] = map[string]any{"baseUrl": binding.BaseURL}
 		}
 	}
 	return provider, block
@@ -436,7 +436,7 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 	if adkRuntime == "" {
 		adkRuntime = "python"
 	}
-	declarative := map[string]interface{}{
+	declarative := map[string]any{
 		"modelConfig": modelConfigName,
 		"runtime":     adkRuntime,
 	}
@@ -447,8 +447,8 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 		declarative["tools"] = renderKagentTools(cfg.Tools)
 	}
 
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{
-		"spec": map[string]interface{}{
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
 			"type":        "Declarative",
 			"description": description,
 			"declarative": declarative,
@@ -460,10 +460,10 @@ func renderKagentAgent(ad *airunwayv1alpha1.AgentDeployment, cfg kagentConfig, m
 	return obj
 }
 
-func renderKagentTools(tools []kagentToolRef) []interface{} {
-	rendered := make([]interface{}, 0, len(tools))
+func renderKagentTools(tools []kagentToolRef) []any {
+	rendered := make([]any, 0, len(tools))
 	for _, tool := range tools {
-		mcpServer := map[string]interface{}{
+		mcpServer := map[string]any{
 			"name": tool.MCPServer.Name,
 		}
 		if tool.MCPServer.APIGroup != "" {
@@ -481,7 +481,7 @@ func renderKagentTools(tools []kagentToolRef) []interface{} {
 		if len(tool.MCPServer.RequireApproval) > 0 {
 			mcpServer["requireApproval"] = stringSliceToInterfaces(tool.MCPServer.RequireApproval)
 		}
-		rendered = append(rendered, map[string]interface{}{
+		rendered = append(rendered, map[string]any{
 			"type":      tool.Type,
 			"mcpServer": mcpServer,
 		})
@@ -489,8 +489,8 @@ func renderKagentTools(tools []kagentToolRef) []interface{} {
 	return rendered
 }
 
-func stringSliceToInterfaces(values []string) []interface{} {
-	rendered := make([]interface{}, len(values))
+func stringSliceToInterfaces(values []string) []any {
+	rendered := make([]any, len(values))
 	for i, value := range values {
 		rendered[i] = value
 	}
@@ -499,6 +499,8 @@ func stringSliceToInterfaces(values []string) []interface{} {
 
 // applyProviderStatus writes the provider-owned status via the shared SSA
 // helper under the kagent field owner.
+//
+//nolint:dupl,unparam // The shared provider-status shape keeps call sites consistent; kagent has no replica status.
 func (r *KagentProviderReconciler) applyProviderStatus(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -552,6 +554,7 @@ func (r *KagentProviderReconciler) objectReader() client.Reader {
 	return r.Client
 }
 
+//nolint:dupl // The ordered resource list is provider-specific and deliberately explicit.
 func (r *KagentProviderReconciler) cleanupRenderedResources(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -605,6 +608,7 @@ func (r *KagentProviderReconciler) failClosedForCredentialProvision(
 	return ctrl.Result{}, cause
 }
 
+//nolint:dupl // CRD providers apply the same fail-closed ownership proof to distinct topologies.
 func (r *KagentProviderReconciler) cleanupAfterRenderedWriteFailure(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -616,7 +620,7 @@ func (r *KagentProviderReconciler) cleanupAfterRenderedWriteFailure(
 	live.SetGroupVersionKind(failed.GroupVersionKind())
 	readErr := r.objectReader().Get(ctx, client.ObjectKeyFromObject(failed), live)
 	foreign := readErr == nil && !agentprovider.IsControlledByAgentDeployment(live, ad)
-	definitivelyIncomplete := cleanupDefinitiveFailure && definitiveCRDResourceWriteFailure(cause)
+	definitivelyIncomplete := cleanupDefinitiveFailure && definitiveResourceWriteFailure(cause)
 	if !foreign && !definitivelyIncomplete {
 		return cause
 	}
@@ -624,21 +628,4 @@ func (r *KagentProviderReconciler) cleanupAfterRenderedWriteFailure(
 		return fmt.Errorf("%w; clean up incomplete kagent topology after rendered resource write failure: %v", cause, err)
 	}
 	return cause
-}
-
-// definitiveCRDResourceWriteFailure identifies API-server status responses that
-// prove the write was rejected. Transport failures and conflicts remain
-// ambiguous and are retried without tearing down an otherwise healthy topology.
-// Orka uses the same classification for its Agent + Provider pair.
-func definitiveCRDResourceWriteFailure(err error) bool {
-	return apierrors.IsAlreadyExists(err) ||
-		apierrors.IsInvalid(err) ||
-		apierrors.IsBadRequest(err) ||
-		apierrors.IsUnauthorized(err) ||
-		apierrors.IsForbidden(err) ||
-		apierrors.IsTooManyRequests(err) ||
-		apierrors.IsMethodNotSupported(err) ||
-		apierrors.IsNotAcceptable(err) ||
-		apierrors.IsUnsupportedMediaType(err) ||
-		apierrors.IsRequestEntityTooLargeError(err)
 }

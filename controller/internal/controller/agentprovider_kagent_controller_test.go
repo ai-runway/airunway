@@ -60,6 +60,7 @@ func (c *recordingKagentResourceWriteClient) Create(
 	return c.Client.Create(ctx, obj, opts...)
 }
 
+//nolint:goconst // The fake records the same verb used by multiple write-path assertions.
 func (c *recordingKagentResourceWriteClient) Patch(
 	ctx context.Context,
 	obj client.Object,
@@ -123,7 +124,7 @@ func TestParseKagentConfig(t *testing.T) {
 		t.Errorf("nil config should be empty, got %+v", got)
 	}
 	for _, valid := range []string{"", "python", "go"} {
-		raw := &runtime.RawExtension{Raw: []byte(fmt.Sprintf(`{"runtime":%q}`, valid))}
+		raw := &runtime.RawExtension{Raw: fmt.Appendf(nil, `{"runtime":%q}`, valid)}
 		if _, err := parseKagentConfig(raw); err != nil {
 			t.Errorf("runtime %q rejected: %v", valid, err)
 		}
@@ -144,6 +145,7 @@ func TestParseKagentConfig(t *testing.T) {
 	}
 }
 
+//nolint:goconst // Repeated names are assertions of the rendered identity contract.
 func TestRenderKagentAgent(t *testing.T) {
 	ad := &airunwayv1alpha1.AgentDeployment{}
 	ad.Name = "k8s-sre"
@@ -189,14 +191,14 @@ func TestRenderKagentAgent(t *testing.T) {
 	if err != nil || !found || len(tools) != 1 {
 		t.Fatalf("declarative.tools = %#v, found=%v, err=%v", tools, found, err)
 	}
-	mcpServer, found, err := unstructured.NestedMap(tools[0].(map[string]interface{}), "mcpServer")
+	mcpServer, found, err := unstructured.NestedMap(tools[0].(map[string]any), "mcpServer")
 	if err != nil || !found {
 		t.Fatalf("declarative.tools[0].mcpServer missing: err=%v", err)
 	}
 	if mcpServer["name"] != "readonly-kubernetes" || mcpServer["namespace"] != "agent-tools" {
 		t.Errorf("mcpServer = %#v, want configured name and namespace", mcpServer)
 	}
-	if got := mcpServer["toolNames"]; !reflect.DeepEqual(got, []interface{}{"k8s_get_resources", "k8s_get_events"}) {
+	if got := mcpServer["toolNames"]; !reflect.DeepEqual(got, []any{"k8s_get_resources", "k8s_get_events"}) {
 		t.Errorf("mcpServer.toolNames = %#v", got)
 	}
 }
@@ -216,6 +218,7 @@ func TestRenderKagentAgent_NoSystemPrompt(t *testing.T) {
 	}
 }
 
+//nolint:goconst // Repeated model fixtures make field mappings directly readable.
 func TestRenderKagentModelConfig(t *testing.T) {
 	ad := &airunwayv1alpha1.AgentDeployment{}
 	ad.Name = "k8s-sre"
@@ -307,6 +310,7 @@ func TestRenderKagentModelConfig_AzureOpenAIType(t *testing.T) {
 	}
 }
 
+//nolint:goconst // Provider identifiers are repeated to pin each mapped field.
 func TestRenderKagentModelConfig_AnthropicType(t *testing.T) {
 	ad := &airunwayv1alpha1.AgentDeployment{}
 	ad.Name = "anthropic"
@@ -826,8 +830,8 @@ var _ = Describe("Kagent crd provider", func() {
 		agent := &unstructured.Unstructured{}
 		agent.SetGroupVersionKind(agentGVK)
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kagent-ready", Namespace: "default"}, agent)).To(Succeed())
-		Expect(unstructured.SetNestedSlice(agent.Object, []interface{}{
-			map[string]interface{}{"type": "Ready", "status": "True", "reason": "AgentRunning", "message": "ok",
+		Expect(unstructured.SetNestedSlice(agent.Object, []any{
+			map[string]any{"type": "Ready", "status": "True", "reason": "AgentRunning", "message": "ok",
 				"lastTransitionTime": metav1.Now().Format("2006-01-02T15:04:05Z07:00")},
 		}, "status", "conditions")).To(Succeed())
 		Expect(k8sClient.Status().Update(ctx, agent)).To(Succeed())

@@ -25,6 +25,8 @@ import (
 // TestAgentDeployment_DeepCopy is a smoke test that the generated
 // DeepCopy methods produce an independent object. Catches accidental
 // shallow copies introduced by hand-edited zz_generated files.
+//
+//nolint:goconst // Mutation sentinels are intentionally repeated literals in this independence test.
 func TestAgentDeployment_DeepCopy(t *testing.T) {
 	orig := &AgentDeployment{
 		Spec: AgentDeploymentSpec{

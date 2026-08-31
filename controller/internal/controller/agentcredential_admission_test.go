@@ -149,6 +149,7 @@ var _ = Describe("AgentDeployment credential admission API defaulting", func() {
 	})
 })
 
+//nolint:goconst,gocyclo // The test exhaustively covers repeated fixtures and independent failure modes.
 func TestVerifyAgentCredentialAdmission(t *testing.T) {
 	valid := validAgentCredentialAdmissionConfiguration
 	newReader := func(objects ...runtime.Object) *fake.ClientBuilder {
@@ -438,7 +439,7 @@ func TestVerifyAgentCredentialAdmission(t *testing.T) {
 	t.Run("rejects a cluster-only resource rule", func(t *testing.T) {
 		config := valid()
 		cluster := admissionv1.ClusterScope
-		config.Webhooks[0].Rules[0].Rule.Scope = &cluster
+		config.Webhooks[0].Rules[0].Scope = &cluster
 		reader := newReader(config).Build()
 		if err := VerifyAgentCredentialAdmission(context.Background(), reader); err == nil {
 			t.Fatal("scope Cluster cannot cover namespaced AgentDeployments")
@@ -559,7 +560,7 @@ func TestVerifyAgentCredentialAdmission(t *testing.T) {
 			{
 				name: "wildcard resource coverage",
 				mutate: func(config *admissionv1.MutatingWebhookConfiguration) {
-					config.Webhooks[0].Rules[0].Rule.Resources = []string{"*"}
+					config.Webhooks[0].Rules[0].Resources = []string{"*"}
 				},
 			},
 		}
@@ -612,17 +613,17 @@ func TestDeletingBindingTargetsAreNotResolved(t *testing.T) {
 	})
 
 	t.Run("Gateway", func(t *testing.T) {
-		gateway := &unstructured.Unstructured{Object: map[string]interface{}{
+		gateway := &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
 			"kind":       "Gateway",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":              "deleting-gateway",
 				"namespace":         "default",
 				"deletionTimestamp": deletingAt.Format(time.RFC3339),
-				"finalizers":        []interface{}{"test.airunway.ai/hold"},
+				"finalizers":        []any{"test.airunway.ai/hold"},
 			},
-			"status": map[string]interface{}{
-				"addresses": []interface{}{map[string]interface{}{"value": "10.0.0.1"}},
+			"status": map[string]any{
+				"addresses": []any{map[string]any{"value": "10.0.0.1"}},
 			},
 		}}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()

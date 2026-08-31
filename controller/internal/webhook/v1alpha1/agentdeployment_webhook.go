@@ -311,7 +311,7 @@ func validateAgentProviderOverrides(provider *airunwayv1alpha1.AgentProviderSpec
 		return allErrs
 	}
 
-	var rawValue interface{}
+	var rawValue any
 	decoder := json.NewDecoder(bytes.NewReader(provider.Overrides.Raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&rawValue); err != nil {
@@ -334,7 +334,7 @@ func validateAgentProviderOverrides(provider *airunwayv1alpha1.AgentProviderSpec
 		return allErrs
 	}
 
-	root, ok := rawValue.(map[string]interface{})
+	root, ok := rawValue.(map[string]any)
 	if !ok {
 		allErrs = append(allErrs, field.Invalid(
 			overridesPath,
@@ -352,7 +352,7 @@ func validateAgentProviderOverrides(provider *airunwayv1alpha1.AgentProviderSpec
 			))
 			continue
 		}
-		section, ok := value.(map[string]interface{})
+		section, ok := value.(map[string]any)
 		if !ok {
 			allErrs = append(allErrs, field.Invalid(
 				overridesPath.Child(key),
@@ -367,7 +367,7 @@ func validateAgentProviderOverrides(provider *airunwayv1alpha1.AgentProviderSpec
 	return allErrs
 }
 
-func validateWorkloadSecurityOverrides(section map[string]interface{}, sectionPath *field.Path) field.ErrorList {
+func validateWorkloadSecurityOverrides(section map[string]any, sectionPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	for key, value := range section {
 		if _, allowed := allowedWorkloadOverrideKeys[key]; !allowed {
@@ -377,7 +377,7 @@ func validateWorkloadSecurityOverrides(section map[string]interface{}, sectionPa
 			))
 			continue
 		}
-		obj, ok := value.(map[string]interface{})
+		obj, ok := value.(map[string]any)
 		if !ok {
 			allErrs = append(allErrs, field.Invalid(
 				sectionPath.Child(key),
@@ -410,7 +410,7 @@ func validateWorkloadSecurityOverrides(section map[string]interface{}, sectionPa
 	return allErrs
 }
 
-func validateAllowedObjectKeys(m map[string]interface{}, path *field.Path, allowed map[string]struct{}, detailPrefix string) field.ErrorList {
+func validateAllowedObjectKeys(m map[string]any, path *field.Path, allowed map[string]struct{}, detailPrefix string) field.ErrorList {
 	var allErrs field.ErrorList
 	for key := range m {
 		if _, ok := allowed[key]; !ok {
@@ -423,8 +423,8 @@ func validateAllowedObjectKeys(m map[string]interface{}, path *field.Path, allow
 	return allErrs
 }
 
-func validateCapabilities(value interface{}, path *field.Path) field.ErrorList {
-	obj, ok := value.(map[string]interface{})
+func validateCapabilities(value any, path *field.Path) field.ErrorList {
+	obj, ok := value.(map[string]any)
 	if !ok {
 		return field.ErrorList{field.Invalid(path, value, "capabilities override must be a JSON object")}
 	}
@@ -433,7 +433,7 @@ func validateCapabilities(value interface{}, path *field.Path) field.ErrorList {
 	if !hasDrop {
 		return allErrs
 	}
-	dropList, ok := dropVal.([]interface{})
+	dropList, ok := dropVal.([]any)
 	if !ok {
 		allErrs = append(allErrs, field.Invalid(path.Child("drop"), dropVal, "drop must be an array of capability names"))
 		return allErrs
@@ -459,8 +459,8 @@ func validateCapabilities(value interface{}, path *field.Path) field.ErrorList {
 	return allErrs
 }
 
-func validateSeccompProfile(value interface{}, path *field.Path) field.ErrorList {
-	obj, ok := value.(map[string]interface{})
+func validateSeccompProfile(value any, path *field.Path) field.ErrorList {
+	obj, ok := value.(map[string]any)
 	if !ok {
 		return field.ErrorList{field.Invalid(path, value, "seccompProfile override must be a JSON object")}
 	}
@@ -497,15 +497,10 @@ func validateSeccompProfile(value interface{}, path *field.Path) field.ErrorList
 	return allErrs
 }
 
-func validatePodSecurityContextValues(m map[string]interface{}, path *field.Path) field.ErrorList {
+func validatePodSecurityContextValues(m map[string]any, path *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	if value, found := m["runAsNonRoot"]; found {
-		b, ok := value.(bool)
-		if !ok {
-			allErrs = append(allErrs, field.Invalid(path.Child("runAsNonRoot"), value, "runAsNonRoot must be a boolean"))
-		} else if !b {
-			allErrs = append(allErrs, field.Forbidden(path.Child("runAsNonRoot"), "runAsNonRoot cannot be set to false"))
-		}
+		allErrs = append(allErrs, validateTrueBoolean(path.Child("runAsNonRoot"), value, "runAsNonRoot")...)
 	}
 	if value, found := m["runAsUser"]; found {
 		allErrs = append(allErrs, validateRunAsUser(path.Child("runAsUser"), value)...)
@@ -517,7 +512,7 @@ func validatePodSecurityContextValues(m map[string]interface{}, path *field.Path
 		allErrs = append(allErrs, validateNonNegativeInt64(path.Child("fsGroup"), value)...)
 	}
 	if value, found := m["supplementalGroups"]; found {
-		groups, ok := value.([]interface{})
+		groups, ok := value.([]any)
 		if !ok {
 			allErrs = append(allErrs, field.Invalid(path.Child("supplementalGroups"), value, "supplementalGroups must be an array of integers"))
 		} else {
@@ -537,15 +532,10 @@ func validatePodSecurityContextValues(m map[string]interface{}, path *field.Path
 	return allErrs
 }
 
-func validateContainerSecurityContextValues(m map[string]interface{}, path *field.Path) field.ErrorList {
+func validateContainerSecurityContextValues(m map[string]any, path *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	if value, found := m["runAsNonRoot"]; found {
-		b, ok := value.(bool)
-		if !ok {
-			allErrs = append(allErrs, field.Invalid(path.Child("runAsNonRoot"), value, "runAsNonRoot must be a boolean"))
-		} else if !b {
-			allErrs = append(allErrs, field.Forbidden(path.Child("runAsNonRoot"), "runAsNonRoot cannot be set to false"))
-		}
+		allErrs = append(allErrs, validateTrueBoolean(path.Child("runAsNonRoot"), value, "runAsNonRoot")...)
 	}
 	if value, found := m["allowPrivilegeEscalation"]; found {
 		b, ok := value.(bool)
@@ -579,7 +569,18 @@ func validateContainerSecurityContextValues(m map[string]interface{}, path *fiel
 	return allErrs
 }
 
-func validateNonNegativeInt64(path *field.Path, value interface{}) field.ErrorList {
+func validateTrueBoolean(path *field.Path, value any, name string) field.ErrorList {
+	b, ok := value.(bool)
+	if !ok {
+		return field.ErrorList{field.Invalid(path, value, name+" must be a boolean")}
+	}
+	if !b {
+		return field.ErrorList{field.Forbidden(path, name+" cannot be set to false")}
+	}
+	return nil
+}
+
+func validateNonNegativeInt64(path *field.Path, value any) field.ErrorList {
 	number, ok := value.(json.Number)
 	if !ok {
 		return field.ErrorList{field.Invalid(path, value, "must be a non-negative 64-bit integer")}
@@ -594,7 +595,7 @@ func validateNonNegativeInt64(path *field.Path, value interface{}) field.ErrorLi
 // validateRunAsUser requires a strictly positive UID. Every rendered container
 // keeps runAsNonRoot=true and overrides may not disable it, so runAsUser=0
 // (root) would be admitted here but rejected by the kubelet at pod start.
-func validateRunAsUser(path *field.Path, value interface{}) field.ErrorList {
+func validateRunAsUser(path *field.Path, value any) field.ErrorList {
 	if errs := validateNonNegativeInt64(path, value); len(errs) > 0 {
 		return errs
 	}

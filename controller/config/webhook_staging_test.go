@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -40,6 +41,7 @@ type renderedAdmission struct {
 	validating map[string]*admissionregistrationv1.ValidatingWebhookConfiguration
 }
 
+//nolint:gocyclo // This integration-style test validates each phase and rollback invariant in one staged flow.
 func TestAgentDeploymentWebhookStaging(t *testing.T) {
 	defaultAdmission := renderAdmission(t, "default")
 	activatedAdmission := renderAdmission(t, "agentdeployment-webhook")
@@ -151,13 +153,13 @@ func TestAgentDeploymentWebhookStaging(t *testing.T) {
 	if !reflect.DeepEqual(rule.Operations, []admissionregistrationv1.OperationType{
 		admissionregistrationv1.Create,
 		admissionregistrationv1.Update,
-	}) || !reflect.DeepEqual(rule.Rule.APIGroups, []string{"airunway.ai"}) ||
-		!reflect.DeepEqual(rule.Rule.APIVersions, []string{"v1alpha1"}) ||
-		!reflect.DeepEqual(rule.Rule.Resources, []string{"agentdeployments"}) {
+	}) || !reflect.DeepEqual(rule.APIGroups, []string{"airunway.ai"}) ||
+		!reflect.DeepEqual(rule.APIVersions, []string{"v1alpha1"}) ||
+		!reflect.DeepEqual(rule.Resources, []string{"agentdeployments"}) {
 		t.Fatalf("upgrade guard rule = %#v, want only AgentDeployment CREATE and UPDATE", rule)
 	}
-	if rule.Rule.Scope == nil || *rule.Rule.Scope != admissionregistrationv1.NamespacedScope {
-		t.Fatalf("upgrade guard scope = %v, want Namespaced", rule.Rule.Scope)
+	if rule.Scope == nil || *rule.Scope != admissionregistrationv1.NamespacedScope {
+		t.Fatalf("upgrade guard scope = %v, want Namespaced", rule.Scope)
 	}
 
 	scheme := runtime.NewScheme()
@@ -322,7 +324,6 @@ func TestDocumentedStagedCommandsFailClosed(t *testing.T) {
 		"../../docs/providers/vllm.md",
 	}
 	for _, document := range documents {
-		document := document
 		t.Run(filepath.Base(filepath.Dir(document))+"-"+filepath.Base(document), func(t *testing.T) {
 			contents, err := os.ReadFile(document)
 			if err != nil {
@@ -489,12 +490,7 @@ func validatingWebhookNames(config *admissionregistrationv1.ValidatingWebhookCon
 }
 
 func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, target)
 }
 
 func makeTargetRecipe(t *testing.T, makefile []byte, target string) string {

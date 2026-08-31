@@ -97,9 +97,9 @@ func (c *recordingOrkaApplyClient) writesFor(gvk schema.GroupVersionKind) []orka
 
 // --- Pure render-function unit tests (no cluster) --------------------------
 
-func orkaAD(name string, ext *airunwayv1alpha1.ExternalAPIBinding) *airunwayv1alpha1.AgentDeployment {
+func orkaAD(ext *airunwayv1alpha1.ExternalAPIBinding) *airunwayv1alpha1.AgentDeployment {
 	ad := &airunwayv1alpha1.AgentDeployment{}
-	ad.Name = name
+	ad.Name = "swarm"
 	ad.Namespace = "default"
 	ad.Spec.Framework.Name = OrkaFrameworkName
 	ad.Spec.Model = airunwayv1alpha1.ModelBinding{ExternalAPI: ext}
@@ -107,7 +107,7 @@ func orkaAD(name string, ext *airunwayv1alpha1.ExternalAPIBinding) *airunwayv1al
 }
 
 func TestRenderOrkaProvider(t *testing.T) {
-	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
+	ad := orkaAD(&airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{
 		BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI,
 		BaseURL:     "https://api.openai.com/v1", ModelName: "gpt-4o-mini",
@@ -143,7 +143,7 @@ func TestRenderOrkaProvider_KeylessUsesManagedSecretName(t *testing.T) {
 	// A credential-free binding (keyless in-cluster model via deploymentRef)
 	// must still render a valid Orka Provider: the CRD requires spec.secretRef,
 	// so the renderer falls back to the deterministic managed no-auth Secret.
-	ad := orkaAD("swarm", nil)
+	ad := orkaAD(nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{
 		BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef,
 		BaseURL:     "http://demo-llm.default.svc.cluster.local/v1", ModelName: "llama",
@@ -161,8 +161,9 @@ func TestRenderOrkaProvider_KeylessUsesManagedSecretName(t *testing.T) {
 	}
 }
 
+//nolint:goconst // Repeating the provider type pins the Orka mapping contract.
 func TestRenderOrkaProvider_AzureType(t *testing.T) {
-	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeAzureOpenAI})
+	ad := orkaAD(&airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeAzureOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{
 		BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI, ModelName: "gpt-4.1",
 	}
@@ -178,7 +179,7 @@ func TestRenderOrkaProvider_AzureType(t *testing.T) {
 }
 
 func TestRenderOrkaAgent(t *testing.T) {
-	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
+	ad := orkaAD(&airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{ModelName: "gpt-4o-mini"}
 	agent := renderOrkaAgent(ad, orkaAgentConfig{SystemPrompt: "coordinate specialists"}, binding, "swarm-provider")
 
@@ -211,13 +212,13 @@ func TestRenderOrkaAgent(t *testing.T) {
 		coordination["maxDepth"] != int64(orkaDefaultMaxDepth) || coordination["maxIterations"] != int64(0) {
 		t.Errorf("coordination defaults = %#v", coordination)
 	}
-	if len(coordination["allowedAgents"].([]interface{})) != 0 || len(coordination["approvalRequiredTools"].([]interface{})) != 0 {
+	if len(coordination["allowedAgents"].([]any)) != 0 || len(coordination["approvalRequiredTools"].([]any)) != 0 {
 		t.Errorf("coordination lists = %#v, want explicit empty lists", coordination)
 	}
 }
 
 func TestRenderOrkaAgent_AdvancedConfig(t *testing.T) {
-	ad := orkaAD("swarm", &airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
+	ad := orkaAD(&airunwayv1alpha1.ExternalAPIBinding{Type: airunwayv1alpha1.ExternalAPITypeOpenAI})
 	binding := airunwayv1alpha1.ModelBindingStatus{ModelName: "claude-opus-5"}
 	enabled, autonomous := true, true
 	maxChildren, maxDepth, maxIterations := int32(2), int32(1), int32(24)
@@ -241,7 +242,7 @@ func TestRenderOrkaAgent_AdvancedConfig(t *testing.T) {
 	if err != nil || !found || len(tools) != 1 {
 		t.Fatalf("spec.tools = %#v (found=%v, err=%v), want one tool", tools, found, err)
 	}
-	tool := tools[0].(map[string]interface{})
+	tool := tools[0].(map[string]any)
 	if tool["name"] != "record-action" || tool["enabled"] != true {
 		t.Errorf("spec.tools[0] = %#v, want enabled record-action", tool)
 	}
@@ -256,15 +257,15 @@ func TestRenderOrkaAgent_AdvancedConfig(t *testing.T) {
 	if coordination["maxConcurrentChildren"] != int64(2) || coordination["maxDepth"] != int64(1) || coordination["maxIterations"] != int64(24) {
 		t.Errorf("coordination limits = %#v, want 2/1/24", coordination)
 	}
-	allowed := coordination["allowedAgents"].([]interface{})
-	if len(allowed) != 2 || allowed[0].(map[string]interface{})["name"] != "math-specialist" {
+	allowed := coordination["allowedAgents"].([]any)
+	if len(allowed) != 2 || allowed[0].(map[string]any)["name"] != "math-specialist" {
 		t.Errorf("coordination.allowedAgents = %#v", allowed)
 	}
-	risk := allowed[1].(map[string]interface{})
+	risk := allowed[1].(map[string]any)
 	if risk["name"] != "risk-specialist" || risk["namespace"] != "specialists" {
 		t.Errorf("coordination.allowedAgents[1] = %#v", risk)
 	}
-	requiredTools := coordination["approvalRequiredTools"].([]interface{})
+	requiredTools := coordination["approvalRequiredTools"].([]any)
 	if len(requiredTools) != 1 || requiredTools[0] != "record-action" {
 		t.Errorf("coordination.approvalRequiredTools = %#v", requiredTools)
 	}
@@ -443,8 +444,8 @@ var _ = Describe("Orka crd provider", func() {
 		// real Agent CRD requires status.activeTasks, so set it too (the stub
 		// CRD did not enforce this; the real schema does).
 		Expect(unstructured.SetNestedField(agent.Object, int64(0), "status", "activeTasks")).To(Succeed())
-		Expect(unstructured.SetNestedSlice(agent.Object, []interface{}{
-			map[string]interface{}{"type": "Ready", "status": "True", "reason": "Ready", "message": "ok",
+		Expect(unstructured.SetNestedSlice(agent.Object, []any{
+			map[string]any{"type": "Ready", "status": "True", "reason": "Ready", "message": "ok",
 				"lastTransitionTime": metav1.Now().Format("2006-01-02T15:04:05Z07:00")},
 		}, "status", "conditions")).To(Succeed())
 		Expect(k8sClient.Status().Update(ctx, agent)).To(Succeed())

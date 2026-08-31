@@ -151,7 +151,7 @@ func ensureBootstrapCerts(dir string) error {
 	return nil
 }
 
-// nolint:gocyclo
+//nolint:gocyclo,dupl // Controller registration is intentionally explicit; keeping each provider visible aids auditing.
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
@@ -186,7 +186,8 @@ func main() {
 	flag.BoolVar(&enableProviderSelector, "enable-provider-selector", true,
 		"If set, the controller will run provider selection for ModelDeployments without explicit provider.name")
 	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", true,
-		"If set, the controller runs the Agent Marketplace controllers (AgentDeployment, AgentProviderConfig, and the in-process framework providers). "+
+		"If set, the controller runs the Agent Marketplace controllers "+
+			"(AgentDeployment, AgentProviderConfig, and the in-process framework providers). "+
 			"Disable to turn the feature off without redeploying a different image.")
 	flag.BoolVar(&disableCertRotation, "disable-cert-rotation", false,
 		"Disable automatic generation and rotation of webhook TLS certificates/keys")

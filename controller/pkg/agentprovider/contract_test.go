@@ -42,7 +42,7 @@ import (
 func TestConditionObservedGeneration(t *testing.T) {
 	cases := []struct {
 		name    string
-		value   interface{}
+		value   any
 		want    int64
 		present bool
 	}{
@@ -54,7 +54,7 @@ func TestConditionObservedGeneration(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cm := map[string]interface{}{}
+			cm := map[string]any{}
 			if tc.value != nil {
 				cm["observedGeneration"] = tc.value
 			}
@@ -161,7 +161,7 @@ func TestResolveStatusWriteConflict(t *testing.T) {
 		t.Fatalf("marked error must preserve the Kubernetes conflict, got %v", marked)
 	}
 	result, err := ResolveStatusWriteConflict(ctrl.Result{RequeueAfter: time.Minute}, marked)
-	if err != nil || !result.Requeue || result.RequeueAfter != 0 {
+	if err != nil || !result.Requeue || result.RequeueAfter != 0 { //nolint:staticcheck
 		t.Fatalf("resource-version conflict resolved to (%+v, %v), want immediate clean requeue", result, err)
 	}
 
@@ -309,9 +309,9 @@ func TestBoundedNamesRespectKubernetesLimits(t *testing.T) {
 }
 
 func TestUpstreamObjectReady(t *testing.T) {
-	ready := &unstructured.Unstructured{Object: map[string]interface{}{
-		"status": map[string]interface{}{
-			"conditions": []interface{}{map[string]interface{}{
+	ready := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{
+			"conditions": []any{map[string]any{
 				"type": "Ready", "status": "True", "observedGeneration": int64(2),
 			}},
 		},
@@ -330,8 +330,8 @@ func TestUpstreamObjectReady(t *testing.T) {
 		t.Fatalf("stale UpstreamObjectReady = (%v, %v), want (false, nil)", got, err)
 	}
 
-	malformed := &unstructured.Unstructured{Object: map[string]interface{}{
-		"status": map[string]interface{}{"conditions": "not-a-list"},
+	malformed := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"conditions": "not-a-list"},
 	}}
 	if _, err := UpstreamObjectReady(malformed); err == nil {
 		t.Fatal("malformed upstream conditions must be reported as a read error, not ordinary not-ready")

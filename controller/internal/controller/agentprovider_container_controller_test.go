@@ -411,7 +411,7 @@ func (c *foreignDeploymentRaceClient) Create(
 	}
 	c.raced = true
 	service := &corev1.Service{}
-	if err := c.Client.Get(ctx, c.serviceKey, service); err == nil {
+	if err := c.Get(ctx, c.serviceKey, service); err == nil {
 		c.serviceSeen = true
 		c.serviceSelectorWasEmpty = len(service.Spec.Selector) == 0
 	}
@@ -490,7 +490,7 @@ func (c *credentialDriftDeploymentApplyClient) Patch(
 	}
 
 	var live appsv1.Deployment
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(desired), &live); err != nil {
+	if err := c.Get(ctx, client.ObjectKeyFromObject(desired), &live); err != nil {
 		return err
 	}
 	if live.Spec.Template.Annotations == nil {
@@ -498,7 +498,7 @@ func (c *credentialDriftDeploymentApplyClient) Patch(
 	}
 	live.Spec.Template.Annotations[agentAccessChecksumAnnotation] = "injected-stale-credential-checksum"
 	live.Finalizers = append(live.Finalizers, "test.airunway.ai/hold-drifted-deployment")
-	if err := c.Client.Update(ctx, &live); err != nil {
+	if err := c.Update(ctx, &live); err != nil {
 		return fmt.Errorf("inject Deployment credential drift: %w", err)
 	}
 	c.drifted = true
@@ -645,14 +645,13 @@ func (r *replacingServiceAccountReader) Get(
 
 // --- Pure render-function unit tests (no cluster) --------------------------
 
+//nolint:goconst // The default namespace is a fixture shared by the controller test suite.
 func containerAD(name string, cfg containerConfig, extra map[string]any) *airunwayv1alpha1.AgentDeployment {
 	merged := map[string]any{}
 	if cfg.Image != "" {
 		merged["image"] = cfg.Image
 	}
-	for k, v := range extra {
-		merged[k] = v
-	}
+	maps.Copy(merged, extra)
 	raw, _ := json.Marshal(merged)
 
 	ad := &airunwayv1alpha1.AgentDeployment{}
@@ -685,6 +684,7 @@ func TestRenderAgentConfigMap(t *testing.T) {
 	}
 }
 
+//nolint:goconst,gocyclo // This assertion intentionally pins the complete repeated security and environment contract.
 func TestRenderAgentDeployment_SecurityAndEnv(t *testing.T) {
 	ad := containerAD("research", containerConfig{Image: "ghcr.io/x/crewai:poc"}, nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{
@@ -1558,6 +1558,7 @@ func TestRenderAgentDeployment_ResourcesAndOTLP(t *testing.T) {
 	}
 }
 
+//nolint:goconst // Repeating the command literal makes the rendered contract explicit.
 func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
 	ad := containerAD("smoke", containerConfig{Image: "img:1"}, nil)
 	binding := airunwayv1alpha1.ModelBindingStatus{BaseURL: "http://x/v1", ModelName: "m"}
@@ -1582,7 +1583,7 @@ func TestRenderAgentDeployment_CommandArgsPort(t *testing.T) {
 	}
 	// The Service targets a stable name so old and new pods can listen on
 	// different numeric ports during a rolling update.
-	svc := renderAgentService(ad, cfg)
+	svc := renderAgentService(ad)
 	if svc.Spec.Ports[0].TargetPort.StrVal != agentContainerPortName {
 		t.Errorf("service targetPort = %v, want %q", svc.Spec.Ports[0].TargetPort, agentContainerPortName)
 	}
@@ -1702,7 +1703,7 @@ func TestAgentSelectorsIsolateDeleteRecreateIncarnations(t *testing.T) {
 	newDeployment := renderAgentDeployment(replacement, renderInputs{
 		cfg: containerConfig{Image: "img:1"}, binding: binding, configMapName: "same-name-config",
 	})
-	newService := renderAgentService(replacement, containerConfig{})
+	newService := renderAgentService(replacement)
 	selector := labels.SelectorFromSet(newService.Spec.Selector)
 
 	if selector.Matches(labels.Set(oldDeployment.Spec.Template.Labels)) {
@@ -1744,7 +1745,7 @@ func TestParseContainerConfig(t *testing.T) {
 		t.Errorf("nil config should be empty, got %+v", got)
 	}
 	for _, port := range []int32{-1, 70000} {
-		raw := &runtime.RawExtension{Raw: []byte(fmt.Sprintf(`{"image":"img:2","port":%d}`, port))}
+		raw := &runtime.RawExtension{Raw: fmt.Appendf(nil, `{"image":"img:2","port":%d}`, port)}
 		if _, err := parseContainerConfig(raw); err == nil {
 			t.Errorf("port %d should be rejected, got no error", port)
 		}
@@ -1927,7 +1928,8 @@ var _ = Describe("Container provider", func() {
 		retry, handledErr := agentprovider.ResolveStatusWriteConflict(
 			reconcile.Result{RequeueAfter: time.Minute}, err)
 		Expect(handledErr).NotTo(HaveOccurred())
-		Expect(retry.Requeue).To(BeTrue(), "a concurrent status writer must trigger a fresh reconcile")
+		Expect(retry.Requeue).To(BeTrue(), //nolint:staticcheck
+			"a concurrent status writer must trigger a fresh reconcile")
 		Expect(retry.RequeueAfter).To(BeZero())
 
 		live := getAgent(replacement.Name)
@@ -3030,7 +3032,7 @@ var _ = Describe("Container provider", func() {
 			reconcileCore(name)
 
 			var deleteClient *failingSecretDeleteClient
-			var cleanupClient client.Client = k8sClient
+			var cleanupClient = k8sClient
 			if failDelete {
 				deleteClient = &failingSecretDeleteClient{
 					Client: k8sClient, target: reservedKey, err: fmt.Errorf("injected reserved Secret deletion failure"),
@@ -3558,8 +3560,7 @@ var _ = Describe("Container provider", func() {
 		Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
 		legacyKey := client.ObjectKeyFromObject(legacy)
 
-		legacyRef, legacyChecksum, err := agentAccessCredentialResult(legacy.Name, legacyToken)
-		Expect(err).NotTo(HaveOccurred())
+		legacyRef, legacyChecksum := agentAccessCredentialResult(legacy.Name, legacyToken)
 		deploymentKey := client.ObjectKeyFromObject(ad)
 		deployment := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, deploymentKey, deployment)).To(Succeed())
@@ -4269,8 +4270,7 @@ var _ = Describe("Container provider", func() {
 		Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
 		legacyKey := client.ObjectKeyFromObject(legacy)
 
-		legacyRef, legacyChecksum, err := agentAccessCredentialResult(legacy.Name, token)
-		Expect(err).NotTo(HaveOccurred())
+		legacyRef, legacyChecksum := agentAccessCredentialResult(legacy.Name, token)
 		deployment := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ad), deployment)).To(Succeed())
 		deployment.Finalizers = append(deployment.Finalizers, "tests.airunway.ai/hold-legacy-deployment")
@@ -4834,7 +4834,7 @@ var _ = Describe("Container provider", func() {
 		Expect(controllerutil.SetControllerReference(ad, polluted, k8sClient.Scheme())).To(Succeed())
 		polluted.Annotations = map[string]string{"eks.amazonaws.com/role-arn": "attacker-role"}
 		polluted.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "attacker-registry"}}
-		Expect(k8sClient.Patch(ctx, polluted, client.Apply,
+		Expect(k8sClient.Patch(ctx, polluted, client.Apply, //nolint:staticcheck
 			client.FieldOwner(ContainerFieldOwner), client.ForceOwnership)).To(Succeed())
 
 		current := &corev1.ServiceAccount{}
@@ -6027,7 +6027,7 @@ var _ = Describe("Container provider", func() {
 		for range 2 {
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue())
+			Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue()) //nolint:staticcheck
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, ledgerKey, &corev1.ConfigMap{}))).To(BeTrue(),
 				"the current spec ConfigMap must stay absent while the previous-generation Job exists")
 
@@ -6737,7 +6737,7 @@ var _ = Describe("Container provider", func() {
 		By("retrying the release without falling through to JobLost")
 		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.Requeue).To(BeTrue())
+		Expect(result.Requeue).To(BeTrue()) //nolint:staticcheck
 		Expect(prCond(getAgent("c-job-release-failure")).Reason).NotTo(Equal("JobLost"))
 		Expect(k8sClient.Get(ctx, ledgerKey, ledger)).To(Succeed())
 		Expect(ledger.Annotations).NotTo(HaveKey(agentJobGenerationAnnotation))
@@ -6794,7 +6794,7 @@ var _ = Describe("Container provider", func() {
 
 		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.Requeue).To(BeTrue())
+		Expect(result.Requeue).To(BeTrue()) //nolint:staticcheck
 		Expect(prCond(getAgent(key.Name)).Reason).NotTo(Equal("JobLost"))
 		Expect(k8sClient.Get(ctx, ledgerKey, ledger)).To(Succeed())
 		Expect(ledger.Annotations).NotTo(HaveKey(agentJobGenerationAnnotation))

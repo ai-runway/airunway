@@ -87,6 +87,8 @@ const (
 	agentCredentialUpgradeGuardServiceName        = "airunway-agentdeployment-upgrade-guard"
 	agentCredentialUpgradeGuardServiceNamespace   = "airunway-system"
 	agentCredentialUpgradeGuardServicePath        = "/deny-agentdeployment-writes-during-controller-rollout"
+	agentGatewayHTTPScheme                        = "http"
+	agentGatewayHTTPSScheme                       = "https"
 
 	// AgentCredentialCertRotatorFieldOwner is the server-side apply field manager
 	// used by cert-controller for webhook certificate and caBundle maintenance.
@@ -254,10 +256,10 @@ func credentialValidatingAdmissionConfiguration(
 		updateCovered := false
 		for j := range webhook.Rules {
 			rule := &webhook.Rules[j]
-			if admissionRuleContains(rule.Rule.APIGroups, airunwayv1alpha1.GroupVersion.Group) &&
-				admissionRuleContains(rule.Rule.APIVersions, airunwayv1alpha1.GroupVersion.Version) &&
-				admissionRuleContains(rule.Rule.Resources, "agentdeployments") &&
-				admissionRuleCoversNamespacedResources(rule.Rule.Scope) {
+			if admissionRuleContains(rule.APIGroups, airunwayv1alpha1.GroupVersion.Group) &&
+				admissionRuleContains(rule.APIVersions, airunwayv1alpha1.GroupVersion.Version) &&
+				admissionRuleContains(rule.Resources, "agentdeployments") &&
+				admissionRuleCoversNamespacedResources(rule.Scope) {
 				createCovered = createCovered || admissionOperationsContain(rule.Operations, admissionv1.Create)
 				updateCovered = updateCovered || admissionOperationsContain(rule.Operations, admissionv1.Update)
 			}
@@ -270,6 +272,7 @@ func credentialValidatingAdmissionConfiguration(
 	return fmt.Errorf("credential validating admission webhook %q is not installed", agentCredentialValidatingWebhookName)
 }
 
+//nolint:gocyclo // Fail-closed upgrade checks deliberately enumerate each admission prerequisite.
 func credentialAdmissionUpgradeGuard(ctx context.Context, reader client.Reader, namespaceLabels labels.Set) error {
 	var config admissionv1.MutatingWebhookConfiguration
 	key := k8stypes.NamespacedName{Name: agentCredentialUpgradeGuardConfiguration}
@@ -327,10 +330,10 @@ func credentialAdmissionUpgradeGuard(ctx context.Context, reader client.Reader, 
 	}
 	rule := &webhook.Rules[0]
 	if !slices.Equal(rule.Operations, []admissionv1.OperationType{admissionv1.Create, admissionv1.Update}) ||
-		!slices.Equal(rule.Rule.APIGroups, []string{airunwayv1alpha1.GroupVersion.Group}) ||
-		!slices.Equal(rule.Rule.APIVersions, []string{airunwayv1alpha1.GroupVersion.Version}) ||
-		!slices.Equal(rule.Rule.Resources, []string{"agentdeployments"}) ||
-		rule.Rule.Scope == nil || *rule.Rule.Scope != admissionv1.NamespacedScope {
+		!slices.Equal(rule.APIGroups, []string{airunwayv1alpha1.GroupVersion.Group}) ||
+		!slices.Equal(rule.APIVersions, []string{airunwayv1alpha1.GroupVersion.Version}) ||
+		!slices.Equal(rule.Resources, []string{"agentdeployments"}) ||
+		rule.Scope == nil || *rule.Scope != admissionv1.NamespacedScope {
 		return fmt.Errorf("credential admission upgrade guard must cover only namespaced AgentDeployment CREATE and UPDATE")
 	}
 	return nil
@@ -924,7 +927,10 @@ func (r *AgentDeploymentReconciler) applyCoreStatus(
 	// disjoint condition-map entries, so a conflict means a second writer is
 	// genuinely claiming a core-owned field. Forcing would steal it back every
 	// reconcile and turn the documented ownership split into last-writer-wins.
-	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(AgentCoreFieldOwner)); err != nil {
+	// The generated CRD types do not yet provide ApplyConfiguration values, so
+	// the typed Apply API cannot represent this status write.
+	if err := r.Status().Patch(ctx, apply, client.Apply, //nolint:staticcheck
+		client.FieldOwner(AgentCoreFieldOwner)); err != nil {
 		return agentprovider.StatusWriteError(err)
 	}
 	ad.ResourceVersion = apply.ResourceVersion
@@ -1091,9 +1097,9 @@ func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (stri
 		}
 	}
 
-	scheme := "http"
+	scheme := agentGatewayHTTPScheme
 	if selected.Protocol == gatewayv1.HTTPSProtocolType {
-		scheme = "https"
+		scheme = agentGatewayHTTPSScheme
 	}
 	if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
 		address = strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")
@@ -1157,7 +1163,7 @@ func (r *AgentDeploymentReconciler) mapModelDeploymentToAgentDeployments(ctx con
 		}
 	}
 
-	var reqs []reconcile.Request
+	reqs := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
 		ref := list.Items[i].Spec.Model.DeploymentRef
 		if ref == nil {

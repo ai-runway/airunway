@@ -135,7 +135,7 @@ func (s *RecordStore) PersistCreate(ctx context.Context, ad *airunwayv1alpha1.Ag
 		limit = DefaultMaxPendingRecords
 	}
 
-	for attempt := 0; attempt < recordPersistenceAttempts; attempt++ {
+	for range recordPersistenceAttempts {
 		var ledger corev1.ConfigMap
 		err := s.Reader.Get(ctx, key, &ledger)
 		if apierrors.IsNotFound(err) {
@@ -335,7 +335,7 @@ func (s *RecordStore) deleteRecord(ctx context.Context, ad *airunwayv1alpha1.Age
 	if err != nil {
 		return err
 	}
-	for attempt := 0; attempt < recordPersistenceAttempts; attempt++ {
+	for range recordPersistenceAttempts {
 		var ledger corev1.ConfigMap
 		if err := s.Reader.Get(ctx, key, &ledger); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -354,17 +354,11 @@ func (s *RecordStore) deleteRecord(ctx context.Context, ad *airunwayv1alpha1.Age
 			return nil
 		}
 		if len(entryKeys) == len(ledger.Data) {
-			uidPrecondition := ledger.UID
-			rvPrecondition := ledger.ResourceVersion
-			if err := s.Writer.Delete(ctx, &ledger, client.Preconditions{
-				UID: &uidPrecondition, ResourceVersion: &rvPrecondition,
-			}); err != nil {
-				if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("delete empty credential admission record ledger %s: %w", key, err)
+			retry, err := s.deleteEmptyLedger(ctx, key, &ledger)
+			if retry {
+				continue
 			}
-			return nil
+			return err
 		}
 		base := ledger.DeepCopy()
 		for _, entryKey := range entryKeys {
@@ -587,7 +581,7 @@ func (s *RecordStore) cleanupLedger(
 	now time.Time,
 	grace time.Duration,
 ) error {
-	for attempt := 0; attempt < recordPersistenceAttempts; attempt++ {
+	for range recordPersistenceAttempts {
 		var ledger corev1.ConfigMap
 		if err := s.Reader.Get(ctx, key, &ledger); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -632,17 +626,11 @@ func (s *RecordStore) cleanupLedger(
 			return nil
 		}
 		if len(ledger.Data) == 0 {
-			uidPrecondition := ledger.UID
-			rvPrecondition := ledger.ResourceVersion
-			if err := s.Writer.Delete(ctx, &ledger, client.Preconditions{
-				UID: &uidPrecondition, ResourceVersion: &rvPrecondition,
-			}); err != nil {
-				if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("delete empty credential admission record ledger %s: %w", key, err)
+			retry, err := s.deleteEmptyLedger(ctx, key, &ledger)
+			if retry {
+				continue
 			}
-			return nil
+			return err
 		}
 		if err := s.Writer.Patch(ctx, &ledger,
 			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -655,4 +643,22 @@ func (s *RecordStore) cleanupLedger(
 	}
 	return fmt.Errorf("could not prune credential admission record ledger %s after %d attempts",
 		key, recordPersistenceAttempts)
+}
+
+func (s *RecordStore) deleteEmptyLedger(
+	ctx context.Context,
+	key types.NamespacedName,
+	ledger *corev1.ConfigMap,
+) (bool, error) {
+	uidPrecondition := ledger.UID
+	rvPrecondition := ledger.ResourceVersion
+	if err := s.Writer.Delete(ctx, ledger, client.Preconditions{
+		UID: &uidPrecondition, ResourceVersion: &rvPrecondition,
+	}); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("delete empty credential admission record ledger %s: %w", key, err)
+	}
+	return false, nil
 }

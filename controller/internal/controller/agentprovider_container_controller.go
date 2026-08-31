@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,8 +67,12 @@ const (
 	agentConfigMountPath = agentConfigMountDir + "/" + agentConfigFileName
 
 	// agentContainerPort is the port the BYO agent server listens on.
-	agentContainerPort     = 8080
-	agentContainerPortName = "http"
+	agentContainerPort      = 8080
+	agentContainerPortName  = "http"
+	agentContainerName      = "agent"
+	agentImageLatestTag     = "latest"
+	agentJobCompletedReason = "JobCompleted"
+	agentJobFailedReason    = "JobFailed"
 
 	// agentConfigChecksumAnnotation carries a digest of the rendered agent.json
 	// on the pod template. The ConfigMap is mounted by name, so without this a
@@ -350,10 +355,8 @@ func clampCapabilities(c *corev1.Capabilities) *corev1.Capabilities {
 		return &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
 	}
 	out := &corev1.Capabilities{Drop: append([]corev1.Capability(nil), c.Drop...)}
-	for _, d := range out.Drop {
-		if d == "ALL" {
-			return out
-		}
+	if slices.Contains(out.Drop, "ALL") {
+		return out
 	}
 	// Adding capabilities is never permitted, so c.Add is dropped entirely.
 	return &corev1.Capabilities{Drop: append([]corev1.Capability{"ALL"}, out.Drop...)}
@@ -417,6 +420,8 @@ func containerPort(cfg containerConfig) int32 {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;delete
 
 // Reconcile renders the container workload for a container-backed AgentDeployment.
+//
+//nolint:gocyclo // Reconcile is an explicit fail-closed state machine spanning lifecycle, credentials, and workloads.
 func (r *ContainerProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	defer func() {
 		result, err = agentprovider.ResolveStatusWriteConflict(result, err)
@@ -805,10 +810,7 @@ func (r *ContainerProviderReconciler) reconcileStaleBinding(
 	if err != nil {
 		return r.stopWorkloadForInvalidStaleBindingCredential(ctx, ad, err)
 	}
-	_, checksum, err := agentAccessCredentialResult(ref.Name, token)
-	if err != nil {
-		return r.stopWorkloadForInvalidStaleBindingCredential(ctx, ad, err)
-	}
+	_, checksum := agentAccessCredentialResult(ref.Name, token)
 	name, keyName, liveChecksum, found := deploymentAccessCredential(workloads.deployment)
 	if !found || name != ref.Name || keyName != ref.Key || liveChecksum != checksum {
 		return r.stopWorkloadForInvalidStaleBindingCredential(ctx, ad, fmt.Errorf(
@@ -970,7 +972,7 @@ func (r *ContainerProviderReconciler) reconcileDeployment(
 	in renderInputs,
 ) (ctrl.Result, bool, error) {
 	deployment := renderAgentDeployment(ad, in)
-	service := renderAgentService(ad, in.cfg)
+	service := renderAgentService(ad)
 	ownershipSafe, deploymentAbsent, err := r.deploymentOwnedOrAbsent(ctx, ad, deployment)
 	if err != nil {
 		result, statusErr := r.failWithAccessCredentialStatus(ctx, ad, in.authSecretRef, "RenderFailed", err)
@@ -1265,7 +1267,7 @@ func deploymentAccessCredential(deployment *appsv1.Deployment) (name, key, check
 	checksum = deployment.Spec.Template.Annotations[agentAccessChecksumAnnotation]
 	for i := range deployment.Spec.Template.Spec.Containers {
 		container := &deployment.Spec.Template.Spec.Containers[i]
-		if container.Name != "agent" {
+		if container.Name != agentContainerName {
 			continue
 		}
 		for j := range container.Env {
@@ -1308,7 +1310,7 @@ func podTemplateModelCredential(template *corev1.PodTemplateSpec) (name, key, ch
 	checksum = template.Annotations[agentModelCredentialChecksumAnnotation]
 	for i := range template.Spec.Containers {
 		container := &template.Spec.Containers[i]
-		if container.Name != "agent" {
+		if container.Name != agentContainerName {
 			continue
 		}
 		for j := range container.Env {
@@ -1416,6 +1418,8 @@ func (r *ContainerProviderReconciler) deletePreviousGenerationJob(
 // agent phase. A Job is reported Failed only once it surfaces a true JobFailed
 // condition (i.e. backoffLimit exhausted), Running while active, and Completed
 // once it succeeds.
+//
+//nolint:gocyclo // The at-most-once Job ledger requires all recovery states to remain explicit.
 func (r *ContainerProviderReconciler) reconcileJob(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,
@@ -1464,7 +1468,7 @@ func (r *ContainerProviderReconciler) reconcileJob(
 			}
 			result := ctrl.Result{RequeueAfter: 5 * time.Second}
 			if !deleting {
-				result.Requeue = true
+				result.Requeue = true //nolint:staticcheck // Immediate retry after an authoritative absence check.
 			}
 			return result, r.status(ctx, ad,
 				airunwayv1alpha1.AgentPhaseDeploying, nil, nil, metav1.ConditionFalse,
@@ -1497,7 +1501,7 @@ func (r *ContainerProviderReconciler) reconcileJob(
 		}
 		result := ctrl.Result{RequeueAfter: 5 * time.Second}
 		if !pending {
-			result.Requeue = true
+			result.Requeue = true //nolint:staticcheck // Immediate retry after an authoritative absence check.
 		}
 		rt, replicas := liveJobStatus(live)
 		return result, r.status(ctx, ad,
@@ -1538,7 +1542,7 @@ func (r *ContainerProviderReconciler) reconcileJob(
 					createErr = fmt.Errorf("%w; release unused job claim: %v", createErr, releaseErr)
 				}
 				return r.failWithStatus(ctx, ad, "RenderFailed", createErr)
-			case apierrors.IsNotFound(readErr) && definitiveJobCreateFailure(createErr):
+			case apierrors.IsNotFound(readErr) && definitiveResourceWriteFailure(createErr):
 				// Persist why this otherwise-ambiguous claim is safe to retry
 				// before clearing it. If the release patch fails, the marker makes
 				// the next reconcile retry the release instead of declaring the
@@ -1571,14 +1575,14 @@ func (r *ContainerProviderReconciler) reconcileJob(
 		}
 		return ctrl.Result{}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseFailed, rt, replicas,
-			metav1.ConditionFalse, "JobFailed", "Agent job failed (backoff limit exhausted)")
+			metav1.ConditionFalse, agentJobFailedReason, "Agent job failed (backoff limit exhausted)")
 	case jobConditionTrue(live, batchv1.JobComplete) || live.Status.Succeeded > 0:
 		if err := r.recordJobOutcome(ctx, ad, configMap, agentJobOutcomeCompleted); err != nil {
 			return r.failWithStatus(ctx, ad, "JobOutcomeRecordFailed", err)
 		}
 		return ctrl.Result{}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseCompleted, rt, replicas,
-			metav1.ConditionTrue, "JobCompleted", "Agent job completed successfully")
+			metav1.ConditionTrue, agentJobCompletedReason, "Agent job completed successfully")
 	case live.Status.Active > 0:
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.status(ctx, ad,
 			airunwayv1alpha1.AgentPhaseRunning, rt, replicas,
@@ -1618,14 +1622,17 @@ func podTemplateSecurityCriticalFieldsMatch(liveTemplate, desiredTemplate *corev
 
 func agentContainerSecurityContext(template *corev1.PodTemplateSpec) (*corev1.SecurityContext, bool) {
 	for i := range template.Spec.Containers {
-		if template.Spec.Containers[i].Name == "agent" {
+		if template.Spec.Containers[i].Name == agentContainerName {
 			return template.Spec.Containers[i].SecurityContext, true
 		}
 	}
 	return nil, false
 }
 
-func definitiveJobCreateFailure(err error) bool {
+// definitiveResourceWriteFailure identifies API-server status responses that
+// prove a resource write was rejected. Transport failures and conflicts remain
+// ambiguous and are retried without tearing down otherwise healthy resources.
+func definitiveResourceWriteFailure(err error) bool {
 	return apierrors.IsAlreadyExists(err) ||
 		apierrors.IsInvalid(err) ||
 		apierrors.IsBadRequest(err) ||
@@ -2070,11 +2077,11 @@ func terminalJobOutcomeFromStatus(ad *airunwayv1alpha1.AgentDeployment) (string,
 		ad.Status.Runtime == nil && ad.Status.Replicas == nil:
 		return agentJobOutcomeLost, true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseCompleted &&
-		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == "JobCompleted" &&
+		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == agentJobCompletedReason &&
 		hasExactJobRuntimeStatus(ad):
 		return agentJobOutcomeCompleted, true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseFailed &&
-		providerReady.Status == metav1.ConditionFalse && providerReady.Reason == "JobFailed" &&
+		providerReady.Status == metav1.ConditionFalse && providerReady.Reason == agentJobFailedReason &&
 		hasExactJobRuntimeStatus(ad):
 		return agentJobOutcomeFailed, true
 	default:
@@ -2118,10 +2125,10 @@ func statusProvesCurrentJobGeneration(ad *airunwayv1alpha1.AgentDeployment) bool
 		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == "JobRunning":
 		return true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseCompleted &&
-		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == "JobCompleted":
+		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == agentJobCompletedReason:
 		return true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseFailed &&
-		providerReady.Status == metav1.ConditionFalse && providerReady.Reason == "JobFailed":
+		providerReady.Status == metav1.ConditionFalse && providerReady.Reason == agentJobFailedReason:
 		return true
 	default:
 		return false
@@ -2134,6 +2141,8 @@ func statusProvesCurrentJobGeneration(ad *airunwayv1alpha1.AgentDeployment) bool
 // observed beside prior-generation status. If the Job itself is gone,
 // at-most-once semantics require consuming the current generation as lost
 // rather than risking a repeat of irreversible work.
+//
+//nolint:gocyclo // Each legacy condition is independent evidence that must fail migration closed.
 func statusHasAmbiguousLegacyJobExecutionEvidence(ad *airunwayv1alpha1.AgentDeployment) bool {
 	if ad.Generation <= 1 || ad.Status.ProviderOwner != ContainerFieldOwner {
 		return false
@@ -2167,11 +2176,11 @@ func statusHasAmbiguousLegacyJobExecutionEvidence(ad *airunwayv1alpha1.AgentDepl
 		hasExactJobRuntimeStatus(ad):
 		return true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseCompleted &&
-		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == "JobCompleted" &&
+		providerReady.Status == metav1.ConditionTrue && providerReady.Reason == agentJobCompletedReason &&
 		hasExactJobRuntimeStatus(ad):
 		return true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseFailed &&
-		providerReady.Status == metav1.ConditionFalse && providerReady.Reason == "JobFailed" &&
+		providerReady.Status == metav1.ConditionFalse && providerReady.Reason == agentJobFailedReason &&
 		hasExactJobRuntimeStatus(ad):
 		return true
 	case ad.Status.Phase == airunwayv1alpha1.AgentPhaseFailed &&
@@ -2366,10 +2375,10 @@ func (r *ContainerProviderReconciler) reportRecordedJobOutcome(
 	switch outcome {
 	case agentJobOutcomeCompleted:
 		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseCompleted, rt, replicas,
-			metav1.ConditionTrue, "JobCompleted", "Agent job completed successfully")
+			metav1.ConditionTrue, agentJobCompletedReason, "Agent job completed successfully")
 	case agentJobOutcomeFailed:
 		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, rt, replicas,
-			metav1.ConditionFalse, "JobFailed", "Agent job failed (backoff limit exhausted)")
+			metav1.ConditionFalse, agentJobFailedReason, "Agent job failed (backoff limit exhausted)")
 	case agentJobOutcomeLost:
 		return ctrl.Result{}, r.status(ctx, ad, airunwayv1alpha1.AgentPhaseFailed, nil, nil,
 			metav1.ConditionFalse, "JobLost", "The claimed agent job no longer exists; it will not be run again for this generation")
@@ -2670,7 +2679,9 @@ func (r *ContainerProviderReconciler) ensureAgentServiceAccount(
 	// precondition conflict instead of being adopted.
 	if !created {
 		desired.ResourceVersion = live.ResourceVersion
-		if err := r.Patch(ctx, desired, client.Apply,
+		// Core API objects could use typed apply configurations, but this path
+		// intentionally validates and reapplies the exact object revision.
+		if err := r.Patch(ctx, desired, client.Apply, //nolint:staticcheck
 			client.FieldOwner(ContainerFieldOwner), client.ForceOwnership); err != nil {
 			return nil, false, fmt.Errorf("apply agent ServiceAccount %s: %w", key, err)
 		}
@@ -2862,8 +2873,8 @@ func (r *ContainerProviderReconciler) recoverAgentAccessSecretReservation(
 	if err != nil {
 		return nil, "", false, fmt.Errorf("reserved agent access Secret %s is not recoverable: %w", key, err)
 	}
-	ref, checksum, err := agentAccessCredentialResult(secret.Name, token)
-	return ref, checksum, true, err
+	ref, checksum := agentAccessCredentialResult(secret.Name, token)
+	return ref, checksum, true, nil
 }
 
 func (r *ContainerProviderReconciler) readAgentAccessReservationConfigMap(
@@ -2989,11 +3000,11 @@ func (r *ContainerProviderReconciler) ensureAgentAccessCredentials(
 		} else {
 			token, validationErr := validatedAgentAccessToken(&existing, ad)
 			if validationErr == nil {
-				ref, checksum, err := agentAccessCredentialResult(existing.Name, token)
-				return ref, checksum, false, err
+				ref, checksum := agentAccessCredentialResult(existing.Name, token)
+				return ref, checksum, false, nil
 			}
 			if existing.Name == legacyAgentAccessSecretName(ad) {
-				_, legacyErr := validatedLegacyAgentAccessToken(&existing, ad)
+				legacyErr := validatedLegacyAgentAccessToken(&existing, ad)
 				if legacyErr == nil {
 					// A deterministic legacy Secret name could be preseeded with a
 					// caller-chosen token and forgeable owner metadata. Preserve no
@@ -3012,7 +3023,7 @@ func (r *ContainerProviderReconciler) ensureAgentAccessCredentials(
 		return ref, checksum, recovered, err
 	}
 
-	for attempt := 0; attempt < agentAccessCreateAttempts; attempt++ {
+	for range agentAccessCreateAttempts {
 		raw := make([]byte, agentAccessTokenBytes)
 		if _, err := rand.Read(raw); err != nil {
 			return nil, "", false, fmt.Errorf("generate agent access token: %w", err)
@@ -3043,8 +3054,8 @@ func (r *ContainerProviderReconciler) ensureAgentAccessCredentials(
 			if readErr == nil {
 				existingToken, validationErr := validatedAgentAccessToken(&existing, ad)
 				if validationErr == nil && string(existingToken) == string(token) {
-					ref, checksum, resultErr := agentAccessCredentialResult(name, token)
-					return ref, checksum, true, resultErr
+					ref, checksum := agentAccessCredentialResult(name, token)
+					return ref, checksum, true, nil
 				}
 				// A foreign or differently bound collision proves this attempt did
 				// not create the desired Secret. Clear its reservation before trying
@@ -3059,7 +3070,7 @@ func (r *ContainerProviderReconciler) ensureAgentAccessCredentials(
 				return nil, "", false, fmt.Errorf("create agent access Secret %s: %v; authoritative reread failed: %w",
 					key, createErr, readErr)
 			}
-			if definitiveAgentAccessSecretCreateFailure(createErr) {
+			if definitiveResourceWriteFailure(createErr) {
 				if clearErr := r.clearAgentAccessSecretReservation(ctx, ad, name); clearErr != nil {
 					return nil, "", false, fmt.Errorf("clear unused agent access Secret reservation %s: %w", key, clearErr)
 				}
@@ -3072,23 +3083,10 @@ func (r *ContainerProviderReconciler) ensureAgentAccessCredentials(
 				"create agent access Secret %s: %w; authoritative reread returned NotFound, keeping the reservation because the create outcome is ambiguous",
 				key, createErr)
 		}
-		ref, checksum, err := agentAccessCredentialResult(name, token)
-		return ref, checksum, true, err
+		ref, checksum := agentAccessCredentialResult(name, token)
+		return ref, checksum, true, nil
 	}
 	return nil, "", false, fmt.Errorf("could not allocate an unguessable agent access Secret name after %d attempts", agentAccessCreateAttempts)
-}
-
-func definitiveAgentAccessSecretCreateFailure(err error) bool {
-	return apierrors.IsAlreadyExists(err) ||
-		apierrors.IsInvalid(err) ||
-		apierrors.IsBadRequest(err) ||
-		apierrors.IsUnauthorized(err) ||
-		apierrors.IsForbidden(err) ||
-		apierrors.IsTooManyRequests(err) ||
-		apierrors.IsMethodNotSupported(err) ||
-		apierrors.IsNotAcceptable(err) ||
-		apierrors.IsUnsupportedMediaType(err) ||
-		apierrors.IsRequestEntityTooLargeError(err)
 }
 
 func (r *ContainerProviderReconciler) renderAgentAccessSecret(
@@ -3136,24 +3134,24 @@ func validatedAgentAccessToken(
 func validatedLegacyAgentAccessToken(
 	secret *corev1.Secret,
 	ad *airunwayv1alpha1.AgentDeployment,
-) ([]byte, error) {
+) error {
 	key := k8stypes.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}
 	if !secret.DeletionTimestamp.IsZero() {
-		return nil, fmt.Errorf("legacy agent access Secret %s is terminating", key)
+		return fmt.Errorf("legacy agent access Secret %s is terminating", key)
 	}
 	if !hasExactBlockingControllerOwner(secret, ad) {
-		return nil, fmt.Errorf("refusing to migrate legacy agent access Secret %s: it is not bound to the exact AgentDeployment %s/%s by a blocking controller owner reference",
+		return fmt.Errorf("refusing to migrate legacy agent access Secret %s: it is not bound to the exact AgentDeployment %s/%s by a blocking controller owner reference",
 			key, ad.Namespace, ad.Name)
 	}
 	if secret.Name != legacyAgentAccessSecretName(ad) {
-		return nil, fmt.Errorf("agent access Secret %s is not the legacy deterministic name", key)
+		return fmt.Errorf("agent access Secret %s is not the legacy deterministic name", key)
 	}
 	token := secret.Data[agentAccessTokenKey]
 	decoded, err := base64.RawURLEncoding.DecodeString(string(token))
 	if err != nil || len(decoded) != agentAccessTokenBytes {
-		return nil, fmt.Errorf("legacy agent access Secret %s contains an invalid %q token", key, agentAccessTokenKey)
+		return fmt.Errorf("legacy agent access Secret %s contains an invalid %q token", key, agentAccessTokenKey)
 	}
-	return token, nil
+	return nil
 }
 
 func (r *ContainerProviderReconciler) deleteAgentAccessSecret(
@@ -3172,7 +3170,7 @@ func (r *ContainerProviderReconciler) deleteAgentAccessSecret(
 	validationTarget := secret.DeepCopy()
 	validationTarget.DeletionTimestamp = nil
 	if _, err := validatedAgentAccessToken(validationTarget, ad); err != nil {
-		if _, legacyErr := validatedLegacyAgentAccessToken(validationTarget, ad); legacyErr != nil {
+		if legacyErr := validatedLegacyAgentAccessToken(validationTarget, ad); legacyErr != nil {
 			return nil
 		}
 	}
@@ -3214,9 +3212,9 @@ func (r *ContainerProviderReconciler) deleteLegacyAgentAccessSecret(
 	})
 }
 
-func agentAccessCredentialResult(name string, token []byte) (*airunwayv1alpha1.SecretKeyRef, string, error) {
+func agentAccessCredentialResult(name string, token []byte) (*airunwayv1alpha1.SecretKeyRef, string) {
 	digest := sha256.Sum256(token)
-	return &airunwayv1alpha1.SecretKeyRef{Name: name, Key: agentAccessTokenKey}, fmt.Sprintf("%x", digest), nil
+	return &airunwayv1alpha1.SecretKeyRef{Name: name, Key: agentAccessTokenKey}, fmt.Sprintf("%x", digest)
 }
 
 // containerProviderSettings holds the provider-owned rendering settings the
@@ -3322,7 +3320,7 @@ func agentRuntimeImageTag(providerVersion string) string {
 	case strings.HasPrefix(providerVersion, "main-"):
 		return providerVersion
 	case providerVersion == "main", providerVersion == "dev", strings.HasPrefix(providerVersion, "dev-"):
-		return "latest"
+		return agentImageLatestTag
 	case len(providerVersion) > 1 && providerVersion[0] == 'v' && providerVersion[1] >= '0' && providerVersion[1] <= '9':
 		return normalizePublishedImageTag(providerVersion[1:])
 	default:
@@ -3349,7 +3347,7 @@ func agentImageUsesMutableTag(image string) bool {
 	if colon := strings.LastIndex(image, ":"); colon > strings.LastIndex(image, "/") {
 		tag = image[colon+1:]
 	}
-	return tag == "" || tag == "latest"
+	return tag == "" || tag == agentImageLatestTag
 }
 
 // parseContainerConfig extracts the container provider's fields from the opaque
@@ -3464,7 +3462,7 @@ func agentPodSpec(
 	applyContainerSecurityOverrides(podSecurity, containerSecurity, in.securityOverrides, in.writableRoot)
 
 	container := corev1.Container{
-		Name:            "agent",
+		Name:            agentContainerName,
 		Image:           cfg.Image,
 		ImagePullPolicy: agentImagePullPolicy(cfg.Image),
 		Ports: []corev1.ContainerPort{{
@@ -3547,7 +3545,7 @@ func agentImagePullPolicy(image string) corev1.PullPolicy {
 	if colon := strings.LastIndex(name, ":"); colon > strings.LastIndex(name, "/") {
 		tag = name[colon+1:]
 	}
-	if tag == "" || tag == "latest" {
+	if tag == "" || tag == agentImageLatestTag {
 		return corev1.PullAlways
 	}
 	return corev1.PullIfNotPresent
@@ -3737,7 +3735,7 @@ func renderAgentServiceAccount(ad *airunwayv1alpha1.AgentDeployment) *corev1.Ser
 }
 
 // renderAgentService renders the ClusterIP Service fronting the agent.
-func renderAgentService(ad *airunwayv1alpha1.AgentDeployment, cfg containerConfig) *corev1.Service {
+func renderAgentService(ad *airunwayv1alpha1.AgentDeployment) *corev1.Service {
 	return &corev1.Service{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{Name: agentServiceName(ad), Namespace: ad.Namespace, Labels: agentLabels(ad)},
@@ -3905,6 +3903,8 @@ func (r *ContainerProviderReconciler) modelCredentialChecksum(
 }
 
 // status writes provider-owned status via the shared SSA helper.
+//
+//nolint:dupl // Provider-specific field ownership is intentionally visible at each provider boundary.
 func (r *ContainerProviderReconciler) status(
 	ctx context.Context,
 	ad *airunwayv1alpha1.AgentDeployment,

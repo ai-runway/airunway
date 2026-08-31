@@ -682,6 +682,8 @@ func TestBindingHoldExpiry(t *testing.T) {
 // rather than merely slow. The Deployment then sits at 0 replicas and the real
 // cause lives on a ReplicaSet event nobody thinks to check, while the agent
 // reports a bland "waiting to become available".
+//
+//nolint:goconst // Repeating the condition reason pins the external status contract.
 func TestWorkloadNotReadyDetail(t *testing.T) {
 	t.Run("a plain slow rollout stays generic", func(t *testing.T) {
 		reason, msg := workloadNotReadyDetail(&appsv1.Deployment{})

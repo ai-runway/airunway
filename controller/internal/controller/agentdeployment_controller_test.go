@@ -646,7 +646,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 					}},
 				},
 			}
-			Expect(k8sClient.Status().Patch(ctx, providerWrite, client.Apply,
+			Expect(k8sClient.Status().Patch(ctx, providerWrite, client.Apply, //nolint:staticcheck
 				client.FieldOwner("airunway-agents-kagent"),
 				client.ForceOwnership,
 			)).To(Succeed())

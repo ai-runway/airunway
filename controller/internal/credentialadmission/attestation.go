@@ -358,7 +358,7 @@ func canonicalPayload(ad *airunwayv1alpha1.AgentDeployment, uid types.UID, gener
 // refuses malformed existing key material instead of silently invalidating all
 // previously admitted AgentDeployments.
 func LoadOrCreateKey(ctx context.Context, c client.Client, secretKey types.NamespacedName) ([]byte, error) {
-	for attempt := 0; attempt < keySetupAttempts; attempt++ {
+	for range keySetupAttempts {
 		var secret corev1.Secret
 		err := c.Get(ctx, secretKey, &secret)
 		if apierrors.IsNotFound(err) {

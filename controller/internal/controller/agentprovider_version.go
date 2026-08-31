@@ -153,7 +153,8 @@ func (r *AgentProviderVersionReconciler) publishHeartbeat(
 	// Force only this dedicated heartbeat apply. Older combined-controller
 	// builds owned lastHeartbeat from the readiness manager; taking it here is
 	// the intentional one-time ownership migration to the real provider process.
-	if err := r.Status().Patch(ctx, heartbeat, client.Apply,
+	// The generated CRD type has no ApplyConfiguration implementation yet.
+	if err := r.Status().Patch(ctx, heartbeat, client.Apply, //nolint:staticcheck
 		client.FieldOwner(AgentProviderHeartbeatFieldOwner(r.Name)),
 		client.ForceOwnership,
 	); err != nil {
@@ -183,7 +184,8 @@ func (r *AgentProviderVersionReconciler) publishVersion(ctx context.Context, apc
 				"conditions": []any{},
 			},
 		}}
-		if err := r.Status().Patch(ctx, release, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+		if err := r.Status().Patch(ctx, release, client.Apply, //nolint:staticcheck
+			client.FieldOwner(fieldOwner)); err != nil {
 			return fmt.Errorf("release provider version for %q: %w", apc.Name, agentprovider.StatusWriteError(err))
 		}
 		return nil
@@ -201,7 +203,8 @@ func (r *AgentProviderVersionReconciler) publishVersion(ctx context.Context, apc
 		},
 		Status: airunwayv1alpha1.AgentProviderConfigStatus{Version: r.Version},
 	}
-	if err := r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldOwner)); err != nil {
+	if err := r.Status().Patch(ctx, apply, client.Apply, //nolint:staticcheck
+		client.FieldOwner(fieldOwner)); err != nil {
 		return fmt.Errorf("publish provider version for %q: %w", apc.Name, agentprovider.StatusWriteError(err))
 	}
 	return nil

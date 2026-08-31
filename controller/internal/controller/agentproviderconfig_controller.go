@@ -314,7 +314,8 @@ func (r *AgentProviderConfigReconciler) applyReadiness(
 		},
 	}
 
-	return agentprovider.StatusWriteError(r.Status().Patch(ctx, apply, client.Apply,
+	// Generated CRD types do not yet expose ApplyConfiguration values.
+	return agentprovider.StatusWriteError(r.Status().Patch(ctx, apply, client.Apply, //nolint:staticcheck
 		client.FieldOwner(AgentProviderReadinessFieldOwner),
 		client.ForceOwnership,
 	))

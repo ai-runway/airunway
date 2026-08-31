@@ -351,7 +351,7 @@ func TestRecordStoreDoesNotPersistCreateForExistingName(t *testing.T) {
 	existing := recordTestAgent("uid-existing")
 	store, c := newRecordTestStore(t, existing)
 
-	for i := 0; i < DefaultMaxPendingRecords+1; i++ {
+	for i := range DefaultMaxPendingRecords + 1 {
 		attempt := recordTestAgent(types.UID(fmt.Sprintf("uid-rejected-%d", i)))
 		attempt.Name = existing.Name
 		if err := store.PersistCreate(ctx, attempt); !apierrors.IsAlreadyExists(err) {

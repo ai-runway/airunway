@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -278,12 +279,7 @@ func (c *AgentProviderCapabilities) HasBindingMode(mode ModelBindingMode) bool {
 	if c == nil {
 		return false
 	}
-	for _, m := range c.ModelBindingModes {
-		if m == mode {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.ModelBindingModes, mode)
 }
 
 // HasProtocol reports whether the provider declares native support for
@@ -292,12 +288,7 @@ func (c *AgentProviderCapabilities) HasProtocol(p AgentToolProtocol) bool {
 	if c == nil {
 		return false
 	}
-	for _, x := range c.Protocols {
-		if x == p {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Protocols, p)
 }
 
 // CatalogItems decodes the provider's catalog from

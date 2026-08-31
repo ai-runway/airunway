@@ -176,6 +176,7 @@ func TestCredentialCreateRecordSideEffects(t *testing.T) {
 	})
 }
 
+//nolint:goconst // Repeated user/resource identities are the authorization boundary under test.
 func TestCredentialDefaulterAttestsOnlyAuthorizedRequests(t *testing.T) {
 	attestor, err := credentialadmission.New(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
