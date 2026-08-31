@@ -49,7 +49,10 @@ import (
 	"github.com/ai-runway/airunway/controller/pkg/agentprovider"
 )
 
-var errGatewayStatusAddressMissing = errors.New("gateway has no published status address")
+var (
+	errGatewayStatusAddressMissing = errors.New("gateway has no published status address")
+	errGatewayListenerAmbiguous    = errors.New("gateway has multiple compatible listeners")
+)
 
 const (
 	// AgentCoreFieldOwner is the server-side apply field manager for the
@@ -553,18 +556,20 @@ func bindingHoldExpired(ad *airunwayv1alpha1.AgentDeployment) bool {
 // bindingNeedsRefresh reports whether a resolved binding depends on something
 // this controller does not watch, and so needs periodic re-validation.
 //
-// ModelDeployment IS watched, so deploymentRef re-resolves on change. The other
-// two inputs are not:
+// ModelDeployment IS watched, but its published gateway endpoint also depends
+// on a Gateway that this controller does not watch. The periodically refreshed
+// inputs are:
 //
 //   - a credential Secret — watching Secrets would need a cluster-wide informer
 //     with list/watch on every Secret, which is exactly the RBAC and memory cost
 //     the uncached read exists to avoid;
-//   - a Gateway's published status address, which can change under a resolved
-//     gatewayEndpoint binding and leave the agent pointed at a dead address.
+//   - a Gateway's published status, which can change under a gatewayEndpoint or
+//     gateway-backed deploymentRef binding and leave the agent pointed at a dead
+//     address.
 //
 // A slow timer is the cheap correct answer for both.
 func bindingNeedsRefresh(ad *airunwayv1alpha1.AgentDeployment) bool {
-	if ad.Spec.Model.GatewayEndpoint != nil {
+	if ad.Spec.Model.DeploymentRef != nil || ad.Spec.Model.GatewayEndpoint != nil {
 		return true
 	}
 	return ad.Spec.Model.ExternalAPI != nil && ad.Spec.Model.ExternalAPI.CredentialsRef != nil
@@ -714,6 +719,10 @@ func (r *AgentDeploymentReconciler) resolveExternalAPI(
 	st airunwayv1alpha1.ModelBindingStatus,
 ) (airunwayv1alpha1.ModelBindingStatus, bool, bool, string, string) {
 	ext := m.ExternalAPI
+	if err := airunwayv1alpha1.ValidateExternalAPIBaseURL(ext.BaseURL); err != nil {
+		return st, false, false, "ExternalAPIInvalid",
+			fmt.Sprintf("spec.model.externalAPI.baseURL is invalid: %v", err)
+	}
 	st.APIType = ext.Type
 	st.BaseURL = ext.BaseURL
 	st.ModelName = ext.ModelName
@@ -875,6 +884,50 @@ func (r *AgentDeploymentReconciler) resolveDeploymentRef(
 
 	st.ObservedResourceUID = string(md.UID)
 	st.BaseURL, st.ModelName = modelDeploymentEndpoint(&md)
+	if gatewayStatus := md.Status.Gateway; gatewayStatus != nil {
+		hasGatewayName := gatewayStatus.GatewayName != ""
+		hasGatewayNamespace := gatewayStatus.GatewayNamespace != ""
+		if hasGatewayName != hasGatewayNamespace {
+			return st, false, true, "ModelGatewayStatusInvalid",
+				fmt.Sprintf("spec.model target ModelDeployment %s/%s has an incomplete Gateway identity in status", ns, ref.Name)
+		}
+		if hasGatewayName {
+			var gateway unstructured.Unstructured
+			gateway.SetAPIVersion("gateway.networking.k8s.io/v1")
+			gateway.SetKind("Gateway")
+			key := k8stypes.NamespacedName{Name: gatewayStatus.GatewayName, Namespace: gatewayStatus.GatewayNamespace}
+			if err := r.Get(ctx, key, &gateway); err != nil {
+				if apierrors.IsNotFound(err) {
+					return st, false, true, "ModelGatewayNotFound",
+						fmt.Sprintf("spec.model target ModelDeployment %s/%s references Gateway %s/%s which does not exist", ns, ref.Name, key.Namespace, key.Name)
+				}
+				return st, false, true, "ModelGatewayLookupFailed", err.Error()
+			}
+			if !gateway.GetDeletionTimestamp().IsZero() {
+				return st, false, true, "ModelGatewayDeleting",
+					fmt.Sprintf("spec.model target ModelDeployment %s/%s references Gateway %s/%s which is being deleted", ns, ref.Name, key.Namespace, key.Name)
+			}
+			var typedGateway gatewayv1.Gateway
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(gateway.Object, &typedGateway); err != nil {
+				return st, false, true, "ModelGatewayInvalid",
+					fmt.Sprintf("spec.model target ModelDeployment %s/%s Gateway %s/%s could not be decoded: %v", ns, ref.Name, key.Namespace, key.Name, err)
+			}
+			baseURL, err := gatewayOpenAIBaseURL(&typedGateway, "")
+			if errors.Is(err, errGatewayListenerAmbiguous) && gatewayStatus.Endpoint != "" {
+				baseURL, err = gatewayOpenAIBaseURLMatchingEndpoint(&typedGateway, gatewayStatus.Endpoint)
+				if err != nil {
+					return st, false, true, "ModelGatewayNotReady",
+						fmt.Sprintf("spec.model target ModelDeployment %s/%s Gateway %s/%s is not ready: %v", ns, ref.Name, key.Namespace, key.Name, err)
+				}
+				st.BaseURL = baseURL
+			} else if err != nil {
+				return st, false, true, "ModelGatewayNotReady",
+					fmt.Sprintf("spec.model target ModelDeployment %s/%s Gateway %s/%s is not ready: %v", ns, ref.Name, key.Namespace, key.Name, err)
+			} else {
+				st.BaseURL = baseURL
+			}
+		}
+	}
 	if st.BaseURL == "" {
 		return st, false, true, "ModelDeploymentNotReady",
 			fmt.Sprintf("spec.model target ModelDeployment %s/%s has no resolved endpoint yet", ns, ref.Name)
@@ -1052,21 +1105,22 @@ func bracketBareIPv6(host string) string {
 }
 
 func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (string, error) {
-	address := ""
-	for _, candidate := range gw.Status.Addresses {
-		if value := strings.TrimSpace(candidate.Value); value != "" {
-			address = value
-			break
-		}
-	}
-	if address == "" {
+	addresses := gatewayStatusAddresses(gw)
+	if len(addresses) == 0 {
 		return "", errGatewayStatusAddressMissing
 	}
 
 	compatible := make([]gatewayv1.Listener, 0, len(gw.Spec.Listeners))
 	for _, listener := range gw.Spec.Listeners {
-		if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType {
+		if (listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType) &&
+			gatewayListenerSupportsHTTPRoute(gw, &listener) {
 			compatible = append(compatible, listener)
+		}
+	}
+	readyCompatible := make([]gatewayv1.Listener, 0, len(compatible))
+	for _, listener := range compatible {
+		if gatewayListenerReady(gw, listener.Name) == nil {
+			readyCompatible = append(readyCompatible, listener)
 		}
 	}
 
@@ -1080,6 +1134,9 @@ func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (stri
 			if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
 				return "", fmt.Errorf("listener %q uses protocol %q; only HTTP and HTTPS listeners are supported", requestedListener, listener.Protocol)
 			}
+			if !gatewayListenerAllowsHTTPRoute(listener) {
+				return "", fmt.Errorf("listener %q does not allow HTTPRoute attachments", requestedListener)
+			}
 			selected = listener
 			break
 		}
@@ -1087,24 +1144,87 @@ func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (stri
 			return "", fmt.Errorf("listener %q does not exist", requestedListener)
 		}
 	} else {
-		switch len(compatible) {
+		switch len(readyCompatible) {
 		case 0:
-			return "", fmt.Errorf("gateway has no HTTP or HTTPS listeners")
+			if len(compatible) == 1 {
+				return "", gatewayListenerReady(gw, compatible[0].Name)
+			}
+			return "", fmt.Errorf("gateway has no ready HTTPRoute-capable HTTP or HTTPS listeners")
 		case 1:
-			selected = &compatible[0]
+			selected = &readyCompatible[0]
 		default:
-			return "", fmt.Errorf("gateway has %d HTTP(S) listeners; set spec.model.gatewayEndpoint.gatewayRef.listenerName", len(compatible))
+			return "", fmt.Errorf("%w: gateway has %d ready HTTPRoute-capable HTTP(S) listeners; set spec.model.gatewayEndpoint.gatewayRef.listenerName", errGatewayListenerAmbiguous, len(readyCompatible))
+		}
+	}
+	if err := gatewayListenerReady(gw, selected.Name); err != nil {
+		return "", err
+	}
+	return gatewayListenerOpenAIBaseURL(selected, addresses[0])
+}
+
+func gatewayOpenAIBaseURLMatchingEndpoint(gw *gatewayv1.Gateway, publishedEndpoint string) (string, error) {
+	normalizedEndpoint := normalizeOpenAIBaseURL(publishedEndpoint)
+	if err := airunwayv1alpha1.ValidateExternalAPIBaseURL(normalizedEndpoint); err != nil {
+		return "", fmt.Errorf("published endpoint %q is invalid: %w", publishedEndpoint, err)
+	}
+
+	addresses := gatewayStatusAddresses(gw)
+	if len(addresses) == 0 {
+		return "", errGatewayStatusAddressMissing
+	}
+
+	matches := make([]string, 0, 1)
+	for i := range gw.Spec.Listeners {
+		listener := &gw.Spec.Listeners[i]
+		if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
+			continue
+		}
+		if !gatewayListenerSupportsHTTPRoute(gw, listener) || gatewayListenerReady(gw, listener.Name) != nil {
+			continue
+		}
+		for _, address := range addresses {
+			candidate, err := gatewayListenerOpenAIBaseURL(listener, address)
+			if err != nil {
+				continue
+			}
+			if openAIBaseURLsEqual(candidate, normalizedEndpoint) {
+				matches = append(matches, candidate)
+				break
+			}
 		}
 	}
 
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("published endpoint %q does not match any current ready HTTPRoute-capable listener", publishedEndpoint)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("published endpoint %q matches %d current ready HTTPRoute-capable listeners", publishedEndpoint, len(matches))
+	}
+}
+
+func gatewayStatusAddresses(gw *gatewayv1.Gateway) []string {
+	addresses := make([]string, 0, len(gw.Status.Addresses))
+	for _, candidate := range gw.Status.Addresses {
+		if candidate.Type != nil &&
+			*candidate.Type != gatewayv1.IPAddressType &&
+			*candidate.Type != gatewayv1.HostnameAddressType {
+			continue
+		}
+		if value := strings.TrimSpace(candidate.Value); value != "" {
+			addresses = append(addresses, value)
+		}
+	}
+	return addresses
+}
+
+func gatewayListenerOpenAIBaseURL(selected *gatewayv1.Listener, address string) (string, error) {
+
 	scheme := agentGatewayHTTPScheme
 	host := address
-	listenerHostname := ""
 	if selected.Hostname != nil {
-		listenerHostname = strings.TrimSpace(string(*selected.Hostname))
-		// A status address identifies where the Gateway is reachable, but a
-		// listener hostname identifies the HTTP Host and HTTPS SNI/certificate
-		// identity. Prefer that exact hostname whenever the listener declares it.
+		listenerHostname := strings.TrimSpace(string(*selected.Hostname))
 		if strings.Contains(listenerHostname, "*") {
 			return "", fmt.Errorf("listener %q hostname %q is a wildcard; a concrete hostname is required", selected.Name, listenerHostname)
 		}
@@ -1114,9 +1234,6 @@ func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (stri
 	}
 	if selected.Protocol == gatewayv1.HTTPSProtocolType {
 		scheme = agentGatewayHTTPSScheme
-		if listenerHostname == "" {
-			return "", fmt.Errorf("HTTPS listener %q has no concrete hostname for TLS verification", selected.Name)
-		}
 	}
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
@@ -1127,6 +1244,100 @@ func gatewayOpenAIBaseURL(gw *gatewayv1.Gateway, requestedListener string) (stri
 		Path:   "/v1",
 	}
 	return endpoint.String(), nil
+}
+
+func openAIBaseURLsEqual(left, right string) bool {
+	leftURL, leftErr := url.Parse(normalizeOpenAIBaseURL(left))
+	rightURL, rightErr := url.Parse(normalizeOpenAIBaseURL(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return strings.EqualFold(leftURL.Scheme, rightURL.Scheme) &&
+		strings.EqualFold(leftURL.Hostname(), rightURL.Hostname()) &&
+		effectiveURLPort(leftURL) == effectiveURLPort(rightURL) &&
+		leftURL.EscapedPath() == rightURL.EscapedPath() &&
+		leftURL.RawQuery == rightURL.RawQuery &&
+		leftURL.Fragment == rightURL.Fragment
+}
+
+func effectiveURLPort(endpoint *url.URL) string {
+	if port := endpoint.Port(); port != "" {
+		if value, err := strconv.Atoi(port); err == nil {
+			return strconv.Itoa(value)
+		}
+		return port
+	}
+	if strings.EqualFold(endpoint.Scheme, agentGatewayHTTPSScheme) {
+		return "443"
+	}
+	if strings.EqualFold(endpoint.Scheme, agentGatewayHTTPScheme) {
+		return "80"
+	}
+	return ""
+}
+
+func gatewayListenerAllowsHTTPRoute(listener *gatewayv1.Listener) bool {
+	if listener.AllowedRoutes == nil || len(listener.AllowedRoutes.Kinds) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(listener.AllowedRoutes.Kinds, gatewayRouteGroupKindIsHTTPRoute)
+}
+
+func gatewayListenerSupportsHTTPRoute(gw *gatewayv1.Gateway, listener *gatewayv1.Listener) bool {
+	if !gatewayListenerAllowsHTTPRoute(listener) {
+		return false
+	}
+	listenerStatus := gatewayListenerStatus(gw, listener.Name)
+	return listenerStatus != nil && gatewayListenerStatusSupportsHTTPRoute(listenerStatus)
+}
+
+func gatewayRouteGroupKindIsHTTPRoute(kind gatewayv1.RouteGroupKind) bool {
+	group := gatewayv1.GroupName
+	if kind.Group != nil {
+		group = string(*kind.Group)
+	}
+	return group == gatewayv1.GroupName && kind.Kind == "HTTPRoute"
+}
+
+func gatewayListenerStatusSupportsHTTPRoute(listenerStatus *gatewayv1.ListenerStatus) bool {
+	return slices.ContainsFunc(listenerStatus.SupportedKinds, gatewayRouteGroupKindIsHTTPRoute)
+}
+
+func gatewayListenerStatus(gw *gatewayv1.Gateway, listenerName gatewayv1.SectionName) *gatewayv1.ListenerStatus {
+	for i := range gw.Status.Listeners {
+		if gw.Status.Listeners[i].Name == listenerName {
+			return &gw.Status.Listeners[i]
+		}
+	}
+	return nil
+}
+
+func gatewayListenerReady(gw *gatewayv1.Gateway, listenerName gatewayv1.SectionName) error {
+	listenerStatus := gatewayListenerStatus(gw, listenerName)
+	if listenerStatus == nil {
+		return fmt.Errorf("listener %q has no published status", listenerName)
+	}
+	if !gatewayListenerStatusSupportsHTTPRoute(listenerStatus) {
+		return fmt.Errorf("listener %q does not report support for HTTPRoute", listenerName)
+	}
+
+	for _, conditionType := range []gatewayv1.ListenerConditionType{
+		gatewayv1.ListenerConditionAccepted,
+		gatewayv1.ListenerConditionResolvedRefs,
+		gatewayv1.ListenerConditionProgrammed,
+	} {
+		condition := meta.FindStatusCondition(listenerStatus.Conditions, string(conditionType))
+		if condition == nil {
+			return fmt.Errorf("listener %q has not reported condition %q", listenerName, conditionType)
+		}
+		if condition.ObservedGeneration != gw.Generation {
+			return fmt.Errorf("listener %q condition %q is stale: observed generation %d, current generation %d", listenerName, conditionType, condition.ObservedGeneration, gw.Generation)
+		}
+		if condition.Status != metav1.ConditionTrue {
+			return fmt.Errorf("listener %q condition %q is %s: %s: %s", listenerName, conditionType, condition.Status, condition.Reason, condition.Message)
+		}
+	}
+	return nil
 }
 
 // setAgentCondition upserts a condition, preserving LastTransitionTime on

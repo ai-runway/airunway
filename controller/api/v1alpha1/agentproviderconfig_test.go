@@ -26,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+const changedDeepCopyValue = "changed"
+
 func catalogJSON(t *testing.T, items []AgentCatalogItem) string {
 	t.Helper()
 	raw, err := json.Marshal(items)
@@ -361,8 +363,8 @@ func TestAgentProviderConfig_DeepCopy(t *testing.T) {
 	if *orig.Status.Ready != true {
 		t.Error("mutating copy Ready leaked into original")
 	}
-	cp.Annotations[AgentProviderCatalogAnnotation] = "changed"
-	if orig.Annotations[AgentProviderCatalogAnnotation] == "changed" {
+	cp.Annotations[AgentProviderCatalogAnnotation] = changedDeepCopyValue
+	if orig.Annotations[AgentProviderCatalogAnnotation] == changedDeepCopyValue {
 		t.Error("mutating copy annotation leaked into original")
 	}
 }

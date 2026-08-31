@@ -73,6 +73,8 @@ const (
 	agentImageLatestTag     = "latest"
 	agentJobCompletedReason = "JobCompleted"
 	agentJobFailedReason    = "JobFailed"
+	agentWorkloadNotReady   = "WorkloadNotReady"
+	agentDeploymentKind     = "AgentDeployment"
 
 	// agentConfigChecksumAnnotation carries a digest of the rendered agent.json
 	// on the pod template. The ConfigMap is mounted by name, so without this a
@@ -1344,7 +1346,7 @@ func workloadNotReadyDetail(live *appsv1.Deployment) (reason, message string) {
 				fmt.Sprintf("The agent workload could not create pods (%s): %s", c.Reason, c.Message)
 		}
 	}
-	return "WorkloadNotReady", "Waiting for the agent workload to become available"
+	return agentWorkloadNotReady, "Waiting for the agent workload to become available"
 }
 
 // deploymentRolledOut reports whether the Deployment's *current* pod template
@@ -2389,14 +2391,14 @@ func (r *ContainerProviderReconciler) reportRecordedJobOutcome(
 
 func liveJobStatus(job *batchv1.Job) (*airunwayv1alpha1.AgentRuntimeStatus, *airunwayv1alpha1.AgentReplicaStatus) {
 	return &airunwayv1alpha1.AgentRuntimeStatus{
-			WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
-				APIVersion: "batch/v1", Kind: "Job", Name: job.Name, Namespace: job.Namespace,
-			},
-		}, &airunwayv1alpha1.AgentReplicaStatus{
-			Desired:   ptr.Deref(job.Spec.Parallelism, 1),
-			Ready:     job.Status.Active,
-			Available: job.Status.Succeeded,
-		}
+		WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
+			APIVersion: "batch/v1", Kind: "Job", Name: job.Name, Namespace: job.Namespace,
+		},
+	}, &airunwayv1alpha1.AgentReplicaStatus{
+		Desired:   ptr.Deref(job.Spec.Parallelism, 1),
+		Ready:     job.Status.Active,
+		Available: job.Status.Succeeded,
+	}
 }
 
 func recordedJobStatus(ad *airunwayv1alpha1.AgentDeployment) (*airunwayv1alpha1.AgentRuntimeStatus, *airunwayv1alpha1.AgentReplicaStatus) {
@@ -2765,7 +2767,7 @@ func hasExactBlockingControllerOwner(obj metav1.Object, ad *airunwayv1alpha1.Age
 	owner := metav1.GetControllerOf(obj)
 	return owner != nil &&
 		owner.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
-		owner.Kind == "AgentDeployment" &&
+		owner.Kind == agentDeploymentKind &&
 		owner.Name == ad.Name &&
 		owner.UID == ad.UID &&
 		owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion
@@ -3961,7 +3963,7 @@ func (r *ContainerProviderReconciler) mapCredentialSecretToAgentDeployments(ctx 
 
 	if owner := metav1.GetControllerOf(obj); owner != nil &&
 		owner.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
-		owner.Kind == "AgentDeployment" && owner.Name != "" && owner.UID != "" &&
+		owner.Kind == agentDeploymentKind && owner.Name != "" && owner.UID != "" &&
 		owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion {
 		add(k8stypes.NamespacedName{Namespace: obj.GetNamespace(), Name: owner.Name})
 	}

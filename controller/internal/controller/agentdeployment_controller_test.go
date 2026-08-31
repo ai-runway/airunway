@@ -391,7 +391,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 			Expect(b.CredentialsRef).To(BeNil())
 		})
 
-		It("prefers the gateway status endpoint and gateway model name when gateway routing is configured", func() {
+		It("preserves a complete gateway status endpoint and gateway model name", func() {
 			createReadyProvider("kagent-depref-gw", airunwayv1alpha1.AgentProviderBackendCRD,
 				airunwayv1alpha1.ModelBindingModeDeploymentRef)
 
@@ -408,10 +408,8 @@ var _ = Describe("AgentDeployment core controller", func() {
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, md) })
 			md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "demo-model-gw", Port: 80}
 			md.Status.Gateway = &airunwayv1alpha1.GatewayStatus{
-				Endpoint:         "10.0.0.42",
-				GatewayName:      "inference-gateway",
-				GatewayNamespace: "gateway-system",
-				ModelName:        "llama-3.2-1b-gateway",
+				Endpoint:  "https://10.0.0.42:8443",
+				ModelName: "llama-3.2-1b-gateway",
 			}
 			Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
 
@@ -432,7 +430,7 @@ var _ = Describe("AgentDeployment core controller", func() {
 
 			Expect(out.Status.ModelBinding).NotTo(BeNil())
 			b := *out.Status.ModelBinding
-			Expect(b.BaseURL).To(Equal("http://10.0.0.42/v1"))
+			Expect(b.BaseURL).To(Equal("https://10.0.0.42:8443/v1"))
 			Expect(b.ModelName).To(Equal("llama-3.2-1b-gateway"))
 			Expect(b.CredentialsRef).To(BeNil())
 		})

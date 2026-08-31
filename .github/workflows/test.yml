@@ -246,7 +246,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [dynamo, kaito, kuberay, llmd, vllm]
+        provider: [agent-container, agent-kagent, agent-orka, dynamo, kaito, kuberay, llmd, vllm]
 
     name: provider-lint (${{ matrix.provider }})
 

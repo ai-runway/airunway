@@ -62,7 +62,7 @@ func TestAgentDeployment_DeepCopy(t *testing.T) {
 	if orig.Spec.Framework.Name != "kagent" {
 		t.Errorf("mutating copy leaked into original: %q", orig.Spec.Framework.Name)
 	}
-	cp.Spec.Model.DeploymentRef.Name = "changed"
+	cp.Spec.Model.DeploymentRef.Name = changedDeepCopyValue
 	if orig.Spec.Model.DeploymentRef.Name != "llama-3-8b" {
 		t.Errorf("mutating copy Model.DeploymentRef.Name leaked into original: %q", orig.Spec.Model.DeploymentRef.Name)
 	}

@@ -341,6 +341,9 @@ func TestAgentDeploymentCustomValidator_ValidatesExternalAPIBaseURLOnCreateAndUp
 		"https://api.openai.com/v1",
 		"http://localhost:8080/v1",
 		"https://[2001:db8::1]:8443/v1",
+		"https://api.example.com:65535/v1",
+		"https://api.example.com:0443/v1",
+		"https://api.example.com:000443/v1",
 	} {
 		t.Run("create accepts "+valid, func(t *testing.T) {
 			obj := makeMinimalAgentDeployment("kagent")
@@ -358,6 +361,14 @@ func TestAgentDeploymentCustomValidator_ValidatesExternalAPIBaseURLOnCreateAndUp
 		"ftp://api.example.com/v1",
 		"https:///v1",
 		" https://api.example.com/v1",
+		"http://:8080/v1",
+		"https://api.example.com:/v1",
+		"https://api.example.com:0/v1",
+		"https://api.example.com:65536/v1",
+		"https://user@api.example.com/v1",
+		"https://[not-an-ip]/v1",
+		"https://[127.0.0.1]/v1",
+		"https://2001:db8::1/v1",
 	} {
 		t.Run("create rejects "+invalid, func(t *testing.T) {
 			obj := makeMinimalAgentDeployment("kagent")

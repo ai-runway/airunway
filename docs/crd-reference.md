@@ -231,23 +231,32 @@ status:
 
 ## AgentDeployment model binding behavior
 
-For `spec.model.gatewayEndpoint`, the core controller combines the first
-published `Gateway.status.addresses` value with an HTTP(S) listener's protocol
+For `spec.model.gatewayEndpoint`, the core controller combines a published IP
+or hostname from `Gateway.status.addresses` with an HTTP(S) listener's protocol
 and port. Set `gatewayRef.listenerName` when the Gateway has more than one
-HTTP(S) listener; it may be omitted when exactly one compatible listener
-exists. Only HTTP and HTTPS listeners are supported, and the resolved URL
-always includes the listener port and the OpenAI-compatible `/v1` path.
+HTTPRoute-capable HTTP(S) listener. It may be omitted when exactly one compatible
+listener exists. The selected listener must report current `Accepted`,
+`ResolvedRefs`, and `Programmed` conditions as true. The resolved URL always
+includes the listener port and the OpenAI-compatible `/v1` path.
+
+When the selected listener declares a concrete hostname, that hostname becomes
+the URL authority so HTTP Host matching and HTTPS SNI/certificate validation use
+the listener identity. A wildcard hostname cannot identify one concrete model
+endpoint and is rejected. A listener without a hostname uses the published
+Gateway address.
 
 For `spec.model.externalAPI`, `baseURL` must be an absolute `http` or `https`
-URL with a host. Relative, hostless, and non-HTTP(S) values are rejected during
-admission on both create and update.
+URL with a host, no embedded user information, and a port from 1 through 65535
+when a port is present. Invalid values are rejected during admission on both
+create and update, and reconciliation repeats the check for objects created
+while the webhook was unavailable.
 
 For `spec.model.deploymentRef`, the core controller resolves the model binding in this order:
 
-1. If `ModelDeployment.status.gateway.endpoint` is present, use that endpoint (normalized to an OpenAI-compatible `/v1` base URL). This is the address the gateway implementation itself published in `Gateway.status.addresses`, so requests follow the same BBR/gateway route as a `gatewayEndpoint` binding.
+1. If `ModelDeployment.status.gateway` records a Gateway identity, resolve that Gateway and its sole compatible ready listener, then combine the listener authority, protocol, and port into an OpenAI-compatible `/v1` base URL. This also recovers when the Gateway publishes its first address after the ModelDeployment status was written. Gateway-backed bindings are periodically rechecked because Gateway status is not watched directly. If the Gateway has multiple compatible ready listeners, `deploymentRef` preserves the endpoint already published in `ModelDeployment.status.gateway.endpoint` because this binding mode has no listener selector. It does not preserve that endpoint when none of those listeners are ready.
 2. Else fall back to the model Service endpoint from `ModelDeployment.status.endpoint`.
 
-`status.gateway.gatewayName` and `gatewayNamespace` identify which Gateway was selected, but are **not** used to construct an address. A Gateway resource name is not a Service DNS name — Gateway API does not require an implementation to name its data-plane Service after the Gateway, and implementations differ — so deriving `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local` from them would produce an address that does not resolve on some clusters. The published status address is authoritative.
+`status.gateway.gatewayName` and `gatewayNamespace` identify which Gateway was selected, but are **not** used to construct an address. A Gateway resource name is not a Service DNS name. Gateway API does not require an implementation to name its data-plane Service after the Gateway, and implementations differ. Deriving `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local` from them would produce an address that does not resolve on some clusters.
 
 The resolved `status.modelBinding.modelName` prefers `status.gateway.modelName`, then `spec.model.servedName`, then `spec.model.id`.
 

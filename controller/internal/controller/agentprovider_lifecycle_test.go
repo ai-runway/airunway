@@ -31,9 +31,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -661,6 +663,14 @@ func TestBindingHoldExpiry(t *testing.T) {
 		}
 	})
 
+	t.Run("a deployment reference is periodically refreshed for Gateway changes", func(t *testing.T) {
+		ad := withModelBound(metav1.ConditionTrue, 0)
+		ad.Spec.Model.DeploymentRef = &airunwayv1alpha1.ModelDeploymentBinding{Name: "model"}
+		if !bindingNeedsRefresh(ad) {
+			t.Fatal("deploymentRef must be refreshed because its Gateway dependency is not watched")
+		}
+	})
+
 	t.Run("a healthy binding is never cleared", func(t *testing.T) {
 		ad := withModelBound(metav1.ConditionTrue, 24*time.Hour)
 		if got := retainBinding(nil, ad); got == nil {
@@ -796,9 +806,16 @@ func TestNormalizeOpenAIBaseURLHandlesIPv6(t *testing.T) {
 
 func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 	newGateway := func(address string, listeners ...gatewayv1.Listener) *gatewayv1.Gateway {
-		gw := &gatewayv1.Gateway{Spec: gatewayv1.GatewaySpec{Listeners: listeners}}
+		const generation = int64(3)
+		gw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Generation: generation},
+			Spec:       gatewayv1.GatewaySpec{Listeners: listeners},
+		}
 		if address != "" {
 			gw.Status.Addresses = []gatewayv1.GatewayStatusAddress{{Value: address}}
+		}
+		for _, listener := range listeners {
+			gw.Status.Listeners = append(gw.Status.Listeners, readyGatewayListenerStatus(listener.Name, generation))
 		}
 		return gw
 	}
@@ -809,6 +826,12 @@ func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 		l := listener(name, protocol, port)
 		h := gatewayv1.Hostname(hostname)
 		l.Hostname = &h
+		return l
+	}
+	listenerAllowingKind := func(name string, protocol gatewayv1.ProtocolType, port gatewayv1.PortNumber, kind gatewayv1.Kind) gatewayv1.Listener {
+		l := listener(name, protocol, port)
+		group := gatewayv1.Group(gatewayv1.GroupName)
+		l.AllowedRoutes = &gatewayv1.AllowedRoutes{Kinds: []gatewayv1.RouteGroupKind{{Group: &group, Kind: kind}}}
 		return l
 	}
 
@@ -840,16 +863,16 @@ func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 			want:      "http://[2001:db8::1]:8080/v1",
 		},
 		{
-			name:      "HTTP listener hostname is used for Host routing",
+			name:      "HTTP listener hostname supplies the request authority",
 			gateway:   newGateway("10.0.0.5", listenerWithHostname("http", gatewayv1.HTTPProtocolType, 8080, "models.example.com")),
 			selection: "http",
 			want:      "http://models.example.com:8080/v1",
 		},
 		{
-			name:      "HTTPS listener without a hostname is rejected",
+			name:      "HTTPS listener without a hostname uses the published address",
 			gateway:   newGateway("10.0.0.5", listener("secure", gatewayv1.HTTPSProtocolType, 443)),
 			selection: "secure",
-			wantErr:   "no concrete hostname",
+			want:      "https://10.0.0.5:443/v1",
 		},
 		{
 			name:      "wildcard listener hostname is rejected",
@@ -858,12 +881,26 @@ func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 			wantErr:   "wildcard",
 		},
 		{
-			name: "multiple compatible listeners require a selection",
+			name: "multiple compatible listeners require an explicit selection",
 			gateway: newGateway("gateway.example.com",
-				listener("http", gatewayv1.HTTPProtocolType, 80),
 				listener("secure", gatewayv1.HTTPSProtocolType, 443),
+				listener("http", gatewayv1.HTTPProtocolType, 8080),
 			),
 			wantErr: "listenerName",
+		},
+		{
+			name: "a listener restricted to GRPCRoute is not inferred",
+			gateway: newGateway("gateway.example.com",
+				listenerAllowingKind("grpc-only", gatewayv1.HTTPProtocolType, 8080, "GRPCRoute"),
+				listener("http", gatewayv1.HTTPProtocolType, 80),
+			),
+			want: "http://gateway.example.com:80/v1",
+		},
+		{
+			name:      "an explicitly selected listener must allow HTTPRoute",
+			gateway:   newGateway("gateway.example.com", listenerAllowingKind("grpc-only", gatewayv1.HTTPProtocolType, 8080, "GRPCRoute")),
+			selection: "grpc-only",
+			wantErr:   "does not allow HTTPRoute",
 		},
 		{
 			name:      "unknown selected listener is rejected",
@@ -898,6 +935,327 @@ func TestGatewayOpenAIBaseURLUsesSelectedListener(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("gatewayOpenAIBaseURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	for _, conditionType := range []gatewayv1.ListenerConditionType{
+		gatewayv1.ListenerConditionAccepted,
+		gatewayv1.ListenerConditionResolvedRefs,
+		gatewayv1.ListenerConditionProgrammed,
+	} {
+		t.Run("rejects listener when "+string(conditionType)+" is false", func(t *testing.T) {
+			gw := newGateway("gateway.example.com", listener("http", gatewayv1.HTTPProtocolType, 80))
+			condition := meta.FindStatusCondition(gw.Status.Listeners[0].Conditions, string(conditionType))
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = "TestFailure"
+			condition.Message = "listener is not usable"
+
+			_, err := gatewayOpenAIBaseURL(gw, "http")
+			if err == nil || !strings.Contains(err.Error(), string(conditionType)) {
+				t.Fatalf("gatewayOpenAIBaseURL() error = %v, want %s failure", err, conditionType)
+			}
+		})
+	}
+
+	t.Run("rejects stale listener status", func(t *testing.T) {
+		gw := newGateway("gateway.example.com", listener("http", gatewayv1.HTTPProtocolType, 80))
+		gw.Status.Listeners[0].Conditions[0].ObservedGeneration--
+		_, err := gatewayOpenAIBaseURL(gw, "http")
+		if err == nil || !strings.Contains(err.Error(), "stale") {
+			t.Fatalf("gatewayOpenAIBaseURL() error = %v, want stale status failure", err)
+		}
+	})
+
+	t.Run("rejects missing listener status", func(t *testing.T) {
+		gw := newGateway("gateway.example.com", listener("http", gatewayv1.HTTPProtocolType, 80))
+		gw.Status.Listeners = nil
+		_, err := gatewayOpenAIBaseURL(gw, "http")
+		if err == nil || !strings.Contains(err.Error(), "no published status") {
+			t.Fatalf("gatewayOpenAIBaseURL() error = %v, want missing status failure", err)
+		}
+	})
+
+	t.Run("skips opaque status addresses", func(t *testing.T) {
+		gw := newGateway("ignored", listener("http", gatewayv1.HTTPProtocolType, 80))
+		namedAddress := gatewayv1.NamedAddressType
+		ipAddress := gatewayv1.IPAddressType
+		gw.Status.Addresses = []gatewayv1.GatewayStatusAddress{
+			{Type: &namedAddress, Value: "internal-address-id"},
+			{Type: &ipAddress, Value: "10.0.0.8"},
+		}
+		got, err := gatewayOpenAIBaseURL(gw, "http")
+		if err != nil {
+			t.Fatalf("gatewayOpenAIBaseURL() unexpected error: %v", err)
+		}
+		if got != "http://10.0.0.8:80/v1" {
+			t.Fatalf("gatewayOpenAIBaseURL() = %q, want supported IP address", got)
+		}
+	})
+
+	t.Run("infers only a listener whose status supports HTTPRoute", func(t *testing.T) {
+		gw := newGateway("gateway.example.com",
+			listener("grpc-status", gatewayv1.HTTPProtocolType, 8080),
+			listener("http", gatewayv1.HTTPProtocolType, 80),
+		)
+		gw.Status.Listeners[0].SupportedKinds[0].Kind = "GRPCRoute"
+		got, err := gatewayOpenAIBaseURL(gw, "")
+		if err != nil {
+			t.Fatalf("gatewayOpenAIBaseURL() unexpected error: %v", err)
+		}
+		if got != "http://gateway.example.com:80/v1" {
+			t.Fatalf("gatewayOpenAIBaseURL() = %q, want listener with HTTPRoute status support", got)
+		}
+	})
+
+	t.Run("rejects selected listener without HTTPRoute status support", func(t *testing.T) {
+		gw := newGateway("gateway.example.com", listener("http", gatewayv1.HTTPProtocolType, 80))
+		gw.Status.Listeners[0].SupportedKinds[0].Kind = "GRPCRoute"
+		_, err := gatewayOpenAIBaseURL(gw, "http")
+		if err == nil || !strings.Contains(err.Error(), "does not report support for HTTPRoute") {
+			t.Fatalf("gatewayOpenAIBaseURL() error = %v, want HTTPRoute status support failure", err)
+		}
+	})
+}
+
+func readyGatewayListenerStatus(name gatewayv1.SectionName, generation int64) gatewayv1.ListenerStatus {
+	group := gatewayv1.Group(gatewayv1.GroupName)
+	conditions := make([]metav1.Condition, 0, 3)
+	for _, conditionType := range []gatewayv1.ListenerConditionType{
+		gatewayv1.ListenerConditionAccepted,
+		gatewayv1.ListenerConditionResolvedRefs,
+		gatewayv1.ListenerConditionProgrammed,
+	} {
+		conditions = append(conditions, metav1.Condition{
+			Type:               string(conditionType),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(conditionType),
+			ObservedGeneration: generation,
+		})
+	}
+	return gatewayv1.ListenerStatus{
+		Name:           name,
+		SupportedKinds: []gatewayv1.RouteGroupKind{{Group: &group, Kind: "HTTPRoute"}},
+		Conditions:     conditions,
+	}
+}
+
+func TestResolveExternalAPIRejectsInvalidLegacyURLs(t *testing.T) {
+	r := &AgentDeploymentReconciler{}
+	ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"}}
+	for _, baseURL := range []string{
+		"http://:8080/v1",
+		"https://example.com:0/v1",
+		"https://example.com:65536/v1",
+		"https://user@example.com/v1",
+		"https://[not-an-ip]/v1",
+		"https://[127.0.0.1]/v1",
+		"https://2001:db8::1/v1",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			model := &airunwayv1alpha1.ModelBinding{ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+				Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
+				BaseURL:   baseURL,
+				ModelName: "model",
+			}}
+			_, ok, requeue, reason, _ := r.resolveExternalAPI(
+				context.Background(), ad, model,
+				airunwayv1alpha1.ModelBindingStatus{BindingMode: airunwayv1alpha1.ModelBindingModeExternalAPI},
+			)
+			if ok || requeue || reason != "ExternalAPIInvalid" {
+				t.Fatalf("invalid URL resolved as ok=%v requeue=%v reason=%q", ok, requeue, reason)
+			}
+		})
+	}
+}
+
+func TestResolveDeploymentRefUsesLiveGatewayListener(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "default", UID: "model-uid"},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Source: airunwayv1alpha1.ModelSourceCustom, ServedName: "served-model",
+		}},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{Gateway: &airunwayv1alpha1.GatewayStatus{
+			GatewayName: "gateway", GatewayNamespace: "default", ModelName: "gateway-model",
+		}},
+	}
+	hostname := gatewayv1.Hostname("models.example.com")
+	gateway := deploymentRefGateway(t, true, gatewayv1.Listener{
+		Name: "secure", Protocol: gatewayv1.HTTPSProtocolType, Port: 8443, Hostname: &hostname,
+	})
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, gateway).Build()
+	r := &AgentDeploymentReconciler{Client: c}
+	ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"}}
+	model := &airunwayv1alpha1.ModelBinding{DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "model"}}
+
+	got, ok, requeue, reason, message := r.resolveDeploymentRef(
+		context.Background(), ad, model,
+		airunwayv1alpha1.ModelBindingStatus{BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef},
+	)
+	if !ok || requeue || reason != "" {
+		t.Fatalf("deploymentRef resolved as ok=%v requeue=%v reason=%q message=%q", ok, requeue, reason, message)
+	}
+	if got.BaseURL != "https://models.example.com:8443/v1" {
+		t.Fatalf("base URL = %q, want live Gateway listener hostname, scheme, and port", got.BaseURL)
+	}
+	if got.ModelName != "gateway-model" {
+		t.Fatalf("model name = %q, want gateway model name", got.ModelName)
+	}
+}
+
+func TestResolveDeploymentRefHandlesAmbiguousGatewayListenerReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		listenersReady bool
+		published      string
+		listeners      []gatewayv1.Listener
+		wantBaseURL    string
+		wantReason     string
+	}{
+		{
+			name:           "uses the one current listener matching the published endpoint",
+			listenersReady: true,
+			published:      "https://10.0.0.42:8443",
+			listeners: []gatewayv1.Listener{
+				{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 8080},
+				{Name: "secure", Protocol: gatewayv1.HTTPSProtocolType, Port: 8443},
+			},
+			wantBaseURL: "https://10.0.0.42:8443/v1",
+		},
+		{
+			name:           "rejects a stale published endpoint",
+			listenersReady: true,
+			published:      "https://published.example.com:9443",
+			listeners: []gatewayv1.Listener{
+				{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 8080},
+				{Name: "secure", Protocol: gatewayv1.HTTPSProtocolType, Port: 8443},
+			},
+			wantReason: "ModelGatewayNotReady",
+		},
+		{
+			name:           "rejects an endpoint shared by multiple listeners",
+			listenersReady: true,
+			published:      "http://10.0.0.42:8080",
+			listeners: []gatewayv1.Listener{
+				{Name: "http-one", Protocol: gatewayv1.HTTPProtocolType, Port: 8080},
+				{Name: "http-two", Protocol: gatewayv1.HTTPProtocolType, Port: 8080},
+			},
+			wantReason: "ModelGatewayNotReady",
+		},
+		{
+			name:           "rejects the published endpoint when no listener is ready",
+			listenersReady: false,
+			published:      "https://10.0.0.42:8443",
+			listeners: []gatewayv1.Listener{
+				{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 8080},
+				{Name: "secure", Protocol: gatewayv1.HTTPSProtocolType, Port: 8443},
+			},
+			wantReason: "ModelGatewayNotReady",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			md := &airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "default", UID: "model-uid"},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+					Source: airunwayv1alpha1.ModelSourceCustom,
+				}},
+				Status: airunwayv1alpha1.ModelDeploymentStatus{Gateway: &airunwayv1alpha1.GatewayStatus{
+					Endpoint: tc.published, GatewayName: "gateway",
+					GatewayNamespace: "default", ModelName: "gateway-model",
+				}},
+			}
+			gateway := deploymentRefGateway(t, tc.listenersReady, tc.listeners...)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, gateway).Build()
+			r := &AgentDeploymentReconciler{Client: c}
+			ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"}}
+			model := &airunwayv1alpha1.ModelBinding{DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "model"}}
+
+			got, ok, requeue, reason, message := r.resolveDeploymentRef(
+				context.Background(), ad, model,
+				airunwayv1alpha1.ModelBindingStatus{BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef},
+			)
+			if tc.wantReason != "" {
+				if ok || !requeue || reason != tc.wantReason {
+					t.Fatalf("deploymentRef resolved as ok=%v requeue=%v reason=%q message=%q", ok, requeue, reason, message)
+				}
+				return
+			}
+			if !ok || requeue || reason != "" {
+				t.Fatalf("deploymentRef resolved as ok=%v requeue=%v reason=%q message=%q", ok, requeue, reason, message)
+			}
+			if got.BaseURL != tc.wantBaseURL {
+				t.Fatalf("base URL = %q, want %q", got.BaseURL, tc.wantBaseURL)
+			}
+		})
+	}
+}
+
+func deploymentRefGateway(t *testing.T, listenersReady bool, listeners ...gatewayv1.Listener) *unstructured.Unstructured {
+	t.Helper()
+	const generation = int64(2)
+	typed := &gatewayv1.Gateway{
+		TypeMeta: metav1.TypeMeta{APIVersion: gatewayv1.GroupVersion.String(), Kind: "Gateway"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gateway", Namespace: "default", Generation: generation,
+		},
+		Spec: gatewayv1.GatewaySpec{Listeners: listeners},
+		Status: gatewayv1.GatewayStatus{
+			Addresses: []gatewayv1.GatewayStatusAddress{{Value: "10.0.0.42"}},
+		},
+	}
+	for _, listener := range listeners {
+		status := readyGatewayListenerStatus(listener.Name, generation)
+		if !listenersReady {
+			for i := range status.Conditions {
+				status.Conditions[i].Status = metav1.ConditionFalse
+				status.Conditions[i].Reason = "TestNotReady"
+			}
+		}
+		typed.Status.Listeners = append(typed.Status.Listeners, status)
+	}
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &unstructured.Unstructured{Object: object}
+}
+
+func TestResolveDeploymentRefRejectsIncompleteGatewayIdentity(t *testing.T) {
+	for name, gatewayStatus := range map[string]*airunwayv1alpha1.GatewayStatus{
+		"missing namespace": {Endpoint: "https://legacy.example:443", GatewayName: "gateway"},
+		"missing name":      {Endpoint: "https://legacy.example:443", GatewayNamespace: "default"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			md := &airunwayv1alpha1.ModelDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "default", UID: "model-uid"},
+				Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+					Source: airunwayv1alpha1.ModelSourceCustom,
+				}},
+				Status: airunwayv1alpha1.ModelDeploymentStatus{Gateway: gatewayStatus},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).Build()
+			r := &AgentDeploymentReconciler{Client: c}
+			ad := &airunwayv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"}}
+			model := &airunwayv1alpha1.ModelBinding{DeploymentRef: &airunwayv1alpha1.ModelDeploymentBinding{Name: "model"}}
+
+			_, ok, requeue, reason, _ := r.resolveDeploymentRef(
+				context.Background(), ad, model,
+				airunwayv1alpha1.ModelBindingStatus{BindingMode: airunwayv1alpha1.ModelBindingModeDeploymentRef},
+			)
+			if ok || !requeue || reason != "ModelGatewayStatusInvalid" {
+				t.Fatalf("deploymentRef resolved as ok=%v requeue=%v reason=%q", ok, requeue, reason)
 			}
 		})
 	}

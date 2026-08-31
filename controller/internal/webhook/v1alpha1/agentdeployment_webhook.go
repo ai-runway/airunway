@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -230,21 +229,15 @@ func validateExternalAPIBaseURL(obj *airunwayv1alpha1.AgentDeployment) field.Err
 	}
 
 	baseURL := obj.Spec.Model.ExternalAPI.BaseURL
-	parsed, err := url.Parse(baseURL)
-	if err == nil &&
-		baseURL == strings.TrimSpace(baseURL) &&
-		parsed.IsAbs() &&
-		parsed.Host != "" &&
-		parsed.Hostname() != "" &&
-		(strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) {
+	if err := airunwayv1alpha1.ValidateExternalAPIBaseURL(baseURL); err == nil {
 		return nil
+	} else {
+		return field.ErrorList{field.Invalid(
+			field.NewPath("spec", "model", "externalAPI", "baseURL"),
+			baseURL,
+			err.Error(),
+		)}
 	}
-
-	return field.ErrorList{field.Invalid(
-		field.NewPath("spec", "model", "externalAPI", "baseURL"),
-		baseURL,
-		"must be an absolute http or https URL with a host",
-	)}
 }
 
 // ValidateUpdate validates AgentDeployment on update.

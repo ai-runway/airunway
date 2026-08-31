@@ -119,9 +119,11 @@ type GatewayResourceRef struct {
 
 	// listenerName selects the HTTP or HTTPS Gateway listener used to derive
 	// the model endpoint scheme and port. It may be omitted when the Gateway
-	// has exactly one HTTP(S) listener.
+	// has exactly one HTTPRoute-capable HTTP(S) listener.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	ListenerName string `json:"listenerName,omitempty"`
 }
 
@@ -147,7 +149,7 @@ type ExternalAPIBinding struct {
 	// baseURL is the OpenAI-compatible base URL, e.g. "https://api.openai.com/v1".
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern=`^[hH][tT][tT][pP][sS]?://[^[:space:]/?#][^[:space:]]*$`
+	// +kubebuilder:validation:Pattern=`^[hH][tT][tT][pP][sS]?://([^[:space:]/?#@:]+|\[[0-9A-Za-z:.%_-]+\])(:[0-9]+)?([/?#][^[:space:]]*)?$`
 	BaseURL string `json:"baseURL"`
 
 	// modelName is the model identifier the agent will request.

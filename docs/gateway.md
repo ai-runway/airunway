@@ -435,7 +435,15 @@ Auto-discovery runs only when the deployment reaches `Running` phase. If the pro
 
 ### AgentDeployment `deploymentRef` integration
 
-Agent deployments that bind with `spec.model.deploymentRef` reuse this gateway resolution path. When a target `ModelDeployment` has published `status.gateway.endpoint`, the agent binding resolves to that address — the one the gateway implementation itself advertised in `Gateway.status.addresses` — so requests follow the same BBR/gateway route as `gatewayEndpoint` bindings. If no gateway endpoint is published, resolution falls back to the model Service endpoint.
+Agent deployments that bind with `spec.model.deploymentRef` reuse this gateway resolution path. When a target `ModelDeployment` records a Gateway identity in status, the agent binding reads that Gateway and combines a usable published address with its sole HTTPRoute-capable, ready HTTP(S) listener. This also handles the case where the Gateway publishes its first address later. The controller periodically rechecks Gateway-backed bindings because it does not watch Gateway status directly. If multiple compatible ready listeners exist, `deploymentRef` keeps the endpoint already published by the `ModelDeployment` because it has no listener selector. It rejects the binding when none of those listeners are ready. If no Gateway identity is recorded, resolution falls back to the model Service endpoint.
+
+For direct `spec.model.gatewayEndpoint` bindings, `gatewayRef.listenerName`
+selects a specific listener. It may be omitted only when exactly one compatible
+listener exists. The listener must allow HTTPRoute attachments and report current
+`Accepted`, `ResolvedRefs`, and `Programmed` conditions as true. A concrete
+listener hostname becomes the URL authority for HTTP Host matching and HTTPS
+SNI/certificate validation. A listener without a hostname uses the published
+Gateway IP or hostname; wildcard listener hostnames are rejected.
 
 `status.gateway.gatewayName` and `gatewayNamespace` record which Gateway was selected, for diagnostics. They are deliberately not used to build an in-cluster Service URL: Gateway API does not require the data-plane Service to be named after the Gateway resource, so `<gatewayName>.<gatewayNamespace>.svc.cluster.local` is not portable across implementations.
 
