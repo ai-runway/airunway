@@ -75,6 +75,19 @@ func TestAppendModelCacheEnvHonorsUserOverride(t *testing.T) {
 	if len(env) != 1 {
 		t.Fatalf("expected no duplicate HF_HOME, got %v", env)
 	}
+
+	md.Spec.Env = nil
+	providerEnv := []any{
+		map[string]any{"name": "HF_TOKEN", "value": "token"},
+		map[string]any{"name": "HF_HOME", "value": "/provider-cache"},
+	}
+	env = AppendModelCacheEnv(md, providerEnv)
+	if len(env) != 2 {
+		t.Fatalf("expected provider-rendered HF_HOME to remain unique, got %v", env)
+	}
+	if got := env[1].(map[string]any)["value"]; got != "/provider-cache" {
+		t.Fatalf("expected provider-rendered HF_HOME to take precedence, got %v", env)
+	}
 }
 
 func TestWorkloadReadyUsesCurrentGeneration(t *testing.T) {

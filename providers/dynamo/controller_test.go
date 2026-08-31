@@ -850,6 +850,8 @@ func TestReconcilePVCNotBound(t *testing.T) {
 	}
 }
 
+const testModelDownloaderImage = "example.test/model-downloader:v1"
+
 func TestReconcileDownloadNotComplete(t *testing.T) {
 	scheme := newScheme()
 	md := newMDWithStorage("test", "default")
@@ -878,7 +880,7 @@ func TestReconcileDownloadNotComplete(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, pvc).WithStatusSubresource(md, pvc).Build()
-	r := NewDynamoProviderReconciler(c, scheme, "")
+	r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
@@ -960,7 +962,7 @@ func TestReconcileFullPipeline(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, pvc, job).WithStatusSubresource(md, pvc, job).Build()
-	r := NewDynamoProviderReconciler(c, scheme, "")
+	r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},

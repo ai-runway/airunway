@@ -162,6 +162,7 @@ jobs:
 
   controller-docker:
     name: Build and Push Controller Docker Image
+    needs: model-downloader-docker
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -210,12 +211,15 @@ jobs:
             VERSION=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
             GAIE_VERSION=${{ env.GAIE_VERSION }}
+            MODEL_DOWNLOADER_IMAGE=ghcr.io/ai-runway/airunway/model-downloader@${{ needs.model-downloader-docker.outputs.digest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   model-downloader-docker:
     name: Build and Push Model Downloader Docker Image
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -246,6 +250,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') }}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: images/model-downloader

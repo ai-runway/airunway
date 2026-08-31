@@ -281,7 +281,7 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2">
                     <Label htmlFor={`vol-purpose-${index}`}>Purpose</Label>
-                    <InfoHint text="Model Cache: automatically downloads and stores model weights for faster restarts. Compilation Cache: stores engine compilation output to skip recompilation. Custom: general-purpose storage you manage." />
+                    <InfoHint text="Model Cache automatically downloads and reuses model weights. Compilation Cache provides a reusable folder for compiled engine files; Dynamo connects to it automatically, while other runtimes need an advanced engine setting. Custom storage is fully user-managed." />
                   </div>
                   <Select
                     value={vol.purpose || 'custom'}

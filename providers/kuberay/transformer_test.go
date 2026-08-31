@@ -593,15 +593,15 @@ func assertRayTemplateStorage(t *testing.T, template map[string]any, claimName s
 		t.Fatalf("expected writable mount, got %v", mounts[0])
 	}
 	env := container["env"].([]any)
-	foundHFHome := false
+	hfHomeCount := 0
 	for _, item := range env {
 		entry := item.(map[string]any)
 		if entry["name"] == "HF_HOME" && entry["value"] == "/model-cache" {
-			foundHFHome = true
+			hfHomeCount++
 		}
 	}
-	if !foundHFHome {
-		t.Fatalf("expected HF_HOME=/model-cache, got %v", env)
+	if hfHomeCount != 1 {
+		t.Fatalf("expected exactly one HF_HOME=/model-cache, got %v", env)
 	}
 }
 

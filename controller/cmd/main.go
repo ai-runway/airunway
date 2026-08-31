@@ -53,6 +53,7 @@ import (
 	"github.com/ai-runway/airunway/controller/internal/controller"
 	"github.com/ai-runway/airunway/controller/internal/gateway"
 	webhookv1alpha1 "github.com/ai-runway/airunway/controller/internal/webhook/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -156,6 +157,7 @@ func main() {
 	var gatewayNamespace string
 	var eppServicePort int
 	var eppImage string
+	var modelDownloaderImage string
 	var patchGateway bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -187,6 +189,8 @@ func main() {
 	flag.StringVar(&eppImage, "epp-image",
 		"registry.k8s.io/gateway-api-inference-extension/epp:"+gateway.DefaultGAIEVersion,
 		"Container image for the Endpoint Picker Proxy (EPP).")
+	flag.StringVar(&modelDownloaderImage, "model-downloader-image", storage.DefaultDownloadJobImage,
+		"Container image for provider-agnostic model download Jobs. Release builds embed an immutable default.")
 	flag.BoolVar(&patchGateway, "patch-gateway-allowed-routes", true,
 		"Patch the Gateway's allowedRoutes to accept HTTPRoutes from ModelDeployment namespaces. "+
 			"Set to false when a Gateway admin manages allowedRoutes independently.")
@@ -390,6 +394,7 @@ func main() {
 		EnableProviderSelector: enableProviderSelector,
 		GatewayDetector:        gatewayDetector,
 		ProviderResolver:       gateway.NewInferenceProviderConfigResolver(mgr.GetClient()),
+		DownloadJobImage:       modelDownloaderImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelDeployment")
 		os.Exit(1)

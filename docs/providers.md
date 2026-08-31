@@ -63,7 +63,7 @@ The selection reason is recorded in `status.provider.selectedReason` for observa
 | Persistent model storage   | No      | **Yes**       | Yes                    | Yes                | Yes                            |
 | Auto-selection             | Yes     | Yes           | Via selection rules    | Explicit/config rules only | Explicit only                 |
 
-Persistent storage uses claims in the `ModelDeployment` namespace, not the provider installation namespace. Dynamo, KubeRay, and llm-d mount storage on every model-serving workload in each advertised serving mode; Direct vLLM mounts storage in its advertised aggregated mode. KAITO storage is rejected because preset workspaces do not expose a pod template and the portable API does not identify a concrete llama.cpp model file. See the [CRD storage reference](crd-reference.md#specmodelstoragevolumes) for lifecycle, cache, and multi-node constraints.
+Persistent storage uses claims in the `ModelDeployment` namespace, not the provider installation namespace. Dynamo, KubeRay, and llm-d render storage into each model-serving pod template they produce; Direct vLLM renders storage into its aggregated Deployment. This describes the storage mapping and does not independently certify every underlying serving mode. KAITO storage is rejected because preset workspaces do not expose a pod template and the portable API does not identify a concrete llama.cpp model file. See the [CRD storage reference](crd-reference.md#specmodelstoragevolumes) for lifecycle, provider-specific cache behavior, and multi-node constraints.
 
 ## Provider Abstraction
 

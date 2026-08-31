@@ -110,11 +110,28 @@ func HasEnvVar(md *airunwayv1alpha1.ModelDeployment, name string) bool {
 // argument; HuggingFace resolves it from this persistent cache directory.
 func AppendModelCacheEnv(md *airunwayv1alpha1.ModelDeployment, env []any) []any {
 	path, found := ModelCacheMountPath(md)
-	if !found || path == "" || HasEnvVar(md, "HF_HOME") {
+	if !found || path == "" || HasEnvVar(md, "HF_HOME") || renderedEnvHasName(env, "HF_HOME") {
 		return env
 	}
 	return append(env, map[string]any{
 		"name":  "HF_HOME",
 		"value": path,
 	})
+}
+
+// renderedEnvHasName reports whether a provider has already rendered an
+// environment variable. Some provider builders call AppendModelCacheEnv at
+// more than one layer, so checking only ModelDeployment.spec.env is not enough
+// to guarantee a valid, duplicate-free container environment.
+func renderedEnvHasName(env []any, name string) bool {
+	for _, item := range env {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if renderedName, ok := entry["name"].(string); ok && renderedName == name {
+			return true
+		}
+	}
+	return false
 }

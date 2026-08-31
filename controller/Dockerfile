@@ -8,6 +8,10 @@ ARG TARGETARCH
 # so a hand-run `docker build` cannot silently fall back to the Go source literal
 # and produce an image untracked by versions.env.
 ARG GAIE_VERSION
+# MODEL_DOWNLOADER_IMAGE is the exact image reference used by storage
+# preparation Jobs. Release builds pass a digest so a mutable tag can never
+# change the downloader code underneath a published controller image.
+ARG MODEL_DOWNLOADER_IMAGE
 
 WORKDIR /workspace
 
@@ -24,13 +28,14 @@ COPY controller/ controller/
 # Require GAIE_VERSION so hand-run `docker build` cannot silently drift from
 # versions.env. Builds should pass it via --build-arg (the Makefile does this).
 RUN test -n "${GAIE_VERSION}" || (echo "ERROR: GAIE_VERSION build arg is required (see versions.env); pass --build-arg GAIE_VERSION=..." >&2; exit 1)
+RUN test -n "${MODEL_DOWNLOADER_IMAGE}" || (echo "ERROR: MODEL_DOWNLOADER_IMAGE build arg is required; pass --build-arg MODEL_DOWNLOADER_IMAGE=..." >&2; exit 1)
 # the GOARCH has no default value to allow the binary to be built according to the host where the command
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN cd controller && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a \
-      -ldflags="-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION}" \
+      -ldflags="-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${GAIE_VERSION} -X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=${MODEL_DOWNLOADER_IMAGE}" \
       -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary

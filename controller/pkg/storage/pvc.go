@@ -167,7 +167,10 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 }
 
 // buildPVC creates a PVC spec from a StorageVolume with Size set.
-func buildPVC(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha1.StorageVolume) (*corev1.PersistentVolumeClaim, error) {
+func buildPVC(
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+) (*corev1.PersistentVolumeClaim, error) {
 	if vol.Size == nil {
 		return nil, fmt.Errorf("volume size must be set for controller-created PVCs")
 	}

@@ -1,5 +1,6 @@
 KUSTOMIZE ?= ../../controller/bin/kustomize
 IMG ?= ghcr.io/ai-runway/airunway/dynamo-provider:latest
+MODEL_DOWNLOADER_IMG ?= ghcr.io/ai-runway/airunway/model-downloader:latest
 PLATFORM ?= linux/amd64
 PUSH ?= false
 PUSH_ENABLED := $(filter true TRUE 1 yes YES on ON,$(PUSH))
@@ -32,6 +33,7 @@ SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 # Makefile (e.g. `go run`, `go test`).
 LDFLAGS := -X $(MODULE).DynamoVersion=$(DYNAMO_VERSION)
 LDFLAGS += -X $(MODULE).shimVersion=$(SHIM_VERSION)
+LDFLAGS += -X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=$(MODEL_DOWNLOADER_IMG)
 
 GOLANGCI_LINT ?= ../../bin/golangci-lint
 
@@ -81,7 +83,7 @@ build: verify-versions vet
 
 ## Build provider Docker image
 docker-build: verify-versions
-	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg DYNAMO_VERSION=$(DYNAMO_VERSION) --build-arg SHIM_VERSION=$(SHIM_VERSION) -f Dockerfile -t $(IMG) ../..
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg DYNAMO_VERSION=$(DYNAMO_VERSION) --build-arg SHIM_VERSION=$(SHIM_VERSION) --build-arg MODEL_DOWNLOADER_IMAGE=$(MODEL_DOWNLOADER_IMG) -f Dockerfile -t $(IMG) ../..
 	@echo "✅ Dynamo provider image built: $(IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
 ## Deploy provider to the K8s cluster

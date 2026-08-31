@@ -31,11 +31,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const (
-	// DefaultDownloadJobImage is the default container image for model download jobs.
-	// This image has huggingface_hub (with hf_xet) pre-installed.
-	DefaultDownloadJobImage = "ghcr.io/ai-runway/airunway/model-downloader:latest"
+// DefaultDownloadJobImage is the build-injected default container image for
+// model download Jobs. Release binaries embed an immutable digest. Source
+// builds intentionally leave it empty so they cannot silently launch a
+// mutable image; callers may provide an explicit runtime override instead.
+var DefaultDownloadJobImage = ""
 
+const (
 	// downloadJobSuffix is the suffix appended to the ModelDeployment name to form the Job name
 	downloadJobSuffix = "-model-download"
 
@@ -100,12 +102,23 @@ func deleteStaleJob(ctx context.Context, c client.Client, job *batchv1.Job) erro
 
 // EnsureDownloadJob ensures a model download Job exists and tracks its completion.
 // Returns completed=true when the Job has succeeded.
-func EnsureDownloadJob(ctx context.Context, c client.Client, md *airunwayv1alpha1.ModelDeployment, downloadJobImage string) (bool, error) {
+func EnsureDownloadJob(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	downloadJobImage string,
+) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	vol := findModelCacheVolume(md)
 	if vol == nil {
 		return true, nil // nothing to do
+	}
+	if downloadJobImage == "" {
+		return false, fmt.Errorf(
+			"model downloader image is not configured; set --model-downloader-image on the controller " +
+				"or --download-job-image on the Dynamo provider, or inject storage.DefaultDownloadJobImage at build time",
+		)
 	}
 
 	jobName := downloadJobName(md.Name)
@@ -181,7 +194,11 @@ func EnsureDownloadJob(ctx context.Context, c client.Client, md *airunwayv1alpha
 }
 
 // buildDownloadJob creates a batch Job that downloads a HuggingFace model.
-func buildDownloadJob(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha1.StorageVolume, downloadJobImage string) *batchv1.Job {
+func buildDownloadJob(
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	downloadJobImage string,
+) *batchv1.Job {
 	claimName := vol.ResolvedClaimName(md.Name)
 	backoffLimit := defaultBackoffLimit
 	completions := int32(1)

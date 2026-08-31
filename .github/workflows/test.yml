@@ -313,9 +313,8 @@ jobs:
 
       - name: Build controller and assert ldflags injection
         # `make controller-build` delegates to controller/Makefile, which
-        # injects -X .../gateway.DefaultGAIEVersion=$(GAIE_VERSION) via
-        # ldflags. Read it back from the binary build info to confirm
-        # the injection actually landed (commit 83c53f8).
+        # injects pinned runtime defaults via ldflags. Read them back from the
+        # binary build info to confirm the injection actually landed.
         run: |
           set -euo pipefail
           source versions.env
@@ -326,6 +325,12 @@ jobs:
             exit 1
           fi
           echo "✅ ldflags injection landed: DefaultGAIEVersion=${GAIE_VERSION}"
+          if ! go version -m controller/bin/manager \
+            | grep -F -- "-X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=ghcr.io/ai-runway/airunway/model-downloader:latest"; then
+            echo "❌ ldflags injection of DefaultDownloadJobImage did not land in controller/bin/manager"
+            exit 1
+          fi
+          echo "✅ ldflags injection landed: DefaultDownloadJobImage"
 
       - name: Build dynamo provider and assert ldflags injection
         # Mirrors the controller assertion above. providers/dynamo/Makefile
@@ -341,6 +346,12 @@ jobs:
             exit 1
           fi
           echo "✅ ldflags injection landed: DynamoVersion=${DYNAMO_VERSION}"
+          if ! go version -m providers/dynamo/bin/provider \
+            | grep -F -- "-X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=ghcr.io/ai-runway/airunway/model-downloader:latest"; then
+            echo "❌ ldflags injection of DefaultDownloadJobImage did not land in providers/dynamo/bin/provider"
+            exit 1
+          fi
+          echo "✅ ldflags injection landed: DefaultDownloadJobImage"
 
   gpu-e2e-check:
     # Cluster-free gate for the GPU e2e module (test/e2e/gpu). The full suite

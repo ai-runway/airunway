@@ -67,7 +67,8 @@ type ModelDeploymentReconciler struct {
 	ProviderResolver gateway.ProviderCapabilityResolver
 
 	// DownloadJobImage is used by provider-agnostic model-cache download Jobs.
-	// An empty value uses storage.DefaultDownloadJobImage.
+	// An empty value uses the build-injected storage.DefaultDownloadJobImage;
+	// storage preparation fails explicitly if neither value is configured.
 	DownloadJobImage string
 
 	// phaseCache tracks the last observed phase per ModelDeployment for detecting transitions.
@@ -453,13 +454,27 @@ func (r *ModelDeploymentReconciler) reconcileStorage(
 		if storage.NeedsDownloadJob(md) {
 			r.setCondition(md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionTrue, "DownloadComplete", "Model download completed")
 		}
-		if recoveringStorageFailure && md.Status.Phase == airunwayv1alpha1.DeploymentPhaseFailed {
-			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
-			md.Status.Message = "Model storage is ready; waiting for the provider workload"
-		}
+		markStorageReady(md, recoveringStorageFailure)
 	}
 
 	return ctrl.Result{}, false, nil
+}
+
+func markStorageReady(md *airunwayv1alpha1.ModelDeployment, recoveringStorageFailure bool) {
+	if recoveringStorageFailure && md.Status.Phase == airunwayv1alpha1.DeploymentPhaseFailed {
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+		md.Status.Message = "Model storage is ready; waiting for the provider workload"
+		return
+	}
+
+	if md.Status.Phase != airunwayv1alpha1.DeploymentPhasePending {
+		return
+	}
+
+	switch md.Status.Message {
+	case "", "Waiting for storage PVCs to become ready", "Model download in progress":
+		md.Status.Message = "Model storage is ready; waiting for the provider workload"
+	}
 }
 
 func hasCurrentStorageFailure(md *airunwayv1alpha1.ModelDeployment) bool {

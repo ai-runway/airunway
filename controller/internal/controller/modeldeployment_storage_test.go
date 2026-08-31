@@ -72,3 +72,77 @@ func TestHasCurrentStorageFailure(t *testing.T) {
 		t.Fatal("expected unrelated failure to be preserved")
 	}
 }
+
+func TestMarkStorageReady(t *testing.T) {
+	tests := []struct {
+		name       string
+		phase      airunwayv1alpha1.DeploymentPhase
+		message    string
+		recovering bool
+		wantPhase  airunwayv1alpha1.DeploymentPhase
+		wantMsg    string
+	}{
+		{
+			name:      "replaces stale PVC wait message",
+			phase:     airunwayv1alpha1.DeploymentPhasePending,
+			message:   "Waiting for storage PVCs to become ready",
+			wantPhase: airunwayv1alpha1.DeploymentPhasePending,
+			wantMsg:   "Model storage is ready; waiting for the provider workload",
+		},
+		{
+			name:      "replaces stale download message",
+			phase:     airunwayv1alpha1.DeploymentPhasePending,
+			message:   "Model download in progress",
+			wantPhase: airunwayv1alpha1.DeploymentPhasePending,
+			wantMsg:   "Model storage is ready; waiting for the provider workload",
+		},
+		{
+			name:      "describes immediately ready storage",
+			phase:     airunwayv1alpha1.DeploymentPhasePending,
+			wantPhase: airunwayv1alpha1.DeploymentPhasePending,
+			wantMsg:   "Model storage is ready; waiting for the provider workload",
+		},
+		{
+			name:       "recovers storage failure",
+			phase:      airunwayv1alpha1.DeploymentPhaseFailed,
+			message:    "Failed to prepare model storage",
+			recovering: true,
+			wantPhase:  airunwayv1alpha1.DeploymentPhasePending,
+			wantMsg:    "Model storage is ready; waiting for the provider workload",
+		},
+		{
+			name:      "preserves provider progress",
+			phase:     airunwayv1alpha1.DeploymentPhasePending,
+			message:   "Provider is preparing a workload",
+			wantPhase: airunwayv1alpha1.DeploymentPhasePending,
+			wantMsg:   "Provider is preparing a workload",
+		},
+		{
+			name:      "preserves running status",
+			phase:     airunwayv1alpha1.DeploymentPhaseRunning,
+			message:   "Ready",
+			wantPhase: airunwayv1alpha1.DeploymentPhaseRunning,
+			wantMsg:   "Ready",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			md := &airunwayv1alpha1.ModelDeployment{
+				Status: airunwayv1alpha1.ModelDeploymentStatus{
+					Phase:   tt.phase,
+					Message: tt.message,
+				},
+			}
+
+			markStorageReady(md, tt.recovering)
+
+			if md.Status.Phase != tt.wantPhase {
+				t.Fatalf("phase = %q, want %q", md.Status.Phase, tt.wantPhase)
+			}
+			if md.Status.Message != tt.wantMsg {
+				t.Fatalf("message = %q, want %q", md.Status.Message, tt.wantMsg)
+			}
+		})
+	}
+}

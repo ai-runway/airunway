@@ -123,3 +123,32 @@ func TestPrepareManagedModelCacheThroughDownload(t *testing.T) {
 		t.Fatalf("expected storage preparation to finish, got %s", stage)
 	}
 }
+
+func TestPrepareRejectsMissingDownloadImage(t *testing.T) {
+	ctx := context.Background()
+	md := newDownloadMD("demo", "team-models")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "shared-model-cache"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-model-cache", Namespace: "team-models"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithStatusSubresource(&corev1.PersistentVolumeClaim{}, &batchv1.Job{}).
+		WithObjects(pvc).
+		Build()
+
+	stage, err := Prepare(ctx, c, md, "")
+	if err == nil {
+		t.Fatal("expected an unconfigured download image to fail before creating a Job")
+	}
+	if stage != PreparationDownloadPending {
+		t.Fatalf("expected download stage, got %s", stage)
+	}
+	job := &batchv1.Job{}
+	getErr := c.Get(ctx, types.NamespacedName{Name: "demo-model-download", Namespace: "team-models"}, job)
+	if getErr == nil {
+		t.Fatal("expected no download Job with an empty image")
+	}
+}
