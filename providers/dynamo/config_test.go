@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
@@ -45,6 +45,11 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(vllmCap.ServingModes) != 2 {
 		t.Fatalf("expected vllm to support 2 serving modes, got %d", len(vllmCap.ServingModes))
 	}
+	assertAPIFormats(t, "vllm", vllmCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	sglangCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeSGLang)
 	if sglangCap == nil {
@@ -56,6 +61,10 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(sglangCap.ServingModes) != 2 {
 		t.Fatalf("expected sglang to support 2 serving modes, got %d", len(sglangCap.ServingModes))
 	}
+	assertAPIFormats(t, "sglang", sglangCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	trtllmCap := spec.Capabilities.GetEngineCapability(airunwayv1alpha1.EngineTypeTRTLLM)
 	if trtllmCap == nil {
@@ -67,6 +76,10 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if len(trtllmCap.ServingModes) != 1 || trtllmCap.ServingModes[0] != airunwayv1alpha1.ServingModeAggregated {
 		t.Errorf("expected trtllm to support only aggregated serving mode")
 	}
+	assertAPIFormats(t, "trtllm", trtllmCap.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+	})
 
 	if len(spec.SelectionRules) != 4 {
 		t.Fatalf("expected 4 selection rules, got %d", len(spec.SelectionRules))
@@ -372,5 +385,24 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	}
 	if len(health.OperatorPods) == 0 || len(health.OperatorPods[0].Selectors) == 0 {
 		t.Fatalf("expected operator pod health probes, got %+v", health.OperatorPods)
+	}
+}
+
+func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alpha1.APIFormat) {
+	t.Helper()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %s to support %d API formats, got %d: %v", engine, len(expected), len(got), got)
+	}
+	for _, e := range expected {
+		found := false
+		for _, a := range got {
+			if a == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s to support API format %s", engine, e)
+		}
 	}
 }

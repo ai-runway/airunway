@@ -18,15 +18,18 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
@@ -34,9 +37,10 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
-	"github.com/kaito-project/airunway/controller/internal/gateway"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/gateway"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -124,6 +128,42 @@ func newTestGateway(name, ns string) *gatewayv1.Gateway {
 	}
 }
 
+// newBBRDeployment returns a stand-in for the shared body-based-router
+// Deployment installed by the upstream GAIE helm chart. It carries an unrelated
+// pod-template annotation so a wholesale rewrite is detectable, not just the
+// restart annotation itself.
+func newBBRDeployment(ns string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "body-based-router", Namespace: ns},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"unrelated": "keep-me"},
+				},
+			},
+		},
+	}
+}
+
+// assertBBRNotRestarted fails if anything rolled the shared BBR Deployment.
+// The controller used to patch airunway.ai/restartedAt onto its pod template to
+// force a restart; nothing should write to that Deployment at all now.
+func assertBBRNotRestarted(t *testing.T, r *ModelDeploymentReconciler, ns string) {
+	t.Helper()
+	var bbr appsv1.Deployment
+	key := types.NamespacedName{Name: "body-based-router", Namespace: ns}
+	if err := r.Get(context.Background(), key, &bbr); err != nil {
+		t.Fatalf("body-based-router Deployment not found: %v", err)
+	}
+	if _, found := bbr.Spec.Template.Annotations["airunway.ai/restartedAt"]; found {
+		t.Errorf("BBR was restarted: pod template carries airunway.ai/restartedAt (%v)",
+			bbr.Spec.Template.Annotations)
+	}
+	if got := bbr.Spec.Template.Annotations["unrelated"]; got != "keep-me" {
+		t.Errorf("BBR pod template annotations were rewritten: %v", bbr.Spec.Template.Annotations)
+	}
+}
+
 // --- Tests ---
 
 func TestGateway_InferencePoolCreation(t *testing.T) {
@@ -133,7 +173,7 @@ func TestGateway_InferencePoolCreation(t *testing.T) {
 	r := newTestReconciler(scheme, detector, md)
 	ctx := context.Background()
 
-	err := r.reconcileInferencePool(ctx, md, 8080, "gateway-ns")
+	err := r.reconcileInferencePool(ctx, md, 8080)
 	if err != nil {
 		t.Fatalf("reconcileInferencePool failed: %v", err)
 	}
@@ -182,6 +222,78 @@ func TestGateway_InferencePoolCreation(t *testing.T) {
 	}
 }
 
+// TestGateway_InferencePoolCreationDoesNotRestartBBR is a regression guard for
+// #334. Creating an InferencePool used to force a rolling restart of the shared
+// body-based-router Deployment, on the mistaken premise that BBR builds a model
+// registry at startup. It does not — its body-field-to-header plugin sets the
+// model header per request, and its ServiceAccount is only granted read access
+// to ConfigMaps — so the restart bought nothing while opening a window in which
+// an already-serving model could mis-route. Nothing should touch BBR now.
+func TestGateway_InferencePoolCreationDoesNotRestartBBR(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	// The removed code resolved BBR's namespace from the Gateway, so seed the
+	// Deployment where a restart would have gone looking for it.
+	bbr := newBBRDeployment("gateway-ns")
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, bbr)
+	ctx := context.Background()
+
+	if err := r.reconcileInferencePool(ctx, md, 8080); err != nil {
+		t.Fatalf("reconcileInferencePool failed: %v", err)
+	}
+
+	// Confirm the pool was actually created, otherwise the restart path never
+	// ran and this test would pass vacuously.
+	var pool inferencev1.InferencePool
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model", Namespace: "default"}, &pool); err != nil {
+		t.Fatalf("InferencePool not created, so this test proves nothing: %v", err)
+	}
+
+	assertBBRNotRestarted(t, r, "gateway-ns")
+}
+
+// TestGateway_ProviderManagedPoolDoesNotRestartBBR covers the second removed
+// call site (#334). Provider-managed pools are created by the provider's own
+// operator, so there is no "created" signal; the restart was gated on a
+// one-shot airunway.ai/bbr-restarted annotation written back to the
+// ModelDeployment instead. Neither the restart nor that annotation should
+// happen now.
+func TestGateway_ProviderManagedPoolDoesNotRestartBBR(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("test-model", "default")
+	bbr := newBBRDeployment("gateway-ns")
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "provider-pool", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			EndpointPickerRef: inferencev1.EndpointPickerRef{
+				Name: inferencev1.ObjectName("provider-pool-epp"),
+			},
+		},
+	}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md, bbr, pool)
+	ctx := context.Background()
+
+	eppName, err := r.reconcileProviderManagedInferencePool(ctx, md, "provider-pool", "default")
+	if err != nil {
+		t.Fatalf("reconcileProviderManagedInferencePool failed: %v", err)
+	}
+	if eppName != "provider-pool-epp" {
+		t.Errorf("expected EPP name %q, got %q", "provider-pool-epp", eppName)
+	}
+
+	assertBBRNotRestarted(t, r, "gateway-ns")
+
+	var got airunwayv1alpha1.ModelDeployment
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-model", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("ModelDeployment not found: %v", err)
+	}
+	if _, found := got.Annotations["airunway.ai/bbr-restarted"]; found {
+		t.Error("ModelDeployment carries the removed airunway.ai/bbr-restarted annotation")
+	}
+}
+
 func TestGateway_InferencePoolDefaultPort(t *testing.T) {
 	scheme := newTestScheme()
 	md := newModelDeployment("test-model", "default")
@@ -191,7 +303,7 @@ func TestGateway_InferencePoolDefaultPort(t *testing.T) {
 	ctx := context.Background()
 
 	// reconcileGateway uses default port 8000 when no endpoint
-	err := r.reconcileInferencePool(ctx, md, 8000, "gateway-ns")
+	err := r.reconcileInferencePool(ctx, md, 8000)
 	if err != nil {
 		t.Fatalf("reconcileInferencePool failed: %v", err)
 	}
@@ -913,7 +1025,7 @@ func TestGateway_ProviderManagedInferencePool_Found(t *testing.T) {
 
 	r := newTestReconciler(scheme, nil, md, pool)
 
-	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system", "default")
+	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -925,7 +1037,7 @@ func TestGateway_ProviderManagedInferencePool_NotFound(t *testing.T) {
 	md := newModelDeployment("llama-70b", "default")
 	r := newTestReconciler(scheme, nil, md)
 
-	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system", "default")
+	_, err := r.reconcileProviderManagedInferencePool(context.Background(), md, "default-llama-70b-pool", "dynamo-system")
 	if err == nil {
 		t.Fatal("expected error when InferencePool does not exist")
 	}
@@ -1029,6 +1141,368 @@ func gwWithNamespaceSelector(name, ns string, namespaces ...string) *gatewayv1.G
 				},
 			},
 		},
+	}
+}
+
+// gwWithSameNamespace creates a Gateway whose single listener is at the default
+// `from: Same` (no Selector) — the pristine state before any cross-namespace MD.
+func gwWithSameNamespace(name, ns string) *gatewayv1.Gateway {
+	fromSame := gatewayv1.NamespacesFromSame
+	return &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "istio",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "http",
+					Port:     80,
+					Protocol: gatewayv1.HTTPProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From: &fromSame,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestGateway_EnsurePreservesGatewayNamespaceOnSameToSelector is the direct
+// regression for issue #333: converting a listener from `from: Same` to
+// `from: Selector` must keep the Gateway's own namespace in the In-list, or every
+// HTTPRoute living alongside the Gateway is evicted. Table-driven across the ways
+// a Gateway can implicitly be at "Same": an explicit `from: Same` listener, a
+// listener with no AllowedRoutes block at all, and a multi-listener Gateway (to
+// prove every listener is patched, not just the first).
+func TestGateway_EnsurePreservesGatewayNamespaceOnSameToSelector(t *testing.T) {
+	newSameListener := func() gatewayv1.Listener {
+		fromSame := gatewayv1.NamespacesFromSame
+		return gatewayv1.Listener{
+			Name:          "http",
+			Port:          80,
+			Protocol:      gatewayv1.HTTPProtocolType,
+			AllowedRoutes: &gatewayv1.AllowedRoutes{Namespaces: &gatewayv1.RouteNamespaces{From: &fromSame}},
+		}
+	}
+
+	tests := []struct {
+		name string
+		gw   *gatewayv1.Gateway
+	}{
+		{
+			name: "explicit from: Same",
+			gw:   gwWithSameNamespace("my-gateway", "gateway-ns"),
+		},
+		{
+			name: "listener with nil AllowedRoutes",
+			gw: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-gateway", Namespace: "gateway-ns"},
+				Spec: gatewayv1.GatewaySpec{
+					GatewayClassName: "istio",
+					Listeners: []gatewayv1.Listener{
+						{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+					},
+				},
+			},
+		},
+		{
+			name: "two listeners both at Same",
+			gw: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-gateway", Namespace: "gateway-ns"},
+				Spec: gatewayv1.GatewaySpec{
+					GatewayClassName: "istio",
+					Listeners: []gatewayv1.Listener{
+						func() gatewayv1.Listener { l := newSameListener(); l.Name = "http"; l.Port = 80; return l }(),
+						func() gatewayv1.Listener {
+							l := newSameListener()
+							l.Name = "https"
+							l.Port = 443
+							l.Protocol = gatewayv1.HTTPSProtocolType
+							return l
+						}(),
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			md := newModelDeployment("test-model", "team-b")
+			detector := fakeDetector(true, "my-gateway", "gateway-ns")
+			detector.PatchGateway = true
+
+			r := newTestReconciler(scheme, detector, md, tc.gw)
+			ctx := context.Background()
+
+			gwConfig := &gateway.GatewayConfig{GatewayName: "my-gateway", GatewayNamespace: "gateway-ns"}
+			if err := r.ensureGatewayAllowsNamespace(ctx, gwConfig, "team-b"); err != nil {
+				t.Fatalf("ensureGatewayAllowsNamespace failed: %v", err)
+			}
+
+			var updatedGW gatewayv1.Gateway
+			if err := r.Get(ctx, types.NamespacedName{Name: "my-gateway", Namespace: "gateway-ns"}, &updatedGW); err != nil {
+				t.Fatalf("failed to get Gateway: %v", err)
+			}
+			if len(updatedGW.Spec.Listeners) == 0 {
+				t.Fatal("expected at least one listener")
+			}
+			// Every listener must be converted to Selector with BOTH the Gateway's
+			// own namespace (retained) and the new cross-namespace one.
+			for i, l := range updatedGW.Spec.Listeners {
+				if l.AllowedRoutes == nil || l.AllowedRoutes.Namespaces == nil || l.AllowedRoutes.Namespaces.From == nil {
+					t.Fatalf("listener[%d]: expected allowedRoutes to be set", i)
+				}
+				if *l.AllowedRoutes.Namespaces.From != gatewayv1.NamespacesFromSelector {
+					t.Errorf("listener[%d]: expected from=Selector, got %s", i, *l.AllowedRoutes.Namespaces.From)
+				}
+				sel := l.AllowedRoutes.Namespaces.Selector
+				if sel == nil || len(sel.MatchExpressions) == 0 {
+					t.Fatalf("listener[%d]: expected matchExpressions to be set", i)
+				}
+				values := sel.MatchExpressions[0].Values
+				if len(values) != 2 || values[0] != "gateway-ns" || values[1] != "team-b" {
+					t.Errorf("listener[%d]: expected [gateway-ns, team-b], got %v", i, values)
+				}
+			}
+		})
+	}
+}
+
+// TestGateway_EnsureRetriesOnConflictAndPreservesUnion proves the read-modify-write
+// is race-safe: when a concurrent writer adds a namespace and bumps the
+// resourceVersion between our Get and Patch, the optimistic-lock Patch conflicts,
+// the RetryOnConflict loop re-reads fresh state, and our add is UNIONED with the
+// concurrent writer's namespace rather than clobbering it.
+func TestGateway_EnsureRetriesOnConflictAndPreservesUnion(t *testing.T) {
+	scheme := newTestScheme()
+	// Gateway starts allowing gateway-ns and team-a (a prior cross-ns writer).
+	gw := gwWithNamespaceSelector("my-gateway", "gateway-ns", "gateway-ns", "team-a")
+	md := newModelDeployment("test-model", "team-b")
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	detector.PatchGateway = true
+
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{}).
+		WithObjects(md, gw).
+		Build()
+
+	var patchCalls, getCalls int
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*gatewayv1.Gateway); ok {
+				getCalls++
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			g, ok := obj.(*gatewayv1.Gateway)
+			if !ok {
+				return cl.Patch(ctx, obj, patch, opts...)
+			}
+			patchCalls++
+			if patchCalls == 1 {
+				// Simulate a concurrent writer landing first: add team-c directly
+				// to the stored Gateway (bumping its resourceVersion), then reject
+				// our stale-resourceVersion patch with a 409.
+				var stored gatewayv1.Gateway
+				if err := base.Get(ctx, client.ObjectKeyFromObject(g), &stored); err != nil {
+					return err
+				}
+				fromSelector := gatewayv1.NamespacesFromSelector
+				storedBase := stored.DeepCopy()
+				for i := range stored.Spec.Listeners {
+					stored.Spec.Listeners[i].AllowedRoutes = &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From: &fromSelector,
+							Selector: &metav1.LabelSelector{
+								MatchExpressions: []metav1.LabelSelectorRequirement{{
+									Key:      "kubernetes.io/metadata.name",
+									Operator: metav1.LabelSelectorOpIn,
+									Values:   []string{"gateway-ns", "team-a", "team-c"},
+								}},
+							},
+						},
+					}
+				}
+				if err := base.Patch(ctx, &stored, client.MergeFrom(storedBase)); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: "gateway.networking.k8s.io", Resource: "gateways"},
+					g.Name, errors.New("resourceVersion mismatch"))
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	r := &ModelDeploymentReconciler{
+		Client:           c,
+		Scheme:           scheme,
+		GatewayDetector:  detector,
+		ProviderResolver: gateway.NewInferenceProviderConfigResolver(c),
+	}
+	ctx := context.Background()
+
+	gwConfig := &gateway.GatewayConfig{GatewayName: "my-gateway", GatewayNamespace: "gateway-ns"}
+	if err := r.ensureGatewayAllowsNamespace(ctx, gwConfig, "team-b"); err != nil {
+		t.Fatalf("ensureGatewayAllowsNamespace failed: %v", err)
+	}
+
+	if patchCalls < 2 {
+		t.Errorf("expected at least 2 patch attempts (1 conflict + 1 success), got %d", patchCalls)
+	}
+	if getCalls < 2 {
+		t.Errorf("expected at least 2 gets (initial + post-conflict re-read), got %d", getCalls)
+	}
+
+	// The concurrent writer's team-c AND our team-b must both survive, alongside
+	// the retained gateway-ns and the pre-existing team-a.
+	var finalGW gatewayv1.Gateway
+	if err := r.Get(ctx, types.NamespacedName{Name: "my-gateway", Namespace: "gateway-ns"}, &finalGW); err != nil {
+		t.Fatalf("failed to get Gateway: %v", err)
+	}
+	for _, l := range finalGW.Spec.Listeners {
+		sel := l.AllowedRoutes.Namespaces.Selector
+		if sel == nil || len(sel.MatchExpressions) == 0 {
+			t.Fatal("expected matchExpressions to be set")
+		}
+		values := sel.MatchExpressions[0].Values
+		want := []string{"gateway-ns", "team-a", "team-b", "team-c"}
+		if len(values) != len(want) {
+			t.Fatalf("expected %v, got %v", want, values)
+		}
+		for i := range want {
+			if values[i] != want[i] {
+				t.Errorf("expected %v, got %v", want, values)
+				break
+			}
+		}
+	}
+}
+
+// TestGateway_EnsureRetriesOnRealOptimisticLockConflict is the companion to
+// TestGateway_EnsureRetriesOnConflictAndPreservesUnion. That test injects the 409
+// synthetically, so it would still pass if MergeFromWithOptimisticLock were
+// downgraded to a plain MergeFrom. This test instead lets the fake client's OWN
+// optimistic-lock machinery raise the conflict: a concurrent writer bumps the
+// stored resourceVersion after our helper's first Get, so the subsequent
+// optimistic-lock Patch carries a stale resourceVersion and the client rejects it
+// with a real 409 ("object was modified"). If the optimistic lock is removed the
+// stale patch merges silently, no conflict is raised, no retry happens, and the
+// concurrent writer's namespace (team-c) is clobbered — failing this test.
+func TestGateway_EnsureRetriesOnRealOptimisticLockConflict(t *testing.T) {
+	scheme := newTestScheme()
+	// Gateway starts allowing gateway-ns and team-a.
+	gw := gwWithNamespaceSelector("my-gateway", "gateway-ns", "gateway-ns", "team-a")
+	md := newModelDeployment("test-model", "team-b")
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	detector.PatchGateway = true
+
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{}).
+		WithObjects(md, gw).
+		Build()
+
+	var getCalls, patchCalls int
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := cl.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*gatewayv1.Gateway); !ok {
+				return nil
+			}
+			getCalls++
+			if getCalls == 1 {
+				// A concurrent writer lands AFTER our helper's first read but
+				// BEFORE its patch: add team-c and let the fake client bump the
+				// stored resourceVersion. Our helper still holds the pre-bump
+				// object, so its optimistic-lock patch will be stale -> real 409.
+				var stored gatewayv1.Gateway
+				if err := base.Get(ctx, key, &stored); err != nil {
+					return err
+				}
+				fromSelector := gatewayv1.NamespacesFromSelector
+				storedBase := stored.DeepCopy()
+				for i := range stored.Spec.Listeners {
+					stored.Spec.Listeners[i].AllowedRoutes = &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From: &fromSelector,
+							Selector: &metav1.LabelSelector{
+								MatchExpressions: []metav1.LabelSelectorRequirement{{
+									Key:      "kubernetes.io/metadata.name",
+									Operator: metav1.LabelSelectorOpIn,
+									Values:   []string{"gateway-ns", "team-a", "team-c"},
+								}},
+							},
+						},
+					}
+				}
+				if err := base.Patch(ctx, &stored, client.MergeFrom(storedBase)); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*gatewayv1.Gateway); ok {
+				patchCalls++
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	r := &ModelDeploymentReconciler{
+		Client:           c,
+		Scheme:           scheme,
+		GatewayDetector:  detector,
+		ProviderResolver: gateway.NewInferenceProviderConfigResolver(c),
+	}
+	ctx := context.Background()
+
+	gwConfig := &gateway.GatewayConfig{GatewayName: "my-gateway", GatewayNamespace: "gateway-ns"}
+	if err := r.ensureGatewayAllowsNamespace(ctx, gwConfig, "team-b"); err != nil {
+		t.Fatalf("ensureGatewayAllowsNamespace failed: %v", err)
+	}
+
+	// The helper must have retried: >=2 gets (initial + post-conflict re-read) and
+	// >=2 patch attempts (the stale one that 409'd + the successful retry).
+	if getCalls < 2 {
+		t.Errorf("expected at least 2 gets (initial + post-conflict re-read), got %d", getCalls)
+	}
+	if patchCalls < 2 {
+		t.Errorf("expected at least 2 patch attempts (1 real 409 + 1 success), got %d", patchCalls)
+	}
+
+	// team-c (concurrent) AND team-b (ours) both survive: proof the retry re-read
+	// fresh state and unioned rather than clobbering.
+	var finalGW gatewayv1.Gateway
+	if err := r.Get(ctx, types.NamespacedName{Name: "my-gateway", Namespace: "gateway-ns"}, &finalGW); err != nil {
+		t.Fatalf("failed to get Gateway: %v", err)
+	}
+	for _, l := range finalGW.Spec.Listeners {
+		sel := l.AllowedRoutes.Namespaces.Selector
+		if sel == nil || len(sel.MatchExpressions) == 0 {
+			t.Fatal("expected matchExpressions to be set")
+		}
+		values := sel.MatchExpressions[0].Values
+		want := []string{"gateway-ns", "team-a", "team-b", "team-c"}
+		if len(values) != len(want) {
+			t.Fatalf("expected %v, got %v", want, values)
+		}
+		for i := range want {
+			if values[i] != want[i] {
+				t.Errorf("expected %v, got %v", want, values)
+				break
+			}
+		}
 	}
 }
 
@@ -1140,8 +1614,12 @@ func TestGateway_CleanupRemovesOneNamespaceFromMultiple(t *testing.T) {
 			t.Fatal("expected matchExpressions to be set")
 		}
 		values := sel.MatchExpressions[0].Values
-		if len(values) != 1 || values[0] != "kaito-workspace" {
-			t.Errorf("expected only [kaito-workspace] in selector values, got %v", values)
+		// dynamo-system is removed, kaito-workspace remains, and gateway-ns is
+		// re-seeded into the Selector by the shared terminal rule — so a cleanup
+		// that still leaves cross-namespace routes self-heals the Gateway's own
+		// namespace into the In-list too (#333).
+		if len(values) != 2 || values[0] != "gateway-ns" || values[1] != "kaito-workspace" {
+			t.Errorf("expected [gateway-ns, kaito-workspace] in selector values, got %v", values)
 		}
 	}
 }
@@ -1176,12 +1654,16 @@ func TestGateway_EnsureAddsNamespaceToExistingSelector(t *testing.T) {
 			t.Fatal("expected matchExpressions to be set")
 		}
 		values := sel.MatchExpressions[0].Values
-		if len(values) != 2 {
-			t.Fatalf("expected 2 namespaces in selector, got %v", values)
+		// gateway-ns is re-seeded into every Selector we write, so converting
+		// Same->Selector (or extending an existing Selector) never drops the
+		// Gateway's own namespace and evicts its routes (#333). It also self-heals
+		// this Gateway, which started without gateway-ns in the Selector.
+		if len(values) != 3 {
+			t.Fatalf("expected 3 namespaces in selector, got %v", values)
 		}
 		// Values are sorted
-		if values[0] != "dynamo-system" || values[1] != "kaito-workspace" {
-			t.Errorf("expected [dynamo-system, kaito-workspace], got %v", values)
+		if values[0] != "dynamo-system" || values[1] != "gateway-ns" || values[2] != "kaito-workspace" {
+			t.Errorf("expected [dynamo-system, gateway-ns, kaito-workspace], got %v", values)
 		}
 	}
 }
@@ -1236,11 +1718,13 @@ func TestGateway_EnsureMigratesLegacyMatchLabels(t *testing.T) {
 			t.Fatal("expected matchExpressions after migration")
 		}
 		values := sel.MatchExpressions[0].Values
-		if len(values) != 2 {
-			t.Fatalf("expected 2 namespaces after migration, got %v", values)
+		// gateway-ns is re-seeded so migrating legacy matchLabels to a
+		// matchExpressions Selector never drops the Gateway's own namespace (#333).
+		if len(values) != 3 {
+			t.Fatalf("expected 3 namespaces after migration, got %v", values)
 		}
-		if values[0] != "dynamo-system" || values[1] != "kaito-workspace" {
-			t.Errorf("expected [dynamo-system, kaito-workspace], got %v", values)
+		if values[0] != "dynamo-system" || values[1] != "gateway-ns" || values[2] != "kaito-workspace" {
+			t.Errorf("expected [dynamo-system, gateway-ns, kaito-workspace], got %v", values)
 		}
 	}
 }

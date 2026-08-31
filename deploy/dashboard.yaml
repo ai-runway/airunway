@@ -212,7 +212,7 @@ spec:
           value: /tmp/helm/data
         - name: HOME
           value: /tmp
-        image: ghcr.io/kaito-project/airunway/dashboard:latest
+        image: ghcr.io/ai-runway/airunway/dashboard:latest
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 3

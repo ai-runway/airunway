@@ -5,11 +5,12 @@ their responsibilities.
 
 ## Maintainers
 
-The following are current AIRunway maintainers:
+| Maintainer        | GitHub ID                                               | Affiliation |
+| ----------------- | ------------------------------------------------------- | ----------- |
+| Suraj Deshmukh    | [surajssd](https://github.com/surajssd)                 | Microsoft   |
+| Robbie Cronin     | [robert-cronin](https://github.com/robert-cronin)       | Microsoft   |
+| Sertaç Özercan    | [sozercan](https://github.com/sozercan)                 | Microsoft   |
 
-* Suraj Deshmukh @surajssd
-* Robbie Cronin @robert-cronin
-* Sertaç Özercan @sozercan
 
 ## Maintainer Responsibilities
 

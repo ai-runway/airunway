@@ -497,6 +497,16 @@ class HuggingFaceService {
     }
     return arch;
   }
+
+  /**
+   * Clear the in-memory model-architecture cache. Intended for tests, which
+   * need a clean cache between cases without reloading the module (reloading
+   * would replace this shared singleton and break other suites that captured
+   * the original instance at import time).
+   */
+  clearArchitectureCacheForTests(): void {
+    architectureCache.clear();
+  }
 }
 
 // Export singleton instance

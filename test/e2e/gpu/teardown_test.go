@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kaito-project/airunway/test/e2e/gpu/e2eutil"
+	"github.com/ai-runway/airunway/test/e2e/gpu/e2eutil"
 )
 
 // forceCascade releases an MD's GPU when graceful delete times out. It deletes

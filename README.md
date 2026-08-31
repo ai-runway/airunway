@@ -43,7 +43,7 @@ AI Runway gives you a web UI and a unified Kubernetes CRD (`ModelDeployment`) to
 
 ### Option A: Run Locally
 
-Download the [latest release](https://github.com/kaito-project/airunway/releases) and run:
+Download the [latest release](https://github.com/ai-runway/airunway/releases) and run:
 
 ```bash
 ./airunway
@@ -57,10 +57,10 @@ Open **http://localhost:3001**
 
 ```bash
 # Install CRDs and controller (required)
-kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/deploy/controller.yaml
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/controller.yaml
 
 # Install dashboard UI (optional)
-kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/deploy/dashboard.yaml
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/dashboard.yaml
 kubectl port-forward -n airunway-system svc/airunway 3001:80
 ```
 
@@ -101,7 +101,7 @@ The controller automatically selects the best engine and provider, creates provi
 
 ## Documentation
 
-📖 **Browse the docs at [kaito-project.github.io/airunway](https://kaito-project.github.io/airunway/)**
+📖 **Browse the docs at [ai-runway.github.io/airunway](https://ai-runway.github.io/airunway/)**
 
 The same content also lives in [`docs/`](docs/) for in-repo browsing.
 
@@ -115,6 +115,12 @@ The same content also lives in [`docs/`](docs/) for in-repo browsing.
 | Kubernetes Deployment | [deploy/README.md](deploy/README.md) |
 | Gateway Integration | [docs/gateway.md](docs/gateway.md) |
 | Headlamp Plugin | [docs/headlamp-plugin.md](docs/headlamp-plugin.md) |
+
+## Community
+
+- **Slack:** Join the [CNCF Slack](https://slack.cncf.io/) workspace and find us in `#airunway`
+- **Issues:** Report bugs or request features in [GitHub Issues](https://github.com/ai-runway/airunway/issues)
+- **Roadmap:** Follow planned work on the [AI Runway project board](https://github.com/orgs/ai-runway/projects/2)
 
 ## Contributing
 

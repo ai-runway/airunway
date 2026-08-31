@@ -66,16 +66,20 @@ export const providers = [
 
 export const ctaLinks = [
   {
-    label: 'GitHub',
-    href: 'https://github.com/kaito-project/airunway',
+    label: 'Join CNCF Slack',
+    href: 'https://slack.cncf.io/',
   },
   {
     label: 'Issues',
-    href: 'https://github.com/kaito-project/airunway/issues',
+    href: 'https://github.com/ai-runway/airunway/issues',
   },
   {
-    label: 'Releases',
-    href: 'https://github.com/kaito-project/airunway/releases',
+    label: 'Contributing',
+    href: 'https://github.com/ai-runway/airunway/blob/main/CONTRIBUTING.md',
+  },
+  {
+    label: 'Roadmap',
+    href: 'https://github.com/orgs/ai-runway/projects/2',
   },
 ];
 

@@ -34,8 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
-	vllm "github.com/kaito-project/airunway/providers/vllm"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	vllm "github.com/ai-runway/airunway/providers/vllm"
 )
 
 var (

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -561,7 +561,7 @@ func TestReconcileHandleDeletion(t *testing.T) {
 }
 
 // TestReconcileDeletionWithMissingUpstreamCRDRemovesFinalizer reproduces
-// https://github.com/kaito-project/airunway/issues/239 — when the KAITO
+// https://github.com/ai-runway/airunway/issues/239 — when the KAITO
 // upstream CRDs are not installed, fetching the Workspace returns
 // meta.NoKindMatchError (not IsNotFound). The reconciler must still complete
 // finalizer removal so the ModelDeployment can be deleted.

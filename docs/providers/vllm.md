@@ -30,8 +30,8 @@ make -C providers/vllm deploy
 Otherwise, apply the published manifests directly:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/deploy/controller.yaml
-kubectl apply -f https://raw.githubusercontent.com/kaito-project/airunway/main/providers/vllm/deploy/vllm.yaml
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/controller.yaml
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/providers/vllm/deploy/vllm.yaml
 ```
 
 The vLLM provider registers an `InferenceProviderConfig` named `vllm`. The Web UI shows it as **Direct vLLM** after registration.

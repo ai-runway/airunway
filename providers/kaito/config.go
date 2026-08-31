@@ -22,14 +22,14 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/providers/pkg/shim"
 )
 
 const (
@@ -37,7 +37,7 @@ const (
 	ProviderConfigName = "kaito"
 
 	// ProviderDocumentation is the documentation URL for the KAITO provider
-	ProviderDocumentation = "https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md"
+	ProviderDocumentation = "https://github.com/ai-runway/airunway/tree/main/docs/providers/kaito.md"
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
@@ -80,12 +80,20 @@ func GetProviderConfigSpec() airunwayv1alpha1.InferenceProviderConfigSpec {
 					ServingModes: []airunwayv1alpha1.ServingMode{
 						airunwayv1alpha1.ServingModeAggregated,
 					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
+						airunwayv1alpha1.APIFormatOpenAIResponses,
+						airunwayv1alpha1.APIFormatAnthropicMessages,
+					},
 					GPUSupport: true,
 				},
 				{
 					Name: airunwayv1alpha1.EngineTypeLlamaCpp,
 					ServingModes: []airunwayv1alpha1.ServingMode{
 						airunwayv1alpha1.ServingModeAggregated,
+					},
+					APIFormats: []airunwayv1alpha1.APIFormat{
+						airunwayv1alpha1.APIFormatOpenAIChat,
 					},
 					GPUSupport: true,
 					CPUSupport: true,
@@ -151,43 +159,19 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 
 // Register creates or updates the InferenceProviderConfig for KAITO
 func (m *ProviderConfigManager) Register(ctx context.Context) error {
-	logger := log.FromContext(ctx)
-
 	annotations, err := buildAnnotations()
 	if err != nil {
 		return fmt.Errorf("failed to build annotations: %w", err)
 	}
 
-	config := &airunwayv1alpha1.InferenceProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        ProviderConfigName,
-			Annotations: annotations,
-		},
-		Spec: GetProviderConfigSpec(),
-	}
-
-	existing := &airunwayv1alpha1.InferenceProviderConfig{}
-	err = m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, existing)
-
-	if errors.IsNotFound(err) {
-		logger.Info("Creating InferenceProviderConfig", "name", ProviderConfigName)
-		if err := m.client.Create(ctx, config); err != nil {
-			return fmt.Errorf("failed to create InferenceProviderConfig: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
-	} else {
-		existing.Spec = config.Spec
-		if existing.Annotations == nil {
-			existing.Annotations = make(map[string]string)
-		}
-		for k, v := range annotations {
-			existing.Annotations[k] = v
-		}
-		logger.Info("Updating InferenceProviderConfig", "name", ProviderConfigName)
-		if err := m.client.Update(ctx, existing); err != nil {
-			return fmt.Errorf("failed to update InferenceProviderConfig: %w", err)
-		}
+	if err := shim.RegisterProviderConfig(
+		ctx,
+		m.client,
+		ProviderConfigName,
+		annotations,
+		GetProviderConfigSpec(),
+	); err != nil {
+		return err
 	}
 
 	// Update status — retry briefly after create to allow cache to sync

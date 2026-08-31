@@ -1,27 +1,39 @@
-import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
-import { isValidHfRepoId, encodeHfRepoPath } from './huggingface';
+import { describe, test, expect, mock, beforeEach, afterEach, afterAll } from 'bun:test';
+import { huggingFaceService, isValidHfRepoId, encodeHfRepoPath } from './huggingface';
 
 // Store original fetch
 const originalFetch = global.fetch;
 
 describe('HuggingFaceService', () => {
   let mockFetch: ReturnType<typeof mock>;
-  let huggingFaceService: typeof import('./huggingface').huggingFaceService;
 
-  beforeEach(async () => {
-    // Create mock fetch
+  beforeEach(() => {
+    // Create mock fetch. The service reads global.fetch at call time, so
+    // swapping it here is enough — no need to reload the module. Reloading
+    // (delete require.cache + re-import) would replace the shared singleton in
+    // the module registry and break other test files that captured the
+    // original instance at import time (e.g. the installation route), which is
+    // a nondeterministic, order-dependent, CI-only flake.
     mockFetch = mock(() => Promise.resolve(new Response()));
     // @ts-expect-error - Mocking global fetch for testing
     global.fetch = mockFetch;
 
-    // Clear module cache and re-import
-    delete require.cache[require.resolve('./huggingface')];
-    const module = await import('./huggingface');
-    huggingFaceService = module.huggingFaceService;
+    // Reset the module-level architecture cache so cache-behaviour tests start
+    // clean. (Previously a full module reload gave each test a fresh cache.)
+    huggingFaceService.clearArchitectureCacheForTests();
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
+  });
+
+  afterAll(() => {
+    // The architecture cache is module-level and now shared across the whole
+    // process lifetime (this suite is the only one that populates it with real
+    // config bodies). Clear it on the way out so no warm entry from these tests
+    // — notably the 500 entries the LRU test inserts — can bleed into a later
+    // test file that happens to call the real getModelArchitecture.
+    huggingFaceService.clearArchitectureCacheForTests();
   });
 
   describe('getClientId', () => {
@@ -478,6 +490,23 @@ describe('HuggingFaceService', () => {
       expect(mockFetch).toHaveBeenCalledTimes(CAP + 2);
     });
 
+    test('clearArchitectureCacheForTests drops cached entries so the next call re-fetches', async () => {
+      mockFetch.mockImplementation(() =>
+        Promise.resolve(new Response(configJson, { status: 200 }))
+      );
+
+      // First call populates the cache; second is served from it (no re-fetch).
+      await huggingFaceService.getModelArchitecture('org/model');
+      await huggingFaceService.getModelArchitecture('org/model');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      // Clearing the cache must force the next call to hit the network again.
+      // Other suites rely on this in beforeEach to guarantee a clean cache.
+      huggingFaceService.clearArchitectureCacheForTests();
+      await huggingFaceService.getModelArchitecture('org/model');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
     test('returns undefined on a non-ok response', async () => {
       mockFetch.mockImplementation(() =>
         Promise.resolve(new Response('not found', { status: 404 }))
@@ -573,5 +602,18 @@ describe('HuggingFaceService', () => {
       expect(encodeHfRepoPath('owner/name')).toBe('owner/name');
       expect(encodeHfRepoPath('gpt2')).toBe('gpt2');
     });
+  });
+});
+
+describe('huggingFaceService singleton identity', () => {
+  // Regression guard for the order-dependent CI flake this file once caused:
+  // a `delete require.cache[...]` + re-import here forked the shared singleton,
+  // so other modules (e.g. the installation route) held a different instance
+  // than the tests mocked. Re-importing the module must return the SAME
+  // instance the static import captured; if this ever fails, something has
+  // reintroduced module reloading / a duplicate registry entry.
+  test('re-importing the module yields the same instance', async () => {
+    const reimported = await import('./huggingface');
+    expect(reimported.huggingFaceService).toBe(huggingFaceService);
   });
 });

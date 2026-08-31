@@ -122,6 +122,41 @@ test('multi-step flow', async () => {
 });
 ```
 
+## Gotchas
+
+### Never `delete require.cache` on a shared-singleton service module
+
+Do **not** reset test state by reloading a service module, e.g.:
+
+```typescript
+// ❌ Don't do this — forks the shared singleton.
+delete require.cache[require.resolve('./huggingface')];
+const { huggingFaceService } = await import('./huggingface');
+```
+
+Services are exported as singletons (`export const fooService = new FooService()`).
+Other modules — including route handlers — capture that instance at import time.
+Reloading the module installs a *different* instance in the registry, so a test
+mocking the reloaded copy patches an object the route never calls. Because test
+files run in a shared worker and their order isn't deterministic, this surfaces
+as an order-dependent, CI-only flake (see PR #358).
+
+Instead, reset internal state through an explicit test-only method on the
+singleton and keep a single static import:
+
+```typescript
+// ✅ Static import + explicit state reset.
+import { huggingFaceService } from './huggingface';
+
+beforeEach(() => {
+  huggingFaceService.clearArchitectureCacheForTests();
+});
+```
+
+Note that services reading `global.fetch` at call time only need the global
+mocked (via `mockFetch` / `mockFetchByUrl`) — no module reload is required to
+intercept their network calls.
+
 ## Test Helpers
 
 Located in `src/test/helpers.ts`:

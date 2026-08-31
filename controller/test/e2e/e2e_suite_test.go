@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/kaito-project/airunway/controller/test/utils"
+	"github.com/ai-runway/airunway/controller/test/utils"
 )
 
 var (

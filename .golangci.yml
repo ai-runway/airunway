@@ -1,6 +1,7 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  relative-path-mode: gitroot
 linters:
   default: none
   enable:
@@ -23,6 +24,8 @@ linters:
     - unparam
     - unused
   settings:
+    dupl:
+      threshold: 50
     revive:
       rules:
         - name: comment-spacings
@@ -35,15 +38,15 @@ linters:
     rules:
       - linters:
           - lll
-        path: api/*
+        path: ^controller/api/
+      - linters:
+          - lll
+        path: ^controller/internal/
       - linters:
           - dupl
-          - lll
-        path: internal/*
+        path: _test\.go$
     paths:
-      - third_party$
-      - builtin$
-      - examples$
+      - ^controller/(third_party|builtin|examples)(/|$)
 formatters:
   enable:
     - gofmt
@@ -51,6 +54,4 @@ formatters:
   exclusions:
     generated: lax
     paths:
-      - third_party$
-      - builtin$
-      - examples$
+      - ^controller/(third_party|builtin|examples)(/|$)

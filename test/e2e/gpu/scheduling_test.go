@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kaito-project/airunway/test/e2e/gpu/e2eutil"
-	"github.com/kaito-project/airunway/test/e2e/gpu/sched"
+	"github.com/ai-runway/airunway/test/e2e/gpu/e2eutil"
+	"github.com/ai-runway/airunway/test/e2e/gpu/sched"
 )
 
 // schedulingDeadline bounds phase 1 (does the workload pod schedule at all). A

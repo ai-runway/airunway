@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -603,6 +603,23 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 
 	if hasNestedMapPath(overrides, "spec", "template", "spec") {
 		return fmt.Errorf("overriding %q is not allowed", "spec.template.spec")
+	}
+
+	// Reject any root key other than "spec". These objects declare only
+	// apiVersion/kind/metadata/spec/status at the root, so anything else is a field no API
+	// server will store. Before strict field validation it was pruned silently, which meant
+	// a typo'd override was invisible — the same silent-no-op issue #308 is about. Sorted so
+	// the message is stable: an unstable status.message re-enqueues the object every
+	// reconcile (the ModelDeployment watch has no GenerationChangedPredicate).
+	var unsupported []string
+	for key := range overrides {
+		if key != "spec" {
+			unsupported = append(unsupported, key)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" is supported", unsupported)
 	}
 
 	obj.Object = deepMerge(obj.Object, overrides)

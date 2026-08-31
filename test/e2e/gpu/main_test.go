@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kaito-project/airunway/test/e2e/gpu/sched"
+	"github.com/ai-runway/airunway/test/e2e/gpu/sched"
 )
 
 // TestMain enforces the cheap, unambiguous cluster preconditions before any case

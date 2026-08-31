@@ -85,7 +85,10 @@ var cases = []testCase{
 		workloadSelector: "nvidia.com/dynamo-graph-deployment-name=qwen3-0-6b-dynamo,nvidia.com/dynamo-component-type=worker",
 		extraAssert:      assertDynamoDeep,
 	},
-	// Disaggregated Dynamo serving is intentionally excluded: it serves correctly
-	// in isolation but its shared-BBR restart races with concurrent aggregated
-	// requests (kaito-project/airunway#334). Re-add as a data-only case once fixed.
+	// Disaggregated Dynamo serving is not in the matrix yet. It was excluded
+	// because the shared-BBR restart raced with concurrent aggregated requests
+	// (ai-runway/airunway#334); that restart has since been removed, so this
+	// blocker is gone. Adding the case still needs a testdata fixture plus an
+	// upstreamCR/podSelector pair confirmed against a live multi-GPU cluster,
+	// since disaggregated serving schedules separate prefill and decode workers.
 }

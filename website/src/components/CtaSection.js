@@ -4,10 +4,11 @@ import {ctaLinks} from '../data/landingPageData';
 
 export default function CtaSection() {
   return (
-    <section className="landing-section cta-section">
+    <section id="community" className="landing-section cta-section">
       <h2 className="section-title">Join the community</h2>
       <p className="section-subtitle">
-        Issues, ideas, and pull requests are all welcome.
+        Chat with us in <strong>#airunway</strong> on CNCF Slack, report an
+        issue, or help improve the project.
       </p>
       <div className="cta-buttons">
         {ctaLinks.map((link) => (

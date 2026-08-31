@@ -14,11 +14,11 @@ const config = {
     v4: true,
   },
 
-  url: 'https://kaito-project.github.io',
+  url: 'https://ai-runway.github.io',
   baseUrl: '/airunway/',
   trailingSlash: false,
 
-  organizationName: 'kaito-project',
+  organizationName: 'ai-runway',
   projectName: 'airunway',
 
   // Strict by default — broken links should fail CI, not slip into prod.
@@ -59,7 +59,7 @@ const config = {
           // Use the function form so the relative `../docs` source path is
           // rewritten to a proper `docs/<file>` URL on github.com.
           editUrl: ({docPath}) =>
-            `https://github.com/kaito-project/airunway/edit/main/docs/${docPath}`,
+            `https://github.com/ai-runway/airunway/edit/main/docs/${docPath}`,
         },
         blog: false,
         theme: {
@@ -92,12 +92,12 @@ const config = {
             label: 'Docs',
           },
           {
-            href: 'https://github.com/kaito-project/airunway/releases',
+            href: 'https://github.com/ai-runway/airunway/releases',
             label: 'Releases',
             position: 'left',
           },
           {
-            href: 'https://github.com/kaito-project/airunway',
+            href: 'https://github.com/ai-runway/airunway',
             position: 'right',
             className: 'header-github-link',
             'aria-label': 'GitHub repository',
@@ -120,16 +120,20 @@ const config = {
             title: 'Community',
             items: [
               {
-                label: 'GitHub',
-                href: 'https://github.com/kaito-project/airunway',
+                label: 'Slack (#airunway)',
+                href: 'https://slack.cncf.io/',
               },
               {
                 label: 'Issues',
-                href: 'https://github.com/kaito-project/airunway/issues',
+                href: 'https://github.com/ai-runway/airunway/issues',
               },
               {
-                label: 'Discussions',
-                href: 'https://github.com/kaito-project/airunway/discussions',
+                label: 'Contributing',
+                href: 'https://github.com/ai-runway/airunway/blob/main/CONTRIBUTING.md',
+              },
+              {
+                label: 'Roadmap',
+                href: 'https://github.com/orgs/ai-runway/projects/2',
               },
             ],
           },

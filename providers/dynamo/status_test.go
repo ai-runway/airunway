@@ -1,9 +1,10 @@
 package dynamo
 
 import (
+	"context"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -226,18 +227,58 @@ func TestTranslateStatusWithEndpoint(t *testing.T) {
 	}
 }
 
-func TestTranslateStatusDefaultEndpoint(t *testing.T) {
+func TestTranslateStatusNilEndpointWithoutFrontend(t *testing.T) {
 	st := NewStatusTranslator()
-	dgd := newDGDWithStatus(map[string]interface{}{
+	resources, err := NewTransformer().Transform(context.Background(), newTestMD("test-dgd", "default"))
+	if err != nil {
+		t.Fatalf("unexpected transformer error: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("expected 1 transformed resource, got %d", len(resources))
+	}
+
+	dgd := resources[0]
+	dgd.Object["status"] = map[string]interface{}{
 		"state": "successful",
-	})
+	}
 
 	result, err := st.TranslateStatus(dgd)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.Endpoint != nil {
+		t.Fatalf("expected nil endpoint without standalone Frontend service, got %#v", result.Endpoint)
+	}
+}
+
+func TestTranslateStatusWithInferredFrontendEndpoint(t *testing.T) {
+	st := NewStatusTranslator()
+	md := newTestMD("test-dgd", "default")
+	// the Transformer creates Frontend whenever spec.gateway.enabled is explicitly false.
+	gatewayEnabled := false
+	md.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{Enabled: &gatewayEnabled}
+	resources, err := NewTransformer().Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected transformer error: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("expected 1 transformed resource, got %d", len(resources))
+	}
+
+	dgd := resources[0]
+	dgd.Object["status"] = map[string]interface{}{
+		"state": "successful",
+	}
+
+	result, err := st.TranslateStatus(dgd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Endpoint == nil {
+		t.Fatal("expected inferred endpoint when standalone Frontend service is configured")
+	}
 	if result.Endpoint.Service != "test-dgd-frontend" {
-		t.Errorf("expected default service 'test-dgd-frontend', got %s", result.Endpoint.Service)
+		t.Errorf("expected inferred service 'test-dgd-frontend', got %s", result.Endpoint.Service)
 	}
 	if result.Endpoint.Port != 8000 {
 		t.Errorf("expected default port 8000, got %d", result.Endpoint.Port)

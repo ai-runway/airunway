@@ -1,6 +1,6 @@
 # Gateway API Inference Extension Integration
 
-> **Pinned versions:** the `GAIE_VERSION` referenced in this document is sourced from [`/versions.env`](https://github.com/kaito-project/airunway/blob/main/versions.env) at the repo root. Substitute that value (currently `v1.5.0`) when running the commands below, or `source` the file in your shell: `set -a; source versions.env; set +a`.
+> **Pinned versions:** the `GAIE_VERSION` referenced in this document is sourced from [`/versions.env`](https://github.com/ai-runway/airunway/blob/main/versions.env) at the repo root. Substitute that value (currently `v1.5.0`) when running the commands below, or `source` the file in your shell: `set -a; source versions.env; set +a`.
 
 ## Overview
 
@@ -81,7 +81,7 @@ AI Runway works with any Gateway API implementation that supports the [Inference
 > (Step 3), the `inference-gateway` Gateway resource (Step 4), and the Body-Based Router (see
 > [Body-Based Routing](#body-based-routing-bbr)). The
 > `GATEWAY_API_VERSION`, `ISTIO_VERSION`, and `GAIE_VERSION` it uses are pinned in
-> [`/versions.env`](https://github.com/kaito-project/airunway/blob/main/versions.env), and `istioctl` must be on your PATH. For other gateway
+> [`/versions.env`](https://github.com/ai-runway/airunway/blob/main/versions.env), and `istioctl` must be on your PATH. For other gateway
 > implementations, follow the manual steps below.
 
 ### Step 1: Install Gateway API CRDs
@@ -206,25 +206,33 @@ helm install body-based-router \
 ```
 
 > [!NOTE]
-> The BBR chart version should match the GAIE version used by AI Runway. The pinned value lives in [`/versions.env`](https://github.com/kaito-project/airunway/blob/main/versions.env); update both at the same time when bumping.
+> The BBR chart version should match the GAIE version used by AI Runway. The pinned value lives in [`/versions.env`](https://github.com/ai-runway/airunway/blob/main/versions.env); update both at the same time when bumping.
 
 Replace `provider.name` with your gateway implementation (`istio`, `gke`, or omit for others). The chart deploys the BBR container and any provider-specific resources (e.g. EnvoyFilter for Istio).
 
 See the [upstream multi-model guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/serving-multiple-inference-pools-latest/) for full details.
 
-> **Known limitation — BBR restart on each new model.** BBR builds its model
-> registry only at startup and does not dynamically watch InferencePools, so the
-> controller triggers a rolling restart of the shared BBR Deployment once per new
-> `ModelDeployment` (tracked by the `airunway.ai/bbr-restarted` annotation). The
-> restart is **not zero-downtime**: while BBR is restarting, its registry is
-> incomplete, so an in-flight request for an *already-serving* model can miss its
-> `X-Gateway-Model-Name` header and mis-route to another model's InferencePool.
-> With disaggregated Dynamo serving this surfaces as a `Worker ID required
-> (--direct-route)` 500 on a concurrent aggregated request. This mainly affects
-> deploying multiple models close together; once all models are settled, routing
-> is correct and stable. A zero-downtime BBR reload (or a BBR that watches
-> InferencePools) would remove the window. The GPU e2e suite leaves
-> disaggregated serving out of its default matrix for this reason.
+> [!NOTE]
+> **Adding a model needs no BBR restart.** BBR holds no model registry. On every
+> request its `body-field-to-header` plugin reads the `model` field from the body
+> and copies it into `X-Gateway-Model-Name`; when that field is missing or empty
+> it records a metric, skips the header, and lets the request through without it.
+> Either way the decision is made from the request body alone — BBR never looks
+> up HTTPRoutes or InferencePools, and its ServiceAccount is only granted
+> `get`/`list`/`watch` on ConfigMaps, so it cannot read them. The one piece of
+> state it does cache is the optional LoRA adapter → base-model map, kept current
+> by a live watch on ConfigMaps labelled
+> `inference.networking.k8s.io/bbr-managed`. A new `ModelDeployment` therefore
+> starts routing as soon as the Gateway admits the HTTPRoute for its model name.
+>
+> Earlier releases rolled the shared BBR Deployment once per new
+> `ModelDeployment` on the mistaken premise that it built a registry at startup.
+> That restart was never load-bearing and opened a window in which a request for
+> an already-serving model could mis-route to another model's InferencePool
+> ([#334](https://github.com/ai-runway/airunway/issues/334)); it has been
+> removed. ModelDeployments created by an older controller may still carry an
+> inert `airunway.ai/bbr-restarted` annotation, which nothing reads and which is
+> safe to leave in place.
 
 ### Auto-detection with Multiple Gateways
 
@@ -238,18 +246,27 @@ If no labeled Gateway is found, the controller skips gateway reconciliation and 
 
 ### Cross-namespace Gateway
 
-When the Gateway is in a different namespace than the ModelDeployment, the controller automatically patches each Gateway listener to allow HTTPRoutes from the ModelDeployment's namespace using a namespace selector:
+When the Gateway is in a different namespace than the ModelDeployment, the controller automatically patches each Gateway listener to allow HTTPRoutes from the ModelDeployment's namespace using a namespace selector. The selector is a `matchExpressions` In-list so that multiple cross-namespace ModelDeployments can share one Gateway, and it always includes the **Gateway's own namespace** so that routes living alongside the Gateway are never evicted:
 
 ```yaml
 allowedRoutes:
   namespaces:
     from: Selector
     selector:
-      matchLabels:
-        kubernetes.io/metadata.name: <modeldeployment-namespace>
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - <gateway-namespace>          # always retained
+            - <modeldeployment-namespace>  # one entry per cross-namespace deployment
 ```
 
 This is required because Gateway API uses `allowedRoutes` on the listener to control cross-namespace route binding. Without it, the Gateway will reject HTTPRoutes from other namespaces.
+
+When the last cross-namespace ModelDeployment using the Gateway is removed, the controller reverts each listener back to `from: Same` (dropping the selector), which again implicitly allows routes from the Gateway's own namespace.
+
+> [!NOTE]
+> Earlier controller versions wrote a single-namespace `matchLabels` selector and, when converting a listener from the default `from: Same`, could drop the Gateway's own namespace — evicting every HTTPRoute co-located with the Gateway. The controller now always retains the Gateway's namespace in the selector. A Gateway left in the old broken state is repaired the next time a new namespace is added or the last cross-namespace deployment is removed.
 
 **Opting out of Gateway patching:** In security-conscious environments where a Gateway admin manages `allowedRoutes` independently, start the controller with `--patch-gateway-allowed-routes=false`. The controller will skip patching the Gateway globally, and the admin is responsible for configuring the listener to accept HTTPRoutes from ModelDeployment namespaces.
 

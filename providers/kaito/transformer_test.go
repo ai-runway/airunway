@@ -3,9 +3,10 @@ package kaito
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1054,7 +1055,7 @@ func TestTransformWithHFSecret(t *testing.T) {
 	}
 }
 
-func TestTransformOverrideCanSetRootFields(t *testing.T) {
+func TestTransformOverrideRejectsResourceCount(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
 	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
@@ -1067,21 +1068,12 @@ func TestTransformOverrideCanSetRootFields(t *testing.T) {
 		},
 	}
 
-	results, err := tr.Transform(context.Background(), md)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := tr.Transform(context.Background(), md)
+	if err == nil {
+		t.Fatal("expected resource.count override to be rejected")
 	}
-
-	ws := results[0]
-	// Overrides should set resource.count (KAITO has resource at root level)
-	count, found, _ := unstructured.NestedFloat64(ws.Object, "resource", "count")
-	if !found || count != 10 {
-		t.Errorf("expected overridden count 10, got %v", count)
-	}
-	// labelSelector should still be present (deep merge preserves it)
-	_, found, _ = unstructured.NestedMap(ws.Object, "resource", "labelSelector")
-	if !found {
-		t.Error("expected labelSelector to be preserved after override merge")
+	if !strings.Contains(err.Error(), "spec.scaling.replicas") {
+		t.Fatalf("error %q does not direct the caller to spec.scaling.replicas", err)
 	}
 }
 

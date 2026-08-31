@@ -158,7 +158,7 @@ export function CapacityWarning({
           </p>
           <div className="mt-3 text-sm">
             <a
-              href="https://github.com/kaito-project/airunway/blob/main/docs/azure-autoscaling.md"
+              href="https://github.com/ai-runway/airunway/blob/main/docs/azure-autoscaling.md"
               target="_blank"
               rel="noopener noreferrer"
               className="underline hover:no-underline"

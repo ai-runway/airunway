@@ -21,9 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -391,6 +392,15 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		return fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
 
+	// KAITO calls its replica field resource.count. Reject that exact path so a
+	// caller that bypasses the validating webhook still cannot override the
+	// replica count derived from the bounded unified scaling field.
+	if resourceOverride, ok := overrides["resource"].(map[string]interface{}); ok {
+		if _, exists := resourceOverride["count"]; exists {
+			return fmt.Errorf("overriding %q is not allowed because it can bypass admission replica limits; use spec.scaling.replicas instead", "resource.count")
+		}
+	}
+
 	// Block dangerous top-level keys to prevent privilege escalation
 	blockedKeys := []string{"apiVersion", "kind", "metadata", "status"}
 	for _, key := range blockedKeys {
@@ -399,9 +409,40 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 		}
 	}
 
+	// Reject any root key this transformer does not render. Note KAITO is unusual: it
+	// puts `resource` and `inference` at the OBJECT ROOT rather than under `spec`, so the
+	// allowlist here is not "spec" as it is for the other providers.
+	//
+	// Before strict field validation an unknown root key was pruned silently, so a typo'd
+	// override was invisible — the same silent-no-op issue #308 is about. Sorted so the
+	// message is stable: an unstable status.message re-enqueues the object on every
+	// reconcile (the ModelDeployment watch has no GenerationChangedPredicate).
+	var unsupported []string
+	for key := range overrides {
+		if !workspaceRootKeys[key] {
+			unsupported = append(unsupported, key)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		return fmt.Errorf("unsupported provider.overrides key(s) %q: this provider renders "+
+			"inference workloads and supports only \"resource\" and \"inference\", which the "+
+			"KAITO Workspace places at the object root rather than under \"spec\"", unsupported)
+	}
+
 	obj.Object = deepMerge(obj.Object, overrides)
 	return nil
 }
+
+// workspaceRootKeys are the root keys this transformer renders. KAITO does not nest them
+// under `spec`, unlike the other providers' upstreams.
+//
+// Deliberately NARROWER than the Workspace schema, which also declares a root `tuning`:
+// a ModelDeployment describes an inference deployment, and the status translator reads
+// inference conditions. Nothing in the CRD stops `inference` and `tuning` both being set,
+// so admitting `tuning` would let an override produce a Workspace whose status this
+// provider cannot interpret — the report-healthy-but-cannot-serve failure #308 is about.
+var workspaceRootKeys = map[string]bool{"resource": true, "inference": true}
 
 // deepMerge recursively merges src into dst.
 // For maps, values are merged recursively. A nil src value deletes the field.

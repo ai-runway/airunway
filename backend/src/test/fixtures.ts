@@ -157,7 +157,7 @@ export const mockInferenceProviderConfig = {
       'airunway.ai/display-name': 'KAITO',
       'airunway.ai/description': 'KAITO - Kubernetes AI Toolchain Operator',
       'airunway.ai/default-namespace': 'kaito-workspace',
-      'airunway.ai/documentation-url': 'https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md',
+      'airunway.ai/documentation-url': 'https://github.com/ai-runway/airunway/tree/main/docs/providers/kaito.md',
       'airunway.ai/capabilities': JSON.stringify({
         engines: ['vllm', 'llamacpp'],
         servingModes: ['aggregated'],
@@ -197,14 +197,14 @@ export const mockInferenceProviderConfig = {
         ],
         steps: [{ title: 'Install KAITO', command: 'helm install kaito-workspace kaito/workspace', description: 'Install KAITO operator' }],
       }),
-      'airunway.ai/documentation': 'https://github.com/kaito-project/airunway/tree/main/docs/providers/kaito.md',
+      'airunway.ai/documentation': 'https://github.com/ai-runway/airunway/tree/main/docs/providers/kaito.md',
     },
   },
   spec: {
     capabilities: {
       engines: [
-        { name: 'vllm', servingModes: ['aggregated'], gpuSupport: true, cpuSupport: false },
-        { name: 'llamacpp', servingModes: ['aggregated'], gpuSupport: true, cpuSupport: true },
+        { name: 'vllm', servingModes: ['aggregated'], apiFormats: ['openai-chat', 'openai-responses', 'anthropic-messages'], gpuSupport: true, cpuSupport: false },
+        { name: 'llamacpp', servingModes: ['aggregated'], apiFormats: ['openai-chat'], gpuSupport: true, cpuSupport: true },
       ],
     },
   },

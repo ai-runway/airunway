@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 )
 
 func TestGetProviderConfigSpec(t *testing.T) {
@@ -36,6 +36,13 @@ func TestGetProviderConfigSpec(t *testing.T) {
 	if vllmEngine.CPUSupport {
 		t.Error("expected no CPU support")
 	}
+
+	// API formats (per-engine)
+	assertAPIFormats(t, "vllm", vllmEngine.APIFormats, []airunwayv1alpha1.APIFormat{
+		airunwayv1alpha1.APIFormatOpenAIChat,
+		airunwayv1alpha1.APIFormatOpenAIResponses,
+		airunwayv1alpha1.APIFormatAnthropicMessages,
+	})
 
 	// Serving modes (aggregated only)
 	hasAggregated := false
@@ -96,5 +103,24 @@ func TestProviderConstants(t *testing.T) {
 func TestProviderDocumentation(t *testing.T) {
 	if ProviderDocumentation == "" {
 		t.Error("expected documentation URL")
+	}
+}
+
+func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alpha1.APIFormat) {
+	t.Helper()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %s to support %d API formats, got %d: %v", engine, len(expected), len(got), got)
+	}
+	for _, e := range expected {
+		found := false
+		for _, a := range got {
+			if a == e {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s to support API format %s", engine, e)
+		}
 	}
 }

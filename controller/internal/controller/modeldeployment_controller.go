@@ -42,10 +42,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
-	"github.com/kaito-project/airunway/controller/internal/gateway"
-	airmetrics "github.com/kaito-project/airunway/controller/internal/metrics"
-	"github.com/kaito-project/airunway/controller/internal/validation"
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/gateway"
+	airmetrics "github.com/ai-runway/airunway/controller/internal/metrics"
+	"github.com/ai-runway/airunway/controller/internal/validation"
 )
 
 // ModelDeploymentReconciler reconciles a ModelDeployment object
@@ -287,7 +287,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// supported: the previously-selected provider's resources and finalizer would
 	// be orphaned because provider controllers only clean up on ModelDeployment
 	// deletion, not on deselection (tracked in
-	// https://github.com/kaito-project/airunway/issues/325). Fail explicitly here
+	// https://github.com/ai-runway/airunway/issues/325). Fail explicitly here
 	// rather than silently keeping the old provider, so the conflict is visible.
 	if md.Spec.Provider != nil && md.Spec.Provider.Name != "" &&
 		md.Status.Provider != nil && md.Status.Provider.Name != "" &&
@@ -881,31 +881,20 @@ func (r *ModelDeploymentReconciler) recordMetrics(md *airunwayv1alpha1.ModelDepl
 	// Update the phase cache and apply gauge deltas (decrement old, increment new).
 	entry.Phase = currentPhase
 	r.phaseCacheMu.Lock()
-	decrementPhaseEntryGauges(previous)
-	incrementPhaseEntryGauges(entry)
+	applyPhaseEntryGaugeDelta(previous, -1)
+	applyPhaseEntryGaugeDelta(entry, 1)
 	r.phaseCache[key] = entry
 	r.phaseCacheMu.Unlock()
 }
 
-// decrementPhaseEntryGauges subtracts a phaseEntry's contributions from the aggregate gauges.
-func decrementPhaseEntryGauges(e phaseEntry) {
+// applyPhaseEntryGaugeDelta adds a phaseEntry's signed contribution to aggregate gauges.
+func applyPhaseEntryGaugeDelta(e phaseEntry, delta float64) {
 	replicaStates := []string{"desired", "ready", "available"}
 	if e.Phase != "" {
-		airmetrics.DeploymentStatus.WithLabelValues(e.Provider, string(e.Phase)).Dec()
+		airmetrics.DeploymentStatus.WithLabelValues(e.Provider, string(e.Phase)).Add(delta)
 	}
 	for i, s := range replicaStates {
-		airmetrics.DeploymentReplicas.WithLabelValues(e.Provider, s).Sub(float64(e.Replicas[i]))
-	}
-}
-
-// incrementPhaseEntryGauges adds a phaseEntry's contributions to the aggregate gauges.
-func incrementPhaseEntryGauges(e phaseEntry) {
-	replicaStates := []string{"desired", "ready", "available"}
-	if e.Phase != "" {
-		airmetrics.DeploymentStatus.WithLabelValues(e.Provider, string(e.Phase)).Inc()
-	}
-	for i, s := range replicaStates {
-		airmetrics.DeploymentReplicas.WithLabelValues(e.Provider, s).Add(float64(e.Replicas[i]))
+		airmetrics.DeploymentReplicas.WithLabelValues(e.Provider, s).Add(float64(e.Replicas[i]) * delta)
 	}
 }
 
@@ -913,7 +902,7 @@ func incrementPhaseEntryGauges(e phaseEntry) {
 func (r *ModelDeploymentReconciler) cleanupMetrics(key k8stypes.NamespacedName) {
 	r.phaseCacheMu.Lock()
 	if old, ok := r.phaseCache[key]; ok {
-		decrementPhaseEntryGauges(old)
+		applyPhaseEntryGaugeDelta(old, -1)
 		delete(r.phaseCache, key)
 	}
 	r.phaseCacheMu.Unlock()

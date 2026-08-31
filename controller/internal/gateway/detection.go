@@ -35,11 +35,6 @@ const (
 
 	// LabelInferenceGateway is the label to identify the inference gateway
 	LabelInferenceGateway = "airunway.ai/inference-gateway"
-
-	// AnnotationBBRNamespace is the annotation on the Gateway resource that specifies which
-	// namespace the body-based-router (BBR) deployment lives in. If not set, the controller
-	// assumes the BBR is in the same namespace as the Gateway.
-	AnnotationBBRNamespace = "airunway.ai/bbr-namespace"
 )
 
 // DefaultGAIEVersion is the default Gateway API Inference Extension version.
@@ -47,7 +42,7 @@ const (
 // Single source of truth: /versions.env at the repo root. The build-time value
 // is injected via:
 //
-//	-ldflags "-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)"
+//	-ldflags "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)"
 //
 // (see controller/Makefile). The string literal below is a fallback for
 // `go run` / `go test` invocations that bypass the Makefile. To use a
@@ -62,20 +57,6 @@ type GatewayConfig struct {
 	GatewayName string
 	// GatewayNamespace is the namespace of the Gateway resource
 	GatewayNamespace string
-	// BBRNamespace is the namespace where the body-based-router deployment lives.
-	// Resolved from the airunway.ai/bbr-namespace annotation on the Gateway resource.
-	// If empty, callers should fall back to GatewayNamespace.
-	BBRNamespace string
-}
-
-// GetBBRNamespace returns the namespace where the BBR deployment is expected.
-// Returns BBRNamespace if set (from the Gateway annotation), otherwise falls back
-// to GatewayNamespace.
-func (c *GatewayConfig) GetBBRNamespace() string {
-	if c.BBRNamespace != "" {
-		return c.BBRNamespace
-	}
-	return c.GatewayNamespace
 }
 
 // Detector checks for Gateway API CRD availability in the cluster
