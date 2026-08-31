@@ -22,6 +22,19 @@ const DEFAULT_OPTIONS: Required<Omit<RetryOptions, 'isRetryable' | 'operationNam
   backoffFactor: 2,
 };
 
+interface RetryableError {
+  statusCode?: number;
+  response?: { statusCode?: number };
+  code?: string | number;
+  message?: string;
+}
+
+function getRetryStatusCode(error: RetryableError): number | undefined {
+  return error.statusCode
+    ?? error.response?.statusCode
+    ?? (typeof error.code === 'number' ? error.code : undefined);
+}
+
 /**
  * Default function to determine if a Kubernetes API error is retryable
  */
@@ -30,15 +43,10 @@ export function isK8sRetryableError(error: unknown): boolean {
     return false;
   }
 
-  const err = error as {
-    statusCode?: number;
-    response?: { statusCode?: number };
-    code?: string;
-    message?: string;
-  };
+  const err = error as RetryableError;
 
   // Get status code from various error formats
-  const statusCode = err.statusCode || err.response?.statusCode;
+  const statusCode = getRetryStatusCode(err);
 
   // Retry on server errors (5xx) and rate limiting (429)
   if (statusCode && (statusCode >= 500 || statusCode === 429)) {
@@ -47,7 +55,7 @@ export function isK8sRetryableError(error: unknown): boolean {
 
   // Retry on network errors
   const networkErrors = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'];
-  if (err.code && networkErrors.includes(err.code)) {
+  if (typeof err.code === 'string' && networkErrors.includes(err.code)) {
     return true;
   }
 
@@ -103,8 +111,9 @@ export async function withRetry<T>(
       }
 
       // Log retry attempt
-      const statusCode = (error as { statusCode?: number; response?: { statusCode?: number } })?.statusCode ||
-        (error as { response?: { statusCode?: number } })?.response?.statusCode;
+      const statusCode = error && typeof error === 'object'
+        ? getRetryStatusCode(error as RetryableError)
+        : undefined;
       
       logger.warn(
         {

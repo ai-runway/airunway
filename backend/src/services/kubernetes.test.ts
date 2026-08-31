@@ -153,10 +153,10 @@ describe('KubernetesService - deployment listing', () => {
     }
   });
 
-  test('propagates cluster-wide Kubernetes API server failures', async () => {
+  test('propagates cluster-wide non-404 Kubernetes API failures', async () => {
     const service = asMockable();
     const originalCustomObjectsApi = service.customObjectsApi;
-    const apiError = { code: 500, message: 'HTTP request failed' };
+    const apiError = { code: 401, message: 'HTTP request failed' };
 
     service.customObjectsApi = {
       listClusterCustomObject: async () => {
@@ -171,10 +171,10 @@ describe('KubernetesService - deployment listing', () => {
     }
   });
 
-  test('propagates namespace-scoped Kubernetes API server failures', async () => {
+  test('propagates namespace-scoped non-404 Kubernetes API failures', async () => {
     const service = asMockable();
     const originalCustomObjectsApi = service.customObjectsApi;
-    const apiError = { code: 500, message: 'HTTP request failed' };
+    const apiError = { code: 401, message: 'HTTP request failed' };
 
     service.customObjectsApi = {
       listNamespacedCustomObject: async () => {

@@ -1524,6 +1524,28 @@ describe('Hono Routes', () => {
       }
     });
 
+    test('GET /api/secrets/huggingface/status fails closed on Kubernetes errors', async () => {
+      const restore = mockServiceMethod(
+        secretsService,
+        'getHfSecretStatus',
+        async () => {
+          throw { code: 500, message: 'HTTP request failed' };
+        },
+      );
+      try {
+        const res = await app.request('/api/secrets/huggingface/status');
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({
+          error: {
+            message: 'Internal Server Error',
+            statusCode: 500,
+          },
+        });
+      } finally {
+        restore();
+      }
+    });
+
     test('POST /api/secrets/huggingface validates required fields', async () => {
       const res = await app.request('/api/secrets/huggingface', {
         method: 'POST',
