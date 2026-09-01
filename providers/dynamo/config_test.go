@@ -281,6 +281,9 @@ func TestUpdateStatus(t *testing.T) {
 	if updated.Status.LastHeartbeat == nil {
 		t.Fatal("expected provider status to include last heartbeat")
 	}
+	if updated.Status.UpstreamCRDVersion != DynamoAPIGroup+"/"+DynamoAPIVersion {
+		t.Fatalf("expected provider upstream CRD version %q, got %q", DynamoAPIGroup+"/"+DynamoAPIVersion, updated.Status.UpstreamCRDVersion)
+	}
 }
 
 func TestUnregister(t *testing.T) {
@@ -297,6 +300,14 @@ func TestUnregister(t *testing.T) {
 	err := mgr.Unregister(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatal("expected provider status to be not ready after unregister")
 	}
 }
 
