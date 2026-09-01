@@ -7,6 +7,16 @@
 - Access to a Kubernetes cluster
 - Helm CLI (for provider installation)
 - kubectl configured with cluster access
+- [TruffleHog](https://github.com/trufflesecurity/trufflehog#installation) —
+  required by `$autoreview`, which is expected before commit/ship (see
+  [Continuous Review](https://github.com/ai-runway/airunway/blob/main/agents.md#continuous-review))
+
+> [!NOTE]
+> `$autoreview` scans the changes under review for credentials before sending
+> them to a review model, and exits immediately if TruffleHog is not installed.
+> There is deliberately no flag to skip it: without the scanner, "clean" and
+> "never scanned" are indistinguishable, and the content is about to leave your
+> machine. Install it once and the check stays out of your way thereafter.
 
 ## Quick Start
 
@@ -56,6 +66,10 @@ make controller-install
 # Deploy controller to cluster
 make controller-deploy CONTROLLER_IMG=<YOUR IMAGE>
 ```
+
+Use a new tag or immutable digest when deploying a rebuilt controller. The
+deploy target forces a new ReplicaSet so an unchanged image string cannot make
+the rollout check succeed against old pods.
 
 **Important**: After editing `controller/api/v1alpha1/*_types.go` files, always run:
 

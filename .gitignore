@@ -9,6 +9,10 @@ build/
 .next/
 out/
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Environment files
 .env
 .env.local
@@ -37,6 +41,7 @@ Thumbs.db
 # Test coverage
 coverage/
 .nyc_output/
+cover.out
 
 # Temporary files
 tmp/
@@ -55,6 +60,9 @@ backend/src/embedded-assets.ts
 # Go workspace
 go.work
 go.work.sum
+
+# Shared Go tool binaries
+bin/
 
 # Provider build outputs
 providers/*/bin/

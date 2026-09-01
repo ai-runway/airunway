@@ -1,0 +1,1 @@
+crewai[azure-ai-inference,litellm]==1.15.14

@@ -43,6 +43,7 @@ import (
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -51,6 +52,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/internal/controller"
+	"github.com/ai-runway/airunway/controller/internal/credentialadmission"
 	"github.com/ai-runway/airunway/controller/internal/gateway"
 	webhookv1alpha1 "github.com/ai-runway/airunway/controller/internal/webhook/v1alpha1"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -71,6 +73,14 @@ const (
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+
+	// agentProviderVersion is the version reported by the in-process agent
+	// providers, injected at build time via:
+	//
+	//	-ldflags "-X main.agentProviderVersion=$(VERSION)"
+	//
+	// The "dev" fallback only applies when the Makefile is bypassed.
+	agentProviderVersion = "dev"
 )
 
 func init() {
@@ -141,7 +151,7 @@ func ensureBootstrapCerts(dir string) error {
 	return nil
 }
 
-// nolint:gocyclo
+//nolint:gocyclo,dupl // Controller registration is intentionally explicit; keeping each provider visible aids auditing.
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
@@ -150,6 +160,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableProviderSelector bool
+	var enableAgentMarketplace bool
 	var disableCertRotation bool
 	var certServiceName string
 	var gatewayName string
@@ -174,6 +185,10 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableProviderSelector, "enable-provider-selector", true,
 		"If set, the controller will run provider selection for ModelDeployments without explicit provider.name")
+	flag.BoolVar(&enableAgentMarketplace, "enable-agent-marketplace", true,
+		"If set, the controller runs the Agent Marketplace controllers "+
+			"(AgentDeployment, AgentProviderConfig, and the in-process framework providers). "+
+			"Disable to turn the feature off without redeploying a different image.")
 	flag.BoolVar(&disableCertRotation, "disable-cert-rotation", false,
 		"Disable automatic generation and rotation of webhook TLS certificates/keys")
 	flag.StringVar(&certServiceName, "cert-service-name", "airunway-webhook-service",
@@ -219,9 +234,14 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
+	// Read once and share: the marketplace reconciler refuses credential-bearing
+	// bindings when the webhook is off, so a second, drifting copy of this test
+	// would silently decide whether a security control is enforced.
+	webhooksEnabled := os.Getenv("ENABLE_WEBHOOKS") != "false"
+
 	// Ensure bootstrap certs exist so the webhook server can start.
 	// The cert-rotator will overwrite these with properly signed certificates.
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if webhooksEnabled {
 		if err := ensureBootstrapCerts(certDir); err != nil {
 			setupLog.Error(err, "unable to create bootstrap certificates")
 			os.Exit(1)
@@ -290,16 +310,75 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up cert rotation for webhook TLS certificates.
-	setupFinished := make(chan struct{})
-	if !disableCertRotation && os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		setupLog.Info("setting up cert rotation")
-
-		podNamespace := os.Getenv("POD_NAMESPACE")
+	// Credential-bearing AgentDeployments need a durable proof that the user
+	// who submitted the exact object shape passed the SecretAccessReview. A
+	// dedicated stable key signs UID/generation-bound proofs; CREATE uses a
+	// short-lived validating-admission record until reconciliation can persist
+	// the proof on the newly created object.
+	var (
+		credentialAttestor *credentialadmission.Attestor
+		credentialKeyGuard *credentialadmission.KeyGuard
+		credentialRecords  *credentialadmission.RecordStore
+	)
+	podNamespace := os.Getenv("POD_NAMESPACE")
+	if webhooksEnabled {
 		if podNamespace == "" {
-			setupLog.Error(fmt.Errorf("POD_NAMESPACE must be set"), "unable to determine namespace")
+			setupLog.Error(fmt.Errorf("POD_NAMESPACE must be set"), "unable to initialize credential admission attestation")
 			os.Exit(1)
 		}
+		directClient, directClientErr := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+		if directClientErr != nil {
+			setupLog.Error(directClientErr, "unable to create direct client for credential admission attestation")
+			os.Exit(1)
+		}
+		attestationSecretKey := types.NamespacedName{
+			Namespace: podNamespace,
+			Name:      credentialadmission.SigningSecretName,
+		}
+		attestationKey, keyErr := credentialadmission.LoadOrCreateKey(
+			context.Background(),
+			directClient,
+			attestationSecretKey,
+		)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to initialize credential admission attestation key")
+			os.Exit(1)
+		}
+		credentialKeyGuard, err = credentialadmission.NewKeyGuard(
+			context.Background(),
+			mgr.GetAPIReader(),
+			attestationSecretKey,
+			attestationKey,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize credential admission signing-key guard")
+			os.Exit(1)
+		}
+		credentialAttestor, err = credentialadmission.NewGuarded(attestationKey, credentialKeyGuard)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize credential admission attestor")
+			os.Exit(1)
+		}
+		credentialRecords, err = credentialadmission.NewRecordStore(
+			credentialAttestor,
+			mgr.GetAPIReader(),
+			mgr.GetClient(),
+			podNamespace,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize credential admission record store")
+			os.Exit(1)
+		}
+		if err := mgr.Add(&credentialadmission.RecordJanitor{Store: credentialRecords}); err != nil {
+			setupLog.Error(err, "unable to register credential admission record janitor")
+			os.Exit(1)
+		}
+	}
+
+	// Set up cert rotation for webhook TLS certificates.
+	setupFinished := make(chan struct{})
+	if !disableCertRotation && webhooksEnabled {
+		setupLog.Info("setting up cert rotation")
 
 		dnsName := fmt.Sprintf("%s.%s.svc", certServiceName, podNamespace)
 
@@ -313,6 +392,7 @@ func main() {
 			CAOrganization: caOrganization,
 			DNSName:        dnsName,
 			IsReady:        setupFinished,
+			FieldOwner:     controller.AgentCredentialCertRotatorFieldOwner,
 			Webhooks: []rotator.WebhookInfo{
 				{
 					Name: vwhName,
@@ -342,7 +422,14 @@ func main() {
 				setupLog.Error(err, "unable to read cert secret")
 				return
 			}
-			for key, data := range secret.Data {
+			// Only serving-certificate files belong in the webhook TLS directory;
+			// the CA private key must not be materialized there.
+			for _, key := range []string{"tls.crt", "tls.key"} {
+				data, ok := secret.Data[key]
+				if !ok {
+					setupLog.Error(fmt.Errorf("certificate Secret is missing %s", key), "unable to sync cert file")
+					continue
+				}
 				if err := os.WriteFile(filepath.Join(certDir, key), data, 0o644); err != nil {
 					setupLog.Error(err, "unable to write cert file", "file", key)
 				}
@@ -394,10 +481,95 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelDeployment")
 		os.Exit(1)
 	}
-	// nolint:goconst
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	if webhooksEnabled {
 		if err := webhookv1alpha1.SetupModelDeploymentWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "ModelDeployment")
+			os.Exit(1)
+		}
+		if err := webhookv1alpha1.SetupAgentDeploymentWebhookWithManager(mgr, credentialAttestor, podNamespace); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "AgentDeployment")
+			os.Exit(1)
+		}
+	}
+
+	// The Agent Marketplace controllers are enabled by default. Operators can
+	// still turn the alpha feature off without shipping a different image.
+	if enableAgentMarketplace {
+		if err := (&controller.AgentDeploymentReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			// Credential Secrets are read uncached: a cached read would start a
+			// cluster-wide Secret informer, which needs list/watch on every Secret
+			// in the cluster and would hold them all in memory.
+			APIReader: mgr.GetAPIReader(),
+			// Starting the local webhook server does not prove the admission rule is
+			// installed. Verify the fail-closed configuration live before resolving
+			// every credential-bearing binding.
+			CredentialAdmissionCheck: func(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
+				if !webhooksEnabled {
+					return fmt.Errorf("the webhook server is disabled")
+				}
+				return controller.VerifyAgentCredentialAdmissionForAgent(ctx, mgr.GetAPIReader(), ad)
+			},
+			CredentialAttestationCheck: func(ctx context.Context, ad *airunwayv1alpha1.AgentDeployment) error {
+				if credentialRecords == nil {
+					return fmt.Errorf("credential admission record store is not configured")
+				}
+				return credentialRecords.VerifyOrFinalize(ctx, ad)
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentDeployment")
+			os.Exit(1)
+		}
+
+		// The agent providers are still in-tree, so the combined controller binds
+		// them here. This is the ONLY place a framework provider is named in main:
+		// each entry carries its reconciler, which AgentProviderConfig it serves,
+		// and the version it reports. Moving a provider out-of-tree — the intended
+		// end state, matching providers/* for the inference side — means deleting
+		// its entry, and nothing else in main() changes.
+		if err := controller.RegisterAgentProviders(mgr,
+			controller.AgentProviderRegistration{
+				Name:      "agent-kagent",
+				Framework: controller.KagentFrameworkName,
+				Backend:   airunwayv1alpha1.AgentProviderBackendCRD,
+				Version:   "agent-kagent-provider:" + agentProviderVersion,
+				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.KagentProviderReconciler{Client: c, APIReader: ar, Scheme: s}
+				},
+			},
+			controller.AgentProviderRegistration{
+				Name:      "agent-orka",
+				Framework: controller.OrkaFrameworkName,
+				Backend:   airunwayv1alpha1.AgentProviderBackendCRD,
+				Version:   "agent-orka-provider:" + agentProviderVersion,
+				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.OrkaProviderReconciler{Client: c, APIReader: ar, Scheme: s}
+				},
+			},
+			controller.AgentProviderRegistration{
+				Name:    "agent-container",
+				Backend: airunwayv1alpha1.AgentProviderBackendContainer,
+				Version: "agent-container-provider:" + agentProviderVersion,
+				New: func(c client.Client, ar client.Reader, s *runtime.Scheme) controller.AgentProviderReconciler {
+					return &controller.ContainerProviderReconciler{Client: c, APIReader: ar, Scheme: s}
+				},
+			},
+		); err != nil {
+			setupLog.Error(err, "unable to create agent provider controllers")
+			os.Exit(1)
+		}
+
+		agentDiscovery, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "unable to create discovery client for agent provider readiness")
+			os.Exit(1)
+		}
+		if err := (&controller.AgentProviderConfigReconciler{
+			Client:    mgr.GetClient(),
+			Discovery: agentDiscovery,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentProviderConfig")
 			os.Exit(1)
 		}
 	}
@@ -411,6 +583,16 @@ func main() {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
+	}
+	if credentialKeyGuard != nil {
+		if err := mgr.AddHealthzCheck("credential-admission-key", credentialKeyGuard.Healthz); err != nil {
+			setupLog.Error(err, "unable to set up credential admission signing-key health check")
+			os.Exit(1)
+		}
+		if err := mgr.AddReadyzCheck("credential-admission-key", credentialKeyGuard.Readyz); err != nil {
+			setupLog.Error(err, "unable to set up credential admission signing-key readiness check")
+			os.Exit(1)
+		}
 	}
 
 	setupLog.Info("starting manager")
