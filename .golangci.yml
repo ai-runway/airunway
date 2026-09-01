@@ -6,6 +6,7 @@ linters:
   default: none
   enable:
     - copyloopvar
+    - depguard
     - dupl
     - errcheck
     - ginkgolinter
@@ -24,6 +25,97 @@ linters:
     - unparam
     - unused
   settings:
+    depguard:
+      rules:
+        controller-api-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/controller/api/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/controller/internal
+              desc: API packages must not import controller internals
+            - pkg: github.com/ai-runway/airunway/providers
+              desc: API packages must not depend on provider implementations
+        provider-dynamo-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/providers/dynamo/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/providers/kaito
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kuberay
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/llmd
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/vllm
+              desc: provider modules must not import each other
+        provider-kaito-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/providers/kaito/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/providers/dynamo
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kuberay
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/llmd
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/vllm
+              desc: provider modules must not import each other
+        provider-kuberay-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/providers/kuberay/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/providers/dynamo
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kaito
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/llmd
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/vllm
+              desc: provider modules must not import each other
+        provider-llmd-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/providers/llmd/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/providers/dynamo
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kaito
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kuberay
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/vllm
+              desc: provider modules must not import each other
+        provider-vllm-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/providers/vllm/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/providers/dynamo
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kaito
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/kuberay
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/llmd
+              desc: provider modules must not import each other
+        provider-shim-boundary:
+          list-mode: lax
+          files:
+            - ${base-path}/providers/pkg/shim/**/*.go
+          deny:
+            - pkg: github.com/ai-runway/airunway/providers/dynamo
+              desc: shared shim must not import provider implementations
+            - pkg: github.com/ai-runway/airunway/providers/kaito
+              desc: shared shim must not import provider implementations
+            - pkg: github.com/ai-runway/airunway/providers/kuberay
+              desc: shared shim must not import provider implementations
+            - pkg: github.com/ai-runway/airunway/providers/llmd
+              desc: shared shim must not import provider implementations
+            - pkg: github.com/ai-runway/airunway/providers/vllm
+              desc: shared shim must not import provider implementations
     dupl:
       threshold: 50
     revive:
