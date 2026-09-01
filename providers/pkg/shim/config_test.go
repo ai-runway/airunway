@@ -173,7 +173,11 @@ func TestUpdateProviderConfigStatus(t *testing.T) {
 				},
 			}
 
-			testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+			testClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(existing).
+				WithStatusSubresource(existing).
+				Build()
 
 			err := UpdateProviderConfigStatus(
 				context.Background(),
@@ -256,20 +260,25 @@ func TestUpdateProviderConfigStatusReturnsStatusUpdateError(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "provider"},
 	}
 
-	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).WithInterceptorFuncs(interceptor.Funcs{
-		SubResourceUpdate: func(
-			ctx context.Context,
-			cl client.Client,
-			subResourceName string,
-			obj client.Object,
-			opts ...client.SubResourceUpdateOption,
-		) error {
-			if subResourceName == "status" {
-				return errors.New("status update failed")
-			}
-			return cl.Status().Update(ctx, obj, opts...)
-		},
-	}).Build()
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithStatusSubresource(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(
+				ctx context.Context,
+				cl client.Client,
+				subResourceName string,
+				obj client.Object,
+				opts ...client.SubResourceUpdateOption,
+			) error {
+				if subResourceName == "status" {
+					return errors.New("status update failed")
+				}
+				return cl.Status().Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
 
 	err := UpdateProviderConfigStatus(
 		context.Background(),
