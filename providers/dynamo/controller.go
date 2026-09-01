@@ -258,16 +258,47 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderCompatible, metav1.ConditionTrue, "CompatibilityVerified", "Configuration compatible with Dynamo")
+	// Reconcile the desired absence of a download Job before creating provider
+	// resources. This covers existing model-cache changes, read-only transitions,
+	// and storage removal while preserving foreign name collisions.
+	if !storage.NeedsDownloadJob(&md) &&
+		(storage.HasStorageVolumes(&md) || storage.HasPreparationConditions(&md)) {
+		absent, err := storage.EnsureDownloadJobAbsent(ctx, r.Client, &md)
+		if err != nil {
+			logger.Error(err, "Failed to clean up obsolete download Job", "name", md.Name)
+			return r.failStorageReconciliation(
+				ctx,
+				&md,
+				airunwayv1alpha1.ConditionTypeModelDownloaded,
+				"DownloadCleanupFailed",
+				"Failed to clean up obsolete model download Job",
+				err,
+			)
+		}
+		storage.PrunePreparationConditions(&md)
+		if !absent {
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+			md.Status.Message = "Cleaning up obsolete model download Job"
+			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+	}
 
 	// --- Phase 1: Ensure PVCs ---
 	if storage.HasStorageVolumes(&md) {
 		allReady, err := storage.EnsurePVCs(ctx, r.Client, &md)
 		if err != nil {
 			logger.Error(err, "Failed to ensure PVCs", "name", md.Name)
-			r.setCondition(&md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionFalse, "PVCFailed", err.Error())
-			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
-			md.Status.Message = fmt.Sprintf("Failed to ensure PVCs: %s", err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, &md)
+			return r.failStorageReconciliation(
+				ctx,
+				&md,
+				airunwayv1alpha1.ConditionTypeStorageReady,
+				"PVCFailed",
+				"Failed to ensure PVCs",
+				err,
+			)
 		}
 		if !allReady {
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionFalse, "PVCsPending", "Waiting for PVCs to be bound")
@@ -286,10 +317,14 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		completed, err := storage.EnsureDownloadJob(ctx, r.Client, &md, r.DownloadJobImage)
 		if err != nil {
 			logger.Error(err, "Failed to ensure download Job", "name", md.Name)
-			r.setCondition(&md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionFalse, "DownloadFailed", err.Error())
-			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
-			md.Status.Message = fmt.Sprintf("Model download failed: %s", err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, &md)
+			return r.failStorageReconciliation(
+				ctx,
+				&md,
+				airunwayv1alpha1.ConditionTypeModelDownloaded,
+				"DownloadFailed",
+				"Model download failed",
+				err,
+			)
 		}
 		if !completed {
 			r.setCondition(&md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionFalse, "DownloadInProgress", "Model download in progress")
@@ -830,6 +865,20 @@ func (r *DynamoProviderReconciler) setCondition(md *airunwayv1alpha1.ModelDeploy
 		ObservedGeneration: md.Generation,
 	}
 	meta.SetStatusCondition(&md.Status.Conditions, condition)
+}
+
+func (r *DynamoProviderReconciler) failStorageReconciliation(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	conditionType string,
+	reason string,
+	messagePrefix string,
+	err error,
+) (ctrl.Result, error) {
+	r.setCondition(md, conditionType, metav1.ConditionFalse, reason, err.Error())
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+	md.Status.Message = fmt.Sprintf("%s: %s", messagePrefix, err)
+	return ctrl.Result{}, r.Status().Update(ctx, md)
 }
 
 // dynamoProviderPredicate returns true if the event should be processed by the dynamo controller.

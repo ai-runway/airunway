@@ -942,29 +942,33 @@ func TestReconcileFullPipeline(t *testing.T) {
 		},
 	}
 
-	// Pre-create completed download Job
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-model-download",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: "airunway.ai/v1alpha1",
-					Kind:       "ModelDeployment",
-					Name:       "test",
-					UID:        "test-uid",
-				},
-			},
-		},
-		Status: batchv1.JobStatus{
-			Succeeded: 1,
-		},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, pvc, job).WithStatusSubresource(md, pvc, job).Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, pvc).
+		WithStatusSubresource(md, pvc, &batchv1.Job{}).
+		Build()
 	r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("creating download Job: %v", err)
+	}
+	if result.RequeueAfter != 15*time.Second {
+		t.Fatalf("expected initial download requeue after 15s, got %v", result.RequeueAfter)
+	}
+	job := &batchv1.Job{}
+	jobKey := types.NamespacedName{Name: "test-model-download", Namespace: "default"}
+	if err := c.Get(context.Background(), jobKey, job); err != nil {
+		t.Fatalf("getting generated download Job: %v", err)
+	}
+	job.Status.Succeeded = 1
+	if err := c.Status().Update(context.Background(), job); err != nil {
+		t.Fatalf("completing generated download Job: %v", err)
+	}
+
+	result, err = r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
 	})
 	if err != nil {
@@ -997,6 +1001,10 @@ func TestReconcileNoStorageSkipsPhases(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
 	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Status.Conditions = []metav1.Condition{
+		{Type: airunwayv1alpha1.ConditionTypeStorageReady, Status: metav1.ConditionTrue},
+		{Type: airunwayv1alpha1.ConditionTypeModelDownloaded, Status: metav1.ConditionTrue},
+	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
 	r := NewDynamoProviderReconciler(c, scheme, "")
@@ -1019,6 +1027,16 @@ func TestReconcileNoStorageSkipsPhases(t *testing.T) {
 	err = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, dgd)
 	if err != nil {
 		t.Fatalf("expected DGD to be created: %v", err)
+	}
+	updated := &airunwayv1alpha1.ModelDeployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("getting updated ModelDeployment: %v", err)
+	}
+	if meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady) != nil {
+		t.Fatal("expected stale StorageReady condition to be removed")
+	}
+	if meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeModelDownloaded) != nil {
+		t.Fatal("expected stale ModelDownloaded condition to be removed")
 	}
 }
 

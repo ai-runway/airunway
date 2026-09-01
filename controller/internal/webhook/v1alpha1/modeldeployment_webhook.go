@@ -34,6 +34,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/internal/validation"
+	storageutil "github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 const (
@@ -759,7 +760,6 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 	claimNamesSeen := map[string]bool{}
 	modelCacheCount := 0
 	compilationCacheCount := 0
-	hasManagedModelCache := false
 
 	for i, vol := range storage.Volumes {
 		volPath := storagePath.Index(i)
@@ -914,9 +914,6 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 		switch vol.Purpose {
 		case airunwayv1alpha1.VolumePurposeModelCache:
 			modelCacheCount++
-			if vol.Size != nil && !vol.ReadOnly {
-				hasManagedModelCache = true
-			}
 		case airunwayv1alpha1.VolumePurposeCompilationCache:
 			compilationCacheCount++
 		}
@@ -944,7 +941,7 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 	// the 253-character Kubernetes name limit.
 	// The download job name is <md-name>-model-download (15-char suffix).
 	downloadJobName := obj.Name + "-model-download"
-	if hasManagedModelCache && len(downloadJobName) > 253 {
+	if storageutil.NeedsDownloadJob(obj) && len(downloadJobName) > 253 {
 		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("metadata", "name"),
 			obj.Name,

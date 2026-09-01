@@ -23,6 +23,7 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -151,4 +152,51 @@ func TestPrepareRejectsMissingDownloadImage(t *testing.T) {
 	if getErr == nil {
 		t.Fatal("expected no download Job with an empty image")
 	}
+}
+
+func TestPrunePreparationConditions(t *testing.T) {
+	newConditions := func() []metav1.Condition {
+		return []metav1.Condition{
+			{Type: airunwayv1alpha1.ConditionTypeStorageReady, Status: metav1.ConditionTrue},
+			{Type: airunwayv1alpha1.ConditionTypeModelDownloaded, Status: metav1.ConditionTrue},
+		}
+	}
+
+	t.Run("removes all storage conditions when storage is absent", func(t *testing.T) {
+		md := &airunwayv1alpha1.ModelDeployment{Status: airunwayv1alpha1.ModelDeploymentStatus{Conditions: newConditions()}}
+		if !HasPreparationConditions(md) {
+			t.Fatal("expected preparation conditions before pruning")
+		}
+		if !PrunePreparationConditions(md) || len(md.Status.Conditions) != 0 {
+			t.Fatalf("expected both conditions removed, got %#v", md.Status.Conditions)
+		}
+	})
+
+	t.Run("keeps storage readiness but removes download state for compilation cache only", func(t *testing.T) {
+		md := &airunwayv1alpha1.ModelDeployment{
+			Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+				Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+					Name: "compile", Purpose: airunwayv1alpha1.VolumePurposeCompilationCache,
+				}}},
+			}},
+			Status: airunwayv1alpha1.ModelDeploymentStatus{Conditions: newConditions()},
+		}
+		if !PrunePreparationConditions(md) {
+			t.Fatal("expected obsolete download condition to be pruned")
+		}
+		if apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady) == nil {
+			t.Fatal("expected StorageReady to remain")
+		}
+		if apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeModelDownloaded) != nil {
+			t.Fatal("expected ModelDownloaded to be removed")
+		}
+	})
+
+	t.Run("keeps both conditions for a writable Hugging Face model cache", func(t *testing.T) {
+		md := newDownloadMD("demo", "default")
+		md.Status.Conditions = newConditions()
+		if PrunePreparationConditions(md) {
+			t.Fatalf("expected no pruning, got %#v", md.Status.Conditions)
+		}
+	})
 }

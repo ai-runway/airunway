@@ -55,6 +55,13 @@ func Prepare(
 	}
 
 	if !NeedsDownloadJob(md) {
+		absent, cleanupErr := EnsureDownloadJobAbsent(ctx, c, md)
+		if cleanupErr != nil {
+			return PreparationDownloadPending, cleanupErr
+		}
+		if !absent {
+			return PreparationDownloadPending, nil
+		}
 		return PreparationReady, nil
 	}
 	if downloadJobImage == "" {
@@ -90,6 +97,27 @@ func WorkloadReady(md *airunwayv1alpha1.ModelDeployment) bool {
 	}
 	downloadCondition := apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeModelDownloaded)
 	return conditionIsCurrentAndTrue(downloadCondition, md.Generation)
+}
+
+// HasPreparationConditions reports whether storage lifecycle status remains on the deployment.
+func HasPreparationConditions(md *airunwayv1alpha1.ModelDeployment) bool {
+	return apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady) != nil ||
+		apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeModelDownloaded) != nil
+}
+
+// PrunePreparationConditions removes conditions that no longer apply to the desired storage state.
+func PrunePreparationConditions(md *airunwayv1alpha1.ModelDeployment) bool {
+	changed := false
+	if !HasStorageVolumes(md) {
+		changed = apiMeta.RemoveStatusCondition(&md.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady) || changed
+	}
+	if !NeedsDownloadJob(md) {
+		changed = apiMeta.RemoveStatusCondition(
+			&md.Status.Conditions,
+			airunwayv1alpha1.ConditionTypeModelDownloaded,
+		) || changed
+	}
+	return changed
 }
 
 func conditionIsCurrentAndTrue(condition *metav1.Condition, generation int64) bool {

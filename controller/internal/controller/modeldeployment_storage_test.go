@@ -146,3 +146,39 @@ func TestMarkStorageReady(t *testing.T) {
 		})
 	}
 }
+
+func TestHasHistoricalStorageFailure(t *testing.T) {
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 4},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{
+			Phase:   airunwayv1alpha1.DeploymentPhaseFailed,
+			Message: "Model download failed: simulated failure",
+			Conditions: []metav1.Condition{{
+				Type:               airunwayv1alpha1.ConditionTypeModelDownloaded,
+				Status:             metav1.ConditionFalse,
+				Reason:             "DownloadFailed",
+				ObservedGeneration: 3,
+			}},
+		},
+	}
+	if !hasHistoricalStorageFailure(md) {
+		t.Fatal("expected a stale storage failure to be recoverable after the spec changes")
+	}
+
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	if hasHistoricalStorageFailure(md) {
+		t.Fatal("must not recover an unrelated current phase")
+	}
+
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+	md.Status.Conditions[0].Reason = "ProviderFailed"
+	if hasHistoricalStorageFailure(md) {
+		t.Fatal("must not classify a provider failure as storage recovery")
+	}
+
+	md.Status.Conditions[0].Reason = "DownloadFailed"
+	md.Status.Message = "Provider failed to create workload"
+	if hasHistoricalStorageFailure(md) {
+		t.Fatal("must not recover a provider failure that retained an old storage condition")
+	}
+}

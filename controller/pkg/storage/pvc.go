@@ -81,6 +81,11 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 			if err != nil {
 				return false, fmt.Errorf("failed to get pre-existing PVC %s: %w", claimName, err)
 			}
+			if !existing.DeletionTimestamp.IsZero() {
+				logger.Info("Pre-existing PVC is terminating", "name", claimName)
+				allReady = false
+				continue
+			}
 			switch existing.Status.Phase {
 			case corev1.ClaimBound:
 				logger.Info("Pre-existing PVC is Bound", "name", claimName)
@@ -126,17 +131,15 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 
 		// Verify the existing PVC is owned by this ModelDeployment (same UID).
 		// If a ModelDeployment is deleted and recreated with the same name, there's a
-		// race window where the old PVC still exists. Delete it and requeue so the
-		// next reconcile creates a fresh PVC.
+		// race window where the old PVC still exists. Only delete it when its owner
+		// reference proves that it belongs to that prior ModelDeployment; labels are
+		// not sufficient authority for destructive cleanup.
 		if !IsOwnedByMD(existing, md.UID) {
-			// Safety guard: only delete PVCs that were created by airunway.
-			// A PVC without the managed-by label was created by another controller
-			// or manually — deleting it would be destructive and unintended.
-			if existing.Labels[airunwayv1alpha1.LabelManagedBy] != "airunway" {
+			if !isOwnedByPriorMD(existing, md) {
 				return false, fmt.Errorf(
-					"PVC %s exists but was not created by airunway (missing %s label); "+
-						"refusing to delete — remove the PVC manually or change the volume claimName",
-					claimName, airunwayv1alpha1.LabelManagedBy,
+					"PVC %s already exists but is not owned by this ModelDeployment or a prior ModelDeployment with the same name; "+
+						"refusing to delete it — remove the PVC manually or change the volume claimName",
+					claimName,
 				)
 			}
 			if err := deleteStalePVC(ctx, c, existing); err != nil {
@@ -144,6 +147,11 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 			}
 			allReady = false
 			continue // requeue → next reconcile creates fresh PVC
+		}
+		if !existing.DeletionTimestamp.IsZero() {
+			logger.Info("PVC is terminating", "name", claimName)
+			allReady = false
+			continue
 		}
 
 		// PVC exists and is owned by this MD — check phase.
@@ -265,6 +273,22 @@ func DeleteManagedPVCs(ctx context.Context, c client.Client, md *airunwayv1alpha
 func IsOwnedByMD(obj client.Object, mdUID types.UID) bool {
 	for _, ref := range obj.GetOwnerReferences() {
 		if ref.UID == mdUID {
+			return true
+		}
+	}
+	return false
+}
+
+// isOwnedByPriorMD reports whether an object is provably owned by an older
+// ModelDeployment with the same namespace/name. It is used only to authorize
+// replacement of generated-name resources after a ModelDeployment is recreated.
+func isOwnedByPriorMD(obj client.Object, md *airunwayv1alpha1.ModelDeployment) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
+			ref.Kind == "ModelDeployment" &&
+			ref.Name == md.Name &&
+			ref.UID != "" &&
+			ref.UID != md.UID {
 			return true
 		}
 	}

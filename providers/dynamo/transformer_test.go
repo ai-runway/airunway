@@ -1821,3 +1821,38 @@ func assertNoArg(t *testing.T, args []string, flag string) {
 		}
 	}
 }
+
+func TestTransformStorageUsesPurposeDefaultMountPaths(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{Name: "model-data", ClaimName: "model-pvc", Purpose: airunwayv1alpha1.VolumePurposeModelCache},
+		{Name: "compile-data", ClaimName: "compile-pvc", Purpose: airunwayv1alpha1.VolumePurposeCompilationCache},
+	}}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	worker, found, err := unstructured.NestedMap(resources[0].Object, "spec", "services", "VllmWorker")
+	if err != nil || !found {
+		t.Fatalf("expected VllmWorker: found=%v err=%v", found, err)
+	}
+	mounts, ok := worker["volumeMounts"].([]any)
+	if !ok || len(mounts) != 2 {
+		t.Fatalf("expected two volume mounts, got %v", worker["volumeMounts"])
+	}
+	wantPaths := map[string]string{"model-pvc": "/model-cache", "compile-pvc": "/compilation-cache"}
+	for _, raw := range mounts {
+		mount := raw.(map[string]any)
+		name := mount["name"].(string)
+		if got := mount["mountPoint"]; got != wantPaths[name] {
+			t.Errorf("mount %q path = %v, want %q", name, got, wantPaths[name])
+		}
+	}
+	eps := worker["extraPodSpec"].(map[string]any)
+	mainContainer := eps["mainContainer"].(map[string]any)
+	if value, ok := containerEnvValue(mainContainer, "HF_HOME"); !ok || value != "/model-cache" {
+		t.Fatalf("HF_HOME = %q, found=%v; want /model-cache", value, ok)
+	}
+}

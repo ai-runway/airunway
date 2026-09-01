@@ -733,18 +733,21 @@ func TestEnsurePVCsStaleNoOwnerRef(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingPVC).WithStatusSubresource(existingPVC).Build()
 
 	allReady, err := EnsurePVCs(context.Background(), c, md)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected a labeled PVC without a prior ModelDeployment owner reference to be rejected")
 	}
 	if allReady {
-		t.Error("expected allReady=false when stale PVC (no owner ref) is deleted")
+		t.Error("a colliding PVC must not be reported ready")
+	}
+	if !strings.Contains(err.Error(), "refusing to delete") {
+		t.Fatalf("expected safe collision error, got %v", err)
 	}
 
-	// Verify stale PVC was deleted
+	// Verify the labels alone did not authorize deletion.
 	pvc := &corev1.PersistentVolumeClaim{}
-	err = c.Get(context.Background(), types.NamespacedName{Name: "my-model-model-cache", Namespace: "default"}, pvc)
-	if err == nil {
-		t.Error("expected stale PVC with no OwnerReferences to be deleted")
+	getErr := c.Get(context.Background(), types.NamespacedName{Name: "my-model-model-cache", Namespace: "default"}, pvc)
+	if getErr != nil {
+		t.Fatalf("expected colliding PVC to be preserved: %v", getErr)
 	}
 }
 
@@ -801,12 +804,12 @@ func TestEnsurePVCsRefusesToDeleteUnmanagedPVC(t *testing.T) {
 
 	_, err := EnsurePVCs(context.Background(), c, md)
 	if err == nil {
-		t.Fatal("expected error when PVC exists without airunway managed-by label")
+		t.Fatal("expected error when PVC is not owned by this or a prior ModelDeployment")
 	}
 
 	// Verify the error message is actionable
-	if !strings.Contains(err.Error(), "was not created by airunway") {
-		t.Errorf("expected error to mention 'was not created by airunway', got: %s", err.Error())
+	if !strings.Contains(err.Error(), "not owned by this ModelDeployment") {
+		t.Errorf("expected error to explain the owner-reference mismatch, got: %s", err.Error())
 	}
 
 	// Verify the unmanaged PVC was NOT deleted
@@ -910,6 +913,55 @@ func TestEnsurePVCsPreExistingPending(t *testing.T) {
 	}
 	if allReady {
 		t.Error("expected allReady=false for Pending pre-existing PVC")
+	}
+}
+
+func TestEnsurePVCsPreExistingTerminating(t *testing.T) {
+	scheme := newScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-model",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{
+			Model: airunwayv1alpha1.ModelSpec{
+				ID: "test-model",
+				Storage: &airunwayv1alpha1.StorageSpec{
+					Volumes: []airunwayv1alpha1.StorageVolume{
+						{
+							Name:      "model-cache",
+							ClaimName: "existing-pvc",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	now := metav1.Now()
+	existingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "existing-pvc",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingPVC).WithStatusSubresource(existingPVC).Build()
+
+	allReady, err := EnsurePVCs(context.Background(), c, md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if allReady {
+		t.Error("expected allReady=false for terminating pre-existing PVC")
 	}
 }
 

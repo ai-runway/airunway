@@ -24,6 +24,7 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -309,6 +310,7 @@ func TestEnsureDownloadJobCompleted(t *testing.T) {
 			},
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
@@ -350,6 +352,7 @@ func TestEnsureDownloadJobStillRunning(t *testing.T) {
 			Failed: 1,
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
@@ -397,6 +400,7 @@ func TestEnsureDownloadJobFailed(t *testing.T) {
 			},
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
@@ -445,6 +449,7 @@ func TestEnsureDownloadJobFailedByConditionOnly(t *testing.T) {
 			},
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
@@ -489,6 +494,7 @@ func TestEnsureDownloadJobFailedAtBackoffLimit(t *testing.T) {
 			Failed: 3, // exactly at backoffLimit, no conditions
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
@@ -812,5 +818,229 @@ func TestIsOwnedByMD(t *testing.T) {
 				t.Errorf("IsOwnedByMD() = %v, want %v", got, tt.expect)
 			}
 		})
+	}
+}
+
+func TestEnsureDownloadJobUsesDefaultModelCacheMountPath(t *testing.T) {
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].MountPath = ""
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if completed {
+		t.Fatal("expected a newly created Job to be incomplete")
+	}
+
+	job := &batchv1.Job{}
+	jobKey := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(context.Background(), jobKey, job); err != nil {
+		t.Fatalf("expected download Job: %v", err)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if got := container.Env[0].Value; got != DefaultModelCacheMountPath {
+		t.Fatalf("HF_HOME = %q, want %q", got, DefaultModelCacheMountPath)
+	}
+	if got := container.VolumeMounts[0].MountPath; got != DefaultModelCacheMountPath {
+		t.Fatalf("mountPath = %q, want %q", got, DefaultModelCacheMountPath)
+	}
+}
+
+func TestEnsureDownloadJobPreservesForeignNameCollision(t *testing.T) {
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	foreign := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      downloadJobName(md.Name),
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Name:       "foreign-owner",
+			UID:        types.UID("foreign-uid"),
+			Controller: boolPtr(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
+
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
+	if err == nil {
+		t.Fatal("expected a foreign same-named Job to block reconciliation")
+	}
+	if completed {
+		t.Fatal("foreign Job collision must not be reported complete")
+	}
+	if !strings.Contains(err.Error(), "refusing to delete") {
+		t.Fatalf("expected safe collision error, got %v", err)
+	}
+	got := &batchv1.Job{}
+	foreignKey := types.NamespacedName{Name: foreign.Name, Namespace: foreign.Namespace}
+	if getErr := c.Get(context.Background(), foreignKey, got); getErr != nil {
+		t.Fatalf("foreign Job was deleted: %v", getErr)
+	}
+}
+
+func TestEnsureDownloadJobReplacesCompletedJobWhenClaimChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "cache-a"
+	pvcA := testDownloadPVC("cache-a", md.Namespace, "pvc-a")
+	pvcB := testDownloadPVC("cache-b", md.Namespace, "pvc-b")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).WithObjects(pvcA, pvcB).Build()
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	job := &batchv1.Job{}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, job); err != nil {
+		t.Fatalf("getting initial Job: %v", err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := c.Status().Update(ctx, job); err != nil {
+		t.Fatalf("completing initial Job: %v", err)
+	}
+
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "cache-b"
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling changed claim: %v", err)
+	}
+	if completed {
+		t.Fatal("completed Job for the old claim must not be reused")
+	}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected obsolete Job deletion, got %v", err)
+	}
+}
+
+func TestEnsureDownloadJobReplacesCompletedJobWhenPVCIsRecreated(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "shared-cache"
+	oldPVC := testDownloadPVC("shared-cache", md.Namespace, "pvc-old")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).WithObjects(oldPVC).Build()
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	job := &batchv1.Job{}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, job); err != nil {
+		t.Fatalf("getting initial Job: %v", err)
+	}
+	job.Status.Succeeded = 1
+	if err := c.Status().Update(ctx, job); err != nil {
+		t.Fatalf("completing initial Job: %v", err)
+	}
+	if err := c.Delete(ctx, oldPVC); err != nil {
+		t.Fatalf("deleting old PVC: %v", err)
+	}
+	if err := c.Create(ctx, testDownloadPVC("shared-cache", md.Namespace, "pvc-new")); err != nil {
+		t.Fatalf("creating replacement PVC: %v", err)
+	}
+
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling recreated PVC: %v", err)
+	}
+	if completed {
+		t.Fatal("completed Job for the deleted PVC identity must not be reused")
+	}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected obsolete Job deletion, got %v", err)
+	}
+}
+
+func TestEnsureDownloadJobAbsentDeletesPriorOwnedJob(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	stale := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      downloadJobName(md.Name),
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       md.Name,
+			UID:        types.UID("prior-md-uid"),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale).Build()
+
+	absent, err := EnsureDownloadJobAbsent(ctx, c, md)
+	if err != nil {
+		t.Fatalf("deleting prior-owned Job: %v", err)
+	}
+	if absent {
+		t.Fatal("deletion request must remain pending until the Job is observed absent")
+	}
+	key := types.NamespacedName{Name: stale.Name, Namespace: stale.Namespace}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected prior-owned Job deletion, got %v", err)
+	}
+
+	absent, err = EnsureDownloadJobAbsent(ctx, c, md)
+	if err != nil || !absent {
+		t.Fatalf("expected confirmed absence after deletion: absent=%v err=%v", absent, err)
+	}
+}
+
+func TestPrepareDeletesDownloadJobWhenItIsNoLongerNeeded(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "shared-cache"
+	pvc := testDownloadPVC("shared-cache", md.Namespace, "pvc-uid")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&batchv1.Job{}, &corev1.PersistentVolumeClaim{}).
+		WithObjects(pvc).
+		Build()
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	md.Spec.Model.Storage.Volumes[0].ReadOnly = true
+	stage, err := Prepare(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("cleaning obsolete Job: %v", err)
+	}
+	if stage != PreparationDownloadPending {
+		t.Fatalf("cleanup stage = %q, want %q", stage, PreparationDownloadPending)
+	}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected obsolete Job deletion, got %v", err)
+	}
+
+	stage, err = Prepare(ctx, c, md, testDownloadJobImage)
+	if err != nil || stage != PreparationReady {
+		t.Fatalf("expected ready after cleanup: stage=%q err=%v", stage, err)
+	}
+}
+
+func testDownloadPVC(name, namespace string, uid types.UID) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: uid},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+}
+
+func stampCurrentDownloadJob(job *batchv1.Job, md *airunwayv1alpha1.ModelDeployment) {
+	job.Annotations = map[string]string{
+		downloadJobInputHashAnnotation: downloadJobInputHash(
+			md,
+			findModelCacheVolume(md),
+			testDownloadJobImage,
+			"",
+		),
 	}
 }
