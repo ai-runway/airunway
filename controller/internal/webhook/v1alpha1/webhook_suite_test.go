@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/internal/credentialadmission"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -47,11 +49,12 @@ import (
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
 var (
-	ctx       context.Context
-	cancel    context.CancelFunc
-	k8sClient client.Client
-	cfg       *rest.Config
-	testEnv   *envtest.Environment
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	k8sClient              client.Client
+	cfg                    *rest.Config
+	testEnv                *envtest.Environment
+	testCredentialAttestor *credentialadmission.Attestor
 )
 
 func TestAPIs(t *testing.T) {
@@ -110,6 +113,11 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = SetupModelDeploymentWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+	attestor, attestorErr := credentialadmission.New(bytes.Repeat([]byte{0x42}, 32))
+	Expect(attestorErr).NotTo(HaveOccurred())
+	testCredentialAttestor = attestor
+	err = SetupAgentDeploymentWebhookWithManager(mgr, attestor, "default")
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:webhook
