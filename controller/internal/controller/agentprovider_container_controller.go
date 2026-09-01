@@ -2390,15 +2390,17 @@ func (r *ContainerProviderReconciler) reportRecordedJobOutcome(
 }
 
 func liveJobStatus(job *batchv1.Job) (*airunwayv1alpha1.AgentRuntimeStatus, *airunwayv1alpha1.AgentReplicaStatus) {
-	return &airunwayv1alpha1.AgentRuntimeStatus{
+	runtimeStatus := &airunwayv1alpha1.AgentRuntimeStatus{
 		WorkloadRef: &airunwayv1alpha1.RuntimeWorkloadRef{
 			APIVersion: "batch/v1", Kind: "Job", Name: job.Name, Namespace: job.Namespace,
 		},
-	}, &airunwayv1alpha1.AgentReplicaStatus{
+	}
+	replicaStatus := &airunwayv1alpha1.AgentReplicaStatus{
 		Desired:   ptr.Deref(job.Spec.Parallelism, 1),
 		Ready:     job.Status.Active,
 		Available: job.Status.Succeeded,
 	}
+	return runtimeStatus, replicaStatus
 }
 
 func recordedJobStatus(ad *airunwayv1alpha1.AgentDeployment) (*airunwayv1alpha1.AgentRuntimeStatus, *airunwayv1alpha1.AgentReplicaStatus) {

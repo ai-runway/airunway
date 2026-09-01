@@ -160,10 +160,10 @@ metadata:
     airunway.ai/agent-catalog: |
       [
         {
-          "name": "langgraph-stateful-agent",
-          "title": "Stateful graph agent (LangGraph)",
-          "description": "A graph-structured agent that keeps state across steps.",
-          "tags": ["graph", "stateful"],
+          "name": "langgraph-agent",
+          "title": "Graph agent (LangGraph)",
+          "description": "A stateless graph-structured agent that uses the message history supplied with each request.",
+          "tags": ["graph", "stateless"],
           "image": "ghcr.io/ai-runway/airunway/agent-langgraph:${AIRUNWAY_VERSION}"
         }
       ]
