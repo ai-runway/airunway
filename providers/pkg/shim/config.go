@@ -22,11 +22,14 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"time"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -72,4 +75,106 @@ func RegisterProviderConfig(
 	}
 
 	return nil
+}
+
+// RetryStatusUpdate retries the supplied status update callback with a linear
+// backoff schedule: baseDelay, 2*baseDelay, ..., n*baseDelay.
+func RetryStatusUpdate(ctx context.Context, attempts int, baseDelay time.Duration, update func(context.Context) error) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		err := update(ctx)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if i == attempts-1 {
+			break
+		}
+
+		delay := time.Duration(i+1) * baseDelay
+		if delay <= 0 {
+			continue
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
+}
+
+// StartHeartbeatLoop runs a provider heartbeat ticker loop in a goroutine.
+// The tick callback is executed every interval; callback errors are logged and
+// do not stop the loop.
+func StartHeartbeatLoop(ctx context.Context, interval time.Duration, tick func(context.Context) error) {
+	logger := log.FromContext(ctx)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Info("Stopping heartbeat goroutine")
+				return
+			case <-ticker.C:
+				if err := tick(ctx); err != nil {
+					logger.Error(err, "Failed to update heartbeat")
+				}
+			}
+		}
+	}()
+}
+
+// IsAPIResourceInstalled checks whether a backend API resource is available.
+// It prefers discovery when a discovery client is provided, and falls back to
+// RESTMapper lookup otherwise.
+func IsAPIResourceInstalled(
+	kubeClient client.Client,
+	discoveryClient discovery.DiscoveryInterface,
+	group, version, kind, resource string,
+) bool {
+	if discoveryClient != nil {
+		return hasAPIResource(discoveryClient, group, version, resource)
+	}
+
+	mapper := kubeClient.RESTMapper()
+	if mapper == nil {
+		return false
+	}
+
+	_, err := mapper.RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
+	return err == nil
+}
+
+func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version, resource string) bool {
+	resources, err := discoveryClient.ServerResourcesForGroupVersion(fmt.Sprintf("%s/%s", group, version))
+	if err != nil {
+		return false
+	}
+
+	for _, apiResource := range resources.APIResources {
+		if apiResource.Name == resource {
+			return true
+		}
+	}
+
+	return false
 }

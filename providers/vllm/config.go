@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/providers/pkg/shim"
@@ -134,15 +133,9 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	}
 
 	// Update status — retry briefly after create to allow cache to sync
-	var statusErr error
-	for i := 0; i < 5; i++ {
-		statusErr = m.UpdateStatus(ctx, true)
-		if statusErr == nil {
-			break
-		}
-		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
-	}
-	return statusErr
+	return shim.RetryStatusUpdate(ctx, 5, 200*time.Millisecond, func(ctx context.Context) error {
+		return m.UpdateStatus(ctx, true)
+	})
 }
 
 // UpdateStatus updates the status of the InferenceProviderConfig
@@ -169,24 +162,9 @@ func (m *ProviderConfigManager) UpdateStatus(ctx context.Context, ready bool) er
 
 // StartHeartbeat starts a goroutine that periodically updates the provider heartbeat
 func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
-	logger := log.FromContext(ctx)
-
-	go func() {
-		ticker := time.NewTicker(HeartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				logger.Info("Stopping heartbeat goroutine")
-				return
-			case <-ticker.C:
-				if err := m.UpdateStatus(ctx, true); err != nil {
-					logger.Error(err, "Failed to update heartbeat")
-				}
-			}
-		}
-	}()
+	shim.StartHeartbeatLoop(ctx, HeartbeatInterval, func(ctx context.Context) error {
+		return m.UpdateStatus(ctx, true)
+	})
 }
 
 // Unregister marks the provider as not ready
