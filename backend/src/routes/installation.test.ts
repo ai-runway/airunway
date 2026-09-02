@@ -463,7 +463,16 @@ describe('Installation Provider Routes', () => {
         ...mockInferenceProviderConfig,
         status: {
           ...mockInferenceProviderConfig.status,
+          ready: false,
           lastHeartbeat: recentHeartbeat,
+          conditions: [
+            {
+              type: 'UpstreamReady',
+              status: 'False',
+              reason: 'UpstreamControllerMissing',
+              message: 'The KAITO workspace controller is not running.',
+            },
+          ],
         },
       });
 

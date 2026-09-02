@@ -10,6 +10,7 @@ describe('getProviderHealth', () => {
   test('returns healthy for new-shim CR with UpstreamHealthy condition', () => {
     const h = getProviderHealth('kaito', mockKaitoCRNewShimHealthy);
     expect(h.healthy).toBe(true);
+    expect(h.connected).toBe(true);
     expect(h.reason).toBe('UpstreamHealthy');
     expect(h.stale).toBe(false);
     expect(h.hasShimSignal).toBe(true);
@@ -18,6 +19,7 @@ describe('getProviderHealth', () => {
   test('returns stale when heartbeat is older than threshold', () => {
     const h = getProviderHealth('kaito', mockKaitoCRStale);
     expect(h.healthy).toBe(false);
+    expect(h.connected).toBe(false);
     expect(h.reason).toBe('ShimStale');
     expect(h.stale).toBe(true);
     expect(h.hasShimSignal).toBe(true);
@@ -30,6 +32,7 @@ describe('getProviderHealth', () => {
     };
     const h = getProviderHealth('kaito', cr);
     expect(h.stale).toBe(false);
+    expect(h.connected).toBe(false);
     expect(h.reason).toBe('NotReady');
     expect(h.hasShimSignal).toBe(false);
   });
@@ -37,6 +40,7 @@ describe('getProviderHealth', () => {
   test('falls back to ready/NotReady reason when no UpstreamReady condition', () => {
     const h = getProviderHealth('kaito', mockKaitoCROldShim);
     expect(h.healthy).toBe(true);
+    expect(h.connected).toBe(true);
     expect(h.reason).toBe('Ready');
     expect(h.stale).toBe(false);
     expect(h.hasShimSignal).toBe(false);
@@ -46,6 +50,7 @@ describe('getProviderHealth', () => {
     const h = getProviderHealth('kaito', null);
     expect(h.stale).toBe(false);
     expect(h.healthy).toBe(false);
+    expect(h.connected).toBe(false);
     expect(h.hasShimSignal).toBe(false);
   });
 
@@ -67,9 +72,45 @@ describe('getProviderHealth', () => {
     };
     const h = getProviderHealth('kaito', cr);
     expect(h.healthy).toBe(false);
+    expect(h.connected).toBe(true);
     expect(h.stale).toBe(false);
     expect(h.hasShimSignal).toBe(true);
     expect(h.reason).toBe('UpstreamControllerMissing');
     expect(h.message).toBe('The KAITO workspace controller is not running.');
+  });
+
+  test('reports an explicitly unregistered shim as disconnected', () => {
+    const h = getProviderHealth('kaito', {
+      ...mockKaitoCRNewShimHealthy,
+      status: {
+        ...mockKaitoCRNewShimHealthy.status,
+        ready: false,
+        conditions: [
+          {
+            type: 'UpstreamReady',
+            status: 'False',
+            reason: 'Unregistered',
+            message: 'The provider shim has stopped.',
+          },
+        ],
+      },
+    });
+
+    expect(h.stale).toBe(false);
+    expect(h.connected).toBe(false);
+    expect(h.reason).toBe('Unregistered');
+  });
+
+  test('does not treat an invalid heartbeat as connected', () => {
+    const h = getProviderHealth('kaito', {
+      ...mockKaitoCRNewShimHealthy,
+      status: {
+        ...mockKaitoCRNewShimHealthy.status,
+        lastHeartbeat: 'not-a-timestamp',
+      },
+    });
+
+    expect(h.stale).toBe(false);
+    expect(h.connected).toBe(false);
   });
 });

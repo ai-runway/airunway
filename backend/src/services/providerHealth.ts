@@ -1,6 +1,7 @@
 export type ProviderHealth = {
   providerId: string;
   healthy: boolean;
+  connected: boolean;
   reason: string;
   message: string;
   stale: boolean;
@@ -54,17 +55,22 @@ export function getProviderHealth(providerId: string, config: ProviderConfigLike
   const hasShimSignal = !!upstreamReady;
   const lastHeartbeat: string | undefined = status.lastHeartbeat;
   const ready: boolean = status.ready === true;
+  const heartbeatTimestamp = lastHeartbeat ? Date.parse(lastHeartbeat) : Number.NaN;
+  const hasValidHeartbeat = Number.isFinite(heartbeatTimestamp);
+  const heartbeatAge = hasValidHeartbeat ? Date.now() - heartbeatTimestamp : Number.POSITIVE_INFINITY;
+  const explicitlyUnregistered = upstreamReady?.reason === 'Unregistered';
 
   // Stale = shim wrote a heartbeat in the past but hasn't refreshed it.
   // Absent heartbeat (no shim running, or provider with no health probe) is
   // NOT stale — just fall through to whatever status conditions report.
-  const stale = !!lastHeartbeat
-    && Date.now() - new Date(lastHeartbeat).getTime() > STALENESS_THRESHOLD_MS;
+  const stale = hasValidHeartbeat && heartbeatAge > STALENESS_THRESHOLD_MS;
+  const connected = hasValidHeartbeat && !stale && !explicitlyUnregistered;
 
   if (stale) {
     return {
       providerId,
       healthy: false,
+      connected: false,
       reason: 'ShimStale',
       message: 'The provider is not reporting status. Check that the AI Runway provider shim is running.',
       stale: true,
@@ -76,6 +82,7 @@ export function getProviderHealth(providerId: string, config: ProviderConfigLike
   return {
     providerId,
     healthy: ready,
+    connected,
     reason: upstreamReady?.reason ?? (ready ? 'Ready' : 'NotReady'),
     message: upstreamReady?.message ?? (ready ? 'Provider is installed and running' : 'Provider is not ready'),
     stale: false,

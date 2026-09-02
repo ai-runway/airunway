@@ -157,11 +157,9 @@ export interface RuntimeStatus {
   shimRegistered?: boolean;
   /**
    * True when AI Runway's integration for this runtime is responding. Derived
-   * from the same provider-health verdict that drives {@link message}, so a
-   * single staleness policy applies (PROVIDER_HEALTH_STALENESS_MS, 3 minutes by
-   * default). An integration that has never reported a check-in counts as
-   * responding rather than stale. Distinct from {@link installed}, which
-   * describes the underlying runtime.
+   * from a valid heartbeat within PROVIDER_HEALTH_STALENESS_MS (3 minutes by
+   * default), independently of whether the underlying runtime is ready.
+   * Distinct from {@link installed}, which describes the underlying runtime.
    */
   shimConnected?: boolean;
   /** ISO timestamp of the last check-in from the integration, if reported. */

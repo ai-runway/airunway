@@ -429,10 +429,10 @@ const installation = new Hono()
       helmCommands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
       // Reported alongside — never folded into — the install fields above, so
       // the UI can never imply the runtime is installed just because AI
-      // Runway's integration is alive (issue #244). Derived from the same
-      // health verdict that drives `message`, so one staleness policy applies.
+      // Runway's integration is alive (issue #244). Connectivity comes only
+      // from a valid, fresh heartbeat, independently of upstream readiness.
       shimRegistered: true,
-      shimConnected: health.healthy,
+      shimConnected: health.connected,
       shimLastHeartbeat: health.lastHeartbeat,
     });
   })

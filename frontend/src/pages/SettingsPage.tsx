@@ -769,8 +769,8 @@ export function SettingsPage() {
                     <>
                       <p className="text-xs text-muted-foreground">
                         Whether {installationStatus?.providerName || currentRuntime?.name || 'this runtime'} itself is set up
-                        in your cluster. AI Runway needs it before it can run models on it — use the install button below
-                        if any part is missing.
+                        in your environment. AI Runway needs it before it can run models on it.
+                        {installationStatus?.installable !== false && ' Use the install button below if any part is missing.'}
                       </p>
                       <div className="grid grid-cols-2 gap-4 text-sm">
                         <div className="flex items-center justify-between rounded-lg bg-muted p-3">
@@ -831,7 +831,7 @@ export function SettingsPage() {
 
                   {selectedRuntimeRequiresCRD && (
                     <div className="flex gap-3">
-                      {!isInstalled && (
+                      {!isInstalled && installationStatus?.installable !== false && (
                         <Button
                           onClick={() => handleInstall(effectiveRuntime)}
                           disabled={isInstalling || isWaitingForInstall || !helmAvailable || !clusterStatus?.connected}

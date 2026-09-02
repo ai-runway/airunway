@@ -787,9 +787,17 @@ describe('KubernetesService - Runtime Status', () => {
     const kaitoConfig = withoutHealthAnnotation({
       ...mockInferenceProviderConfig,
       status: {
-        ready: true,
+        ready: false,
         version: '0.10.0',
         lastHeartbeat: heartbeat,
+        conditions: [
+          {
+            type: 'UpstreamReady',
+            status: 'False',
+            reason: 'UpstreamControllerMissing',
+            message: 'The KAITO workspace controller is not running.',
+          },
+        ],
       },
     });
 

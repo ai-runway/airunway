@@ -48,6 +48,7 @@ type MockRuntimeStatus = {
   crdFound?: boolean
   operatorRunning?: boolean
   requiresCRD?: boolean
+  installable?: boolean
   version?: string
   shimRegistered?: boolean
   shimConnected?: boolean
@@ -193,6 +194,17 @@ const getMockInstallationStatus = (providerId: string) => {
         crdFound: false,
         operatorRunning: false,
         requiresCRD: false,
+        installationSteps: [],
+      }
+    case 'custom-runtime':
+      return {
+        installed: false,
+        providerName: 'Custom Runtime',
+        message: 'Custom Runtime has not provided installation metadata.',
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: false,
         installationSteps: [],
       }
     default:
@@ -461,6 +473,31 @@ describe('SettingsPage', () => {
     const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('Not responding')
+  })
+
+  it('does not offer installation when a provider has no installation metadata', () => {
+    mockRuntimes = [
+      {
+        id: 'custom-runtime',
+        name: 'Custom Runtime',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: false,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const installationPanel = screen.getByText('Custom Runtime Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).queryByRole('button', { name: /install custom runtime/i })).not.toBeInTheDocument()
+    expect(installationPanel).not.toHaveTextContent('Use the install button below')
   })
 
   it('shows providers that do not require runtime operators without CRD controls', () => {
