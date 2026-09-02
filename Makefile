@@ -1,6 +1,7 @@
 .PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend clean help providers-test gpu-e2e gpu-e2e-check verify-versions test-verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
-.PHONY: model-downloader-docker-build setup-gateway cleanup-gateway
+.PHONY: model-downloader-docker-build agent-images-docker-build agent-images-test setup-gateway cleanup-gateway
+.PHONY: agent-crewai-docker-build agent-langgraph-docker-build agent-openclaw-docker-build agent-hermes-docker-build
 
 # Controller image
 CONTROLLER_IMG ?= ghcr.io/ai-runway/airunway/controller:latest
@@ -10,6 +11,17 @@ DASHBOARD_IMG ?= ghcr.io/ai-runway/airunway/dashboard:latest
 
 # Model downloader image
 MODEL_DOWNLOADER_IMG ?= ghcr.io/ai-runway/airunway/model-downloader:latest
+
+# Agent workload images (distinct from the agent provider/controller shim).
+AGENT_CREWAI_IMG ?= ghcr.io/ai-runway/airunway/agent-crewai:latest
+AGENT_LANGGRAPH_IMG ?= ghcr.io/ai-runway/airunway/agent-langgraph:latest
+AGENT_OPENCLAW_IMG ?= ghcr.io/ai-runway/airunway/agent-openclaw:latest
+AGENT_HERMES_IMG ?= ghcr.io/ai-runway/airunway/agent-hermes:latest
+
+# Version reported by the in-process agent providers in controller images.
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo '-dirty')
+AGENT_PROVIDER_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 
 # Image build settings
 PLATFORM ?= linux/amd64
@@ -51,6 +63,8 @@ help:
 	@echo "  controller-docker-build Build controller Docker image"
 	@echo "  controller-generate    Generate CRD manifests and code"
 	@echo "  model-downloader-docker-build Build model downloader Docker image"
+	@echo "  agent-images-docker-build Build all four agent workload images"
+	@echo "  agent-images-test      Run agent runtime contract and source checks"
 	@echo "  controller-install     Install CRDs into cluster"
 	@echo "  controller-uninstall   Uninstall CRDs from cluster"
 	@echo "  controller-deploy      Deploy controller to cluster"
@@ -156,7 +170,8 @@ controller-build: verify-versions
 
 # Build controller Docker image
 controller-docker-build: verify-versions
-	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg GAIE_VERSION=$(GAIE_VERSION) --build-arg MODEL_DOWNLOADER_IMAGE=$(MODEL_DOWNLOADER_IMG) -f controller/Dockerfile -t $(CONTROLLER_IMG) .
+	@test -n "$(strip $(AGENT_PROVIDER_VERSION))" || { echo "❌ AGENT_PROVIDER_VERSION must not be empty"; exit 1; }
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg "GAIE_VERSION=$(GAIE_VERSION)" --build-arg "MODEL_DOWNLOADER_IMAGE=$(MODEL_DOWNLOADER_IMG)" --build-arg "AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION)" -f controller/Dockerfile -t $(CONTROLLER_IMG) .
 	@echo "✅ Controller image built: $(CONTROLLER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
 # Generate CRD manifests and deep copy code
@@ -200,6 +215,9 @@ providers-test: verify-versions
 	cd providers/kuberay && go test ./...
 	cd providers/llmd && go test ./...
 	cd providers/vllm && go test ./...
+	cd providers/agent-container && go test ./...
+	cd providers/agent-kagent && go test ./...
+	cd providers/agent-orka && go test ./...
 	@echo "✅ Provider tests completed"
 
 # Run the GPU end-to-end suite against a pre-existing GPU cluster.
@@ -231,8 +249,10 @@ gpu-e2e-check:
 generate-deploy-manifests:
 	cd controller && $(MAKE) kustomize
 	cd controller/config/manager && ../../bin/kustomize edit set image controller=$(CONTROLLER_IMG)
+	cd controller && bin/kustomize build config/agentdeployment-webhook-guard > ../deploy/agentdeployment-webhook-guard.yaml
 	cd controller && bin/kustomize build config/default > ../deploy/controller.yaml
-	@echo "✅ Generated deploy/controller.yaml"
+	cd controller && bin/kustomize build config/agentdeployment-webhook > ../deploy/agentdeployment-webhook.yaml
+	@echo "✅ Generated the AgentDeployment guard, controller, and webhook activation manifests"
 	cd backend/config/manager && ../../../controller/bin/kustomize edit set image IMAGE_PLACEHOLDER=$(DASHBOARD_IMG)
 	controller/bin/kustomize build backend/config/default > deploy/dashboard.yaml
 	@git checkout backend/config/manager/kustomization.yaml 2>/dev/null || true
@@ -244,6 +264,31 @@ generate-deploy-manifests:
 model-downloader-docker-build:
 	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) -f images/model-downloader/Dockerfile -t $(MODEL_DOWNLOADER_IMG) images/model-downloader
 	@echo "✅ Model downloader image built: $(MODEL_DOWNLOADER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
+
+# ==================== Agent Workload Image Targets ====================
+
+agent-images-docker-build: agent-crewai-docker-build agent-langgraph-docker-build agent-openclaw-docker-build agent-hermes-docker-build
+	@echo "✅ Agent workload images built ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
+
+agent-crewai-docker-build:
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg PYTHON_BASE=$(AGENT_PYTHON_BASE) -f images/agents/crewai/Dockerfile -t $(AGENT_CREWAI_IMG) .
+
+agent-langgraph-docker-build:
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg PYTHON_BASE=$(AGENT_PYTHON_BASE) -f images/agents/langgraph/Dockerfile -t $(AGENT_LANGGRAPH_IMG) .
+
+agent-openclaw-docker-build:
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg OPENCLAW_BASE=$(AGENT_OPENCLAW_BASE) -f images/agents/openclaw/Dockerfile -t $(AGENT_OPENCLAW_IMG) .
+
+agent-hermes-docker-build:
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg HERMES_BASE=$(AGENT_HERMES_BASE) -f images/agents/hermes/Dockerfile -t $(AGENT_HERMES_IMG) .
+
+agent-images-test:
+	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=images/agents/python python3 -m unittest discover -s images/agents/python -p 'test_*.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s images/agents/hermes -p 'test_*.py'
+	python3 -c 'import pathlib,sys; [compile(pathlib.Path(p).read_text(), p, "exec") for p in sys.argv[1:]]' images/agents/python/airunway_runtime.py images/agents/crewai/adapter.py images/agents/langgraph/adapter.py images/agents/hermes/entrypoint.py images/agents/testdata/openai_mock.py
+	node --check images/agents/openclaw/entrypoint.mjs
+	node --test images/agents/openclaw/*.test.mjs
+	bash -n images/agents/smoke.sh
 
 # ==================== Cluster Setup Targets ====================
 
@@ -332,7 +377,24 @@ verify-versions:
 	@# 7. providers/llmd/config.go fallback literal must match LLMD_VERSION
 	@grep -qE '^var LLMDSchedulerImage = "ghcr\.io/llm-d/llm-d-inference-scheduler:v$(LLMD_VERSION_RE)"$$' providers/llmd/config.go || \
 	  { echo "❌ providers/llmd/config.go LLMDSchedulerImage tag != $(LLMD_VERSION) (from versions.env)"; exit 1; }
-	@# 8. generated TS must be in sync with versions.env.
+	@# 8. Agent image bases must remain immutable digest references.
+	@for assignment in \
+	  "AGENT_PYTHON_BASE=$(AGENT_PYTHON_BASE)" \
+	  "AGENT_OPENCLAW_BASE=$(AGENT_OPENCLAW_BASE)" \
+	  "AGENT_HERMES_BASE=$(AGENT_HERMES_BASE)"; do \
+	  printf '%s\n' "$$assignment" | grep -qE '^[A-Z][A-Z0-9_]*=.+@sha256:[0-9a-f]{64}$$' || \
+	    { echo "❌ $$assignment is not a digest-pinned image reference"; exit 1; }; \
+	done
+	@# 9. Dockerfiles must require their versions.env base with no inline fallback.
+	@grep -qx 'ARG PYTHON_BASE' images/agents/crewai/Dockerfile || \
+	  { echo "❌ CrewAI Dockerfile must require PYTHON_BASE from versions.env"; exit 1; }
+	@grep -qx 'ARG PYTHON_BASE' images/agents/langgraph/Dockerfile || \
+	  { echo "❌ LangGraph Dockerfile must require PYTHON_BASE from versions.env"; exit 1; }
+	@grep -qx 'ARG OPENCLAW_BASE' images/agents/openclaw/Dockerfile || \
+	  { echo "❌ OpenClaw Dockerfile must require OPENCLAW_BASE from versions.env"; exit 1; }
+	@grep -qx 'ARG HERMES_BASE' images/agents/hermes/Dockerfile || \
+	  { echo "❌ Hermes Dockerfile must require HERMES_BASE from versions.env"; exit 1; }
+	@# 10. generated TS must be in sync with versions.env.
 	@#    Generate to a temp file and diff against the working-tree copy so
 	@#    that synced uncommitted edits pass (the local-dev case) while
 	@#    stale committed files still fail (the CI case — CI's working

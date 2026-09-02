@@ -52,6 +52,28 @@ patches:
   target:
     kind: Deployment
 
+# AgentDeployment credential admission uses a mutating route that older
+# controller images do not serve and a validating route that persists CREATE
+# records. The separately applied upgrade guard fails first in mutating
+# admission; keep both normal routes out of the rolling-update bundle so it
+# remains the only AgentDeployment rule after the apply. This prevents rejected
+# CREATEs from leaving records and mixed validator versions from admitting
+# incompatible credentials. config/agentdeployment-webhook restores both routes
+# after the new Deployment is fully rolled out. The existing ModelDeployment
+# webhooks remain live.
+- path: disable_agentdeployment_mutating_webhook_patch.yaml
+  target:
+    group: admissionregistration.k8s.io
+    version: v1
+    kind: MutatingWebhookConfiguration
+    name: mutating-webhook-configuration
+- path: disable_agentdeployment_validating_webhook_patch.yaml
+  target:
+    group: admissionregistration.k8s.io
+    version: v1
+    kind: ValidatingWebhookConfiguration
+    name: validating-webhook-configuration
+
 # - source: # Uncomment the following block if you have a ConversionWebhook (--conversion)
 #     kind: Certificate
 #     group: cert-manager.io

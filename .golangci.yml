@@ -38,12 +38,13 @@ linters:
     rules:
       - linters:
           - lll
-        path: ^controller/api/
+        path: ^(controller/)?api/
       - linters:
           - lll
-        path: ^controller/internal/
+        path: ^(controller/)?internal/
       - linters:
           - dupl
+          - lll
         path: _test\.go$
     paths:
       - ^controller/(third_party|builtin|examples)(/|$)
