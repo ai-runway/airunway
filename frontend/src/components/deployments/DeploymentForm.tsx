@@ -979,8 +979,6 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       setAiConfigRecommendedBackend(null)
       setAiConfigRecommendedMode(null)
       setAiConfigRecommendedValues(null)
-      // Clear storage config (storage volumes are only for Dynamo)
-      setConfig(prev => ({ ...prev, storage: undefined }))
     }
   }
 
@@ -2158,7 +2156,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
             <span className="text-sm font-normal text-muted-foreground">(optional)</span>
           </h3>
           <p className="text-xs text-muted-foreground mb-4">
-            Add persistent disks to speed up deployments. A <strong>Model Cache</strong> disk automatically downloads and stores model weights so restarts and scale-ups skip the download. A <strong>Compilation Cache</strong> disk stores engine compilation artifacts to avoid recompilation.
+            Add persistent disks to speed up deployments. A <strong>Model Cache</strong> disk automatically downloads and stores model weights so restarts and scale-ups skip the download. A <strong>Compilation Cache</strong> disk provides a reusable folder for compiled engine files; Dynamo configures it automatically, while other runtimes require a matching engine setting.
           </p>
           <StorageVolumesSection
             volumes={config.storage?.volumes || []}

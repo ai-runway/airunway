@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -29,10 +30,17 @@ import (
 type PreparationStage string
 
 const (
+	// ConditionReasonPVCsTerminating tells provider controllers to stop owned
+	// pod workloads so PVC protection can finish deleting a referenced claim.
+	ConditionReasonPVCsTerminating = "PVCsTerminating"
+
 	// PreparationReady means claims are usable and any required model download finished.
 	PreparationReady PreparationStage = "ready"
 	// PreparationPVCsPending means at least one claim is not ready for a consumer yet.
 	PreparationPVCsPending PreparationStage = "pvcsPending"
+	// PreparationPVCsTerminating means a claim is deleting and existing
+	// consumers must be stopped before preparation can continue.
+	PreparationPVCsTerminating PreparationStage = "pvcsTerminating"
 	// PreparationDownloadPending means the model download Job has not completed yet.
 	PreparationDownloadPending PreparationStage = "downloadPending"
 )
@@ -46,11 +54,20 @@ func Prepare(
 	md *airunwayv1alpha1.ModelDeployment,
 	downloadJobImage string,
 ) (PreparationStage, error) {
-	ready, err := EnsurePVCs(ctx, c, md)
+	pvcState, err := EnsurePVCsState(ctx, c, md)
+	if pvcState == PVCStateTerminating {
+		// A downloader can itself hold PVC protection. Remove it alongside the
+		// provider workload before waiting for the claim to disappear, even if
+		// another volume also reported an error during this pass.
+		if _, cleanupErr := EnsureDownloadJobAbsent(ctx, c, md); cleanupErr != nil {
+			return PreparationPVCsTerminating, errors.Join(err, cleanupErr)
+		}
+		return PreparationPVCsTerminating, err
+	}
 	if err != nil {
 		return PreparationPVCsPending, err
 	}
-	if !ready {
+	if pvcState != PVCStateReady {
 		return PreparationPVCsPending, nil
 	}
 
@@ -97,6 +114,16 @@ func WorkloadReady(md *airunwayv1alpha1.ModelDeployment) bool {
 	}
 	downloadCondition := apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeModelDownloaded)
 	return conditionIsCurrentAndTrue(downloadCondition, md.Generation)
+}
+
+// WorkloadTeardownRequired reports whether the current storage condition asks
+// a provider to remove its owned pod workload to release a terminating PVC.
+func WorkloadTeardownRequired(md *airunwayv1alpha1.ModelDeployment) bool {
+	condition := apiMeta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady)
+	return condition != nil &&
+		condition.Status == metav1.ConditionFalse &&
+		condition.Reason == ConditionReasonPVCsTerminating &&
+		condition.ObservedGeneration == md.Generation
 }
 
 // HasPreparationConditions reports whether storage lifecycle status remains on the deployment.

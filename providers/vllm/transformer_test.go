@@ -1430,6 +1430,48 @@ func TestTransformMountsModelStorageVolumes(t *testing.T) {
 	}
 }
 
+func TestTransformAvoidsSharedMemoryStorageNameCollision(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("shm-collision", "vllm-storage-collision")
+	const generatedShmName = "shm-1"
+	md.Spec.Resources.GPU.Count = 2
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{{
+			Name:      VLLMShmVolumeName,
+			ClaimName: "shared-data",
+			MountPath: "/data",
+			Purpose:   airunwayv1alpha1.VolumePurposeCustom,
+		}},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	deploy := resources[0]
+	volumes, found, err := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+	if err != nil || !found || len(volumes) != 2 {
+		t.Fatalf("expected shared memory and storage volumes, got %v (found=%v, err=%v)", volumes, found, err)
+	}
+	if got := volumes[0].(map[string]any)["name"]; got != generatedShmName {
+		t.Fatalf("expected generated shared-memory name shm-1, got %v", got)
+	}
+	if got := volumes[1].(map[string]any)["name"]; got != VLLMShmVolumeName {
+		t.Fatalf("expected user storage volume name %s, got %v", VLLMShmVolumeName, got)
+	}
+
+	mounts, ok := getContainer(t, deploy)["volumeMounts"].([]any)
+	if !ok || len(mounts) != 2 {
+		t.Fatalf("expected shared memory and storage mounts, got %v", mounts)
+	}
+	if got := mounts[0].(map[string]any)["name"]; got != generatedShmName {
+		t.Fatalf("expected shared-memory mount to use shm-1, got %v", got)
+	}
+	if got := mounts[1].(map[string]any)["name"]; got != VLLMShmVolumeName {
+		t.Fatalf("expected storage mount to retain name %s, got %v", VLLMShmVolumeName, got)
+	}
+}
+
 func TestTransformMountsManagedStorageWithGeneratedClaimName(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "team-models")

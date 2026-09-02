@@ -48,6 +48,17 @@ func HasStorageVolumes(md *airunwayv1alpha1.ModelDeployment) bool {
 	return md.Spec.Model.Storage != nil && len(md.Spec.Model.Storage.Volumes) > 0
 }
 
+// PVCState describes whether the claims required by a ModelDeployment are
+// ready for consumers, still being prepared, or waiting for existing
+// consumers to release a terminating claim.
+type PVCState string
+
+const (
+	PVCStateReady       PVCState = "ready"
+	PVCStatePending     PVCState = "pending"
+	PVCStateTerminating PVCState = "terminating"
+)
+
 // EnsurePVCs ensures that all storage volume PVCs exist and are usable.
 //
 // For managed PVCs (Size is set): returns ready once the PVC has been created,
@@ -58,13 +69,33 @@ func HasStorageVolumes(md *airunwayv1alpha1.ModelDeployment) bool {
 // For pre-existing PVCs (Size is nil): returns ready only when the PVC is Bound,
 // since these are outside the controller's control.
 func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.ModelDeployment) (bool, error) {
+	state, err := EnsurePVCsState(ctx, c, md)
+	return state == PVCStateReady, err
+}
+
+// EnsurePVCsState is the stateful form of EnsurePVCs. Callers that own pod
+// workloads use PVCStateTerminating to stop those consumers before waiting for
+// Kubernetes PVC protection to finish deletion.
+func EnsurePVCsState(ctx context.Context, c client.Client, md *airunwayv1alpha1.ModelDeployment) (PVCState, error) {
 	logger := log.FromContext(ctx)
 
 	if md.Spec.Model.Storage == nil {
-		return true, nil
+		return PVCStateReady, nil
 	}
 
-	allReady := true
+	state := PVCStateReady
+	markPending := func() {
+		if state != PVCStateTerminating {
+			state = PVCStatePending
+		}
+	}
+	var firstErr error
+	recordError := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+		markPending()
+	}
 	for _, vol := range md.Spec.Model.Storage.Volumes {
 		if vol.Size == nil {
 			// Pre-existing PVC: verify it exists and is usable before proceeding
@@ -72,18 +103,20 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 			existing := &corev1.PersistentVolumeClaim{}
 			err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, existing)
 			if errors.IsNotFound(err) {
-				return false, fmt.Errorf(
+				recordError(fmt.Errorf(
 					"pre-existing PVC %q not found in namespace %q (referenced by volume %q); "+
 						"ensure the PVC exists before creating the ModelDeployment",
 					claimName, md.Namespace, vol.Name,
-				)
+				))
+				continue
 			}
 			if err != nil {
-				return false, fmt.Errorf("failed to get pre-existing PVC %s: %w", claimName, err)
+				recordError(fmt.Errorf("failed to get pre-existing PVC %s: %w", claimName, err))
+				continue
 			}
 			if !existing.DeletionTimestamp.IsZero() {
 				logger.Info("Pre-existing PVC is terminating", "name", claimName)
-				allReady = false
+				state = PVCStateTerminating
 				continue
 			}
 			switch existing.Status.Phase {
@@ -91,11 +124,11 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 				logger.Info("Pre-existing PVC is Bound", "name", claimName)
 			case corev1.ClaimPending:
 				logger.Info("Pre-existing PVC is Pending", "name", claimName)
-				allReady = false
+				markPending()
 			case corev1.ClaimLost:
-				return false, fmt.Errorf("pre-existing PVC %q is in Lost phase", claimName)
+				recordError(fmt.Errorf("pre-existing PVC %q is in Lost phase", claimName))
 			default:
-				allReady = false
+				markPending()
 			}
 			continue
 		}
@@ -113,20 +146,23 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 			// Create the PVC
 			pvc, buildErr := buildPVC(md, &vol)
 			if buildErr != nil {
-				return false, fmt.Errorf("failed to build PVC %s: %w", claimName, buildErr)
+				recordError(fmt.Errorf("failed to build PVC %s: %w", claimName, buildErr))
+				continue
 			}
 			logger.Info("Creating PVC", "name", claimName, "namespace", md.Namespace, "size", vol.Size.String())
 			if createErr := c.Create(ctx, pvc); createErr != nil {
 				if !errors.IsAlreadyExists(createErr) {
-					return false, fmt.Errorf("failed to create PVC %s: %w", claimName, createErr)
+					recordError(fmt.Errorf("failed to create PVC %s: %w", claimName, createErr))
+					continue
 				}
 				logger.Info("PVC already exists (concurrent creation)", "name", claimName)
 			}
-			allReady = false
+			markPending()
 			continue
 		}
 		if err != nil {
-			return false, fmt.Errorf("failed to get PVC %s: %w", claimName, err)
+			recordError(fmt.Errorf("failed to get PVC %s: %w", claimName, err))
+			continue
 		}
 
 		// Verify the existing PVC is owned by this ModelDeployment (same UID).
@@ -136,21 +172,23 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 		// not sufficient authority for destructive cleanup.
 		if !IsOwnedByMD(existing, md.UID) {
 			if !isOwnedByPriorMD(existing, md) {
-				return false, fmt.Errorf(
+				recordError(fmt.Errorf(
 					"PVC %s already exists but is not owned by this ModelDeployment or a prior ModelDeployment with the same name; "+
 						"refusing to delete it — remove the PVC manually or change the volume claimName",
 					claimName,
-				)
+				))
+				continue
 			}
 			if err := deleteStalePVC(ctx, c, existing); err != nil {
-				return false, err
+				recordError(err)
+				continue
 			}
-			allReady = false
+			state = PVCStateTerminating
 			continue // requeue → next reconcile creates fresh PVC
 		}
 		if !existing.DeletionTimestamp.IsZero() {
 			logger.Info("PVC is terminating", "name", claimName)
-			allReady = false
+			state = PVCStateTerminating
 			continue
 		}
 
@@ -165,13 +203,13 @@ func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.Model
 			// Don't set allReady=false — proceed to create the download Job
 			// which will reference this PVC and trigger binding.
 		case corev1.ClaimLost:
-			return false, fmt.Errorf("PVC %s is in Lost phase", claimName)
+			recordError(fmt.Errorf("PVC %s is in Lost phase", claimName))
 		default:
-			allReady = false
+			markPending()
 		}
 	}
 
-	return allReady, nil
+	return state, firstErr
 }
 
 // buildPVC creates a PVC spec from a StorageVolume with Size set.

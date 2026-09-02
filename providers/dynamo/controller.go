@@ -288,7 +288,59 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// --- Phase 1: Ensure PVCs ---
 	if storage.HasStorageVolumes(&md) {
-		allReady, err := storage.EnsurePVCs(ctx, r.Client, &md)
+		pvcState, err := storage.EnsurePVCsState(ctx, r.Client, &md)
+		if pvcState == storage.PVCStateTerminating {
+			if err != nil {
+				logger.Error(err, "PVC preparation also failed while terminating storage is being released", "name", md.Name)
+			}
+			if _, err := storage.EnsureDownloadJobAbsent(ctx, r.Client, &md); err != nil {
+				return r.failStorageReconciliation(
+					ctx,
+					&md,
+					airunwayv1alpha1.ConditionTypeStorageReady,
+					"PVCConsumerTeardownFailed",
+					"Failed to stop model downloader for terminating PVC",
+					err,
+				)
+			}
+			if _, err := storage.EnsureConsumerWorkloadsAbsent(ctx, r.Client, &md, storage.ConsumerWorkload{
+				GroupVersionKind: schema.GroupVersionKind{
+					Group: DynamoAPIGroup, Version: DynamoAPIVersion, Kind: DynamoGraphDeploymentKind,
+				},
+				Name: md.Name,
+			}); err != nil {
+				return r.failStorageReconciliation(
+					ctx,
+					&md,
+					airunwayv1alpha1.ConditionTypeStorageReady,
+					"PVCConsumerTeardownFailed",
+					"Failed to stop Dynamo workload for terminating PVC",
+					err,
+				)
+			}
+			r.setCondition(
+				&md,
+				airunwayv1alpha1.ConditionTypeStorageReady,
+				metav1.ConditionFalse,
+				storage.ConditionReasonPVCsTerminating,
+				"Stopping provider workloads and waiting for terminating storage PVCs",
+			)
+			r.setCondition(
+				&md,
+				airunwayv1alpha1.ConditionTypeReady,
+				metav1.ConditionFalse,
+				"StorageUnavailable",
+				"Provider workload is stopping to release terminating storage PVCs",
+			)
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+			md.Status.Message = "Stopping provider workloads and waiting for terminating storage PVCs"
+			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		if err != nil {
 			logger.Error(err, "Failed to ensure PVCs", "name", md.Name)
 			return r.failStorageReconciliation(
@@ -300,14 +352,15 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				err,
 			)
 		}
-		if !allReady {
-			r.setCondition(&md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionFalse, "PVCsPending", "Waiting for PVCs to be bound")
-			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
-			md.Status.Message = "Waiting for PVCs to be bound"
-			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		if pvcState != storage.PVCStateReady {
+			return r.updatePendingStatus(
+				ctx,
+				&md,
+				airunwayv1alpha1.ConditionTypeStorageReady,
+				"PVCsPending",
+				"Waiting for PVCs to be bound",
+				10*time.Second,
+			)
 		}
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionTrue, "PVCsBound", "All managed PVCs are bound")
 	}
@@ -327,13 +380,14 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			)
 		}
 		if !completed {
-			r.setCondition(&md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionFalse, "DownloadInProgress", "Model download in progress")
-			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
-			md.Status.Message = "Model download in progress"
-			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			return r.updatePendingStatus(
+				ctx,
+				&md,
+				airunwayv1alpha1.ConditionTypeModelDownloaded,
+				"DownloadInProgress",
+				"Model download in progress",
+				15*time.Second,
+			)
 		}
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionTrue, "DownloadComplete", "Model download completed")
 	}
@@ -470,6 +524,23 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Requeue to periodically sync status
 	return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+}
+
+func (r *DynamoProviderReconciler) updatePendingStatus(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	conditionType string,
+	reason string,
+	message string,
+	requeueAfter time.Duration,
+) (ctrl.Result, error) {
+	r.setCondition(md, conditionType, metav1.ConditionFalse, reason, message)
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+	md.Status.Message = message
+	if err := r.Status().Update(ctx, md); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // validateCompatibility checks if the ModelDeployment configuration is compatible with Dynamo

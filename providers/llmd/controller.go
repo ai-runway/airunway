@@ -271,6 +271,21 @@ func (r *LLMDProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Releasing a terminating PVC takes precedence over validating the next
+	// desired workload. An invalid spec must not keep older pods alive and
+	// deadlock Kubernetes PVC protection.
+	if storage.WorkloadTeardownRequired(&md) {
+		workloads := []storage.ConsumerWorkload{
+			{GroupVersionKind: deploymentGVK, Name: md.Name},
+			{GroupVersionKind: deploymentGVK, Name: md.Name + "-decode"},
+			{GroupVersionKind: deploymentGVK, Name: md.Name + "-prefill"},
+		}
+		if _, err := storage.EnsureConsumerWorkloadsAbsent(ctx, r.Client, &md, workloads...); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	// Validate provider compatibility
 	if err := r.validateCompatibility(&md); err != nil {
 		logger.Error(err, "Provider compatibility check failed", "name", md.Name)

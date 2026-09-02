@@ -17,10 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestProviderUsesCoreStorageLifecycle(t *testing.T) {
@@ -90,6 +95,13 @@ func TestMarkStorageReady(t *testing.T) {
 			wantMsg:   "Model storage is ready; waiting for the provider workload",
 		},
 		{
+			name:      "replaces terminating PVC teardown message",
+			phase:     airunwayv1alpha1.DeploymentPhasePending,
+			message:   "Stopping provider workloads and waiting for terminating storage PVCs",
+			wantPhase: airunwayv1alpha1.DeploymentPhasePending,
+			wantMsg:   "Model storage is ready; waiting for the provider workload",
+		},
+		{
 			name:      "replaces stale download message",
 			phase:     airunwayv1alpha1.DeploymentPhasePending,
 			message:   "Model download in progress",
@@ -144,6 +156,76 @@ func TestMarkStorageReady(t *testing.T) {
 				t.Fatalf("message = %q, want %q", md.Status.Message, tt.wantMsg)
 			}
 		})
+	}
+}
+
+func TestReconcileStorageMarksTerminatingPVCWorkloadUnavailable(t *testing.T) {
+	scheme := newTestScheme()
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "demo",
+			Namespace:  "default",
+			UID:        types.UID("md-uid"),
+			Generation: 2,
+		},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Source: airunwayv1alpha1.ModelSourceCustom,
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+				Name: "data", ClaimName: "shared-data", MountPath: "/data",
+			}}},
+		}},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{
+			Phase: airunwayv1alpha1.DeploymentPhaseRunning,
+			Endpoint: &airunwayv1alpha1.EndpointStatus{
+				Service: "demo", Port: 8000,
+			},
+			Replicas: &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1},
+			Conditions: []metav1.Condition{{
+				Type: airunwayv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue,
+				Reason: "DeploymentReady", ObservedGeneration: 2,
+			}},
+		},
+	}
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "shared-data",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	r := newTestReconciler(scheme, nil, md, pvc)
+	current := &airunwayv1alpha1.ModelDeployment{}
+	key := types.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+	if err := r.Get(context.Background(), key, current); err != nil {
+		t.Fatalf("getting ModelDeployment: %v", err)
+	}
+	base := current.DeepCopy()
+
+	result, stop, err := r.reconcileStorage(context.Background(), current, base)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !stop || result.RequeueAfter != 5*time.Second {
+		t.Fatalf("expected terminating storage to stop reconciliation and requeue after 5s, got stop=%v result=%+v", stop, result)
+	}
+
+	updated := &airunwayv1alpha1.ModelDeployment{}
+	if err := r.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("getting updated ModelDeployment: %v", err)
+	}
+	storageReady := apiMeta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady)
+	if storageReady == nil || storageReady.Status != metav1.ConditionFalse || storageReady.Reason != "PVCsTerminating" {
+		t.Fatalf("unexpected StorageReady condition: %+v", storageReady)
+	}
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "StorageUnavailable" {
+		t.Fatalf("unexpected Ready condition: %+v", ready)
+	}
+	if updated.Status.Endpoint != nil || updated.Status.Replicas != nil {
+		t.Fatalf("expected stale serving status to be cleared, got endpoint=%+v replicas=%+v", updated.Status.Endpoint, updated.Status.Replicas)
 	}
 }
 

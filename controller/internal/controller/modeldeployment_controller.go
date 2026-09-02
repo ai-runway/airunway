@@ -428,7 +428,20 @@ func (r *ModelDeploymentReconciler) reconcileStorage(
 		conditionType := airunwayv1alpha1.ConditionTypeStorageReady
 		reason := conditionReasonPVCFailed
 		messagePrefix := "Failed to prepare model storage"
-		if stage == storage.PreparationDownloadPending {
+		switch stage {
+		case storage.PreparationPVCsTerminating:
+			reason = storage.ConditionReasonPVCsTerminating
+			messagePrefix = "Failed while releasing terminating storage PVCs"
+			r.setCondition(
+				md,
+				airunwayv1alpha1.ConditionTypeReady,
+				metav1.ConditionFalse,
+				"StorageUnavailable",
+				"Provider workload is stopping to release terminating storage PVCs",
+			)
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
+		case storage.PreparationDownloadPending:
 			conditionType = airunwayv1alpha1.ConditionTypeModelDownloaded
 			if storage.NeedsDownloadJob(md) {
 				reason = conditionReasonDownloadFailed
@@ -449,6 +462,27 @@ func (r *ModelDeploymentReconciler) reconcileStorage(
 	}
 
 	switch stage {
+	case storage.PreparationPVCsTerminating:
+		r.setCondition(
+			md,
+			airunwayv1alpha1.ConditionTypeStorageReady,
+			metav1.ConditionFalse,
+			storage.ConditionReasonPVCsTerminating,
+			"Stopping provider workloads and waiting for terminating storage PVCs",
+		)
+		r.setCondition(
+			md,
+			airunwayv1alpha1.ConditionTypeReady,
+			metav1.ConditionFalse,
+			"StorageUnavailable",
+			"Provider workload is stopping to release terminating storage PVCs",
+		)
+		md.Status.Endpoint = nil
+		md.Status.Replicas = nil
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+		md.Status.Message = "Stopping provider workloads and waiting for terminating storage PVCs"
+		patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, patchErr
 	case storage.PreparationPVCsPending:
 		r.setCondition(md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionFalse, "PVCsPending", "Waiting for storage PVCs to become ready")
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
@@ -495,7 +529,7 @@ func markStorageReady(md *airunwayv1alpha1.ModelDeployment, recoveringStorageFai
 	}
 
 	switch md.Status.Message {
-	case "", "Waiting for storage PVCs to become ready", "Model download in progress", "Cleaning up obsolete model download Job":
+	case "", "Waiting for storage PVCs to become ready", "Stopping provider workloads and waiting for terminating storage PVCs", "Model download in progress", "Cleaning up obsolete model download Job":
 		md.Status.Message = "Model storage is ready; waiting for the provider workload"
 	}
 }

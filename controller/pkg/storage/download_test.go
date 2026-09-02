@@ -244,6 +244,54 @@ func TestEnsureDownloadJobCreation(t *testing.T) {
 	}
 }
 
+func TestBuildDownloadJobCopiesWorkloadSchedulingConstraints(t *testing.T) {
+	md := newDownloadMD("my-model", "default")
+	tolerationSeconds := int64(60)
+	const gpuPool = "gpu"
+	md.Spec.NodeSelector = map[string]string{
+		"agentpool":                   gpuPool,
+		"topology.kubernetes.io/zone": "eastus-1",
+	}
+	md.Spec.Tolerations = []corev1.Toleration{{
+		Key:               "sku",
+		Operator:          corev1.TolerationOpEqual,
+		Value:             gpuPool,
+		Effect:            corev1.TaintEffectNoSchedule,
+		TolerationSeconds: &tolerationSeconds,
+	}}
+
+	job := buildDownloadJob(
+		md,
+		&md.Spec.Model.Storage.Volumes[0],
+		testDownloadJobImage,
+		"input-hash",
+	)
+
+	if got := job.Spec.Template.Spec.NodeSelector["agentpool"]; got != gpuPool {
+		t.Fatalf("expected downloader nodeSelector to target gpu pool, got %q", got)
+	}
+	if got := job.Spec.Template.Spec.NodeSelector["topology.kubernetes.io/zone"]; got != "eastus-1" {
+		t.Fatalf("expected downloader topology selector, got %q", got)
+	}
+	if len(job.Spec.Template.Spec.Tolerations) != 1 {
+		t.Fatalf("expected one downloader toleration, got %v", job.Spec.Template.Spec.Tolerations)
+	}
+	gotToleration := job.Spec.Template.Spec.Tolerations[0]
+	if gotToleration.Key != "sku" || gotToleration.Value != gpuPool || gotToleration.Effect != corev1.TaintEffectNoSchedule {
+		t.Fatalf("unexpected downloader toleration: %#v", gotToleration)
+	}
+
+	// The Job must not retain mutable references to the ModelDeployment spec.
+	md.Spec.NodeSelector["agentpool"] = "system"
+	*md.Spec.Tolerations[0].TolerationSeconds = 1
+	if job.Spec.Template.Spec.NodeSelector["agentpool"] != gpuPool {
+		t.Fatal("expected downloader nodeSelector to be copied")
+	}
+	if got := *job.Spec.Template.Spec.Tolerations[0].TolerationSeconds; got != 60 {
+		t.Fatalf("expected downloader toleration to be deep-copied, got %d", got)
+	}
+}
+
 func TestEnsureDownloadJobWithHFToken(t *testing.T) {
 	scheme := newScheme()
 	_ = batchv1.AddToScheme(scheme)

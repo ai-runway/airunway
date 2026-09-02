@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -304,6 +305,17 @@ func buildDownloadJob(
 	backoffLimit := defaultBackoffLimit
 	completions := int32(1)
 	parallelism := int32(1)
+	var nodeSelector map[string]string
+	if len(md.Spec.NodeSelector) > 0 {
+		nodeSelector = maps.Clone(md.Spec.NodeSelector)
+	}
+	var tolerations []corev1.Toleration
+	if len(md.Spec.Tolerations) > 0 {
+		tolerations = make([]corev1.Toleration, len(md.Spec.Tolerations))
+		for i := range md.Spec.Tolerations {
+			md.Spec.Tolerations[i].DeepCopyInto(&tolerations[i])
+		}
+	}
 
 	envVars := []corev1.EnvVar{
 		{
@@ -342,6 +354,8 @@ func buildDownloadJob(
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					NodeSelector:  nodeSelector,
+					Tolerations:   tolerations,
 					Containers: []corev1.Container{
 						{
 							Name:  "model-download",

@@ -234,18 +234,20 @@ func (t *Transformer) buildDeployment(md *airunwayv1alpha1.ModelDeployment, name
 
 	image := t.getImage(md)
 
-	container, err := t.buildContainer(md, image, args, resources)
-	if err != nil {
-		return nil, err
+	sharedMemoryName := ""
+	if requiresSharedMemoryVolume(resources) {
+		sharedMemoryName = sharedMemoryVolumeName(md)
 	}
+
+	container := t.buildContainer(md, image, args, resources, sharedMemoryName)
 
 	podSpec := map[string]interface{}{
 		"containers": []interface{}{container},
 	}
 
 	var volumes []interface{}
-	if requiresSharedMemoryVolume(resources) {
-		volumes = append(volumes, buildSharedMemoryVolume())
+	if sharedMemoryName != "" {
+		volumes = append(volumes, buildSharedMemoryVolume(sharedMemoryName))
 	}
 	volumes = append(volumes, buildStorageVolumes(md)...)
 	if len(volumes) > 0 {
@@ -340,7 +342,13 @@ func (t *Transformer) buildService(md *airunwayv1alpha1.ModelDeployment, name, s
 }
 
 // buildContainer constructs the vLLM container map.
-func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image string, args []string, resources *airunwayv1alpha1.ResourceSpec) (map[string]interface{}, error) {
+func (t *Transformer) buildContainer(
+	md *airunwayv1alpha1.ModelDeployment,
+	image string,
+	args []string,
+	resources *airunwayv1alpha1.ResourceSpec,
+	sharedMemoryName string,
+) map[string]any {
 	argsList := make([]interface{}, len(args))
 	for i, a := range args {
 		argsList[i] = a
@@ -365,8 +373,8 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 	}
 
 	var volumeMounts []interface{}
-	if requiresSharedMemoryVolume(resources) {
-		volumeMounts = append(volumeMounts, buildSharedMemoryVolumeMount())
+	if sharedMemoryName != "" {
+		volumeMounts = append(volumeMounts, buildSharedMemoryVolumeMount(sharedMemoryName))
 	}
 	volumeMounts = append(volumeMounts, buildStorageVolumeMounts(md)...)
 	if len(volumeMounts) > 0 {
@@ -385,7 +393,7 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 		container["env"] = envVars
 	}
 
-	return container, nil
+	return container
 }
 
 // buildVLLMArgs constructs the vLLM command-line arguments.
@@ -585,16 +593,35 @@ func requiresSharedMemoryVolume(resources *airunwayv1alpha1.ResourceSpec) bool {
 	return resources != nil && resources.GPU != nil && resources.GPU.Count > 1
 }
 
-func buildSharedMemoryVolumeMount() map[string]interface{} {
-	return map[string]interface{}{
-		"name":      VLLMShmVolumeName,
+func sharedMemoryVolumeName(md *airunwayv1alpha1.ModelDeployment) string {
+	usedNames := map[string]struct{}{}
+	if md.Spec.Model.Storage != nil {
+		for _, volume := range md.Spec.Model.Storage.Volumes {
+			usedNames[volume.Name] = struct{}{}
+		}
+	}
+
+	for suffix := 0; ; suffix++ {
+		candidate := VLLMShmVolumeName
+		if suffix > 0 {
+			candidate = fmt.Sprintf("%s-%d", VLLMShmVolumeName, suffix)
+		}
+		if _, found := usedNames[candidate]; !found {
+			return candidate
+		}
+	}
+}
+
+func buildSharedMemoryVolumeMount(name string) map[string]any {
+	return map[string]any{
+		"name":      name,
 		"mountPath": "/dev/shm",
 	}
 }
 
-func buildSharedMemoryVolume() map[string]interface{} {
-	return map[string]interface{}{
-		"name": VLLMShmVolumeName,
+func buildSharedMemoryVolume(name string) map[string]any {
+	return map[string]any{
+		"name": name,
 		"emptyDir": map[string]interface{}{
 			"medium":    "Memory",
 			"sizeLimit": DefaultVLLMShmSize,

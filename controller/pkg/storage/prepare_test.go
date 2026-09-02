@@ -23,6 +23,7 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -151,6 +152,122 @@ func TestPrepareRejectsMissingDownloadImage(t *testing.T) {
 	getErr := c.Get(ctx, types.NamespacedName{Name: "demo-model-download", Namespace: "team-models"}, job)
 	if getErr == nil {
 		t.Fatal("expected no download Job with an empty image")
+	}
+}
+
+func TestPrepareTerminatingClaimDeletesDownloader(t *testing.T) {
+	ctx := context.Background()
+	md := newDownloadMD("demo", "team-models")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "shared-model-cache"
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "shared-model-cache",
+			Namespace:         "team-models",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "demo-model-download",
+		Namespace: "team-models",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       md.Name,
+			UID:        md.UID,
+		}},
+	}}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithStatusSubresource(&corev1.PersistentVolumeClaim{}, &batchv1.Job{}).
+		WithObjects(pvc, job).
+		Build()
+
+	stage, err := Prepare(ctx, c, md, "example.test/model-downloader:v1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stage != PreparationPVCsTerminating {
+		t.Fatalf("expected terminating PVC stage, got %s", stage)
+	}
+	remaining := &batchv1.Job{}
+	err = c.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, remaining)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected downloader Job deletion, got %v", err)
+	}
+}
+
+func TestPrepareTerminatingClaimDeletesDownloaderWhenAnotherVolumeFails(t *testing.T) {
+	ctx := context.Background()
+	md := newDownloadMD("multi-volume", "team-models")
+	modelCache := md.Spec.Model.Storage.Volumes[0]
+	modelCache.Size = nil
+	modelCache.ClaimName = "terminating-model-cache"
+	md.Spec.Model.Storage.Volumes = []airunwayv1alpha1.StorageVolume{{
+		Name:      "missing-data",
+		ClaimName: "missing-data-pvc",
+		MountPath: "/data",
+		Purpose:   airunwayv1alpha1.VolumePurposeCustom,
+	}, modelCache}
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "terminating-model-cache",
+			Namespace:         md.Namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      downloadJobName(md.Name),
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       md.Name,
+			UID:        md.UID,
+		}},
+	}}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithStatusSubresource(&corev1.PersistentVolumeClaim{}, &batchv1.Job{}).
+		WithObjects(pvc, job).
+		Build()
+
+	stage, err := Prepare(ctx, c, md, "example.test/model-downloader:v1")
+	if err == nil {
+		t.Fatal("expected the missing second PVC to be reported")
+	}
+	if stage != PreparationPVCsTerminating {
+		t.Fatalf("expected terminating PVC stage, got %s", stage)
+	}
+	remaining := &batchv1.Job{}
+	err = c.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, remaining)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected downloader Job deletion despite the second-volume error, got %v", err)
+	}
+}
+
+func TestWorkloadTeardownRequired(t *testing.T) {
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{Conditions: []metav1.Condition{{
+			Type:               airunwayv1alpha1.ConditionTypeStorageReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ConditionReasonPVCsTerminating,
+			ObservedGeneration: 3,
+		}}},
+	}
+	if !WorkloadTeardownRequired(md) {
+		t.Fatal("expected current terminating-PVC condition to require workload teardown")
+	}
+	md.Status.Conditions[0].ObservedGeneration = 2
+	if WorkloadTeardownRequired(md) {
+		t.Fatal("expected stale terminating-PVC condition not to affect current workloads")
 	}
 }
 

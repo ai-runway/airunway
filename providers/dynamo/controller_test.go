@@ -850,6 +850,94 @@ func TestReconcilePVCNotBound(t *testing.T) {
 	}
 }
 
+func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
+	scheme := newScheme()
+	md := newMDWithStorage("terminating-dynamo", "dynamo-storage-recovery")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	modelCache := md.Spec.Model.Storage.Volumes[0]
+	md.Spec.Model.Storage.Volumes = []airunwayv1alpha1.StorageVolume{{
+		Name:      "missing-data",
+		ClaimName: "missing-data-pvc",
+		MountPath: "/data",
+		Purpose:   airunwayv1alpha1.VolumePurposeCustom,
+	}, modelCache}
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              md.Name + "-model-cache",
+			Namespace:         md.Namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+			OwnerReferences:   []metav1.OwnerReference{{UID: md.UID}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	dgd := &unstructured.Unstructured{}
+	setDGDGVK(dgd)
+	dgd.SetName(md.Name)
+	dgd.SetNamespace(md.Namespace)
+	dgd.SetOwnerReferences([]metav1.OwnerReference{{UID: md.UID}})
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      md.Name + "-model-download",
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       md.Name,
+			UID:        md.UID,
+		}},
+	}}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, pvc, dgd, job).
+		WithStatusSubresource(md, pvc, &batchv1.Job{}).
+		Build()
+	r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("expected storage recovery requeue after 5s, got %v", result.RequeueAfter)
+	}
+	remaining := &unstructured.Unstructured{}
+	setDGDGVK(remaining)
+	err = c.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, remaining)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected owned DynamoGraphDeployment deletion, got %v", err)
+	}
+	remainingJob := &batchv1.Job{}
+	err = c.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, remainingJob)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected owned downloader Job deletion, got %v", err)
+	}
+	updated := &airunwayv1alpha1.ModelDeployment{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, updated); err != nil {
+		t.Fatalf("getting updated ModelDeployment: %v", err)
+	}
+	assertCondition(
+		t,
+		updated.Status.Conditions,
+		airunwayv1alpha1.ConditionTypeStorageReady,
+		metav1.ConditionFalse,
+		"PVCsTerminating",
+	)
+	assertCondition(
+		t,
+		updated.Status.Conditions,
+		airunwayv1alpha1.ConditionTypeReady,
+		metav1.ConditionFalse,
+		"StorageUnavailable",
+	)
+	if updated.Status.Endpoint != nil || updated.Status.Replicas != nil {
+		t.Fatalf("expected stale serving status to be cleared, got endpoint=%+v replicas=%+v", updated.Status.Endpoint, updated.Status.Replicas)
+	}
+}
+
 const testModelDownloaderImage = "example.test/model-downloader:v1"
 
 func TestReconcileDownloadNotComplete(t *testing.T) {

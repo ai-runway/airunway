@@ -956,12 +956,118 @@ func TestEnsurePVCsPreExistingTerminating(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingPVC).WithStatusSubresource(existingPVC).Build()
 
-	allReady, err := EnsurePVCs(context.Background(), c, md)
+	state, err := EnsurePVCsState(context.Background(), c, md)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if allReady {
-		t.Error("expected allReady=false for terminating pre-existing PVC")
+	if state != PVCStateTerminating {
+		t.Fatalf("expected terminating state for terminating pre-existing PVC, got %s", state)
+	}
+}
+
+func TestEnsurePVCsManagedTerminating(t *testing.T) {
+	md := newDownloadMD("managed-model", "managed-storage")
+	now := metav1.Now()
+	managedPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              md.Spec.Model.Storage.Volumes[0].ResolvedClaimName(md.Name),
+			Namespace:         md.Namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+			OwnerReferences:   []metav1.OwnerReference{{UID: md.UID}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithObjects(managedPVC).
+		WithStatusSubresource(managedPVC).
+		Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected terminating state for managed PVC, got %s", state)
+	}
+}
+
+func TestEnsurePVCsStatePreservesTerminationAcrossLaterError(t *testing.T) {
+	scheme := newScheme()
+	_ = corev1.AddToScheme(scheme)
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-model", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "terminating", ClaimName: "terminating-pvc"},
+				{Name: "lost", ClaimName: "lost-pvc"},
+			}},
+		}},
+	}
+	now := metav1.Now()
+	terminatingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "terminating-pvc",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	lostPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "lost-pvc", Namespace: "default"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimLost},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(terminatingPVC, lostPVC).
+		WithStatusSubresource(terminatingPVC, lostPVC).
+		Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err == nil {
+		t.Fatal("expected Lost claim error")
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected terminating state to take precedence, got %s", state)
+	}
+}
+
+func TestEnsurePVCsStateFindsTerminationAfterEarlierError(t *testing.T) {
+	scheme := newScheme()
+	_ = corev1.AddToScheme(scheme)
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "ordered-model", Namespace: "storage-order", UID: types.UID("ordered-uid")},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "missing", ClaimName: "missing-pvc"},
+				{Name: "terminating", ClaimName: "terminating-pvc"},
+			}},
+		}},
+	}
+	now := metav1.Now()
+	terminatingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "terminating-pvc",
+			Namespace:         md.Namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(terminatingPVC).
+		WithStatusSubresource(terminatingPVC).
+		Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err == nil {
+		t.Fatal("expected missing claim error")
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected later terminating claim to take precedence, got %s", state)
 	}
 }
 
