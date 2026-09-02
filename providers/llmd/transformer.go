@@ -35,6 +35,9 @@ const (
 	// DefaultVLLMPort is the default serving port for vLLM
 	DefaultVLLMPort = int64(8000)
 
+	// DefaultVLLMHealthPath is the vLLM endpoint that reports engine health.
+	DefaultVLLMHealthPath = "/health"
+
 	// GPUResourceKey is the Kubernetes resource key for NVIDIA GPUs
 	GPUResourceKey = "nvidia.com/gpu"
 
@@ -312,10 +315,13 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 	}
 
 	container := map[string]interface{}{
-		"name":  "vllm",
-		"image": image,
-		"args":  argsList,
-		"ports": ports,
+		"name":           "vllm",
+		"image":          image,
+		"args":           argsList,
+		"ports":          ports,
+		"startupProbe":   buildStartupProbe(),
+		"livenessProbe":  buildLivenessProbe(),
+		"readinessProbe": buildReadinessProbe(),
 	}
 
 	// Resource limits/requests
@@ -331,6 +337,30 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 	}
 
 	return container, nil
+}
+
+func buildStartupProbe() map[string]any {
+	return buildHTTPProbe(15, 10, 60)
+}
+
+func buildLivenessProbe() map[string]any {
+	return buildHTTPProbe(15, 10, 3)
+}
+
+func buildReadinessProbe() map[string]any {
+	return buildHTTPProbe(15, 5, 3)
+}
+
+func buildHTTPProbe(initialDelaySeconds, periodSeconds, failureThreshold int64) map[string]any {
+	return map[string]any{
+		"initialDelaySeconds": initialDelaySeconds,
+		"periodSeconds":       periodSeconds,
+		"failureThreshold":    failureThreshold,
+		"httpGet": map[string]any{
+			"path": DefaultVLLMHealthPath,
+			"port": DefaultVLLMPort,
+		},
+	}
 }
 
 // buildVLLMArgs constructs the vLLM command-line arguments.

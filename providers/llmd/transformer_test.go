@@ -78,6 +78,38 @@ func TestTransformAggregatedBasic(t *testing.T) {
 	}
 }
 
+func TestTransformServingDeploymentsHaveHTTPProbes(t *testing.T) {
+	tr := NewTransformer()
+
+	aggregated, err := tr.Transform(context.Background(), newTestMD("aggregated", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error for aggregated deployment: %v", err)
+	}
+	assertServingProbes(t, aggregated[0])
+
+	disaggregatedMD := newTestMD("disaggregated", "default")
+	disaggregatedMD.Spec.Serving = &airunwayv1alpha1.ServingSpec{
+		Mode: airunwayv1alpha1.ServingModeDisaggregated,
+	}
+	disaggregatedMD.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 1,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 1},
+		},
+		Decode: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 1,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 1},
+		},
+	}
+
+	disaggregated, err := tr.Transform(context.Background(), disaggregatedMD)
+	if err != nil {
+		t.Fatalf("unexpected error for disaggregated deployment: %v", err)
+	}
+	assertServingProbes(t, disaggregated[0])
+	assertServingProbes(t, disaggregated[1])
+}
+
 func TestTransformAggregatedOwnerReference(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
@@ -1000,4 +1032,47 @@ func getContainerArgs(t *testing.T, deploy *unstructured.Unstructured) []string 
 	}
 	container := containers[0].(map[string]interface{})
 	return argsToStrings(container["args"].([]interface{}))
+}
+
+func assertServingProbes(t *testing.T, deploy *unstructured.Unstructured) {
+	t.Helper()
+	containers, found, err := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "containers")
+	if err != nil || !found || len(containers) != 1 {
+		t.Fatalf("expected one serving container, found=%v count=%d err=%v", found, len(containers), err)
+	}
+	container, ok := containers[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected serving container object, got %T", containers[0])
+	}
+
+	assertHTTPProbe(t, container, "startupProbe", 15, 10, 60)
+	assertHTTPProbe(t, container, "livenessProbe", 15, 10, 3)
+	assertHTTPProbe(t, container, "readinessProbe", 15, 5, 3)
+}
+
+func assertHTTPProbe(t *testing.T, container map[string]any, name string, initialDelaySeconds, periodSeconds, failureThreshold int64) {
+	t.Helper()
+	probe, ok := container[name].(map[string]any)
+	if !ok {
+		t.Fatalf("expected %s", name)
+	}
+	if probe["initialDelaySeconds"] != initialDelaySeconds {
+		t.Errorf("expected %s initialDelaySeconds %d, got %v", name, initialDelaySeconds, probe["initialDelaySeconds"])
+	}
+	if probe["periodSeconds"] != periodSeconds {
+		t.Errorf("expected %s periodSeconds %d, got %v", name, periodSeconds, probe["periodSeconds"])
+	}
+	if probe["failureThreshold"] != failureThreshold {
+		t.Errorf("expected %s failureThreshold %d, got %v", name, failureThreshold, probe["failureThreshold"])
+	}
+	httpGet, ok := probe["httpGet"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected %s httpGet", name)
+	}
+	if httpGet["path"] != DefaultVLLMHealthPath {
+		t.Errorf("expected %s path %s, got %v", name, DefaultVLLMHealthPath, httpGet["path"])
+	}
+	if httpGet["port"] != DefaultVLLMPort {
+		t.Errorf("expected %s port %d, got %v", name, DefaultVLLMPort, httpGet["port"])
+	}
 }
