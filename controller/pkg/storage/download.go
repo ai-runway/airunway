@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"sort"
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -45,6 +46,9 @@ const (
 	downloadJobSuffix = "-model-download"
 	// downloadJobInputHashAnnotation ties Job completion to the exact model-cache PVC identity and inputs.
 	downloadJobInputHashAnnotation = "airunway.ai/download-input-hash"
+	// downloadJobSchedulingHashAnnotation replaces incomplete Jobs when immutable
+	// scheduling constraints change without invalidating completed downloads.
+	downloadJobSchedulingHashAnnotation = "airunway.ai/download-scheduling-hash"
 
 	// defaultBackoffLimit is the number of retries for the download Job
 	defaultBackoffLimit int32 = 6
@@ -124,6 +128,40 @@ func downloadJobInputHash(
 		huggingFaceToken,
 		string(pvcUID),
 	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return fmt.Sprintf("%x", sum)
+}
+
+func downloadJobSchedulingHash(md *airunwayv1alpha1.ModelDeployment) string {
+	parts := []string{"nodeSelector"}
+	selectorKeys := make([]string, 0, len(md.Spec.NodeSelector))
+	for key := range md.Spec.NodeSelector {
+		selectorKeys = append(selectorKeys, key)
+	}
+	sort.Strings(selectorKeys)
+	for _, key := range selectorKeys {
+		parts = append(parts, key, md.Spec.NodeSelector[key])
+	}
+
+	canonicalTolerations := make([]string, len(md.Spec.Tolerations))
+	for i := range md.Spec.Tolerations {
+		toleration := &md.Spec.Tolerations[i]
+		tolerationSeconds := "nil"
+		if toleration.TolerationSeconds != nil {
+			tolerationSeconds = fmt.Sprintf("%d", *toleration.TolerationSeconds)
+		}
+		canonicalTolerations[i] = strings.Join([]string{
+			toleration.Key,
+			string(toleration.Operator),
+			toleration.Value,
+			string(toleration.Effect),
+			tolerationSeconds,
+		}, "\x00")
+	}
+	sort.Strings(canonicalTolerations)
+	parts = append(parts, "tolerations")
+	parts = append(parts, canonicalTolerations...)
+
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return fmt.Sprintf("%x", sum)
 }
@@ -226,26 +264,37 @@ func EnsureDownloadJob(
 		return false, nil // requeue → next reconcile creates a Job for the current PVC/input identity
 	}
 
-	// Job exists — check conditions (authoritative) then counters (fallback).
+	// Completed downloads remain valid when only scheduling constraints change:
+	// the immutable Job no longer needs to schedule, and the input hash still
+	// proves the model/PVC provenance.
 	for _, cond := range existing.Status.Conditions {
-		if cond.Status != corev1.ConditionTrue {
-			continue
-		}
-		switch cond.Type {
-		case batchv1.JobComplete:
+		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobComplete {
 			logger.Info("Model download Job completed", "name", jobName)
 			return true, nil
-		case batchv1.JobFailed:
-			return false, fmt.Errorf("model download Job %s failed permanently: %s",
-				jobName, cond.Message)
 		}
 	}
 
-	// Fallback: counter-based detection for older clusters or edge cases
+	// Fallback: counter-based completion detection for older clusters or edge cases
 	// where conditions haven't been set yet.
 	if existing.Status.Succeeded >= 1 {
 		logger.Info("Model download Job completed (counter)", "name", jobName)
 		return true, nil
+	}
+
+	if existing.Annotations[downloadJobSchedulingHashAnnotation] != downloadJobSchedulingHash(md) {
+		if err := deleteDownloadJob(ctx, c, existing, "scheduling constraints changed"); err != nil {
+			return false, err
+		}
+		return false, nil // requeue → next reconcile creates a schedulable replacement Job
+	}
+
+	// Job is incomplete and still has current scheduling. Check terminal failure
+	// conditions before falling back to counters.
+	for _, cond := range existing.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobFailed {
+			return false, fmt.Errorf("model download Job %s failed permanently: %s",
+				jobName, cond.Message)
+		}
 	}
 
 	backoffLimit := defaultBackoffLimit
@@ -329,7 +378,8 @@ func buildDownloadJob(
 			Name:      downloadJobName(md.Name),
 			Namespace: md.Namespace,
 			Annotations: map[string]string{
-				downloadJobInputHashAnnotation: inputHash,
+				downloadJobInputHashAnnotation:      inputHash,
+				downloadJobSchedulingHashAnnotation: downloadJobSchedulingHash(md),
 			},
 			Labels: map[string]string{
 				airunwayv1alpha1.LabelManagedBy:       "airunway",

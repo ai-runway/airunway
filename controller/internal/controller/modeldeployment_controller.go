@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -227,6 +228,18 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
 	}
 
+	// Releasing a terminating PVC takes precedence over validation and provider
+	// selection. Provider reconcilers need this current-generation condition to
+	// stop older workloads, even when the desired spec cannot otherwise proceed.
+	if md.Status.Provider != nil &&
+		providerUsesCoreStorageLifecycle(md.Status.Provider.Name) &&
+		storage.HasStorageVolumes(&md) {
+		result, handled, err := r.reconcileTerminatingStorage(ctx, &md, base)
+		if handled {
+			return result, err
+		}
+	}
+
 	// Step 1: List all InferenceProviderConfigs once for use across validation and selection.
 	// This is loaded regardless of EnableProviderSelector because validateSpec needs
 	// provider capabilities to determine whether an engine supports CPU-only inference.
@@ -415,6 +428,62 @@ func providerUsesCoreStorageLifecycle(providerName string) bool {
 	}
 }
 
+// reconcileTerminatingStorage performs only the teardown-safe subset of
+// storage reconciliation. It deliberately runs before normal spec validation
+// so an invalid update cannot keep existing PVC consumers alive.
+func (r *ModelDeploymentReconciler) reconcileTerminatingStorage(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	base *airunwayv1alpha1.ModelDeployment,
+) (ctrl.Result, bool, error) {
+	terminating, detectionErr := storage.HasTerminatingPVCs(ctx, r.Client, md)
+	if !terminating {
+		if detectionErr != nil {
+			return ctrl.Result{}, true, detectionErr
+		}
+		return ctrl.Result{}, false, nil
+	}
+
+	_, cleanupErr := storage.EnsureDownloadJobAbsent(ctx, r.Client, md)
+	preparationErr := errors.Join(detectionErr, cleanupErr)
+	r.markStorageTerminating(md, preparationErr)
+	patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+	if preparationErr != nil {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true, patchErr
+	}
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, true, patchErr
+}
+
+func (r *ModelDeploymentReconciler) markStorageTerminating(
+	md *airunwayv1alpha1.ModelDeployment,
+	preparationErr error,
+) {
+	storageMessage := "Stopping provider workloads and waiting for terminating storage PVCs"
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+	md.Status.Message = storageMessage
+	if preparationErr != nil {
+		storageMessage = preparationErr.Error()
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = fmt.Sprintf("Failed while releasing terminating storage PVCs: %s", preparationErr)
+	}
+	r.setCondition(
+		md,
+		airunwayv1alpha1.ConditionTypeStorageReady,
+		metav1.ConditionFalse,
+		storage.ConditionReasonPVCsTerminating,
+		storageMessage,
+	)
+	r.setCondition(
+		md,
+		airunwayv1alpha1.ConditionTypeReady,
+		metav1.ConditionFalse,
+		"StorageUnavailable",
+		"Provider workload is stopping to release terminating storage PVCs",
+	)
+	md.Status.Endpoint = nil
+	md.Status.Replicas = nil
+}
+
 // reconcileStorage blocks provider workloads until all same-namespace claims
 // are usable and any required HuggingFace model download has completed.
 func (r *ModelDeploymentReconciler) reconcileStorage(
@@ -425,22 +494,15 @@ func (r *ModelDeploymentReconciler) reconcileStorage(
 	recoveringStorageFailure := hasCurrentStorageFailure(md) || hasHistoricalStorageFailure(md)
 	stage, prepareErr := storage.Prepare(ctx, r.Client, md, r.DownloadJobImage)
 	if prepareErr != nil {
+		if stage == storage.PreparationPVCsTerminating {
+			r.markStorageTerminating(md, prepareErr)
+			patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, true, patchErr
+		}
 		conditionType := airunwayv1alpha1.ConditionTypeStorageReady
 		reason := conditionReasonPVCFailed
 		messagePrefix := "Failed to prepare model storage"
 		switch stage {
-		case storage.PreparationPVCsTerminating:
-			reason = storage.ConditionReasonPVCsTerminating
-			messagePrefix = "Failed while releasing terminating storage PVCs"
-			r.setCondition(
-				md,
-				airunwayv1alpha1.ConditionTypeReady,
-				metav1.ConditionFalse,
-				"StorageUnavailable",
-				"Provider workload is stopping to release terminating storage PVCs",
-			)
-			md.Status.Endpoint = nil
-			md.Status.Replicas = nil
 		case storage.PreparationDownloadPending:
 			conditionType = airunwayv1alpha1.ConditionTypeModelDownloaded
 			if storage.NeedsDownloadJob(md) {
@@ -463,24 +525,7 @@ func (r *ModelDeploymentReconciler) reconcileStorage(
 
 	switch stage {
 	case storage.PreparationPVCsTerminating:
-		r.setCondition(
-			md,
-			airunwayv1alpha1.ConditionTypeStorageReady,
-			metav1.ConditionFalse,
-			storage.ConditionReasonPVCsTerminating,
-			"Stopping provider workloads and waiting for terminating storage PVCs",
-		)
-		r.setCondition(
-			md,
-			airunwayv1alpha1.ConditionTypeReady,
-			metav1.ConditionFalse,
-			"StorageUnavailable",
-			"Provider workload is stopping to release terminating storage PVCs",
-		)
-		md.Status.Endpoint = nil
-		md.Status.Replicas = nil
-		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
-		md.Status.Message = "Stopping provider workloads and waiting for terminating storage PVCs"
+		r.markStorageTerminating(md, nil)
 		patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, patchErr
 	case storage.PreparationPVCsPending:
@@ -1198,28 +1243,10 @@ func (r *ModelDeploymentReconciler) mapProviderConfigToModelDeployments(ctx cont
 
 func modelDeploymentPVCReferenceIndexValues(obj client.Object) []string {
 	md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
-	if !ok || md.Spec.Model.Storage == nil {
+	if !ok {
 		return nil
 	}
-
-	seen := make(map[string]struct{}, len(md.Spec.Model.Storage.Volumes))
-	references := make([]string, 0, len(md.Spec.Model.Storage.Volumes))
-	for i := range md.Spec.Model.Storage.Volumes {
-		volume := &md.Spec.Model.Storage.Volumes[i]
-		if volume.Size != nil {
-			continue
-		}
-		claimName := volume.ResolvedClaimName(md.Name)
-		if claimName == "" {
-			continue
-		}
-		if _, exists := seen[claimName]; exists {
-			continue
-		}
-		seen[claimName] = struct{}{}
-		references = append(references, claimName)
-	}
-	return references
+	return storage.ReferencedPVCNames(md)
 }
 
 func (r *ModelDeploymentReconciler) mapPVCToModelDeployments(ctx context.Context, obj client.Object) []reconcile.Request {

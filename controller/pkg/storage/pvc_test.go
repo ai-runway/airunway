@@ -94,6 +94,60 @@ func TestHasManagedPVCs(t *testing.T) {
 	}
 }
 
+func TestReferencedPVCNames(t *testing.T) {
+	const sharedCacheClaim = "shared-cache"
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "model"},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "explicit", ClaimName: sharedCacheClaim},
+				{Name: "duplicate", ClaimName: sharedCacheClaim},
+				{Name: "generated"},
+				{Name: "managed", Size: pvcSize("5Gi")},
+			}},
+		}},
+	}
+
+	got := ReferencedPVCNames(md)
+	if len(got) != 2 || got[0] != sharedCacheClaim || got[1] != "model-generated" {
+		t.Fatalf("unexpected referenced PVC names: %#v", got)
+	}
+}
+
+func TestHasTerminatingPVCsChecksAllClaimsWithoutPreparingThem(t *testing.T) {
+	now := metav1.Now()
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "default"},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "missing", ClaimName: "missing-pvc"},
+				{Name: "terminating", ClaimName: "terminating-pvc"},
+				{Name: "managed", Size: pvcSize("5Gi")},
+			}},
+		}},
+	}
+	terminatingPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:              "terminating-pvc",
+		Namespace:         md.Namespace,
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"kubernetes.io/pvc-protection"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(terminatingPVC).Build()
+
+	terminating, err := HasTerminatingPVCs(context.Background(), c, md)
+	if err != nil {
+		t.Fatalf("checking terminating PVCs: %v", err)
+	}
+	if !terminating {
+		t.Fatal("expected the terminating referenced PVC to be detected")
+	}
+
+	managed := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "model-managed", Namespace: md.Namespace}, managed); err == nil {
+		t.Fatal("termination detection must not create a missing managed PVC")
+	}
+}
+
 func TestEnsurePVCsCreation(t *testing.T) {
 	scheme := newScheme()
 	_ = corev1.AddToScheme(scheme)

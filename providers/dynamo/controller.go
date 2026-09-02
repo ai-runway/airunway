@@ -58,6 +58,9 @@ const (
 
 	// FinalizerName is the finalizer used by this controller
 	FinalizerName = "airunway.ai/dynamo-provider"
+	// dynamoModelDeploymentPVCReferenceField indexes user-owned PVC references
+	// so create/delete events can recover deployments that could not proceed.
+	dynamoModelDeploymentPVCReferenceField = "airunway.ai/dynamo-modeldeployment-pvc-reference"
 
 	// FieldManager is the server-side apply field manager name
 	FieldManager = "dynamo-provider"
@@ -249,6 +252,16 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Consumer teardown for a terminating PVC must happen before compatibility
+	// validation. Otherwise an invalid update can leave the old DGD or downloader
+	// holding pvc-protection indefinitely.
+	if storage.HasStorageVolumes(&md) {
+		result, handled, err := r.reconcileTerminatingStorage(ctx, &md)
+		if handled {
+			return result, err
+		}
+	}
+
 	// Validate provider compatibility
 	if err := r.validateCompatibility(&md); err != nil {
 		logger.Error(err, "Provider compatibility check failed", "name", md.Name)
@@ -290,56 +303,7 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if storage.HasStorageVolumes(&md) {
 		pvcState, err := storage.EnsurePVCsState(ctx, r.Client, &md)
 		if pvcState == storage.PVCStateTerminating {
-			if err != nil {
-				logger.Error(err, "PVC preparation also failed while terminating storage is being released", "name", md.Name)
-			}
-			if _, err := storage.EnsureDownloadJobAbsent(ctx, r.Client, &md); err != nil {
-				return r.failStorageReconciliation(
-					ctx,
-					&md,
-					airunwayv1alpha1.ConditionTypeStorageReady,
-					"PVCConsumerTeardownFailed",
-					"Failed to stop model downloader for terminating PVC",
-					err,
-				)
-			}
-			if _, err := storage.EnsureConsumerWorkloadsAbsent(ctx, r.Client, &md, storage.ConsumerWorkload{
-				GroupVersionKind: schema.GroupVersionKind{
-					Group: DynamoAPIGroup, Version: DynamoAPIVersion, Kind: DynamoGraphDeploymentKind,
-				},
-				Name: md.Name,
-			}); err != nil {
-				return r.failStorageReconciliation(
-					ctx,
-					&md,
-					airunwayv1alpha1.ConditionTypeStorageReady,
-					"PVCConsumerTeardownFailed",
-					"Failed to stop Dynamo workload for terminating PVC",
-					err,
-				)
-			}
-			r.setCondition(
-				&md,
-				airunwayv1alpha1.ConditionTypeStorageReady,
-				metav1.ConditionFalse,
-				storage.ConditionReasonPVCsTerminating,
-				"Stopping provider workloads and waiting for terminating storage PVCs",
-			)
-			r.setCondition(
-				&md,
-				airunwayv1alpha1.ConditionTypeReady,
-				metav1.ConditionFalse,
-				"StorageUnavailable",
-				"Provider workload is stopping to release terminating storage PVCs",
-			)
-			md.Status.Endpoint = nil
-			md.Status.Replicas = nil
-			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
-			md.Status.Message = "Stopping provider workloads and waiting for terminating storage PVCs"
-			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return r.handleTerminatingStorage(ctx, &md, err)
 		}
 		if err != nil {
 			logger.Error(err, "Failed to ensure PVCs", "name", md.Name)
@@ -524,6 +488,84 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Requeue to periodically sync status
 	return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+}
+
+func (r *DynamoProviderReconciler) reconcileTerminatingStorage(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) (ctrl.Result, bool, error) {
+	terminating, detectionErr := storage.HasTerminatingPVCs(ctx, r.Client, md)
+	if !terminating {
+		if detectionErr != nil {
+			return ctrl.Result{}, true, detectionErr
+		}
+		return ctrl.Result{}, false, nil
+	}
+
+	result, err := r.handleTerminatingStorage(ctx, md, detectionErr)
+	return result, true, err
+}
+
+func (r *DynamoProviderReconciler) handleTerminatingStorage(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	detectionErr error,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	if detectionErr != nil {
+		logger.Error(detectionErr, "PVC inspection also failed while terminating storage is being released", "name", md.Name)
+	}
+
+	var teardownErr error
+	messagePrefix := ""
+	if _, err := storage.EnsureDownloadJobAbsent(ctx, r.Client, md); err != nil {
+		messagePrefix = "Failed to stop model downloader for terminating PVC"
+		teardownErr = err
+	}
+	if _, err := storage.EnsureConsumerWorkloadsAbsent(ctx, r.Client, md, storage.ConsumerWorkload{
+		GroupVersionKind: schema.GroupVersionKind{
+			Group: DynamoAPIGroup, Version: DynamoAPIVersion, Kind: DynamoGraphDeploymentKind,
+		},
+		Name: md.Name,
+	}); err != nil {
+		if messagePrefix == "" {
+			messagePrefix = "Failed to stop Dynamo workload for terminating PVC"
+		}
+		teardownErr = stderrors.Join(teardownErr, err)
+	}
+	if teardownErr != nil {
+		return r.failStorageReconciliation(
+			ctx,
+			md,
+			airunwayv1alpha1.ConditionTypeStorageReady,
+			"PVCConsumerTeardownFailed",
+			messagePrefix,
+			teardownErr,
+		)
+	}
+
+	r.setCondition(
+		md,
+		airunwayv1alpha1.ConditionTypeStorageReady,
+		metav1.ConditionFalse,
+		storage.ConditionReasonPVCsTerminating,
+		"Stopping provider workloads and waiting for terminating storage PVCs",
+	)
+	r.setCondition(
+		md,
+		airunwayv1alpha1.ConditionTypeReady,
+		metav1.ConditionFalse,
+		"StorageUnavailable",
+		"Provider workload is stopping to release terminating storage PVCs",
+	)
+	md.Status.Endpoint = nil
+	md.Status.Replicas = nil
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+	md.Status.Message = "Stopping provider workloads and waiting for terminating storage PVCs"
+	if statusErr := r.Status().Update(ctx, md); statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 func (r *DynamoProviderReconciler) updatePendingStatus(
@@ -1029,13 +1071,72 @@ func (r *DynamoProviderReconciler) mapProviderConfigToModelDeployments(ctx conte
 	return requests
 }
 
+func dynamoModelDeploymentPVCReferenceIndexValues(obj client.Object) []string {
+	md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
+	if !ok {
+		return nil
+	}
+	return storage.ReferencedPVCNames(md)
+}
+
+func (r *DynamoProviderReconciler) mapPVCToModelDeployments(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	pvc, ok := obj.(*corev1.PersistentVolumeClaim)
+	if !ok {
+		return nil
+	}
+
+	var mdList airunwayv1alpha1.ModelDeploymentList
+	if err := r.List(
+		ctx,
+		&mdList,
+		client.InNamespace(pvc.Namespace),
+		client.MatchingFields{dynamoModelDeploymentPVCReferenceField: pvc.Name},
+	); err != nil {
+		log.FromContext(ctx).Error(
+			err,
+			"Failed to list Dynamo ModelDeployments for PVC change",
+			"pvc", pvc.Name,
+			"namespace", pvc.Namespace,
+		)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(mdList.Items))
+	for i := range mdList.Items {
+		md := &mdList.Items[i]
+		if !dynamoProviderPredicate(md) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+		})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&airunwayv1alpha1.ModelDeployment{},
+		dynamoModelDeploymentPVCReferenceField,
+		dynamoModelDeploymentPVCReferenceIndexValues,
+	); err != nil {
+		return fmt.Errorf("failed to index Dynamo ModelDeployment PVC references: %w", err)
+	}
+
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.ModelDeployment{}).
 		// Watch PVCs and Jobs owned by ModelDeployments (auto-reconcile on status changes)
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPVCToModelDeployments),
+		).
 		Watches(
 			&airunwayv1alpha1.InferenceProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToModelDeployments),

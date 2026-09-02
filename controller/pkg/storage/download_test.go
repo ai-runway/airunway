@@ -292,6 +292,81 @@ func TestBuildDownloadJobCopiesWorkloadSchedulingConstraints(t *testing.T) {
 	}
 }
 
+func TestDownloadJobSchedulingHashIsCanonical(t *testing.T) {
+	seconds := int64(60)
+	first := newDownloadMD("my-model", "default")
+	first.Spec.NodeSelector = map[string]string{"zone": "a", "pool": "gpu"}
+	first.Spec.Tolerations = []corev1.Toleration{
+		{Key: "sku", Operator: corev1.TolerationOpEqual, Value: "gpu", Effect: corev1.TaintEffectNoSchedule},
+		{Key: "spot", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &seconds},
+	}
+
+	second := first.DeepCopy()
+	second.Spec.NodeSelector = map[string]string{"pool": "gpu", "zone": "a"}
+	second.Spec.Tolerations[0], second.Spec.Tolerations[1] = second.Spec.Tolerations[1], second.Spec.Tolerations[0]
+
+	if got, want := downloadJobSchedulingHash(second), downloadJobSchedulingHash(first); got != want {
+		t.Fatalf("equivalent scheduling constraints produced different hashes: got %s want %s", got, want)
+	}
+}
+
+func TestEnsureDownloadJobReplacesIncompleteJobWhenSchedulingChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).Build()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.NodeSelector = map[string]string{"pool": "system"}
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	md.Spec.NodeSelector["pool"] = "gpu"
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling changed scheduling: %v", err)
+	}
+	if completed {
+		t.Fatal("incomplete Job with stale scheduling must not be reported complete")
+	}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale pending Job deletion, got %v", err)
+	}
+}
+
+func TestEnsureDownloadJobPreservesCompletedJobWhenSchedulingChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).Build()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.NodeSelector = map[string]string{"pool": "system"}
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	job := &batchv1.Job{}
+	if err := c.Get(ctx, key, job); err != nil {
+		t.Fatalf("getting initial Job: %v", err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := c.Status().Update(ctx, job); err != nil {
+		t.Fatalf("completing initial Job: %v", err)
+	}
+
+	md.Spec.NodeSelector["pool"] = "gpu"
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling completed Job after scheduling change: %v", err)
+	}
+	if !completed {
+		t.Fatal("completed download provenance should survive scheduling-only changes")
+	}
+	if err := c.Get(ctx, key, &batchv1.Job{}); err != nil {
+		t.Fatalf("completed Job was unexpectedly deleted: %v", err)
+	}
+}
+
 func TestEnsureDownloadJobWithHFToken(t *testing.T) {
 	scheme := newScheme()
 	_ = batchv1.AddToScheme(scheme)
@@ -1090,5 +1165,6 @@ func stampCurrentDownloadJob(job *batchv1.Job, md *airunwayv1alpha1.ModelDeploym
 			testDownloadJobImage,
 			"",
 		),
+		downloadJobSchedulingHashAnnotation: downloadJobSchedulingHash(md),
 	}
 }

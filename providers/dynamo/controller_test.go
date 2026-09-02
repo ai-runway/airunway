@@ -854,6 +854,9 @@ func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
 	scheme := newScheme()
 	md := newMDWithStorage("terminating-dynamo", "dynamo-storage-recovery")
 	controllerutil.AddFinalizer(md, FinalizerName)
+	// The old workload still has to release its PVC even though the updated
+	// desired spec is no longer Dynamo-compatible.
+	md.Spec.Resources = nil
 	modelCache := md.Spec.Model.Storage.Volumes[0]
 	md.Spec.Model.Storage.Volumes = []airunwayv1alpha1.StorageVolume{{
 		Name:      "missing-data",
@@ -935,6 +938,9 @@ func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
 	)
 	if updated.Status.Endpoint != nil || updated.Status.Replicas != nil {
 		t.Fatalf("expected stale serving status to be cleared, got endpoint=%+v replicas=%+v", updated.Status.Endpoint, updated.Status.Replicas)
+	}
+	if compatible := meta.FindStatusCondition(updated.Status.Conditions, airunwayv1alpha1.ConditionTypeProviderCompatible); compatible != nil {
+		t.Fatalf("compatibility validation must wait for PVC consumer teardown, got %#v", compatible)
 	}
 }
 
@@ -1557,6 +1563,61 @@ func TestDynamoProviderPredicatePassesPVC(t *testing.T) {
 	}
 	if !dynamoProviderPredicate(pvc) {
 		t.Error("expected PVC to pass predicate (non-ModelDeployment objects should always pass)")
+	}
+}
+
+func TestDynamoModelDeploymentPVCReferenceIndexValues(t *testing.T) {
+	managedSize := resource.MustParse("5Gi")
+	md := newMDForController("model", "default")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{Name: "explicit", ClaimName: "shared-cache"},
+		{Name: "duplicate", ClaimName: "shared-cache"},
+		{Name: "generated"},
+		{Name: "managed", Size: &managedSize},
+	}}
+
+	got := dynamoModelDeploymentPVCReferenceIndexValues(md)
+	if len(got) != 2 || got[0] != "shared-cache" || got[1] != "model-generated" {
+		t.Fatalf("unexpected indexed PVC references: %#v", got)
+	}
+}
+
+func TestMapPVCToDynamoModelDeployments(t *testing.T) {
+	referenced := newMDForController("referenced", "default")
+	referenced.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name: "cache", ClaimName: "shared-cache",
+	}}}
+	unrelated := newMDForController("unrelated", "default")
+	unrelated.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name: "cache", ClaimName: "other-cache",
+	}}}
+	otherProvider := newMDForController("other-provider", "default")
+	otherProvider.Status.Provider.Name = ProviderName + "-other"
+	otherProvider.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name: "cache", ClaimName: "shared-cache",
+	}}}
+	otherNamespace := newMDForController("other-namespace", "other")
+	otherNamespace.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name: "cache", ClaimName: "shared-cache",
+	}}}
+
+	scheme := newScheme()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(referenced, unrelated, otherProvider, otherNamespace).
+		WithIndex(
+			&airunwayv1alpha1.ModelDeployment{},
+			dynamoModelDeploymentPVCReferenceField,
+			dynamoModelDeploymentPVCReferenceIndexValues,
+		).
+		Build()
+	r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)
+
+	requests := r.mapPVCToModelDeployments(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-cache", Namespace: "default"},
+	})
+	if len(requests) != 1 || requests[0].Name != referenced.Name || requests[0].Namespace != referenced.Namespace {
+		t.Fatalf("unexpected Dynamo PVC watch requests: %#v", requests)
 	}
 }
 

@@ -48,6 +48,77 @@ func HasStorageVolumes(md *airunwayv1alpha1.ModelDeployment) bool {
 	return md.Spec.Model.Storage != nil && len(md.Spec.Model.Storage.Volumes) > 0
 }
 
+// ReferencedPVCNames returns the unique claims that must already exist because
+// their storage volume does not request controller-managed capacity.
+func ReferencedPVCNames(md *airunwayv1alpha1.ModelDeployment) []string {
+	if md.Spec.Model.Storage == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(md.Spec.Model.Storage.Volumes))
+	references := make([]string, 0, len(md.Spec.Model.Storage.Volumes))
+	for i := range md.Spec.Model.Storage.Volumes {
+		volume := &md.Spec.Model.Storage.Volumes[i]
+		if volume.Size != nil {
+			continue
+		}
+		claimName := volume.ResolvedClaimName(md.Name)
+		if claimName == "" {
+			continue
+		}
+		if _, exists := seen[claimName]; exists {
+			continue
+		}
+		seen[claimName] = struct{}{}
+		references = append(references, claimName)
+	}
+	return references
+}
+
+// HasTerminatingPVCs checks the configured claims without creating, deleting,
+// or otherwise preparing them. It lets reconcilers prioritize consumer
+// teardown even when normal validation cannot proceed.
+func HasTerminatingPVCs(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+) (bool, error) {
+	if md.Spec.Model.Storage == nil {
+		return false, nil
+	}
+
+	seen := make(map[string]struct{}, len(md.Spec.Model.Storage.Volumes))
+	terminating := false
+	var firstErr error
+	for i := range md.Spec.Model.Storage.Volumes {
+		claimName := md.Spec.Model.Storage.Volumes[i].ResolvedClaimName(md.Name)
+		if claimName == "" {
+			continue
+		}
+		if _, exists := seen[claimName]; exists {
+			continue
+		}
+		seen[claimName] = struct{}{}
+
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, pvc)
+		if errors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to get PVC %s while checking for termination: %w", claimName, err)
+			}
+			continue
+		}
+		if !pvc.DeletionTimestamp.IsZero() {
+			terminating = true
+		}
+	}
+
+	return terminating, firstErr
+}
+
 // PVCState describes whether the claims required by a ModelDeployment are
 // ready for consumers, still being prepared, or waiting for existing
 // consumers to release a terminating claim.
