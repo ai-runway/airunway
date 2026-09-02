@@ -56,13 +56,37 @@ Open **http://localhost:3001**
 ### Option B: Deploy to Kubernetes
 
 ```bash
-# Install CRDs and controller (required)
+set -euo pipefail
+
+# Block AgentDeployment CREATE/UPDATE before webhook versions can mix (phase 1)
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/agentdeployment-webhook-guard.yaml
+
+# Install CRDs and roll out without AgentDeployment admission routes (phase 2)
 kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/controller.yaml
+
+# Force a new ReplicaSet even when the image tag string is unchanged, then wait
+# until every webhook Service endpoint runs the replacement pods.
+kubectl rollout restart deployment/airunway-controller-manager -n airunway-system
+kubectl rollout status deployment/airunway-controller-manager -n airunway-system --timeout=5m
+
+# Activate the complete validator/mutator set, then unblock writes (phase 3).
+# Wait until cert-controller injects the serving CA before deleting the guard.
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/agentdeployment-webhook.yaml
+kubectl wait secret/airunway-webhook-server-cert -n airunway-system --for=jsonpath='{.data.ca\.crt}' --timeout=5m
+AIRUNWAY_WEBHOOK_CA_BUNDLE="$(kubectl get secret/airunway-webhook-server-cert -n airunway-system -o jsonpath='{.data.ca\.crt}')"
+test -n "${AIRUNWAY_WEBHOOK_CA_BUNDLE}"
+kubectl wait mutatingwebhookconfiguration/airunway-mutating-webhook-configuration --for="jsonpath={.webhooks[?(@.name==\"magentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=${AIRUNWAY_WEBHOOK_CA_BUNDLE}" --timeout=5m
+kubectl wait validatingwebhookconfiguration/airunway-validating-webhook-configuration --for="jsonpath={.webhooks[?(@.name==\"vagentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=${AIRUNWAY_WEBHOOK_CA_BUNDLE}" --timeout=5m
+kubectl delete --ignore-not-found=true -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/agentdeployment-webhook-guard.yaml
 
 # Install dashboard UI (optional)
 kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/dashboard.yaml
 kubectl port-forward -n airunway-system svc/airunway 3001:80
 ```
+
+For production upgrades, use a versioned release and an immutable digest or a
+new image tag. The explicit restart prevents an unchanged Deployment template
+from making the rollout check succeed against old pods.
 
 Open **http://localhost:3001** — see [deployment docs](deploy/README.md) for more options.
 
