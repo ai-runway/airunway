@@ -938,6 +938,117 @@ func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
 	}
 }
 
+func TestReconcileTerminatingPVCReportsConsumerTeardownFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		consumerKind  string
+		messagePrefix string
+	}{
+		{
+			name:          "model downloader",
+			consumerKind:  "Job",
+			messagePrefix: "Failed to stop model downloader for terminating PVC",
+		},
+		{
+			name:          "Dynamo workload",
+			consumerKind:  DynamoGraphDeploymentKind,
+			messagePrefix: "Failed to stop Dynamo workload for terminating PVC",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newScheme()
+			md := newMDWithStorage("terminating-dynamo", "dynamo-storage-recovery")
+			controllerutil.AddFinalizer(md, FinalizerName)
+			now := metav1.Now()
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              md.Name + "-model-cache",
+					Namespace:         md.Namespace,
+					DeletionTimestamp: &now,
+					Finalizers:        []string{"kubernetes.io/pvc-protection"},
+					OwnerReferences:   []metav1.OwnerReference{{UID: md.UID}},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+			}
+
+			objects := []client.Object{md, pvc}
+			switch tt.consumerKind {
+			case "Job":
+				objects = append(objects, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+					Name:      md.Name + "-model-download",
+					Namespace: md.Namespace,
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: airunwayv1alpha1.GroupVersion.String(),
+						Kind:       "ModelDeployment",
+						Name:       md.Name,
+						UID:        md.UID,
+					}},
+				}})
+			case DynamoGraphDeploymentKind:
+				dgd := &unstructured.Unstructured{}
+				setDGDGVK(dgd)
+				dgd.SetName(md.Name)
+				dgd.SetNamespace(md.Namespace)
+				dgd.SetOwnerReferences([]metav1.OwnerReference{{UID: md.UID}})
+				objects = append(objects, dgd)
+			}
+
+			interceptorFuncs := interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if tt.consumerKind == "Job" {
+						if _, ok := obj.(*batchv1.Job); ok {
+							return fmt.Errorf("simulated %s deletion failure", tt.name)
+						}
+					}
+					if workload, ok := obj.(*unstructured.Unstructured); ok && workload.GetKind() == tt.consumerKind {
+						return fmt.Errorf("simulated %s deletion failure", tt.name)
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(md, pvc, &batchv1.Job{}).
+				WithInterceptorFuncs(interceptorFuncs).
+				Build()
+			r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)
+
+			result, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+			})
+			if err != nil {
+				t.Fatalf("unexpected reconciliation error: %v", err)
+			}
+			if result != (ctrl.Result{}) {
+				t.Fatalf("expected teardown failure to rely on a watched status update, got %+v", result)
+			}
+
+			updated := &airunwayv1alpha1.ModelDeployment{}
+			if err := c.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, updated); err != nil {
+				t.Fatalf("getting updated ModelDeployment: %v", err)
+			}
+			assertCondition(
+				t,
+				updated.Status.Conditions,
+				airunwayv1alpha1.ConditionTypeStorageReady,
+				metav1.ConditionFalse,
+				"PVCConsumerTeardownFailed",
+			)
+			if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+				t.Fatalf("expected Failed phase, got %s", updated.Status.Phase)
+			}
+			if !strings.Contains(updated.Status.Message, tt.messagePrefix) ||
+				!strings.Contains(updated.Status.Message, "simulated "+tt.name+" deletion failure") {
+				t.Fatalf("unexpected failure message: %q", updated.Status.Message)
+			}
+		})
+	}
+}
+
 const testModelDownloaderImage = "example.test/model-downloader:v1"
 
 func TestReconcileDownloadNotComplete(t *testing.T) {
