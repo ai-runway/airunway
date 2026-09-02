@@ -7,10 +7,13 @@ import (
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/providers/pkg/shim"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -180,6 +183,15 @@ func TestUnregister(t *testing.T) {
 	err := mgr.Unregister(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, "UpstreamReady")
+	if updated.Status.Ready || condition == nil || condition.Reason != shim.ReasonUnregistered {
+		t.Fatalf("unexpected unregistered status: %+v", updated.Status)
 	}
 }
 

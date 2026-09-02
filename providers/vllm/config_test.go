@@ -1,10 +1,17 @@
 package vllm
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/providers/pkg/shim"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGetProviderConfigSpec(t *testing.T) {
@@ -103,6 +110,28 @@ func TestProviderConstants(t *testing.T) {
 func TestProviderDocumentation(t *testing.T) {
 	if ProviderDocumentation == "" {
 		t.Error("expected documentation URL")
+	}
+}
+
+func TestUnregister(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+
+	if err := NewProviderConfigManager(c).Unregister(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, "UpstreamReady")
+	if updated.Status.Ready || condition == nil || condition.Reason != shim.ReasonUnregistered {
+		t.Fatalf("unexpected unregistered status: %+v", updated.Status)
 	}
 }
 

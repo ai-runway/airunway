@@ -25,11 +25,14 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const ReasonUnregistered = "Unregistered"
 
 // RegisterProviderConfig creates or updates the cluster-scoped InferenceProviderConfig
 // used to register a provider with the controller.
@@ -71,5 +74,33 @@ func RegisterProviderConfig(
 		}
 	}
 
+	return nil
+}
+
+// MarkProviderConfigUnregistered records an immediate, provider-independent
+// shutdown signal while preserving the provider's last reported status fields.
+func MarkProviderConfigUnregistered(
+	ctx context.Context,
+	kubeClient client.Client,
+	name string,
+) error {
+	config := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Name: name}, config); err != nil {
+		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
+	}
+
+	now := metav1.Now()
+	config.Status.Ready = false
+	config.Status.LastHeartbeat = &now
+	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+		Type:    "UpstreamReady",
+		Status:  metav1.ConditionFalse,
+		Reason:  ReasonUnregistered,
+		Message: "Shim is shutting down.",
+	})
+
+	if err := kubeClient.Status().Update(ctx, config); err != nil {
+		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
+	}
 	return nil
 }
