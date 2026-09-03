@@ -198,6 +198,40 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	}
 }
 
+func TestUpdateStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+	mgr := NewProviderConfigManager(c)
+
+	err := mgr.UpdateStatus(context.Background(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if !updated.Status.Ready {
+		t.Fatal("expected provider status to be ready")
+	}
+	if updated.Status.Version != ProviderVersion {
+		t.Fatalf("expected provider status version %q, got %q", ProviderVersion, updated.Status.Version)
+	}
+	if updated.Status.LastHeartbeat == nil {
+		t.Fatal("expected provider status to include last heartbeat")
+	}
+	if updated.Status.UpstreamCRDVersion != "apps/v1" {
+		t.Fatalf("expected provider upstream CRD version %q, got %q", "apps/v1", updated.Status.UpstreamCRDVersion)
+	}
+}
+
 func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alpha1.APIFormat) {
 	t.Helper()
 	if len(got) != len(expected) {

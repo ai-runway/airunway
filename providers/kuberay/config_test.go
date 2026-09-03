@@ -167,6 +167,23 @@ func TestUpdateStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if !updated.Status.Ready {
+		t.Fatal("expected provider status to be ready")
+	}
+	if updated.Status.Version != ProviderVersion {
+		t.Fatalf("expected provider status version %q, got %q", ProviderVersion, updated.Status.Version)
+	}
+	if updated.Status.LastHeartbeat == nil {
+		t.Fatal("expected provider status to include last heartbeat")
+	}
+	if updated.Status.UpstreamCRDVersion != "ray.io/v1" {
+		t.Fatalf("expected provider upstream CRD version %q, got %q", "ray.io/v1", updated.Status.UpstreamCRDVersion)
+	}
 }
 
 func TestUnregister(t *testing.T) {

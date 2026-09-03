@@ -283,6 +283,13 @@ func TestUpdateStatus(t *testing.T) {
 	if updated.Status.LastHeartbeat == nil {
 		t.Fatal("expected provider status to include last heartbeat")
 	}
+	if updated.Status.UpstreamCRDVersion != DynamoAPIGroup+"/"+DynamoAPIVersion {
+		t.Fatalf(
+			"expected provider upstream CRD version %q, got %q",
+			DynamoAPIGroup+"/"+DynamoAPIVersion,
+			updated.Status.UpstreamCRDVersion,
+		)
+	}
 }
 
 func TestUnregister(t *testing.T) {
