@@ -125,6 +125,8 @@ export interface Settings {
   auth: AuthConfig;
 }
 
+export type InstallationState = 'installed' | 'not-installed' | 'unknown';
+
 /**
  * Runtime status for the runtimes endpoint
  * Used to show installation and health status of each runtime
@@ -142,6 +144,8 @@ export interface RuntimeStatus {
   capabilities?: ProviderCapabilities;
   deploymentDefaults?: ProviderDeploymentDefaults;
   health?: ProviderHealthConfig;
+  /** Explicit installation verdict. Prefer this over the legacy installed boolean when present. */
+  installationState?: InstallationState;
   installed: boolean;
   healthy: boolean;
   crdFound?: boolean;

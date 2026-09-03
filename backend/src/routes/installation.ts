@@ -402,6 +402,14 @@ const installation = new Hono()
       provider.health,
       provider.requiresCRD,
     );
+    const runtimeRequiresExternalInstallation = installationStatus.requiresCRD
+      ?? provider.requiresCRD
+      ?? true;
+    const installationState = runtimeRequiresExternalInstallation
+      ? installationStatus.installationState
+        ?? (installationStatus.installed ? 'installed' : 'not-installed')
+      : undefined;
+    const installationUnknown = installationState === 'unknown';
     // Layer the shim's heartbeat-aware health view on top of the live
     // installation check. Prefer the shim's message whenever it has an
     // actionable signal — either a stale heartbeat OR a fresh UpstreamReady
@@ -409,24 +417,29 @@ const installation = new Hono()
     // (installed/operatorRunning) stay sourced from installationStatus since
     // that reflects what's actually in the cluster regardless of shim state.
     const health = getProviderHealth(providerId, config);
-    const baseMessage = hasInstallMetadata || provider.requiresCRD === false
+    const baseMessage = installationUnknown || hasInstallMetadata || provider.requiresCRD === false
       ? installationStatus.message
       : `No installation metadata found for provider ${providerId}`;
-    const useShimMessage = health.stale || (!health.healthy && health.hasShimSignal);
+    const useShimMessage = !installationUnknown
+      && (health.stale || (!health.healthy && health.hasShimSignal));
     const message = useShimMessage ? health.message : baseMessage;
+    const canInstall = installable && !installationUnknown;
 
     return c.json({
       providerId: provider.id,
       providerName: provider.name,
+      installationState,
       installed: installationStatus.installed,
-      crdFound: installationStatus.crdFound,
-      operatorRunning: installationStatus.operatorRunning ?? false,
+      crdFound: installationUnknown ? undefined : installationStatus.crdFound,
+      operatorRunning: installationUnknown
+        ? undefined
+        : installationStatus.operatorRunning ?? false,
       requiresCRD: installationStatus.requiresCRD ?? provider.requiresCRD,
       version: status.version,
       message,
-      installable,
+      installable: canInstall,
       installationSteps: provider.installationSteps,
-      helmCommands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
+      helmCommands: canInstall ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
       // Reported alongside — never folded into — the install fields above, so
       // the UI can never imply the runtime is installed just because AI
       // Runway's integration is alive (issue #244). Connectivity comes only

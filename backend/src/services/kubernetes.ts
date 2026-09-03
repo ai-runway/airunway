@@ -1,7 +1,7 @@
 import * as k8s from '@kubernetes/client-node';
 import type * as https from 'node:https';
 import { configService } from './config';
-import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig } from '@airunway/shared';
+import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig, InstallationState } from '@airunway/shared';
 import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient, kubeConfigToBunTls, type BunTlsOptions } from '../lib/kubeconfig';
@@ -140,12 +140,17 @@ export function extractCRDVersionFromAnnotations(crdOrResponse: unknown, annotat
  * Installation status for CRDs
  */
 export interface InstallationStatus {
+  installationState?: InstallationState;
   installed: boolean;
   crdFound?: boolean;
   operatorRunning?: boolean;
   requiresCRD?: boolean;
   version?: string;
   message?: string;
+}
+
+function resolveInstallationState(status: InstallationStatus): InstallationState {
+  return status.installationState ?? (status.installed ? 'installed' : 'not-installed');
 }
 
 /**
@@ -952,6 +957,11 @@ class KubernetesService {
             providerInfo.health,
             requiresCRD,
           );
+          const runtimeRequiresExternalInstallation = runtimeStatus.requiresCRD ?? requiresCRD;
+          const installationState = runtimeRequiresExternalInstallation
+            ? resolveInstallationState(runtimeStatus)
+            : undefined;
+          const installationUnknown = installationState === 'unknown';
 
           // Layer the shim's heartbeat-aware view over the live installation
           // check: prefer the shim's message when it carries an actionable
@@ -961,7 +971,8 @@ class KubernetesService {
           // check — they reflect what's actually in the cluster.
           const { getProviderHealth } = await import('./providerHealth');
           const health = getProviderHealth(providerInfo.id, item);
-          const useShimMessage = health.stale || (!health.healthy && health.hasShimSignal);
+          const useShimMessage = !installationUnknown
+            && (health.stale || (!health.healthy && health.hasShimSignal));
           const message = useShimMessage ? health.message : runtimeStatus.message;
 
           return {
@@ -972,14 +983,19 @@ class KubernetesService {
             documentationUrl: providerInfo.documentationUrl,
             icon: providerInfo.icon,
             warnings: providerInfo.warnings,
-            installable: providerInfo.installable,
+            installable: installationUnknown ? false : providerInfo.installable,
             capabilities: providerInfo.capabilities,
             deploymentDefaults: providerInfo.deploymentDefaults,
             health: providerInfo.health,
+            installationState,
             installed: runtimeStatus.installed,
             healthy: runtimeStatus.operatorRunning ?? false,
-            crdFound: runtimeStatus.crdFound ?? runtimeStatus.installed,
-            operatorRunning: runtimeStatus.operatorRunning ?? false,
+            crdFound: installationUnknown
+              ? undefined
+              : runtimeStatus.crdFound ?? runtimeStatus.installed,
+            operatorRunning: installationUnknown
+              ? undefined
+              : runtimeStatus.operatorRunning ?? false,
             requiresCRD: runtimeStatus.requiresCRD ?? requiresCRD,
             version: status.version,
             message,
@@ -1212,11 +1228,11 @@ class KubernetesService {
     // API or its pods. `statusReady` only tells us AI Runway's own integration
     // is alive; promoting that into installed/crdFound/operatorRunning is
     // exactly the false "installed" report from issue #244. Say we don't know
-    // instead, which still leaves the install action available to the user.
+    // instead. Automated install/uninstall actions are withheld because either
+    // one could modify a runtime that is already present.
     return {
+      installationState: 'unknown',
       installed: false,
-      crdFound: false,
-      operatorRunning: false,
       requiresCRD: true,
       message: `${displayName} has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.`,
     };
@@ -1283,6 +1299,7 @@ class KubernetesService {
     }
 
     return {
+      installationState: installed ? 'installed' : 'not-installed',
       installed,
       crdFound,
       operatorRunning,
@@ -1322,6 +1339,7 @@ class KubernetesService {
     }
 
     return {
+      installationState: installed ? 'installed' : 'not-installed',
       installed,
       crdFound,
       operatorRunning,

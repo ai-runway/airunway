@@ -2,7 +2,7 @@
  * Installation and Helm types
  */
 
-import { InstallationStep } from './settings';
+import type { InstallationStep, InstallationState } from './settings';
 import { GAIE_VERSION } from './versions.generated';
 
 /**
@@ -32,6 +32,8 @@ export interface HelmStatus {
 export interface InstallationStatus {
   providerId: string;
   providerName: string;
+  /** Explicit installation verdict. Prefer this over the legacy installed boolean when present. */
+  installationState?: InstallationState;
   installed: boolean;
   version?: string;
   message?: string;

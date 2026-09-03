@@ -412,15 +412,14 @@ describe('Installation Provider Routes', () => {
       // for a custom-named registration of an otherwise CRD-less engine.
       expect(data.requiresCRD).toBe(true);
       // Issue #244: nothing to probe with, so a live heartbeat must not be
-      // reported as the runtime being installed.
+      // reported as either installed or definitely absent.
+      expect(data.installationState).toBe('unknown');
       expect(data.installed).toBe(false);
-      expect(data.crdFound).toBe(false);
-      expect(data.operatorRunning).toBe(false);
+      expect(data.crdFound).toBeUndefined();
+      expect(data.operatorRunning).toBeUndefined();
       expect(data.message).toContain('cannot be confirmed');
-      // ...and the install action stays available, which is what the issue asked
-      // for: show it as not installed AND offer to install it.
-      expect(data.installable).toBe(true);
-      expect(data.helmCommands.length).toBeGreaterThan(0);
+      expect(data.installable).toBe(false);
+      expect(data.helmCommands).toEqual([]);
     });
 
     test('honors per-engine requiresCRD: false on the migrated schema for custom providers', async () => {

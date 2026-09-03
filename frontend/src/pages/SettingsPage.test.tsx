@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PINNED_GAIE_VERSION } from '@airunway/shared'
+import type { InstallationState } from '@airunway/shared'
 import { SettingsPage } from './SettingsPage'
 
 const mutateAsync = vi.fn()
@@ -43,6 +44,7 @@ let mockGatewayStatus = {
 type MockRuntimeStatus = {
   id: string
   name: string
+  installationState?: InstallationState
   installed: boolean
   healthy: boolean
   crdFound?: boolean
@@ -206,6 +208,22 @@ const getMockInstallationStatus = (providerId: string) => {
         requiresCRD: true,
         installable: false,
         installationSteps: [],
+      }
+    case 'unverified-runtime':
+      return {
+        installationState: 'unknown' as const,
+        installed: false,
+        providerName: 'Unverified Runtime',
+        message: 'Unverified Runtime has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.',
+        requiresCRD: true,
+        installable: true,
+        installationSteps: [
+          {
+            title: 'Install Unverified Runtime',
+            description: 'Install the runtime.',
+            command: 'helm upgrade --install unverified-runtime example/unverified-runtime',
+          },
+        ],
       }
     default:
       return {
@@ -500,6 +518,40 @@ describe('SettingsPage', () => {
     const installationPanel = screen.getByText('Custom Runtime Installation').closest('.rounded-2xl') as HTMLElement
     expect(within(installationPanel).queryByRole('button', { name: /install custom runtime/i })).not.toBeInTheDocument()
     expect(installationPanel).not.toHaveTextContent('Use the install button below')
+  })
+
+  it('shows an unverified runtime neutrally and withholds installation actions', () => {
+    mockRuntimes = [
+      {
+        id: 'unverified-runtime',
+        name: 'Unverified Runtime',
+        installationState: 'unknown',
+        installed: false,
+        healthy: false,
+        requiresCRD: true,
+        installable: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const card = screen.getByText('Unverified Runtime').closest('.rounded-2xl') as HTMLElement
+    expect(within(card).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(card).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(card).getAllByText('Not checked')).toHaveLength(2)
+
+    const installationPanel = screen.getByText('Unverified Runtime Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(installationPanel).getAllByText('Not checked')).toHaveLength(2)
+    expect(installationPanel).toHaveTextContent('status cannot be confirmed')
+    expect(within(installationPanel).queryByRole('button', { name: /install unverified runtime/i })).not.toBeInTheDocument()
+    expect(within(installationPanel).queryByRole('button', { name: /uninstall/i })).not.toBeInTheDocument()
+    expect(screen.queryByText('Manual Installation Steps')).not.toBeInTheDocument()
+    expect(screen.queryByText('Helm CLI not available')).not.toBeInTheDocument()
   })
 
   it('shows providers that do not require runtime operators without CRD controls', () => {

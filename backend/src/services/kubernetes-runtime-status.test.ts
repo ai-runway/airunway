@@ -292,11 +292,14 @@ describe('KubernetesService - Runtime Status', () => {
     // Issue #244: this registration declares it needs an upstream runtime but
     // ships nothing to probe with, so a live heartbeat must not be promoted into
     // "installed". Previously all three of these reported true purely because
-    // status.ready was true.
+    // status.ready was true; reporting false is also inaccurate because nothing
+    // was checked.
+    expect(vllm?.installationState).toBe('unknown');
     expect(vllm?.installed).toBe(false);
-    expect(vllm?.crdFound).toBe(false);
-    expect(vllm?.operatorRunning).toBe(false);
+    expect(vllm?.crdFound).toBeUndefined();
+    expect(vllm?.operatorRunning).toBeUndefined();
     expect(vllm?.healthy).toBe(false);
+    expect(vllm?.installable).toBe(false);
     expect(vllm?.message).toContain('cannot be confirmed');
     // The integration itself is still reported as present and responding, so the
     // UI can distinguish "AI Runway is fine" from "the runtime is missing".
@@ -474,6 +477,7 @@ describe('KubernetesService - Runtime Status', () => {
       true,
     );
 
+    expect(status.installationState).toBe('not-installed');
     expect(status.installed).toBe(false);
     expect(status.crdFound).toBe(false);
     expect(status.operatorRunning).toBe(false);
@@ -561,6 +565,7 @@ describe('KubernetesService - Runtime Status', () => {
 
     const status = await kubernetesService.checkKaitoInstallationStatus();
 
+    expect(status.installationState).toBe('installed');
     expect(status.installed).toBe(true);
     expect(status.crdFound).toBe(true);
     expect(status.operatorRunning).toBe(true);
