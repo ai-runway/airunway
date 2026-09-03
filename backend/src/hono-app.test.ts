@@ -1,5 +1,6 @@
 import { describe, test, expect, afterEach } from 'bun:test';
-import app, { parseCorsOrigin } from './hono-app';
+import { Hono } from 'hono';
+import app, { handleAppError, parseCorsOrigin } from './hono-app';
 import { kubernetesService } from './services/kubernetes';
 import { configService } from './services/config';
 import { authService } from './services/auth';
@@ -8,6 +9,8 @@ import { secretsService } from './services/secrets';
 import { mockServiceMethod } from './test/helpers';
 import { mockDeployment } from './test/fixtures';
 import { HTTPException } from 'hono/http-exception';
+import { ApiException } from '@kubernetes/client-node/dist/gen/index.js';
+import type { AppEnv } from './types/hono';
 
 const AIRUNWAY_AUTH_ERROR_HEADER = 'X-Airunway-Auth-Error';
 
@@ -51,13 +54,17 @@ function createChunkedErrorStream(chunks: string[]): {
   };
 }
 
-app.get('/__test/http-exception/internal', () => {
-  throw new HTTPException(500, { message: 'database password is secret' });
-});
-
-app.get('/__test/http-exception/bad-request', () => {
-  throw new HTTPException(400, { message: 'client supplied an invalid value' });
-});
+function createErrorHandlingTestApp(): Hono<AppEnv> {
+  const testApp = new Hono<AppEnv>();
+  testApp.get('/internal', () => {
+    throw new HTTPException(500, { message: 'database password is secret' });
+  });
+  testApp.get('/bad-request', () => {
+    throw new HTTPException(400, { message: 'client supplied an invalid value' });
+  });
+  testApp.onError(handleAppError);
+  return testApp;
+}
 
 describe('Hono Routes', () => {
   describe('Health Routes', () => {
@@ -267,6 +274,54 @@ describe('Hono Routes', () => {
         message: 'Internal Server Error',
         statusCode: 500,
       });
+    });
+
+    test('GET /api/deployments does not expose Kubernetes exception internals', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => {
+          throw new ApiException(
+            403,
+            'Forbidden',
+            { message: 'deployments are forbidden', reason: 'Forbidden', code: 403 },
+            { 'audit-id': 'sensitive-header-value' },
+          );
+        }),
+      );
+
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(403);
+
+      const data = await res.json();
+      expect(data.error).toEqual({
+        message: 'Failed to list deployments: deployments are forbidden',
+        statusCode: 403,
+      });
+      expect(JSON.stringify(data)).not.toContain('sensitive-header-value');
+      expect(JSON.stringify(data)).not.toContain('HTTP-Code');
+    });
+
+    test('GET /api/deployments sanitizes Kubernetes exceptions without a response body', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => {
+          throw new ApiException(
+            401,
+            'Unauthorized',
+            undefined,
+            { 'audit-id': 'sensitive-header-value' },
+          );
+        }),
+      );
+
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(401);
+
+      const data = await res.json();
+      expect(data.error).toEqual({
+        message: 'Failed to list deployments: Authentication failed. Check your cluster credentials.',
+        statusCode: 401,
+      });
+      expect(JSON.stringify(data)).not.toContain('sensitive-header-value');
+      expect(JSON.stringify(data)).not.toContain('HTTP-Code');
     });
 
     test('POST /api/deployments/:name/chat streams proxied chat completions', async () => {
@@ -1424,7 +1479,7 @@ describe('Hono Routes', () => {
 
   describe('Error Handling', () => {
     test('sanitizes 5xx HTTPException messages', async () => {
-      const res = await app.request('/__test/http-exception/internal');
+      const res = await createErrorHandlingTestApp().request('/internal');
       expect(res.status).toBe(500);
       const data = await res.json();
       expect(data.error.message).toBe('Internal Server Error');
@@ -1432,7 +1487,7 @@ describe('Hono Routes', () => {
     });
 
     test('preserves 4xx HTTPException messages', async () => {
-      const res = await app.request('/__test/http-exception/bad-request');
+      const res = await createErrorHandlingTestApp().request('/bad-request');
       expect(res.status).toBe(400);
       const data = await res.json();
       expect(data.error.message).toBe('client supplied an invalid value');

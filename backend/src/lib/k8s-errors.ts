@@ -64,13 +64,21 @@ export function extractK8sErrorMessage(error: unknown): string {
     return 'Unknown error occurred';
   }
 
-  // Handle standard Error objects
-  if (error instanceof Error && !(error as K8sApiError).response) {
+  const k8sError = error as K8sApiError;
+
+  // Kubernetes ApiException extends Error, but its generated message embeds
+  // the complete response body and headers. Only return an Error message
+  // directly when it has no Kubernetes response metadata to normalize.
+  if (
+    error instanceof Error
+    && !k8sError.response
+    && !k8sError.body
+    && k8sError.statusCode === undefined
+    && typeof k8sError.code !== 'number'
+  ) {
     return error.message;
   }
 
-  const k8sError = error as K8sApiError;
-  
   // Try to get the body from various locations
   const rawBody: K8sErrorBody | string | undefined =
     k8sError.body ||
@@ -127,16 +135,12 @@ export function extractK8sErrorMessage(error: unknown): string {
   // Get status code for more context
   const statusCode = getDirectK8sStatusCode(k8sError);
 
-  // Fall back to the raw message with status code context
-  if (k8sError.message) {
-    if (k8sError.message === 'HTTP request failed' && statusCode) {
-      return getStatusCodeMessage(statusCode);
-    }
-    return k8sError.message;
-  }
-
   if (statusCode) {
     return getStatusCodeMessage(statusCode);
+  }
+
+  if (k8sError.message) {
+    return k8sError.message;
   }
 
   return 'Unknown Kubernetes API error';

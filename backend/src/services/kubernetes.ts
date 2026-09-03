@@ -514,7 +514,7 @@ class KubernetesService {
       return this.convertToDeploymentStatuses(response, namespace);
     } catch (error) {
       const statusCode = getK8sStatusCode(error);
-      if (statusCode === 404 || statusCode === 403) {
+      if (statusCode === 404) {
         logger.debug({ namespace }, 'Cannot list deployments in namespace');
         return [];
       }
@@ -597,7 +597,11 @@ class KubernetesService {
             allowedNamespaces.push(ns);
           }
         } catch (error) {
-          logger.debug({ namespace: ns, error }, 'SelfSubjectAccessReview failed for namespace');
+          logger.error(
+            { namespace: ns, error: getK8sErrorMessage(error) },
+            'SelfSubjectAccessReview failed for namespace'
+          );
+          throw error;
         }
       })
     );
