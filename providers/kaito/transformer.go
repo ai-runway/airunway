@@ -96,7 +96,7 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 
 	// Merge podTemplate annotations onto the Workspace
 	if md.Spec.PodTemplate != nil && md.Spec.PodTemplate.Metadata != nil && len(md.Spec.PodTemplate.Metadata.Annotations) > 0 {
-		ws.SetAnnotations(copyStringMap(md.Spec.PodTemplate.Metadata.Annotations))
+		ws.SetAnnotations(sanitizedDesiredAnnotations(md.Spec.PodTemplate.Metadata.Annotations))
 	}
 
 	// Build resource spec

@@ -37,7 +37,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/csaupgrade"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -57,8 +59,28 @@ const (
 	// FieldManager is the server-side apply field manager name
 	FieldManager = "kaito-provider"
 
-	// lastAppliedWorkspaceAnnotation stores the Workspace fields last written by this controller.
+	// createFieldsManager is used only for the atomic Create collision boundary.
+	// Its temporary Update ownership is migrated before FieldManager records the
+	// final rendered configuration.
+	createFieldsManager = "kaito-provider-create"
+
+	// preservedFieldsManager holds only non-rendered fields discovered while
+	// migrating legacy Create/Update ownership. Keeping it separate ensures the
+	// stable FieldManager declaratively owns only the rendered configuration.
+	preservedFieldsManager = "kaito-provider-preserved-fields"
+
+	// lastAppliedWorkspaceAnnotation stores the Workspace fields rendered by this controller.
+	// It provides a stable no-op fingerprint and a migration record for pre-SSA Workspaces.
 	lastAppliedWorkspaceAnnotation = "airunway.ai/kaito-last-applied"
+
+	// migrationManagersAnnotation temporarily records the exact legacy Update
+	// managers captured before first SSA adoption so an interrupted migration can
+	// resume without guessing from unrelated managers' managedFields entries.
+	migrationManagersAnnotation = "airunway.ai/kaito-migration-managers"
+
+	// migrationPreviousFieldsAnnotation keeps the original last-applied
+	// fingerprint until preservation ownership has been released successfully.
+	migrationPreviousFieldsAnnotation = "airunway.ai/kaito-migration-previous-fields"
 
 	// RequeueInterval is the default requeue interval for periodic reconciliation
 	RequeueInterval = 30 * time.Second
@@ -322,7 +344,8 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			// about whether the existing workload is still serving. Record the failed write,
 			// but preserve last-known Phase/Ready/Endpoint/Replicas until a successful read can
 			// replace them.
-			retryableWriteError := isRetryableUpstreamWriteError(err)
+			fieldManagerConflict := isFieldManagerConflict(err)
+			retryableWriteError := isRetryableUpstreamWriteError(err) && !fieldManagerConflict
 			if retryableWriteError && canPreserveLastKnownStatus(err) {
 				reason := "CreateFailed"
 				if errors.IsConflict(err) || errors.IsAlreadyExists(err) {
@@ -342,7 +365,8 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			reason := "CreateFailed"
 			requeueAfter := ExternalRecoveryInterval
-			if errors.IsConflict(err) {
+			statusBeforeFailure := md.DeepCopy().Status
+			if errors.IsConflict(err) && !fieldManagerConflict {
 				requeueAfter = time.Second
 			} else if errors.IsNotFound(err) || retryableWriteError {
 				// A definite 404 means the write did not reach an existing upstream
@@ -362,6 +386,17 @@ func (r *KaitoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 			md.Status.Message = fmt.Sprintf("Failed to create Workspace: %s", err.Error())
+			if fieldManagerConflict {
+				// A status write triggers the ModelDeployment watch. Persist only the
+				// first transition so an unchanged conflict does not hot-loop, and retain
+				// a slow retry because this controller does not watch Workspaces.
+				if !equality.Semantic.DeepEqual(statusBeforeFailure, md.Status) {
+					if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
+						return ctrl.Result{}, statusErr
+					}
+				}
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, nil
+			}
 			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -437,7 +472,24 @@ func (e *resourceConflictError) Error() string {
 // isResourceConflict checks whether the error is a resource ownership conflict
 func isResourceConflict(err error) bool {
 	var conflict *resourceConflictError
-	return stderrors.As(err, &conflict)
+	return stderrors.As(err, &conflict) || isFieldManagerConflict(err) || errors.IsAlreadyExists(err)
+}
+
+func isFieldManagerConflict(err error) bool {
+	var statusError errors.APIStatus
+	if !stderrors.As(err, &statusError) {
+		return false
+	}
+	details := statusError.Status().Details
+	if details == nil {
+		return false
+	}
+	for _, cause := range details.Causes {
+		if cause.Type == metav1.CauseTypeFieldManagerConflict {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyOwnerReference checks that the existing resource has an OwnerReference pointing to the given ModelDeployment UID.
@@ -450,7 +502,10 @@ func verifyOwnerReference(existing *unstructured.Unstructured, mdUID types.UID) 
 	return &resourceConflictError{namespace: existing.GetNamespace(), name: existing.GetName()}
 }
 
-// createOrUpdateResource creates or updates an unstructured resource
+// createOrUpdateResource creates, adopts, or updates a Workspace with server-side apply.
+// A preliminary Get protects resources owned by a different ModelDeployment. Once
+// adopted, FieldManager's managedFields entry is the source of truth for ownership:
+// omitting a previously applied field deletes it while fields owned by KAITO survive.
 func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, resource *unstructured.Unstructured, md *airunwayv1alpha1.ModelDeployment) error {
 	logger := log.FromContext(ctx)
 
@@ -468,11 +523,52 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 	}, existing)
 
 	if errors.IsNotFound(err) {
-		// Create new resource
+		// Apply is an upsert, so it cannot safely preserve the create collision
+		// boundary after this non-atomic existence check. Create atomically first;
+		// a concurrent creator then gets AlreadyExists without this controller
+		// mutating or adopting its object. After Create succeeds, migrate its
+		// Update ownership through the same preservation handoff used for legacy
+		// objects before recording the stable Apply ownership.
 		logger.Info("Creating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		return wrapResourceWriteError(r.Create(ctx, resource, strictFieldValidation), false)
-	}
-	if err != nil {
+		created := resource.DeepCopy()
+		if err := setPendingMigrationManagers(created, map[string]struct{}{createFieldsManager: {}}); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, created, client.FieldOwner(createFieldsManager), strictFieldValidation); err != nil {
+			if !errors.IsAlreadyExists(err) {
+				return wrapResourceWriteError(
+					fmt.Errorf("failed to create Workspace %s/%s: %w", resource.GetNamespace(), resource.GetName(), err),
+					false,
+				)
+			}
+
+			// A parallel reconcile or a stale cached Get can race with Create.
+			// Read directly from the API server and let the normal ownership check
+			// below distinguish a same-owner winner from a foreign collision.
+			reader := r.DirectClient
+			if reader == nil {
+				reader = r.Client
+			}
+			if err := reader.Get(ctx, types.NamespacedName{
+				Name:      resource.GetName(),
+				Namespace: resource.GetNamespace(),
+			}, existing); err != nil {
+				return fmt.Errorf(
+					"failed to get Workspace %s/%s after create collision: %w",
+					resource.GetNamespace(),
+					resource.GetName(),
+					err,
+				)
+			}
+		} else {
+			applied, err := r.applyWorkspace(ctx, withoutLastAppliedWorkspaceAnnotation(resource), created.GetResourceVersion())
+			if err != nil {
+				return wrapResourceWriteError(err, false)
+			}
+			_, err = r.completeOwnershipMigration(ctx, applied, resource, map[string]struct{}{createFieldsManager: {}})
+			return wrapResourceWriteError(err, false)
+		}
+	} else if err != nil {
 		return fmt.Errorf("failed to get existing resource: %w", err)
 	}
 
@@ -485,180 +581,1379 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 		statusResult, statusErr := r.StatusTranslator.TranslateStatus(existing)
 		resourceWasOwnedActiveAndServing = statusErr == nil && statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning
 	}
+	return wrapResourceWriteError(
+		r.reconcileExistingWorkspace(ctx, existing, resource, md),
+		resourceWasOwnedActiveAndServing,
+	)
+}
 
-	// Update existing resource if managed fields or desired metadata have changed. Compare only the fields we manage.
-	// Comparing full maps would cause an infinite update loop.
-	existingResource, _, _ := unstructured.NestedMap(existing.Object, "resource")
-	newResource, _, _ := unstructured.NestedMap(resource.Object, "resource")
-	existingInference, _, _ := unstructured.NestedMap(existing.Object, "inference")
-	newInference, _, _ := unstructured.NestedMap(resource.Object, "inference")
-	lastAppliedResource, lastAppliedInference, lastAppliedLabels, lastAppliedAnnotations := lastAppliedManagedFields(existing)
+func (r *KaitoProviderReconciler) reconcileExistingWorkspace(
+	ctx context.Context,
+	existing, resource *unstructured.Unstructured,
+	md *airunwayv1alpha1.ModelDeployment,
+) error {
+	logger := log.FromContext(ctx)
 
-	resourceMatches := managedFieldsMatch(newResource, existingResource, lastAppliedResource, "resource")
-	inferenceMatches := managedFieldsMatch(newInference, existingInference, lastAppliedInference, "inference")
-	metadataMatches := desiredMetadataMatches(resource, existing, lastAppliedLabels, lastAppliedAnnotations)
-	if !resourceMatches || !inferenceMatches || !metadataMatches {
-		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		return wrapResourceWriteError(
-			r.updateManagedWorkspaceFields(ctx, existing, resource, lastAppliedResource, lastAppliedInference, lastAppliedLabels, lastAppliedAnnotations),
-			resourceWasOwnedActiveAndServing,
+	if hasApplyManagedFields(existing) {
+		migrationManagers, migrationPending, err := pendingMigrationManagers(existing)
+		if err != nil {
+			return err
+		}
+		updateManagers, err := updateManagersOwningMigrationState(existing)
+		if err != nil {
+			return err
+		}
+		_, controllerUpdatePending := updateManagers[FieldManager]
+		if controllerUpdatePending {
+			migrationManagers[FieldManager] = struct{}{}
+		}
+		preservedOverlap, err := managerOwnsAnyDesired(existing, preservedFieldsManager, resource)
+		if err != nil {
+			return err
+		}
+		if migrationPending || controllerUpdatePending || preservedOverlap {
+			stableApplied, err := r.completeOwnershipMigration(ctx, existing, resource, migrationManagers)
+			if err != nil {
+				return err
+			}
+			if stableApplied {
+				return nil
+			}
+		}
+	}
+
+	// Avoid an API write when our previously applied state is still present.
+	// The last-applied annotation detects desired-field removals; the subset
+	// comparison detects drift while ignoring fields defaulted by KAITO.
+	matches, err := workspaceMatchesDesired(existing, resource)
+	if err != nil {
+		return err
+	}
+	if matches {
+		return nil
+	}
+
+	if !hasApplyManagedFields(existing) {
+		// Existing Workspaces were historically written with Create/Update. Record
+		// the exact managers selected for migration, then let the managedFields
+		// handoff move only their fields through SSA. The bridge patch changes no
+		// rendered value, so unrelated Apply ownership still produces a conflict.
+		logger.Info("Adopting resource with server-side apply", "kind", resource.GetKind(), "name", resource.GetName())
+		migrationManagers, err := legacyUpdateManagers(existing, md.UID)
+		if err != nil {
+			return err
+		}
+		migrationManagers[FieldManager] = struct{}{}
+		migrated, err := r.markLegacyWorkspaceMigration(ctx, existing, migrationManagers)
+		if err != nil {
+			return err
+		}
+		_, err = r.completeOwnershipMigration(ctx, migrated, resource, migrationManagers)
+		return err
+	}
+
+	logger.Info("Updating resource with server-side apply", "kind", resource.GetKind(), "name", resource.GetName())
+	_, err = r.applyWorkspace(ctx, resource, existing.GetResourceVersion())
+	return err
+}
+
+func (r *KaitoProviderReconciler) applyWorkspace(
+	ctx context.Context,
+	resource *unstructured.Unstructured,
+	resourceVersion string,
+) (*unstructured.Unstructured, error) {
+	return r.applyWorkspaceAs(ctx, resource, FieldManager, resourceVersion)
+}
+
+func (r *KaitoProviderReconciler) applyWorkspaceAs(
+	ctx context.Context,
+	resource *unstructured.Unstructured,
+	manager, resourceVersion string,
+) (*unstructured.Unstructured, error) {
+	// The apply patch must receive the freshly rendered configuration, never a
+	// live object containing status or server metadata.
+	// resourceVersion makes the verified Workspace identity part of the write,
+	// so a delete/recreate between Get and Apply returns Conflict rather than
+	// allowing this controller to adopt the replacement.
+	if resourceVersion == "" {
+		return nil, fmt.Errorf(
+			"cannot server-side apply Workspace %s/%s without resourceVersion",
+			resource.GetNamespace(),
+			resource.GetName(),
 		)
 	}
-
-	return nil
+	applied := resource.DeepCopy()
+	applied.SetResourceVersion(resourceVersion)
+	// controller-runtime's Client.Apply options do not expose fieldValidation.
+	// Patch with client.Apply is the equivalent SSA request and lets every KAITO
+	// write retain the repository-wide Strict validation guarantee.
+	//nolint:staticcheck // Client.Apply cannot carry FieldValidation in controller-runtime v0.23.3.
+	if err := r.Patch(ctx, applied, client.Apply, client.FieldOwner(manager), strictFieldValidation); err != nil {
+		return nil, fmt.Errorf(
+			"failed to server-side apply Workspace %s/%s: %w",
+			resource.GetNamespace(),
+			resource.GetName(),
+			err,
+		)
+	}
+	return applied, nil
 }
 
-func desiredMetadataMatches(desired, existing *unstructured.Unstructured, lastAppliedLabels, lastAppliedAnnotations map[string]string) bool {
-	return managedStringMapMatches(desired.GetLabels(), existing.GetLabels(), lastAppliedLabels) &&
-		managedStringMapMatches(managedAnnotations(desired.GetAnnotations()), managedAnnotations(existing.GetAnnotations()), lastAppliedAnnotations) &&
-		existing.GetAnnotations()[lastAppliedWorkspaceAnnotation] == desired.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+// updateManagersOwningLastApplied returns Update managers that own AI Runway's
+// reserved migration annotation. This is the same ownership signal used by
+// Kubernetes' client-side-to-server-side apply migration; manager names alone
+// are insufficient because clients may choose identical or changing names.
+func updateManagersOwningLastApplied(resource *unstructured.Unstructured) (map[string]struct{}, error) {
+	return updateManagersOwningAnyField(resource, [][]string{
+		{"f:metadata", "f:annotations", "f:" + lastAppliedWorkspaceAnnotation},
+	})
 }
 
-func managedStringMapMatches(desired, existing, lastApplied map[string]string) bool {
-	for key, desiredValue := range desired {
-		existingValue, found := existing[key]
-		if !found || existingValue != desiredValue {
-			return false
+func updateManagersOwningMigrationState(resource *unstructured.Unstructured) (map[string]struct{}, error) {
+	return updateManagersOwningAnyField(resource, [][]string{
+		{"f:metadata", "f:annotations", "f:" + lastAppliedWorkspaceAnnotation},
+		{"f:metadata", "f:annotations", "f:" + migrationManagersAnnotation},
+	})
+}
+
+func pendingMigrationManagers(resource *unstructured.Unstructured) (map[string]struct{}, bool, error) {
+	annotation, found := resource.GetAnnotations()[migrationManagersAnnotation]
+	if !found {
+		return map[string]struct{}{}, false, nil
+	}
+	var managerNames []string
+	if err := json.Unmarshal([]byte(annotation), &managerNames); err != nil {
+		return nil, true, fmt.Errorf(
+			"failed to decode Workspace %s/%s migration managers annotation: %w",
+			resource.GetNamespace(),
+			resource.GetName(),
+			err,
+		)
+	}
+	managers := make(map[string]struct{}, len(managerNames))
+	for _, manager := range managerNames {
+		if manager == "" {
+			return nil, true, fmt.Errorf(
+				"failed to decode Workspace %s/%s migration managers annotation: manager name is empty",
+				resource.GetNamespace(),
+				resource.GetName(),
+			)
+		}
+		managers[manager] = struct{}{}
+	}
+	return managers, true, nil
+}
+
+// legacyUpdateManagers identifies the pre-SSA manager before any migration
+// patch can transfer the last-applied annotation. Workspaces predating that
+// annotation fall back to controller-specific identity fields, but only after
+// their ModelDeployment owner reference has already been verified by the caller.
+func legacyUpdateManagers(resource *unstructured.Unstructured, ownerUID types.UID) (map[string]struct{}, error) {
+	managers, err := updateManagersOwningLastApplied(resource)
+	if err != nil || len(managers) > 0 {
+		return managers, err
+	}
+	identityLabelPaths := make([][]string, 0, 2)
+	labels := resource.GetLabels()
+	for _, label := range []string{"airunway.ai/managed-by", "airunway.ai/model-deployment"} {
+		if _, present := labels[label]; present {
+			identityLabelPaths = append(identityLabelPaths, []string{"f:metadata", "f:labels", "f:" + label})
 		}
 	}
+	labelManagers, err := updateManagersOwningAllFields(resource, identityLabelPaths)
+	if err != nil {
+		return nil, err
+	}
+	ownerManagers, err := updateManagersOwningOwnerReferenceUID(resource, ownerUID)
+	if err != nil {
+		return nil, err
+	}
+	if len(identityLabelPaths) == 0 {
+		if len(ownerManagers) == 1 {
+			return ownerManagers, nil
+		}
+		return map[string]struct{}{}, nil
+	}
+	intersection := map[string]struct{}{}
+	for manager := range labelManagers {
+		if _, ownsVerifiedReference := ownerManagers[manager]; ownsVerifiedReference {
+			intersection[manager] = struct{}{}
+		}
+	}
+	if len(intersection) == 1 {
+		return intersection, nil
+	}
+	// Ambiguous identity ownership is safer to leave in place than to transfer
+	// an unrelated manager's entire Update field set.
+	return map[string]struct{}{}, nil
+}
 
-	for key := range existing {
-		if _, desiredHasKey := desired[key]; desiredHasKey {
+func updateManagersOwningAllFields(
+	resource *unstructured.Unstructured,
+	fieldPaths [][]string,
+) (map[string]struct{}, error) {
+	intersection := map[string]struct{}{}
+	for index, fieldPath := range fieldPaths {
+		owners, err := updateManagersOwningAnyField(resource, [][]string{fieldPath})
+		if err != nil {
+			return nil, err
+		}
+		if index == 0 {
+			intersection = owners
 			continue
 		}
-		if lastAppliedStringMapHasKey(lastApplied, key) {
+		for manager := range intersection {
+			if _, ownsField := owners[manager]; !ownsField {
+				delete(intersection, manager)
+			}
+		}
+	}
+	return intersection, nil
+}
+
+func updateManagersOwningOwnerReferenceUID(
+	resource *unstructured.Unstructured,
+	ownerUID types.UID,
+) (map[string]struct{}, error) {
+	managers := map[string]struct{}{}
+	if ownerUID == "" {
+		return managers, nil
+	}
+	ownerReferencePresent := false
+	for _, ownerReference := range resource.GetOwnerReferences() {
+		if ownerReference.UID == ownerUID {
+			ownerReferencePresent = true
+			break
+		}
+	}
+	if !ownerReferencePresent {
+		return managers, nil
+	}
+	for _, entry := range resource.GetManagedFields() {
+		if entry.Operation != metav1.ManagedFieldsOperationUpdate || entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(entry.FieldsV1.Raw, &fields); err != nil {
+			return nil, fmt.Errorf("failed to decode Workspace managedFields for manager %q: %w", entry.Manager, err)
+		}
+		ownerReferences, found, err := unstructured.NestedMap(fields, "f:metadata", "f:ownerReferences")
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to inspect Workspace ownerReference managedFields for manager %q: %w",
+				entry.Manager,
+				err,
+			)
+		}
+		if !found {
+			continue
+		}
+		// The API server may represent metadata.ownerReferences as an atomic
+		// list. In that form the manager owns the verified live list as a whole,
+		// so FieldsV1 has no per-UID child.
+		if len(ownerReferences) == 0 {
+			managers[entry.Manager] = struct{}{}
+			continue
+		}
+		for fieldKey := range ownerReferences {
+			if len(fieldKey) > 2 && fieldKey[:2] == "k:" && jsonKeyContainsUID(fieldKey[2:], string(ownerUID)) {
+				managers[entry.Manager] = struct{}{}
+				break
+			}
+		}
+	}
+	return managers, nil
+}
+
+func updateManagersOwningAnyField(
+	resource *unstructured.Unstructured,
+	fieldPaths [][]string,
+) (map[string]struct{}, error) {
+	managers := map[string]struct{}{}
+	for _, entry := range resource.GetManagedFields() {
+		if entry.Operation != metav1.ManagedFieldsOperationUpdate || entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(entry.FieldsV1.Raw, &fields); err != nil {
+			return nil, fmt.Errorf("failed to decode Workspace managedFields for manager %q: %w", entry.Manager, err)
+		}
+		for _, fieldPath := range fieldPaths {
+			if _, found, err := unstructured.NestedFieldNoCopy(fields, fieldPath...); err != nil {
+				return nil, fmt.Errorf("failed to inspect Workspace managedFields for manager %q: %w", entry.Manager, err)
+			} else if found {
+				managers[entry.Manager] = struct{}{}
+				break
+			}
+		}
+	}
+	return managers, nil
+}
+
+// completeOwnershipMigration uses Kubernetes' supported client-side-apply
+// managedFields migration to convert legacy Update ownership into a dedicated
+// Apply manager. That manager then applies only the live fields absent from the
+// rendered configuration, relinquishing rendered fields without deleting
+// webhook defaults or other preserved values.
+func (r *KaitoProviderReconciler) completeOwnershipMigration(
+	ctx context.Context,
+	live, desired *unstructured.Unstructured,
+	capturedManagers map[string]struct{},
+) (bool, error) {
+	stableApplied := false
+	previouslyRendered, err := lastAppliedWorkspaceConfiguration(live)
+	if err != nil {
+		return false, err
+	}
+	migrationDesired := desired
+	annotations := live.GetAnnotations()
+	_, hasManagerMarker := annotations[migrationManagersAnnotation]
+	_, hasPreviousFields := annotations[migrationPreviousFieldsAnnotation]
+	migrationPending := hasManagerMarker || hasPreviousFields
+	if migrationPending {
+		// Keep only the old fingerprint while migration is pending. Applying the
+		// new fingerprint alongside it can exceed Kubernetes' annotation-size
+		// limit. The full desired configuration is applied after cleanup removes
+		// the old fingerprint.
+		migrationDesired = withoutLastAppliedWorkspaceAnnotation(desired)
+	}
+	live, err = r.migrateCapturedUpdateManagers(ctx, live, desired, capturedManagers)
+	if err != nil {
+		return false, err
+	}
+	preservedOverlap, err := managerOwnsAnyDesired(live, preservedFieldsManager, migrationDesired)
+	if err != nil {
+		return false, err
+	}
+	stableOwnsDesired, err := applyManagerOwnsDesired(live, migrationDesired)
+	if err != nil {
+		return false, err
+	}
+	stableHasDesiredValues := desiredSubsetMatches(migrationDesired.Object, live.Object)
+	stableReady := stableOwnsDesired && stableHasDesiredValues
+	if preservedOverlap && !stableReady {
+		// Move overlapping fields to their desired values while the
+		// preservation manager still owns them. The stable Apply below then
+		// shares ownership before the preservation manager omits them.
+		handoff, err := preservedFieldsHandoffConfiguration(live, migrationDesired)
+		if err != nil {
+			return false, err
+		}
+		live, err = r.applyWorkspaceAs(ctx, handoff, preservedFieldsManager, live.GetResourceVersion())
+		if err != nil {
+			return false, fmt.Errorf(
+				"failed to prepare preserved Workspace %s/%s fields for ownership handoff: %w",
+				desired.GetNamespace(),
+				desired.GetName(),
+				err,
+			)
+		}
+	}
+	if !stableReady {
+		live, err = r.applyWorkspace(ctx, migrationDesired, live.GetResourceVersion())
+		if err != nil {
+			return false, fmt.Errorf(
+				"failed to claim Workspace %s/%s fields: %w",
+				desired.GetNamespace(),
+				desired.GetName(),
+				err,
+			)
+		}
+		stableApplied = true
+	}
+	preservedFields, err := managedFieldsForManager(
+		live,
+		preservedFieldsManager,
+		metav1.ManagedFieldsOperationApply,
+	)
+	if err != nil {
+		return false, err
+	}
+	if preservedFields == nil {
+		// KAITO updates the complete annotations map. It can therefore become
+		// the Update owner of our pending marker after the preservation manager
+		// has already relinquished its last field. Resume by cleaning only stale
+		// fields that no manager owns, then remove our private marker with an
+		// optimistic patch. Original external managers still own every value we
+		// deliberately declined to migrate.
+		return r.finishMigrationWithoutPreservedFields(
+			ctx,
+			live,
+			desired,
+			migrationDesired,
+			previouslyRendered,
+			migrationPending,
+			stableApplied,
+		)
+	}
+	preserved, err := preservedFieldsConfiguration(live, migrationDesired, previouslyRendered, true)
+	if err != nil {
+		return false, err
+	}
+	released, err := r.applyWorkspaceAs(ctx, preserved, preservedFieldsManager, live.GetResourceVersion())
+	if err != nil {
+		return false, fmt.Errorf(
+			"failed to preserve non-rendered Workspace %s/%s fields: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	cleaned := released
+	if previouslyRendered != nil {
+		cleaned, err = r.removeUnownedPreviouslyRenderedFields(ctx, released, migrationDesired, previouslyRendered)
+		if err != nil {
+			return false, err
+		}
+	}
+	annotations = cleaned.GetAnnotations()
+	_, hasManagerMarker = annotations[migrationManagersAnnotation]
+	_, hasPreviousFields = annotations[migrationPreviousFieldsAnnotation]
+	if hasManagerMarker || hasPreviousFields {
+		finalPreserved, err := preservedFieldsConfiguration(cleaned, migrationDesired, previouslyRendered, false)
+		if err != nil {
+			return false, err
+		}
+		cleaned, err = r.applyWorkspaceAs(ctx, finalPreserved, preservedFieldsManager, cleaned.GetResourceVersion())
+		if err != nil {
+			return false, fmt.Errorf(
+				"failed to finish Workspace %s/%s ownership migration: %w",
+				live.GetNamespace(),
+				live.GetName(),
+				err,
+			)
+		}
+	}
+	cleaned, err = r.clearWorkspaceMigrationState(ctx, cleaned)
+	if err != nil {
+		return false, err
+	}
+	if migrationPending {
+		if _, err := r.applyWorkspace(ctx, desired, cleaned.GetResourceVersion()); err != nil {
+			return false, fmt.Errorf(
+				"failed to record Workspace %s/%s applied configuration: %w",
+				live.GetNamespace(),
+				live.GetName(),
+				err,
+			)
+		}
+		stableApplied = true
+	}
+	return stableApplied, nil
+}
+
+func (r *KaitoProviderReconciler) finishMigrationWithoutPreservedFields(
+	ctx context.Context,
+	live, desired, migrationDesired, previouslyRendered *unstructured.Unstructured,
+	migrationPending, stableApplied bool,
+) (bool, error) {
+	cleaned := live
+	var err error
+	if previouslyRendered != nil {
+		cleaned, err = r.removeUnownedPreviouslyRenderedFields(ctx, live, migrationDesired, previouslyRendered)
+		if err != nil {
+			return false, err
+		}
+	}
+	cleaned, err = r.clearWorkspaceMigrationState(ctx, cleaned)
+	if err != nil {
+		return false, err
+	}
+	if !migrationPending {
+		return stableApplied, nil
+	}
+	if _, err := r.applyWorkspace(ctx, desired, cleaned.GetResourceVersion()); err != nil {
+		return false, fmt.Errorf(
+			"failed to record Workspace %s/%s applied configuration: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	return true, nil
+}
+
+func (r *KaitoProviderReconciler) clearWorkspaceMigrationState(
+	ctx context.Context,
+	live *unstructured.Unstructured,
+) (*unstructured.Unstructured, error) {
+	base := live.DeepCopy()
+	updated := live.DeepCopy()
+	annotations := copyStringMap(updated.GetAnnotations())
+	delete(annotations, migrationManagersAnnotation)
+	delete(annotations, migrationPreviousFieldsAnnotation)
+	updated.SetAnnotations(annotations)
+	if equality.Semantic.DeepEqual(base.Object, updated.Object) {
+		return live, nil
+	}
+	if err := r.Patch(
+		ctx,
+		updated,
+		client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+		client.FieldOwner(FieldManager),
+		strictFieldValidation,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"failed to clear Workspace %s/%s ownership migration state: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	return updated, nil
+}
+
+func (r *KaitoProviderReconciler) migrateCapturedUpdateManagers(
+	ctx context.Context,
+	live, desired *unstructured.Unstructured,
+	managers map[string]struct{},
+) (*unstructured.Unstructured, error) {
+	if len(managers) == 0 {
+		return live, nil
+	}
+	preservedFields, err := managedFieldsForManager(
+		live,
+		preservedFieldsManager,
+		metav1.ManagedFieldsOperationApply,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if preservedFields == nil {
+		seed, found, err := capturedUpdateFieldsConfiguration(live, managers)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			live, err = r.applyWorkspaceAs(ctx, seed, preservedFieldsManager, live.GetResourceVersion())
+			if err != nil {
+				return nil, fmt.Errorf(
+					"failed to seed preserved Workspace %s/%s fields: %w",
+					desired.GetNamespace(),
+					desired.GetName(),
+					err,
+				)
+			}
+		}
+	}
+	managerNames := sets.New[string]()
+	for manager := range managers {
+		managerNames.Insert(manager)
+	}
+	patchData, err := csaupgrade.UpgradeManagedFieldsPatch(live, managerNames, preservedFieldsManager)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to prepare Workspace %s/%s managedFields migration: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	if patchData == nil {
+		return live, nil
+	}
+	if err := r.Patch(
+		ctx,
+		live,
+		client.RawPatch(types.JSONPatchType, patchData),
+		strictFieldValidation,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"failed to migrate Workspace %s/%s managedFields: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	return live, nil
+}
+
+func (r *KaitoProviderReconciler) removeUnownedPreviouslyRenderedFields(
+	ctx context.Context,
+	live, desired, previouslyRendered *unstructured.Unstructured,
+) (*unstructured.Unstructured, error) {
+	stale, keep := subtractDesiredJSON(previouslyRendered.Object, desired.Object, nil)
+	if !keep {
+		return live, nil
+	}
+	staleFields, ok := stale.(map[string]any)
+	if !ok {
+		return live, nil
+	}
+	ownedFields, err := managedFieldsOwnedConfiguration(live)
+	if err != nil {
+		return nil, err
+	}
+	unowned, keep := subtractDesiredJSON(staleFields, ownedFields, nil)
+	if !keep {
+		return live, nil
+	}
+	unownedFields, ok := unowned.(map[string]any)
+	if !ok {
+		return live, nil
+	}
+	cleaned, _ := subtractDesiredJSON(live.Object, unownedFields, nil)
+	cleanedObject, ok := cleaned.(map[string]any)
+	if !ok || equality.Semantic.DeepEqual(cleanedObject, live.Object) {
+		return live, nil
+	}
+	updated := live.DeepCopy()
+	updated.Object = cleanedObject
+	if err := r.Patch(
+		ctx,
+		updated,
+		client.MergeFromWithOptions(live.DeepCopy(), client.MergeFromWithOptimisticLock{}),
+		client.FieldOwner(FieldManager),
+		strictFieldValidation,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"failed to remove unowned legacy Workspace %s/%s fields: %w",
+			live.GetNamespace(),
+			live.GetName(),
+			err,
+		)
+	}
+	return updated, nil
+}
+
+func managedFieldsOwnedConfiguration(live *unstructured.Unstructured) (map[string]any, error) {
+	owned := map[string]any{}
+	for _, entry := range live.GetManagedFields() {
+		if entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(entry.FieldsV1.Raw, &fields); err != nil {
+			return nil, fmt.Errorf("failed to decode Workspace managedFields for manager %q: %w", entry.Manager, err)
+		}
+		owned = mergeManagedFieldValues(owned, extractManagedFieldsMap(live.Object, fields))
+	}
+	return owned, nil
+}
+
+func capturedUpdateFieldsConfiguration(
+	live *unstructured.Unstructured,
+	managers map[string]struct{},
+) (*unstructured.Unstructured, bool, error) {
+	object := map[string]any{}
+	found := false
+	for _, entry := range live.GetManagedFields() {
+		if _, captured := managers[entry.Manager]; !captured ||
+			entry.Operation != metav1.ManagedFieldsOperationUpdate || entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(entry.FieldsV1.Raw, &fields); err != nil {
+			return nil, false, fmt.Errorf("failed to decode Workspace managedFields for manager %q: %w", entry.Manager, err)
+		}
+		object = mergeManagedFieldValues(object, extractManagedFieldsMap(live.Object, fields))
+		found = true
+	}
+	if !found {
+		return nil, false, nil
+	}
+	delete(object, "status")
+	return workspaceConfigurationWithIdentity(object, live), true, nil
+}
+
+func mergeManagedFieldValues(target, source map[string]any) map[string]any {
+	merged := runtime.DeepCopyJSON(target)
+	for key, sourceValue := range source {
+		targetValue, found := merged[key]
+		if !found {
+			merged[key] = runtime.DeepCopyJSONValue(sourceValue)
+			continue
+		}
+		targetMap, targetIsMap := targetValue.(map[string]any)
+		sourceMap, sourceIsMap := sourceValue.(map[string]any)
+		if targetIsMap && sourceIsMap {
+			merged[key] = mergeManagedFieldValues(targetMap, sourceMap)
+			continue
+		}
+		targetList, targetIsList := targetValue.([]any)
+		sourceList, sourceIsList := sourceValue.([]any)
+		if targetIsList && sourceIsList {
+			combined := runtime.DeepCopyJSONValue(targetList).([]any)
+			for _, item := range sourceList {
+				alreadyPresent := false
+				for _, existingItem := range combined {
+					if equality.Semantic.DeepEqual(existingItem, item) {
+						alreadyPresent = true
+						break
+					}
+				}
+				if !alreadyPresent {
+					combined = append(combined, runtime.DeepCopyJSONValue(item))
+				}
+			}
+			merged[key] = combined
+			continue
+		}
+		merged[key] = runtime.DeepCopyJSONValue(sourceValue)
+	}
+	return merged
+}
+
+func preservedFieldsHandoffConfiguration(live, desired *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	fields, err := managedFieldsForManager(live, preservedFieldsManager, metav1.ManagedFieldsOperationApply)
+	if err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, fmt.Errorf(
+			"cannot hand off Workspace %s/%s fields: migration manager %q is missing",
+			live.GetNamespace(),
+			live.GetName(),
+			preservedFieldsManager,
+		)
+	}
+	object := extractManagedFieldsMap(live.Object, fields)
+	delete(object, "status")
+	desiredOwnedFields := extractManagedFieldsMap(desired.Object, fields)
+	object = migrateLegacyJSONMap(object, desiredOwnedFields, nil, nil)
+	replaceAtomicDesiredFields(object, desiredOwnedFields)
+	stableFields, err := managedFieldsForManager(live, FieldManager, metav1.ManagedFieldsOperationApply)
+	if err != nil {
+		return nil, err
+	}
+	if stableFields != nil {
+		// Relinquish preservation ownership for fields the stable manager
+		// already owns. Their old values remain present while the stable Apply
+		// changes them; preservation-only fields stay in this handoff so they
+		// can first move to the desired value without an intermediate deletion.
+		stableOwned := extractManagedFieldsMap(live.Object, stableFields)
+		remaining, _ := subtractDesiredJSON(object, stableOwned, nil)
+		var ok bool
+		object, ok = remaining.(map[string]any)
+		if !ok {
+			object = map[string]any{}
+		}
+	}
+	return workspaceConfigurationWithIdentity(object, live), nil
+}
+
+func replaceAtomicDesiredFields(target, desired map[string]any) {
+	targetResource, targetHasResource := target["resource"].(map[string]any)
+	desiredResource, desiredHasResource := desired["resource"].(map[string]any)
+	if !targetHasResource || !desiredHasResource {
+		return
+	}
+	if selector, found := desiredResource["labelSelector"]; found {
+		targetResource["labelSelector"] = runtime.DeepCopyJSONValue(selector)
+	}
+}
+
+func managedFieldsForManager(
+	resource *unstructured.Unstructured,
+	manager string,
+	operation metav1.ManagedFieldsOperationType,
+) (map[string]any, error) {
+	for _, entry := range resource.GetManagedFields() {
+		if entry.Manager != manager || entry.Operation != operation || entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(entry.FieldsV1.Raw, &fields); err != nil {
+			return nil, fmt.Errorf("failed to decode Workspace managedFields for manager %q: %w", entry.Manager, err)
+		}
+		return fields, nil
+	}
+	return nil, nil
+}
+
+func managerOwnsAnyDesired(
+	existing *unstructured.Unstructured,
+	manager string,
+	desired *unstructured.Unstructured,
+) (bool, error) {
+	fields, err := managedFieldsForManager(existing, manager, metav1.ManagedFieldsOperationApply)
+	if err != nil || fields == nil {
+		return false, err
+	}
+	return managedFieldsOverlapDesired(desired.Object, fields, nil), nil
+}
+
+func managedFieldsOverlapDesired(desired map[string]any, fields map[string]any, path []string) bool {
+	for key, desiredValue := range desired {
+		if shouldIgnoreDesiredOwnershipPath(path, key) {
+			continue
+		}
+		fieldValue, found := fields["f:"+key]
+		if !found {
+			continue
+		}
+		fieldChildren, ok := fieldValue.(map[string]any)
+		if !ok || len(fieldChildren) == 0 {
+			return true
+		}
+		nextPath := append(path, key)
+		switch value := desiredValue.(type) {
+		case map[string]any:
+			if managedFieldsOverlapDesired(value, fieldChildren, nextPath) {
+				return true
+			}
+		case []any:
+			if !pathMatches(nextPath, "metadata", "ownerReferences") {
+				return true
+			}
+			for _, item := range value {
+				reference, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				uid, _ := reference["uid"].(string)
+				for fieldKey := range fieldChildren {
+					if len(fieldKey) > 2 && fieldKey[:2] == "k:" && jsonKeyContainsUID(fieldKey[2:], uid) {
+						return true
+					}
+				}
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func jsonKeyContainsUID(encoded, uid string) bool {
+	if uid == "" {
+		return false
+	}
+	var keyFields map[string]any
+	return json.Unmarshal([]byte(encoded), &keyFields) == nil && keyFields["uid"] == uid
+}
+
+func preservedFieldsConfiguration(
+	live, desired, previouslyRendered *unstructured.Unstructured,
+	keepMigrationState bool,
+) (*unstructured.Unstructured, error) {
+	fields, err := managedFieldsForManager(live, preservedFieldsManager, metav1.ManagedFieldsOperationApply)
+	if err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, fmt.Errorf(
+			"cannot preserve Workspace %s/%s fields: migration manager %q is missing",
+			live.GetNamespace(),
+			live.GetName(),
+			preservedFieldsManager,
+		)
+	}
+	object := extractManagedFieldsMap(live.Object, fields)
+	delete(object, "status")
+	if !keepMigrationState {
+		unstructured.RemoveNestedField(object, "metadata", "annotations", migrationManagersAnnotation)
+		unstructured.RemoveNestedField(object, "metadata", "annotations", migrationPreviousFieldsAnnotation)
+	}
+
+	preserved, _ := subtractDesiredJSON(object, desired.Object, nil)
+	preservedObject, ok := preserved.(map[string]any)
+	if !ok {
+		preservedObject = map[string]any{}
+	}
+	if previouslyRendered != nil {
+		preserved, _ = subtractDesiredJSON(preservedObject, previouslyRendered.Object, nil)
+		preservedObject, ok = preserved.(map[string]any)
+		if !ok {
+			preservedObject = map[string]any{}
+		}
+	}
+	return workspaceConfigurationWithIdentity(preservedObject, live), nil
+}
+
+func workspaceConfigurationWithIdentity(
+	object map[string]any,
+	live *unstructured.Unstructured,
+) *unstructured.Unstructured {
+	object["apiVersion"] = live.GetAPIVersion()
+	object["kind"] = live.GetKind()
+	metadata, _ := object["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+		object["metadata"] = metadata
+	}
+	metadata["name"] = live.GetName()
+	metadata["namespace"] = live.GetNamespace()
+	return &unstructured.Unstructured{Object: object}
+}
+
+func extractManagedFieldsMap(live, fields map[string]any) map[string]any {
+	extracted := map[string]any{}
+	for fieldKey, fieldValue := range fields {
+		if len(fieldKey) < 3 || fieldKey[:2] != "f:" {
+			continue
+		}
+		key := fieldKey[2:]
+		liveValue, found := live[key]
+		if !found {
+			continue
+		}
+		fieldChildren, ok := fieldValue.(map[string]any)
+		if !ok || len(fieldChildren) == 0 {
+			extracted[key] = runtime.DeepCopyJSONValue(liveValue)
+			continue
+		}
+		switch value := liveValue.(type) {
+		case map[string]any:
+			children := extractManagedFieldsMap(value, fieldChildren)
+			if len(children) > 0 {
+				extracted[key] = children
+			}
+		case []any:
+			items := extractManagedFieldsList(value, fieldChildren)
+			if len(items) > 0 {
+				extracted[key] = items
+			}
+		default:
+			extracted[key] = runtime.DeepCopyJSONValue(liveValue)
+		}
+	}
+	return extracted
+}
+
+func extractManagedFieldsList(live []any, fields map[string]any) []any {
+	keyedFields := map[string]map[string]any{}
+	setValues := make([]any, 0)
+	for fieldKey, fieldValue := range fields {
+		if len(fieldKey) < 3 {
+			continue
+		}
+		switch fieldKey[:2] {
+		case "k:":
+			children, ok := fieldValue.(map[string]any)
+			if ok {
+				keyedFields[fieldKey[2:]] = children
+			}
+		case "v:":
+			var value any
+			if json.Unmarshal([]byte(fieldKey[2:]), &value) == nil {
+				setValues = append(setValues, value)
+			}
+		}
+	}
+	if len(keyedFields) == 0 && len(setValues) == 0 {
+		return runtime.DeepCopyJSONValue(live).([]any)
+	}
+
+	extracted := make([]any, 0, len(keyedFields)+len(setValues))
+	for _, ownedValue := range setValues {
+		for _, liveValue := range live {
+			if equality.Semantic.DeepEqual(liveValue, ownedValue) {
+				extracted = append(extracted, runtime.DeepCopyJSONValue(liveValue))
+				break
+			}
+		}
+	}
+	for encodedKey, children := range keyedFields {
+		var keyFields map[string]any
+		if json.Unmarshal([]byte(encodedKey), &keyFields) != nil {
+			continue
+		}
+		for _, item := range live {
+			itemMap, ok := item.(map[string]any)
+			if !ok || !jsonMapContains(itemMap, keyFields) {
+				continue
+			}
+			var extractedItem map[string]any
+			_, ownsItemNode := children["."]
+			if len(children) == 0 || (len(children) == 1 && ownsItemNode) {
+				extractedItem = runtime.DeepCopyJSON(itemMap)
+			} else {
+				extractedItem = extractManagedFieldsMap(itemMap, children)
+			}
+			for key, value := range keyFields {
+				extractedItem[key] = runtime.DeepCopyJSONValue(value)
+			}
+			extracted = append(extracted, extractedItem)
+			break
+		}
+	}
+	return extracted
+}
+
+func jsonMapContains(values, expected map[string]any) bool {
+	for key, expectedValue := range expected {
+		if !equality.Semantic.DeepEqual(values[key], expectedValue) {
 			return false
 		}
 	}
-
 	return true
 }
 
-func (r *KaitoProviderReconciler) updateManagedWorkspaceFields(ctx context.Context, existing, desired *unstructured.Unstructured, lastAppliedResource, lastAppliedInference map[string]interface{}, lastAppliedLabels, lastAppliedAnnotations map[string]string) error {
+func subtractDesiredJSON(live, desired any, path []string) (any, bool) {
+	liveMap, liveIsMap := live.(map[string]any)
+	desiredMap, desiredIsMap := desired.(map[string]any)
+	if liveIsMap && desiredIsMap {
+		remaining := runtime.DeepCopyJSON(liveMap)
+		for key, desiredValue := range desiredMap {
+			liveValue, found := remaining[key]
+			if !found {
+				continue
+			}
+			nextPath := append(path, key)
+			if pathMatches(nextPath, "resource", "labelSelector") {
+				// KAITO declares this map atomic. Any ownership overlap is for the
+				// whole selector, never for an independently subtractable child.
+				delete(remaining, key)
+				continue
+			}
+			if pathMatches(nextPath, "metadata", "ownerReferences") {
+				liveReferences, liveOK := liveValue.([]any)
+				desiredReferences, desiredOK := desiredValue.([]any)
+				if liveOK && desiredOK {
+					filtered := filterDesiredOwnerReferences(liveReferences, desiredReferences)
+					if len(filtered) == 0 {
+						delete(remaining, key)
+					} else {
+						remaining[key] = filtered
+					}
+					continue
+				}
+			}
+			if child, keep := subtractDesiredJSON(liveValue, desiredValue, nextPath); keep {
+				remaining[key] = child
+			} else {
+				delete(remaining, key)
+			}
+		}
+		return remaining, len(remaining) > 0
+	}
+	return nil, false
+}
+
+func filterDesiredOwnerReferences(live, desired []any) []any {
+	desiredUIDs := map[string]struct{}{}
+	for _, item := range desired {
+		if reference, ok := item.(map[string]any); ok {
+			if uid, ok := reference["uid"].(string); ok {
+				desiredUIDs[uid] = struct{}{}
+			}
+		}
+	}
+	filtered := make([]any, 0, len(live))
+	for _, item := range live {
+		reference, ok := item.(map[string]any)
+		uid, hasUID := reference["uid"].(string)
+		if ok && hasUID {
+			if _, rendered := desiredUIDs[uid]; rendered {
+				continue
+			}
+		}
+		filtered = append(filtered, runtime.DeepCopyJSONValue(item))
+	}
+	return filtered
+}
+
+func hasApplyManagedFields(resource *unstructured.Unstructured) bool {
+	for _, entry := range resource.GetManagedFields() {
+		if entry.Manager == FieldManager &&
+			entry.Operation == metav1.ManagedFieldsOperationApply &&
+			entry.Subresource == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceMatchesDesired(existing, desired *unstructured.Unstructured) (bool, error) {
+	if !hasApplyManagedFields(existing) {
+		return false, nil
+	}
+	owned, err := applyManagerOwnsDesired(existing, desired)
+	if err != nil || !owned {
+		return false, err
+	}
+	return desiredSubsetMatches(desired.Object, existing.Object), nil
+}
+
+// applyManagerOwnsDesired prevents the value-only no-op check from masking a
+// rendered field that another manager force-took and restored to the same value.
+// Re-applying in that case re-establishes shared declarative ownership without
+// forcing the other manager away.
+func applyManagerOwnsDesired(existing, desired *unstructured.Unstructured) (bool, error) {
+	fields, err := managedFieldsForManager(existing, FieldManager, metav1.ManagedFieldsOperationApply)
+	if err != nil || fields == nil {
+		return false, err
+	}
+	return managedFieldsOwnDesired(desired.Object, fields, nil), nil
+}
+
+func managedFieldsOwnDesired(desired map[string]any, fields map[string]any, path []string) bool {
+	for key, desiredValue := range desired {
+		if shouldIgnoreDesiredOwnershipPath(path, key) {
+			continue
+		}
+		fieldValue, found := fields["f:"+key]
+		if !found {
+			return false
+		}
+		fieldChildren, ok := fieldValue.(map[string]any)
+		if !ok {
+			return false
+		}
+		if len(fieldChildren) == 0 {
+			continue
+		}
+
+		nextPath := append(path, key)
+		switch value := desiredValue.(type) {
+		case map[string]any:
+			if !managedFieldsOwnDesired(value, fieldChildren, nextPath) {
+				return false
+			}
+		case []any:
+			if pathMatches(nextPath, "metadata", "ownerReferences") &&
+				!managedFieldsOwnOwnerReferences(value, fieldChildren) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func managedFieldsOwnOwnerReferences(desired []any, fields map[string]any) bool {
+	if len(fields) == 0 {
+		return true
+	}
+	for _, desiredItem := range desired {
+		desiredReference, ok := desiredItem.(map[string]any)
+		if !ok {
+			return false
+		}
+		desiredUID, ok := desiredReference["uid"].(string)
+		if !ok || desiredUID == "" {
+			return false
+		}
+		matched := false
+		for fieldKey, fieldValue := range fields {
+			if len(fieldKey) < 2 || fieldKey[:2] != "k:" {
+				continue
+			}
+			var keyFields map[string]any
+			if err := json.Unmarshal([]byte(fieldKey[2:]), &keyFields); err != nil || keyFields["uid"] != desiredUID {
+				continue
+			}
+			fieldChildren, ok := fieldValue.(map[string]any)
+			if !ok {
+				return false
+			}
+			if _, ownsWholeItem := fieldChildren["."]; len(fieldChildren) == 0 || ownsWholeItem {
+				matched = true
+				break
+			}
+			if managedFieldsOwnDesired(desiredReference, fieldChildren, []string{"metadata", "ownerReferences"}) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func shouldIgnoreDesiredOwnershipPath(path []string, key string) bool {
+	if len(path) == 0 && (key == "apiVersion" || key == "kind") {
+		return true
+	}
+	if pathMatches(path, "metadata") {
+		switch key {
+		case "name", "namespace":
+			return true
+		}
+	}
+	if pathMatches(path, "metadata", "ownerReferences") && key == "uid" {
+		// UID is the associative-list key and is represented by the surrounding
+		// k:{"uid":...} FieldsV1 node rather than an f:uid child.
+		return true
+	}
+	return false
+}
+
+// desiredSubsetMatches compares only rendered fields. Extra map fields may be
+// KAITO defaults or fields owned by another SSA manager. The pinned KAITO CRD
+// declares resource.labelSelector atomic, so that map is compared exactly;
+// AI Runway owns the entire selector whenever it renders one. KAITO spec lists
+// are likewise compared atomically because the CRD does not declare them
+// associative; metadata.ownerReferences is compared by UID according to the
+// Kubernetes metadata schema.
+func desiredSubsetMatches(desired, existing any, path ...string) bool {
+	switch desiredValue := desired.(type) {
+	case map[string]any:
+		existingValue, ok := existing.(map[string]any)
+		if !ok {
+			return false
+		}
+		if pathMatches(path, "resource", "labelSelector") {
+			return equality.Semantic.DeepEqual(desiredValue, existingValue)
+		}
+		for key, value := range desiredValue {
+			existingField, found := existingValue[key]
+			if !found || !desiredSubsetMatches(value, existingField, append(path, key)...) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		existingValue, ok := existing.([]any)
+		if !ok {
+			return false
+		}
+		if pathMatches(path, "metadata", "ownerReferences") {
+			return ownerReferencesSubsetMatches(desiredValue, existingValue)
+		}
+		return equality.Semantic.DeepEqual(desiredValue, existingValue)
+	default:
+		return equality.Semantic.DeepEqual(desired, existing)
+	}
+}
+
+func ownerReferencesSubsetMatches(desired, existing []any) bool {
+	for _, desiredItem := range desired {
+		desiredReference, ok := desiredItem.(map[string]any)
+		if !ok {
+			return false
+		}
+		desiredUID, ok := desiredReference["uid"].(string)
+		if !ok || desiredUID == "" {
+			return false
+		}
+		matched := false
+		for _, existingItem := range existing {
+			existingReference, ok := existingItem.(map[string]any)
+			if !ok || existingReference["uid"] != desiredUID {
+				continue
+			}
+			if desiredSubsetMatches(desiredReference, existingReference, "metadata", "ownerReferences") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func pathMatches(path []string, segments ...string) bool {
+	if len(path) != len(segments) {
+		return false
+	}
+	for index, segment := range segments {
+		if path[index] != segment {
+			return false
+		}
+	}
+	return true
+}
+
+// markLegacyWorkspaceMigration persists only the exact Update manager names
+// selected for the SSA handoff. Rendered fields are deliberately untouched so
+// a conflicting Apply owner is surfaced by the subsequent stable Apply.
+func (r *KaitoProviderReconciler) markLegacyWorkspaceMigration(
+	ctx context.Context,
+	existing *unstructured.Unstructured,
+	migrationManagers map[string]struct{},
+) (*unstructured.Unstructured, error) {
 	base := existing.DeepCopy()
 	updated := existing.DeepCopy()
-
-	if err := mergeManagedTopLevelMap(updated, desired, lastAppliedResource, "resource"); err != nil {
-		return err
+	if err := setPendingMigrationManagers(updated, migrationManagers); err != nil {
+		return nil, err
 	}
-	if err := mergeManagedTopLevelMap(updated, desired, lastAppliedInference, "inference"); err != nil {
-		return err
-	}
-	mergeManagedMetadata(updated, desired, lastAppliedLabels, lastAppliedAnnotations)
 
-	return r.Patch(ctx, updated, client.MergeFrom(base), strictFieldValidation)
+	if equality.Semantic.DeepEqual(base.Object, updated.Object) {
+		return existing, nil
+	}
+	if err := r.Patch(
+		ctx,
+		updated,
+		client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+		client.FieldOwner(FieldManager),
+		strictFieldValidation,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"failed to mark legacy Workspace %s/%s migration: %w",
+			existing.GetNamespace(),
+			existing.GetName(),
+			err,
+		)
+	}
+	return updated, nil
 }
 
-func mergeManagedTopLevelMap(target, desired *unstructured.Unstructured, lastApplied map[string]interface{}, field string) error {
-	desiredMap, desiredFound, err := unstructured.NestedMap(desired.Object, field)
-	if err != nil {
-		return fmt.Errorf("failed to read desired Workspace %s: %w", field, err)
-	}
-	existingMap, existingFound, err := unstructured.NestedMap(target.Object, field)
-	if err != nil {
-		return fmt.Errorf("failed to read existing Workspace %s: %w", field, err)
-	}
-
-	if desiredFound {
-		if !existingFound {
-			existingMap = map[string]interface{}{}
-		}
-		merged := mergeManagedMap(existingMap, desiredMap, lastApplied, field)
-		if err := unstructured.SetNestedField(target.Object, merged, field); err != nil {
-			return fmt.Errorf("failed to update Workspace %s: %w", field, err)
-		}
-		return nil
-	}
-
-	if lastApplied != nil {
-		unstructured.RemoveNestedField(target.Object, field)
-	}
-	return nil
-}
-
-func mergeManagedMap(existing, desired, lastApplied map[string]interface{}, path ...string) map[string]interface{} {
+func migrateLegacyJSONMap(existing, desired, legacy map[string]any, path []string) map[string]any {
 	merged := runtime.DeepCopyJSON(existing)
 	if merged == nil {
-		merged = map[string]interface{}{}
+		merged = map[string]any{}
 	}
-
 	for key, desiredValue := range desired {
-		desiredMap, desiredIsMap := desiredValue.(map[string]interface{})
-		existingMap, existingIsMap := merged[key].(map[string]interface{})
-		if desiredIsMap && existingIsMap {
-			merged[key] = mergeManagedMap(existingMap, desiredMap, nestedLastAppliedMap(lastApplied, key), append(path, key)...)
-			continue
+		nextPath := append(path, key)
+		if pathMatches(nextPath, "metadata", "ownerReferences") {
+			existingReferences, existingOK := merged[key].([]any)
+			desiredReferences, desiredOK := desiredValue.([]any)
+			if existingOK && desiredOK {
+				merged[key] = mergeDesiredOwnerReferences(existingReferences, desiredReferences)
+				continue
+			}
 		}
-		if desiredIsMap {
-			merged[key] = runtime.DeepCopyJSON(desiredMap)
-			continue
+		existingMap, existingIsMap := merged[key].(map[string]any)
+		desiredMap, desiredIsMap := desiredValue.(map[string]any)
+		legacyMap, _ := legacy[key].(map[string]any)
+		if existingIsMap && desiredIsMap {
+			merged[key] = migrateLegacyJSONMap(existingMap, desiredMap, legacyMap, nextPath)
+		} else {
+			merged[key] = runtime.DeepCopyJSONValue(desiredValue)
 		}
-
-		merged[key] = runtime.DeepCopyJSONValue(desiredValue)
-	}
-
-	for key := range merged {
-		if _, desiredHasKey := desired[key]; desiredHasKey {
-			continue
-		}
-		if lastAppliedHasKey(lastApplied, key) {
-			delete(merged, key)
-			continue
-		}
-		if lastApplied == nil && treatsUnknownExtraAsManaged(path, key) {
-			delete(merged, key)
-		}
-	}
-
-	return merged
-}
-
-func mergeManagedMetadata(target, desired *unstructured.Unstructured, lastAppliedLabels, lastAppliedAnnotations map[string]string) {
-	target.SetLabels(mergeManagedStringMap(target.GetLabels(), desired.GetLabels(), lastAppliedLabels))
-
-	annotations := mergeManagedStringMap(managedAnnotations(target.GetAnnotations()), managedAnnotations(desired.GetAnnotations()), lastAppliedAnnotations)
-	if lastApplied := desired.GetAnnotations()[lastAppliedWorkspaceAnnotation]; lastApplied != "" {
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-		annotations[lastAppliedWorkspaceAnnotation] = lastApplied
-	}
-	target.SetAnnotations(annotations)
-}
-
-func mergeManagedStringMap(existing, desired, lastApplied map[string]string) map[string]string {
-	if len(existing) == 0 && len(desired) == 0 {
-		return nil
-	}
-
-	merged := make(map[string]string, len(existing)+len(desired))
-	for key, value := range existing {
-		merged[key] = value
-	}
-	for key, value := range desired {
-		merged[key] = value
 	}
 	for key := range merged {
 		if _, desiredHasKey := desired[key]; desiredHasKey {
 			continue
 		}
-		if lastAppliedStringMapHasKey(lastApplied, key) {
+		if _, legacyOwnedKey := legacy[key]; legacyOwnedKey {
 			delete(merged, key)
 		}
-	}
-	if len(merged) == 0 {
-		return nil
 	}
 	return merged
 }
 
-func managedAnnotations(annotations map[string]string) map[string]string {
+func mergeDesiredOwnerReferences(existing, desired []any) []any {
+	merged := runtime.DeepCopyJSONValue(existing).([]any)
+	for _, desiredItem := range desired {
+		desiredReference, desiredIsReference := desiredItem.(map[string]any)
+		desiredUID, desiredHasUID := desiredReference["uid"].(string)
+		replaced := false
+		if desiredIsReference && desiredHasUID && desiredUID != "" {
+			for index, existingItem := range merged {
+				existingReference, existingIsReference := existingItem.(map[string]any)
+				existingUID, existingHasUID := existingReference["uid"].(string)
+				if existingIsReference && existingHasUID && existingUID == desiredUID {
+					merged[index] = runtime.DeepCopyJSONValue(desiredItem)
+					replaced = true
+					break
+				}
+			}
+		}
+		if !replaced {
+			merged = append(merged, runtime.DeepCopyJSONValue(desiredItem))
+		}
+	}
+	return merged
+}
+
+// sanitizedDesiredAnnotations copies user-rendered Workspace annotations while
+// removing the reconciler's private ownership-migration state. Only the
+// reconciler may add these keys after desired state has been fingerprinted.
+func sanitizedDesiredAnnotations(annotations map[string]string) map[string]string {
 	if len(annotations) == 0 {
 		return nil
 	}
 	managed := make(map[string]string, len(annotations))
 	for key, value := range annotations {
-		if key == lastAppliedWorkspaceAnnotation {
+		if key == lastAppliedWorkspaceAnnotation ||
+			key == migrationManagersAnnotation ||
+			key == migrationPreviousFieldsAnnotation {
 			continue
 		}
 		managed[key] = value
@@ -669,22 +1964,43 @@ func managedAnnotations(annotations map[string]string) map[string]string {
 	return managed
 }
 
-func lastAppliedStringMapHasKey(lastApplied map[string]string, key string) bool {
-	if lastApplied == nil {
-		return false
+func setPendingMigrationManagers(resource *unstructured.Unstructured, managers map[string]struct{}) error {
+	managerSet := sets.New[string]()
+	for manager := range managers {
+		managerSet.Insert(manager)
 	}
-	_, ok := lastApplied[key]
-	return ok
+	data, err := json.Marshal(sets.List(managerSet))
+	if err != nil {
+		return fmt.Errorf("failed to marshal Workspace migration managers: %w", err)
+	}
+	annotations := copyStringMap(resource.GetAnnotations())
+	if _, alreadyRecorded := annotations[migrationPreviousFieldsAnnotation]; !alreadyRecorded {
+		if previous, found := annotations[lastAppliedWorkspaceAnnotation]; found {
+			annotations[migrationPreviousFieldsAnnotation] = previous
+			delete(annotations, lastAppliedWorkspaceAnnotation)
+		}
+	}
+	annotations[migrationManagersAnnotation] = string(data)
+	resource.SetAnnotations(annotations)
+	return nil
 }
 
-// setLastAppliedManagedFields records the desired Workspace fields that Airunway owns.
-// The annotation lets future reconciles distinguish provider/operator defaults from
-// fields that Airunway wrote previously and must delete when they disappear from the
-// desired ModelDeployment-derived Workspace.
+func withoutLastAppliedWorkspaceAnnotation(resource *unstructured.Unstructured) *unstructured.Unstructured {
+	configuration := resource.DeepCopy()
+	annotations := copyStringMap(configuration.GetAnnotations())
+	delete(annotations, lastAppliedWorkspaceAnnotation)
+	configuration.SetAnnotations(annotations)
+	return configuration
+}
+
+// setLastAppliedManagedFields records the desired Workspace fields rendered by
+// AI Runway. SSA owns the annotation with the rest of the desired configuration;
+// future reconciles use it to detect removals without comparing KAITO defaults.
 func setLastAppliedManagedFields(resource *unstructured.Unstructured) error {
+	annotations := sanitizedDesiredAnnotations(resource.GetAnnotations())
 	managedFields := map[string]interface{}{
 		"labels":      copyStringMap(resource.GetLabels()),
-		"annotations": copyStringMap(managedAnnotations(resource.GetAnnotations())),
+		"annotations": copyStringMap(annotations),
 	}
 	if resourceSpec, found, _ := unstructured.NestedMap(resource.Object, "resource"); found {
 		managedFields["resource"] = resourceSpec
@@ -698,32 +2014,70 @@ func setLastAppliedManagedFields(resource *unstructured.Unstructured) error {
 		return fmt.Errorf("failed to marshal last-applied Workspace fields: %w", err)
 	}
 
-	annotations := copyStringMap(resource.GetAnnotations())
+	annotations = copyStringMap(annotations)
 	annotations[lastAppliedWorkspaceAnnotation] = string(data)
 	resource.SetAnnotations(annotations)
 	return nil
 }
 
-// lastAppliedManagedFields returns the Workspace fields that this controller
-// wrote on its previous create/update. A missing or malformed annotation means
-// the resource predates the annotation scheme, so callers fall back to a
-// conservative comparison for known Airunway-owned maps.
-func lastAppliedManagedFields(existing *unstructured.Unstructured) (map[string]interface{}, map[string]interface{}, map[string]string, map[string]string) {
+// lastAppliedManagedFields returns the Workspace fields written by the legacy
+// Create/Update implementation. It is used only to migrate those fields into
+// SSA ownership; managedFields is authoritative after adoption.
+func lastAppliedManagedFields(
+	existing *unstructured.Unstructured,
+) (map[string]any, map[string]any, map[string]string, map[string]string, error) {
 	annotation := existing.GetAnnotations()[lastAppliedWorkspaceAnnotation]
 	if annotation == "" {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	var managedFields map[string]interface{}
 	if err := json.Unmarshal([]byte(annotation), &managedFields); err != nil {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, fmt.Errorf(
+			"failed to decode legacy Workspace %s/%s last-applied annotation: %w",
+			existing.GetNamespace(),
+			existing.GetName(),
+			err,
+		)
 	}
 
 	resourceSpec, _ := managedFields["resource"].(map[string]interface{})
 	inference, _ := managedFields["inference"].(map[string]interface{})
 	labels := stringMapFromInterface(managedFields["labels"])
 	annotations := stringMapFromInterface(managedFields["annotations"])
-	return resourceSpec, inference, labels, annotations
+	return resourceSpec, inference, labels, annotations, nil
+}
+
+func lastAppliedWorkspaceConfiguration(existing *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	annotation := existing.GetAnnotations()[migrationPreviousFieldsAnnotation]
+	if annotation == "" {
+		annotation = existing.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+	}
+	if annotation == "" {
+		return nil, nil
+	}
+	snapshot := existing.DeepCopy()
+	snapshotAnnotations := copyStringMap(snapshot.GetAnnotations())
+	snapshotAnnotations[lastAppliedWorkspaceAnnotation] = annotation
+	snapshot.SetAnnotations(snapshotAnnotations)
+	resourceSpec, inference, labels, annotations, err := lastAppliedManagedFields(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	configuration := &unstructured.Unstructured{Object: map[string]any{}}
+	if resourceSpec != nil {
+		configuration.Object["resource"] = runtime.DeepCopyJSON(resourceSpec)
+	}
+	if inference != nil {
+		configuration.Object["inference"] = runtime.DeepCopyJSON(inference)
+	}
+	if len(labels) > 0 {
+		configuration.SetLabels(copyStringMap(labels))
+	}
+	if len(annotations) > 0 {
+		configuration.SetAnnotations(copyStringMap(annotations))
+	}
+	return configuration, nil
 }
 
 func copyStringMap(values map[string]string) map[string]string {
@@ -751,86 +2105,6 @@ func stringMapFromInterface(value interface{}) map[string]string {
 		result[key] = stringValue
 	}
 	return result
-}
-
-// managedFieldsMatch returns true when existing still matches the desired fields
-// managed by Airunway. Extra existing keys are ignored only when they were not part
-// of the last-applied desired state, which lets operator defaults such as
-// inference.preset.accessMode coexist without preventing deletion of fields that
-// Airunway wrote in an earlier reconcile.
-func managedFieldsMatch(desired, existing, lastApplied map[string]interface{}, path ...string) bool {
-	if desired == nil {
-		desired = map[string]interface{}{}
-	}
-	if existing == nil {
-		existing = map[string]interface{}{}
-	}
-
-	for k, dv := range desired {
-		ev, ok := existing[k]
-		if !ok {
-			return false
-		}
-
-		dMap, dIsMap := dv.(map[string]interface{})
-		eMap, eIsMap := ev.(map[string]interface{})
-		if dIsMap && eIsMap {
-			if !managedFieldsMatch(dMap, eMap, nestedLastAppliedMap(lastApplied, k), append(path, k)...) {
-				return false
-			}
-			continue
-		}
-
-		if !equality.Semantic.DeepEqual(dv, ev) {
-			return false
-		}
-	}
-
-	for k := range existing {
-		if _, desiredHasKey := desired[k]; desiredHasKey {
-			continue
-		}
-		if lastAppliedHasKey(lastApplied, k) {
-			return false
-		}
-		if lastApplied == nil && treatsUnknownExtraAsManaged(path, k) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func nestedLastAppliedMap(lastApplied map[string]interface{}, key string) map[string]interface{} {
-	if lastApplied == nil {
-		return nil
-	}
-	nested, _ := lastApplied[key].(map[string]interface{})
-	return nested
-}
-
-func lastAppliedHasKey(lastApplied map[string]interface{}, key string) bool {
-	if lastApplied == nil {
-		return false
-	}
-	_, ok := lastApplied[key]
-	return ok
-}
-
-func treatsUnknownExtraAsManaged(path []string, key string) bool {
-	return pathMatches(path, "resource", "labelSelector") || pathMatches(path, "resource", "labelSelector", "matchLabels")
-}
-
-func pathMatches(path []string, segments ...string) bool {
-	if len(path) != len(segments) {
-		return false
-	}
-	for i, segment := range segments {
-		if path[i] != segment {
-			return false
-		}
-	}
-	return true
 }
 
 // syncStatus fetches the upstream resource and syncs its status to the ModelDeployment
