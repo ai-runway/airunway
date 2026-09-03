@@ -1,5 +1,4 @@
 import * as k8s from '@kubernetes/client-node';
-import type * as https from 'node:https';
 import { configService } from './config';
 import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig } from '@airunway/shared';
 import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
@@ -376,7 +375,8 @@ type ProxyServiceGetOptions = ProxyServiceOptions & {
   accept?: string;
 };
 
-type ProxyServiceRequestInit = RequestInit & {
+type ProxyServiceRequestInit = Omit<RequestInit, 'method'> & {
+  method: 'GET' | 'POST';
   userToken?: string;
 };
 
@@ -2500,15 +2500,19 @@ class KubernetesService {
     // Build proxy URL: /api/v1/namespaces/{ns}/services/{name}:{port}/proxy/{path}
     const proxyUrl = `${cluster.server}/api/v1/namespaces/${encodeURIComponent(namespace)}/services/${encodeURIComponent(serviceName)}:${port}/proxy/${path}`;
 
-    // Extract auth headers from KubeConfig
-    const authOpts = await kubeConfig.applyToFetchOptions({ headers: {} } as https.RequestOptions);
+    // Apply kubeconfig authentication to the SDK's request context, then copy
+    // the resulting headers into Bun's native fetch request. client-node v2
+    // removed applyToFetchOptions in favour of this public authentication API.
+    const method = requestInit.method === 'POST' ? k8s.HttpMethod.POST : k8s.HttpMethod.GET;
+    const authContext = new k8s.RequestContext(proxyUrl, method);
+    await kubeConfig.applySecurityAuthentication(authContext);
 
     // Extract TLS material (CA, client cert/key, SNI, verification mode) via the
     // shared kubeconfig→Bun mapping, so this raw-`fetch` path and the typed-API
     // path (`BunTlsHttpLibrary`) stay in lockstep and cannot drift.
     const tlsOpts = await kubeConfigToBunTls(kubeConfig);
 
-    const headers = new Headers((authOpts.headers as HeadersInit) || {});
+    const headers = new Headers(authContext.getHeaders());
     if (requestInit.headers) {
       new Headers(requestInit.headers).forEach((value, key) => headers.set(key, value));
     }
