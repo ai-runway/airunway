@@ -408,11 +408,18 @@ describe('Installation Provider Routes', () => {
       const data = await res.json();
       expect(data.providerId).toBe('custom-llmd-registration');
       expect(data.providerName).toBe('LLM-D');
-      expect(data.installed).toBe(true);
+      // The point of this test: an explicit requiresCRD: true is honoured even
+      // for a custom-named registration of an otherwise CRD-less engine.
       expect(data.requiresCRD).toBe(true);
-      expect(data.installable).toBe(true);
-      expect(data.helmCommands.length).toBeGreaterThan(0);
-      expect(data.message).toBe('LLM-D is installed and running');
+      // Issue #244: nothing to probe with, so a live heartbeat must not be
+      // reported as either installed or definitely absent.
+      expect(data.installationState).toBe('unknown');
+      expect(data.installed).toBe(false);
+      expect(data.crdFound).toBeUndefined();
+      expect(data.operatorRunning).toBeUndefined();
+      expect(data.message).toContain('cannot be confirmed');
+      expect(data.installable).toBe(false);
+      expect(data.helmCommands).toEqual([]);
     });
 
     test('honors per-engine requiresCRD: false on the migrated schema for custom providers', async () => {
@@ -443,6 +450,53 @@ describe('Installation Provider Routes', () => {
 
       const res = await app.request('/api/installation/providers/unknown/status');
       expect(res.status).toBe(404);
+    });
+
+    test('includes AI Runway integration (shim) status derived from the provider config heartbeat', async () => {
+      const recentHeartbeat = new Date().toISOString();
+      // Strip the health/capabilities annotations so this exercises the mocked
+      // KAITO probe below. With them present, checkProviderInstallationStatus
+      // takes the annotation-driven path (or the !requiresCRD early return,
+      // which reports crdFound: true unconditionally) and the mock never runs.
+      const configWithHeartbeat = withoutHealthAnnotation({
+        ...mockInferenceProviderConfig,
+        status: {
+          ...mockInferenceProviderConfig.status,
+          ready: false,
+          lastHeartbeat: recentHeartbeat,
+          conditions: [
+            {
+              type: 'UpstreamReady',
+              status: 'False',
+              reason: 'UpstreamControllerMissing',
+              message: 'The KAITO workspace controller is not running.',
+            },
+          ],
+        },
+      });
+
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => configWithHeartbeat),
+        mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => ({
+          installed: false,
+          crdFound: false,
+          operatorRunning: false,
+          message: 'KAITO workspace CRD not found',
+        })),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/status');
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      // Runtime install status still reflects the live probe, not shim heartbeat
+      expect(data.installed).toBe(false);
+      expect(data.crdFound).toBe(false);
+      expect(data.operatorRunning).toBe(false);
+      // Shim status is exposed separately so the UI can clarify the distinction
+      expect(data.shimRegistered).toBe(true);
+      expect(data.shimConnected).toBe(true);
+      expect(data.shimLastHeartbeat).toBe(recentHeartbeat);
     });
 
     test('surfaces shim refuse-fast message when UpstreamReady=False is fresh', async () => {

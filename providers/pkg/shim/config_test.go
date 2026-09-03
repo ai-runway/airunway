@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -129,6 +130,53 @@ func TestRegisterProviderConfigUpdatesExistingConfig(t *testing.T) {
 	}
 	if len(stored.Spec.SelectionRules) != 1 || stored.Spec.SelectionRules[0].Priority != 99 {
 		t.Fatalf("stored spec selection rules = %#v, want one rule with priority 99", stored.Spec.SelectionRules)
+	}
+}
+
+func TestMarkProviderConfigUnregistered(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add scheme: %v", err)
+	}
+
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-provider"},
+		Status: airunwayv1alpha1.InferenceProviderConfigStatus{
+			Ready:              true,
+			Version:            "test-provider:v1",
+			UpstreamCRDVersion: "example.io/v1",
+		},
+	}
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithStatusSubresource(existing).
+		Build()
+
+	if err := MarkProviderConfigUnregistered(context.Background(), testClient, existing.Name); err != nil {
+		t.Fatalf("MarkProviderConfigUnregistered() unexpected error: %v", err)
+	}
+
+	var stored airunwayv1alpha1.InferenceProviderConfig
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: existing.Name}, &stored); err != nil {
+		t.Fatalf("failed to fetch updated config: %v", err)
+	}
+
+	if stored.Status.Ready {
+		t.Fatal("expected provider status to be not ready")
+	}
+	if stored.Status.LastHeartbeat == nil {
+		t.Fatal("expected shutdown to write a heartbeat")
+	}
+	if stored.Status.Version != "test-provider:v1" || stored.Status.UpstreamCRDVersion != "example.io/v1" {
+		t.Fatalf("expected provider-specific status fields to be preserved, got %+v", stored.Status)
+	}
+	condition := meta.FindStatusCondition(stored.Status.Conditions, "UpstreamReady")
+	if condition == nil ||
+		condition.Reason != ReasonUnregistered ||
+		condition.Message != MessageUnregistered ||
+		condition.Status != metav1.ConditionFalse {
+		t.Fatalf("unexpected shutdown condition: %+v", condition)
 	}
 }
 

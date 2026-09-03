@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PINNED_GAIE_VERSION } from '@airunway/shared'
+import type { InstallationState } from '@airunway/shared'
 import { SettingsPage } from './SettingsPage'
 
 const mutateAsync = vi.fn()
@@ -43,12 +44,17 @@ let mockGatewayStatus = {
 type MockRuntimeStatus = {
   id: string
   name: string
+  installationState?: InstallationState
   installed: boolean
   healthy: boolean
   crdFound?: boolean
   operatorRunning?: boolean
   requiresCRD?: boolean
+  installable?: boolean
   version?: string
+  shimRegistered?: boolean
+  shimConnected?: boolean
+  shimLastHeartbeat?: string
 }
 
 const defaultMockRuntimes = (): MockRuntimeStatus[] => [
@@ -140,6 +146,9 @@ const getMockInstallationStatus = (providerId: string) => {
         crdFound: true,
         operatorRunning: false,
         installationSteps: [],
+        shimRegistered: mockRuntimes.find(runtime => runtime.id === 'kuberay')?.shimRegistered,
+        shimConnected: mockRuntimes.find(runtime => runtime.id === 'kuberay')?.shimConnected,
+        shimLastHeartbeat: mockRuntimes.find(runtime => runtime.id === 'kuberay')?.shimLastHeartbeat,
       }
     case 'llmd':
       return {
@@ -188,6 +197,33 @@ const getMockInstallationStatus = (providerId: string) => {
         operatorRunning: false,
         requiresCRD: false,
         installationSteps: [],
+      }
+    case 'custom-runtime':
+      return {
+        installed: false,
+        providerName: 'Custom Runtime',
+        message: 'Custom Runtime has not provided installation metadata.',
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: false,
+        installationSteps: [],
+      }
+    case 'unverified-runtime':
+      return {
+        installationState: 'unknown' as const,
+        installed: false,
+        providerName: 'Unverified Runtime',
+        message: 'Unverified Runtime has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.',
+        requiresCRD: true,
+        installable: true,
+        installationSteps: [
+          {
+            title: 'Install Unverified Runtime',
+            description: 'Install the runtime.',
+            command: 'helm upgrade --install unverified-runtime example/unverified-runtime',
+          },
+        ],
       }
     default:
       return {
@@ -378,6 +414,144 @@ describe('SettingsPage', () => {
     expect(within(installationPanel as HTMLElement).getByText('Operator Running')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^uninstall$/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /install kuberay/i })).toBeInTheDocument()
+  })
+
+  it('issue #244: distinguishes connected AI Runway integration from missing underlying runtime', () => {
+    // Simulate the user's reported scenario: KAITO shim is registered and
+    // heartbeating, but the underlying KAITO operator + CRDs are not
+    // installed. The card should still report "Not Installed", the detail
+    // panel should still show red X icons and an Install button, AND the
+    // integration status should be clearly shown as Connected so users
+    // understand which side is which.
+    const heartbeat = new Date().toISOString()
+    mockRuntimes = [
+      {
+        id: 'kuberay',
+        name: 'Kuberay',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        shimRegistered: true,
+        shimConnected: true,
+        shimLastHeartbeat: heartbeat,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    // Card: still says "Not Installed" because the underlying operator is missing
+    const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
+    expect(within(card).getByText('Not Installed')).toBeInTheDocument()
+    // Card: integration status visible and labeled "Connected"
+    const integrationRow = within(card).getByTestId('integration-status-kuberay')
+    expect(integrationRow).toHaveTextContent('AI Runway integration')
+    expect(integrationRow).toHaveTextContent('Connected')
+
+    // Detail panel: install button still visible, runtime row icons are red
+    fireEvent.click(screen.getByText('Kuberay'))
+    const installationPanel = screen.getByText('Kuberay Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).getByText('CRD Installed')).toBeInTheDocument()
+    expect(within(installationPanel).getByText('Operator Running')).toBeInTheDocument()
+    expect(within(installationPanel).getByRole('button', { name: /install kuberay/i })).toBeInTheDocument()
+
+    // Detail panel: integration status row shown with a "Connected" label
+    const detailIntegration = within(installationPanel).getByTestId('integration-status-detail')
+    expect(detailIntegration).toHaveTextContent('AI Runway integration')
+    expect(detailIntegration).toHaveTextContent('Connected')
+    expect(detailIntegration).toHaveTextContent('The AI Runway integration is checking in normally')
+  })
+
+  it('issue #244: shows AI Runway integration as Not responding when the integration has not reported recently', () => {
+    mockRuntimes = [
+      {
+        id: 'kuberay',
+        name: 'Kuberay',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        shimRegistered: true,
+        shimConnected: false,
+        shimLastHeartbeat: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
+    const integrationRow = within(card).getByTestId('integration-status-kuberay')
+    expect(integrationRow).toHaveTextContent('Not responding')
+    expect(integrationRow.getAttribute('title')).toContain('The AI Runway integration has not checked in recently')
+  })
+
+  it('does not offer installation when a provider has no installation metadata', () => {
+    mockRuntimes = [
+      {
+        id: 'custom-runtime',
+        name: 'Custom Runtime',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: false,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const installationPanel = screen.getByText('Custom Runtime Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).queryByRole('button', { name: /install custom runtime/i })).not.toBeInTheDocument()
+    expect(installationPanel).not.toHaveTextContent('Use the install button below')
+  })
+
+  it('shows an unverified runtime neutrally and withholds installation actions', () => {
+    mockRuntimes = [
+      {
+        id: 'unverified-runtime',
+        name: 'Unverified Runtime',
+        installationState: 'unknown',
+        installed: false,
+        healthy: false,
+        requiresCRD: true,
+        installable: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const card = screen.getByText('Unverified Runtime').closest('.rounded-2xl') as HTMLElement
+    expect(within(card).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(card).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(card).getAllByText('Not checked')).toHaveLength(2)
+
+    const installationPanel = screen.getByText('Unverified Runtime Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(installationPanel).getAllByText('Not checked')).toHaveLength(2)
+    expect(installationPanel).toHaveTextContent('status cannot be confirmed')
+    expect(within(installationPanel).queryByRole('button', { name: /install unverified runtime/i })).not.toBeInTheDocument()
+    expect(within(installationPanel).queryByRole('button', { name: /uninstall/i })).not.toBeInTheDocument()
+    expect(screen.queryByText('Manual Installation Steps')).not.toBeInTheDocument()
+    expect(screen.queryByText('Helm CLI not available')).not.toBeInTheDocument()
   })
 
   it('shows providers that do not require runtime operators without CRD controls', () => {

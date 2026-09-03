@@ -303,7 +303,7 @@ func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
 
 // Unregister marks the provider as not ready
 func (m *ProviderConfigManager) Unregister(ctx context.Context) error {
-	return m.UpdateStatus(ctx, false)
+	return shim.MarkProviderConfigUnregistered(ctx, m.client, ProviderConfigName)
 }
 
 func buildAnnotations() (map[string]string, error) {

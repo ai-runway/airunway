@@ -285,13 +285,25 @@ describe('KubernetesService - Runtime Status', () => {
 
     expect(vllm).toBeDefined();
     expect(vllm?.name).toBe('vLLM');
-    expect(vllm?.installed).toBe(true);
-    expect(vllm?.healthy).toBe(true);
-    expect(vllm?.crdFound).toBe(true);
-    expect(vllm?.operatorRunning).toBe(true);
+    // The point of this test: an explicit requiresCRD: true is honoured even for
+    // a custom-named registration of an otherwise CRD-less engine.
     expect(vllm?.requiresCRD).toBe(true);
     expect(vllm?.version).toBe('0.8.0');
-    expect(vllm?.message).toBe('vLLM is installed and running');
+    // Issue #244: this registration declares it needs an upstream runtime but
+    // ships nothing to probe with, so a live heartbeat must not be promoted into
+    // "installed". Previously all three of these reported true purely because
+    // status.ready was true; reporting false is also inaccurate because nothing
+    // was checked.
+    expect(vllm?.installationState).toBe('unknown');
+    expect(vllm?.installed).toBe(false);
+    expect(vllm?.crdFound).toBeUndefined();
+    expect(vllm?.operatorRunning).toBeUndefined();
+    expect(vllm?.healthy).toBe(false);
+    expect(vllm?.installable).toBe(false);
+    expect(vllm?.message).toContain('cannot be confirmed');
+    // The integration itself is still reported as present and responding, so the
+    // UI can distinguish "AI Runway is fine" from "the runtime is missing".
+    expect(vllm?.shimRegistered).toBe(true);
   });
 
   test('honors per-engine requiresCRD: false on the migrated schema for custom-named runtime entries', async () => {
@@ -465,6 +477,7 @@ describe('KubernetesService - Runtime Status', () => {
       true,
     );
 
+    expect(status.installationState).toBe('not-installed');
     expect(status.installed).toBe(false);
     expect(status.crdFound).toBe(false);
     expect(status.operatorRunning).toBe(false);
@@ -552,6 +565,7 @@ describe('KubernetesService - Runtime Status', () => {
 
     const status = await kubernetesService.checkKaitoInstallationStatus();
 
+    expect(status.installationState).toBe('installed');
     expect(status.installed).toBe(true);
     expect(status.crdFound).toBe(true);
     expect(status.operatorRunning).toBe(true);
@@ -756,5 +770,96 @@ describe('KubernetesService - Runtime Status', () => {
     expect(status.crdFound).toBe(true);
     expect(status.operatorRunning).toBe(true);
     expect(status.message).toBe('KubeRay CRD found and KubeRay operator pods are ready');
+  });
+
+  // The shared fixture carries an airunway.ai/health annotation declaring
+  // workspaces.kaito.sh, which routes checkProviderInstallationStatus down the
+  // annotation-driven probe path and bypasses the KAITO-specific check these
+  // tests mock. Strip it so the mocked probe is the one that actually runs.
+  function withoutHealthAnnotation<T extends { metadata: { annotations: Record<string, string> } }>(config: T): T {
+    const { 'airunway.ai/health': _health, 'airunway.ai/capabilities': _capabilities, ...annotationsWithoutHealth } = config.metadata.annotations;
+    return {
+      ...config,
+      metadata: {
+        ...config.metadata,
+        annotations: annotationsWithoutHealth,
+      },
+    };
+  }
+
+  test('issue #244 regression: KAITO shim heartbeating + KAITO operator missing reports runtime not installed but integration connected', async () => {
+    const heartbeat = new Date().toISOString();
+    const kaitoConfig = withoutHealthAnnotation({
+      ...mockInferenceProviderConfig,
+      status: {
+        ready: false,
+        version: '0.10.0',
+        lastHeartbeat: heartbeat,
+        conditions: [
+          {
+            type: 'UpstreamReady',
+            status: 'False',
+            reason: 'UpstreamControllerMissing',
+            message: 'The KAITO workspace controller is not running.',
+          },
+        ],
+      },
+    });
+
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
+      mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => ({
+        installed: false,
+        crdFound: false,
+        operatorRunning: false,
+        message: 'KAITO workspace CRD not found',
+      })),
+    );
+    mockProviderConfigs([kaitoConfig]);
+
+    const runtimes = await kubernetesService.getRuntimesStatus();
+    const kaito = runtimes.find((runtime) => runtime.id === 'kaito');
+
+    expect(kaito).toBeDefined();
+    // Runtime install status reflects probe results, not the shim heartbeat
+    expect(kaito?.installed).toBe(false);
+    expect(kaito?.crdFound).toBe(false);
+    expect(kaito?.operatorRunning).toBe(false);
+    // Shim status is reported independently so the UI can distinguish them
+    expect(kaito?.shimRegistered).toBe(true);
+    expect(kaito?.shimConnected).toBe(true);
+    expect(kaito?.shimLastHeartbeat).toBe(heartbeat);
+  });
+
+  test('shim with no recent heartbeat is reported as not connected', async () => {
+    const staleHeartbeat = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const kaitoConfig = withoutHealthAnnotation({
+      ...mockInferenceProviderConfig,
+      status: {
+        ready: true,
+        version: '0.10.0',
+        lastHeartbeat: staleHeartbeat,
+      },
+    });
+
+    restores.push(
+      mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({ installed: true })),
+      mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => ({
+        installed: true,
+        crdFound: true,
+        operatorRunning: true,
+        message: 'KAITO is installed and running',
+      })),
+    );
+    mockProviderConfigs([kaitoConfig]);
+
+    const runtimes = await kubernetesService.getRuntimesStatus();
+    const kaito = runtimes.find((runtime) => runtime.id === 'kaito');
+
+    expect(kaito).toBeDefined();
+    expect(kaito?.installed).toBe(true);
+    expect(kaito?.shimRegistered).toBe(true);
+    expect(kaito?.shimConnected).toBe(false);
+    expect(kaito?.shimLastHeartbeat).toBe(staleHeartbeat);
   });
 });

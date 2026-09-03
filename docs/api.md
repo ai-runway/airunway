@@ -417,6 +417,7 @@ Get provider installation status.
 {
   "providerId": "dynamo",
   "providerName": "Dynamo",
+  "installationState": "installed",
   "installed": true,
   "crdFound": true,
   "operatorRunning": true,
@@ -424,6 +425,8 @@ Get provider installation status.
   "message": "Dynamo is installed and running"
 }
 ```
+
+`installationState` is `installed`, `not-installed`, or `unknown`. Prefer it over the legacy `installed` boolean when present; `unknown` means the provider has not supplied enough health metadata for AI Runway to verify the underlying runtime, so automated installation actions are withheld.
 
 ### GET /installation/providers/:id/commands
 
@@ -954,6 +957,7 @@ Get installation and health status of all runtimes.
     {
       "id": "dynamo",
       "name": "Dynamo",
+      "installationState": "installed",
       "installed": true,
       "healthy": true,
       "version": "dynamo-provider:v0.2.0",
@@ -962,6 +966,7 @@ Get installation and health status of all runtimes.
     {
       "id": "kuberay",
       "name": "KubeRay",
+      "installationState": "not-installed",
       "installed": false,
       "healthy": false,
       "message": "CRD not found"
@@ -992,10 +997,13 @@ Get installation and health status of all runtimes.
 }
 ```
 
+For runtimes that require an external operator or API, `installationState` distinguishes a verified `installed` or `not-installed` result from `unknown`, where AI Runway has no configured installation probe. The legacy `installed` boolean remains for compatibility.
+
 **Fields:**
 - `id` - Runtime identifier (`dynamo`, `kuberay`, `kaito`, `llmd`, or `vllm`)
 - `name` - Display name
-- `installed` - Whether the runtime/provider is ready to use
+- `installationState` - Verified installation result: `installed`, `not-installed`, or `unknown`
+- `installed` - Legacy boolean installation/readiness flag retained for compatibility
 - `healthy` - Whether runtime health checks pass
 - `version` - Detected version (if available)
 - `message` - Status message
