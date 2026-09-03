@@ -10,7 +10,7 @@ describe('generateDeploymentName', () => {
   });
 
   it('normalizes model identifiers into Kubernetes-compatible names', () => {
-    expect(generateDeploymentName('Org/Model:Variant.Name')).toBe('org-model-variant-name');
+    expect(generateDeploymentName('Org/Model_Name:Variant.Name')).toBe('org-model-name-variant-name');
     expect(generateDeploymentName(`${'a'.repeat(47)}--model`)).toBe('a'.repeat(47));
   });
 });
