@@ -6,7 +6,7 @@
 
 AI Runway integrates with the [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) to provide a unified inference gateway. Instead of accessing each model's Service individually, you deploy a single Gateway and call **all** models through one endpoint using the standard OpenAI-compatible API. The Gateway routes requests to the correct model based on the `model` field in the request body.
 
-When gateway integration is active, AI Runway automatically creates an **InferencePool**, **Endpoint Picker (EPP)**, and an **HTTPRoute** for each `ModelDeployment`. You only need to provide the Gateway itself.
+When gateway integration is active, AI Runway normally creates an **InferencePool**, **Endpoint Picker (EPP)**, and an **HTTPRoute** for each `ModelDeployment`. You can instead reference an existing InferencePool with `spec.gateway.poolRef`, or an existing HTTPRoute with `spec.gateway.httpRouteRef`.
 
 ## Architecture
 
@@ -22,14 +22,16 @@ When gateway integration is active, AI Runway automatically creates an **Inferen
                      │                          ▼                     │
                      │                  ┌───────────────┐             │
                      │                  │ InferencePool │             │
-                     │                  │ (auto-created)│             │
+                     │                  │ (managed or   │             │
+                     │                  │  referenced)  │             │
                      │                  └───────┬───────┘             │
                      │                          │                     │
                      │                          ▼                     │
                      │                  ┌───────────────┐             │
                      │                  │  EPP (Endpoint│             │
                      │                  │  Picker Proxy)│             │
-                     │                  │ (auto-created)│             │
+                     │                  │ (managed with │             │
+                     │                  │  its pool)    │             │
                      │                  └───────┬───────┘             │
                      │                          │                     │
                      │                          ▼                     │
@@ -45,13 +47,15 @@ When gateway integration is active, AI Runway automatically creates an **Inferen
 
 **What AI Runway creates automatically** (when `gateway.enabled` is `true` or omitted, and Gateway CRDs are detected):
 
-- `InferencePool` — selects pods labeled with `airunway.ai/model-deployment: <name>` on the model's serving port
+- `InferencePool` — selects pods labeled with `airunway.ai/model-deployment: <name>` on the model's serving port (unless `poolRef` is set or the provider manages the pool)
 - `HTTPRoute` — routes from the Gateway to the InferencePool (unless `httpRouteRef` is set)
-- `EPP` — Endpoint Picker Proxy for intelligent endpoint selection
+- `EPP` — Endpoint Picker Proxy for intelligent endpoint selection (unless `poolRef` is set or the provider manages the pool)
 
 **What you provide:**
 
 - A Gateway resource (with any compatible implementation)
+- Optionally, a same-namespace InferencePool and its EPP when using `poolRef`
+- Optionally, a same-namespace HTTPRoute when using `httpRouteRef`
 
 ## Prerequisites
 
@@ -144,7 +148,7 @@ metadata:
 
 ### Step 5: Deploy Models
 
-Deploy models as usual. AI Runway automatically creates the InferencePool, EPP, and HTTPRoute:
+Deploy models as usual. By default, AI Runway creates the InferencePool, EPP, and HTTPRoute:
 
 ```yaml
 apiVersion: airunway.ai/v1alpha1
@@ -282,16 +286,45 @@ Each `ModelDeployment` can override gateway behavior:
 ```yaml
 spec:
   gateway:
-    # Disable gateway integration for this specific deployment
-    enabled: false
+    # Enable gateway integration for the references below
+    enabled: true
     # Override the model name used in routing (defaults to auto-discovered from /v1/models, or spec.model.id)
     modelName: "my-custom-model-name"
+    # Use an existing InferencePool in this ModelDeployment's namespace
+    poolRef: "shared-pool"
+    # Use an existing HTTPRoute in this ModelDeployment's namespace
+    httpRouteRef: "shared-route"
 ```
 
 | Field | Default | Description |
 |---|---|---|
 | `spec.gateway.enabled` | `true` (when Gateway detected) | Set to `false` to skip InferencePool/HTTPRoute creation |
 | `spec.gateway.modelName` | Auto-discovered or `spec.model.id` | Model name used for routing and in API requests |
+| `spec.gateway.poolRef` | — | Existing InferencePool in the ModelDeployment namespace. The controller uses it as the HTTPRoute backend and does not create, update, label pods for, or delete the pool or its EPP. |
+| `spec.gateway.httpRouteRef` | — | Existing HTTPRoute in the ModelDeployment namespace. The controller does not create or delete that route. |
+
+### Using an Existing InferencePool
+
+Set `spec.gateway.poolRef` when you already manage an InferencePool and Endpoint Picker (EPP):
+
+```yaml
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen3
+  namespace: default
+spec:
+  model:
+    id: "Qwen/Qwen3-0.6B"
+  gateway:
+    poolRef: "shared-pool"
+```
+
+`poolRef` is a resource name, so the referenced InferencePool must be in the same namespace as the `ModelDeployment`. AI Runway verifies that the pool exists before creating the HTTPRoute; a missing pool is reported as `GatewayReady=False` with reason `InferencePoolNotFound`. If the pool later reports `Accepted=False` or `ResolvedRefs=False` for the selected Gateway, AI Runway surfaces that as `GatewayReady=False` with reason `InferencePoolNotReady`.
+
+AI Runway creates an HTTPRoute whose backend is that pool unless `httpRouteRef` is also set. The referenced InferencePool and its EPP remain user-owned: the controller does not create, update, or delete them, and it does not add the controller's pool-selection label to model pods. Creating, deleting, or changing the status of the referenced pool automatically triggers reconciliation so the gateway condition recovers or fails promptly.
+
+A user-set `poolRef` takes precedence over provider gateway capabilities such as `managesInferencePool`. This lets a deployment opt into a user-managed pool even when its provider can create one.
 
 ## Provider-Managed Gateway Resources
 
@@ -302,7 +335,7 @@ When a provider declares gateway capabilities in its `InferenceProviderConfig`, 
 1. **Full delegation** (`managesInferencePool: true`): the provider owns both the InferencePool and the EPP. The controller skips creating either and only wires the HTTPRoute. Used by Dynamo.
 2. **EPP customization** (`endpointPicker: { image, configData }`): the controller still creates the InferencePool, EPP & scaffolding, but substitutes the provider's EPP image and plugin configuration. Used by llm-d.
 
-`endpointPicker` is ignored when `managesInferencePool: true` — full delegation supersedes any EPP override.
+`endpointPicker` is ignored when `managesInferencePool: true` — full delegation supersedes any EPP override. A user-set `spec.gateway.poolRef` takes precedence over both provider-managed modes.
 
 ### How It Works
 
@@ -340,7 +373,7 @@ The controller adapts its reconciliation based on these fields:
 | `managesInferencePool` | When set to `true`, controller waits for the provider's InferencePool to exist, then uses it as the HTTPRoute backend. Skips `reconcileInferencePool()`, `reconcileEPP()`, and `labelModelPods()`. | Controller creates and owns the InferencePool and the EPP (default behavior). |
 | `endpointPicker.image` / `endpointPicker.configData` | Controller still creates the InferencePool and EPP Deployment/Service, but the EPP container uses the provider's image and the EPP ConfigMap carries `configData` as `default-plugins.yaml`. | Controller deploys the generic upstream GAIE EPP image with an empty plugin config. |
 
-The HTTPRoute is **always** managed by the controller regardless of provider capabilities.
+The HTTPRoute is managed by the controller regardless of provider capabilities unless the user sets `spec.gateway.httpRouteRef`.
 
 ### Cross-Namespace Routing
 

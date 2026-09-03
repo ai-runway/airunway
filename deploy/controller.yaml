@@ -1430,6 +1430,16 @@ spec:
                       modelName overrides the model name used in HTTPRoute routing.
                       Defaults to spec.model.servedName or spec.model.id
                     type: string
+                  poolRef:
+                    description: |-
+                      poolRef references an existing InferencePool by name instead of auto-creating one.
+                      When set, the controller uses the referenced pool as the HTTPRoute backend and
+                      does not create, update, or delete that InferencePool or its EPP resources.
+                      The InferencePool must be in the same namespace as the ModelDeployment.
+                      Missing, rejected, or unresolved pools are reported through GatewayReady.
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
                 type: object
               image:
                 description: image is a custom container image
