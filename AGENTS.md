@@ -189,6 +189,7 @@ Read these files **only when relevant** to your task:
 | [docs/web-ui-architecture.md](docs/web-ui-architecture.md) | Web UI, auth flow, backend services |
 | [docs/api.md](docs/api.md) | Working on REST endpoints or API client |
 | [docs/development.md](docs/development.md) | Setup issues, build process, testing |
+| [docs/agent-container-runtime.md](docs/agent-container-runtime.md) | Building or integrating AgentDeployment workload images |
 | [docs/gateway.md](docs/gateway.md) | Gateway API Inference Extension integration |
 | [docs/csi-azure-lustre.md](docs/csi-azure-lustre.md) | Installing Azure Lustre CSI driver on AKS |
 | [docs/standards.md](docs/standards.md) | Code style questions (prefer running linters instead) |

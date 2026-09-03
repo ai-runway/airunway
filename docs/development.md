@@ -67,6 +67,10 @@ make controller-install
 make controller-deploy CONTROLLER_IMG=<YOUR IMAGE>
 ```
 
+Use a new tag or immutable digest when deploying a rebuilt controller. The
+deploy target forces a new ReplicaSet so an unchanged image string cannot make
+the rollout check succeed against old pods.
+
 **Important**: After editing `controller/api/v1alpha1/*_types.go` files, always run:
 
 ```bash
