@@ -162,8 +162,8 @@ const describeIntegrationStatus = (source: ShimStatusSource | undefined | null):
       label: 'Connected',
       tone: 'success',
       description: age
-        ? `AI Runway is connected to this runtime (last checked in ${age}).`
-        : 'AI Runway is connected to this runtime.',
+        ? `The AI Runway integration is checking in normally (last checked in ${age}).`
+        : 'The AI Runway integration is checking in normally.',
     }
   }
   const age = formatHeartbeatAge(source.shimLastHeartbeat)
@@ -171,8 +171,8 @@ const describeIntegrationStatus = (source: ShimStatusSource | undefined | null):
     label: 'Not responding',
     tone: 'warning',
     description: age
-      ? `AI Runway is set up for this runtime but has not heard from it recently (last checked in ${age}).`
-      : 'AI Runway is set up for this runtime but has not heard from it yet.',
+      ? `The AI Runway integration has not checked in recently (last checked in ${age}).`
+      : 'The AI Runway integration has not checked in yet.',
   }
 }
 

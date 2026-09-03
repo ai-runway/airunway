@@ -446,6 +446,7 @@ describe('SettingsPage', () => {
     const detailIntegration = within(installationPanel).getByTestId('integration-status-detail')
     expect(detailIntegration).toHaveTextContent('AI Runway integration')
     expect(detailIntegration).toHaveTextContent('Connected')
+    expect(detailIntegration).toHaveTextContent('The AI Runway integration is checking in normally')
   })
 
   it('issue #244: shows AI Runway integration as Not responding when the integration has not reported recently', () => {
@@ -473,6 +474,7 @@ describe('SettingsPage', () => {
     const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('Not responding')
+    expect(integrationRow.getAttribute('title')).toContain('The AI Runway integration has not checked in recently')
   })
 
   it('does not offer installation when a provider has no installation metadata', () => {
