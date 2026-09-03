@@ -87,6 +87,16 @@ vi.mock('./StorageVolumesSection', () => ({
       >
         Add test volume
       </button>
+      <button
+        type="button"
+        onClick={() => onChange([{
+          name: 'existing-model-cache',
+          purpose: 'modelCache',
+          claimName: 'existing-model-cache',
+        }])}
+      >
+        Add existing claim volume
+      </button>
     </div>
   ),
 }))
@@ -243,6 +253,73 @@ describe('DeploymentForm', () => {
     fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
 
     expect(screen.getByText('llm-d').closest('[role="radio"]')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+  })
+
+  it('clears existing claim storage when a supported runtime switch changes namespace', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({
+              id: 'kuberay',
+              name: 'KubeRay',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'kuberay-system',
+            }),
+            createRuntime({
+              id: 'llmd',
+              name: 'llm-d',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'default',
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+
+    fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
+
+    expect(screen.getByText('llm-d').closest('[role="radio"]')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '0')
+  })
+
+  it('preserves existing claim storage when a supported runtime switch keeps the namespace', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({
+              id: 'kuberay',
+              name: 'KubeRay',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'shared-models',
+            }),
+            createRuntime({
+              id: 'llmd',
+              name: 'llm-d',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'shared-models',
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
+
     expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
   })
 

@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -937,17 +938,17 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 		))
 	}
 
-	// Validate that the auto-generated download job name fits within
-	// the 253-character Kubernetes name limit.
+	// Validate that the auto-generated download Job name fits the DNS-label
+	// limit used by the Job controller's generated pod labels.
 	// The download job name is <md-name>-model-download (15-char suffix).
 	downloadJobName := obj.Name + "-model-download"
-	if storageutil.NeedsDownloadJob(obj) && len(downloadJobName) > 253 {
+	if storageutil.NeedsDownloadJob(obj) && len(downloadJobName) > k8svalidation.DNS1123LabelMaxLength {
 		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("metadata", "name"),
 			obj.Name,
 			fmt.Sprintf(
-				"auto-generated download Job name %q exceeds the 253-character Kubernetes name limit (got %d characters); use a shorter ModelDeployment name",
-				downloadJobName, len(downloadJobName)),
+				"auto-generated download Job name %q exceeds the %d-character Job controller label limit (got %d characters); use a shorter ModelDeployment name",
+				downloadJobName, k8svalidation.DNS1123LabelMaxLength, len(downloadJobName)),
 		))
 	}
 

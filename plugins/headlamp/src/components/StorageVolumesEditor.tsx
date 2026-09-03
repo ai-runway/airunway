@@ -12,6 +12,7 @@ import Tooltip from '@mui/material/Tooltip';
 import { Icon } from '@iconify/react';
 import type { StorageVolume, VolumePurpose, PersistentVolumeAccessMode } from '@airunway/shared';
 import { PURPOSE_LABELS } from '../lib/constants';
+import { storageVolumeWithExistingClaim, storageVolumeWithSize } from '../lib/storage';
 
 interface StorageVolumesEditorProps {
   volumes: StorageVolume[];
@@ -249,7 +250,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       <input
                         type="text"
                         value={volume.size || ''}
-                        onChange={(e) => handleUpdate(index, { size: e.target.value })}
+                        onChange={(e) =>
+                          handleUpdate(index, storageVolumeWithSize(volume, e.target.value))
+                        }
                         placeholder="e.g. 100Gi"
                         style={inputStyle}
                       />
@@ -266,6 +269,7 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                           accessMode: e.target.value as PersistentVolumeAccessMode,
                         })
                       }
+                      disabled={Boolean(volume.claimName)}
                       style={selectStyle}
                     >
                       {(Object.keys(ACCESS_MODE_LABELS) as PersistentVolumeAccessMode[]).map(
@@ -285,7 +289,7 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       type="text"
                       value={volume.claimName || ''}
                       onChange={(e) =>
-                        handleUpdate(index, { claimName: e.target.value || undefined })
+                        handleUpdate(index, storageVolumeWithExistingClaim(volume, e.target.value))
                       }
                       placeholder="Leave blank to create a new volume"
                       style={inputStyle}
@@ -304,6 +308,7 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       onChange={(e) =>
                         handleUpdate(index, { storageClassName: e.target.value || undefined })
                       }
+                      disabled={Boolean(volume.claimName)}
                       placeholder="Leave blank for cluster default"
                       style={inputStyle}
                     />

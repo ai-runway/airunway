@@ -30,6 +30,28 @@ export interface StorageSpec {
   volumes?: StorageVolume[];
 }
 
+// Existing PVC references are namespace-scoped, while managed volumes can be
+// recreated safely in the target namespace.
+export function storageAfterNamespaceChange(
+  storage: StorageSpec | undefined,
+  currentNamespace: string,
+  nextNamespace: string
+): StorageSpec | undefined {
+  if (!storage || currentNamespace === nextNamespace) {
+    return storage;
+  }
+
+  const managedVolumes = storage.volumes?.filter((volume) => Boolean(volume.size?.trim()));
+  if (!managedVolumes || managedVolumes.length === 0) {
+    return undefined;
+  }
+
+  return {
+    ...storage,
+    volumes: managedVolumes,
+  };
+}
+
 // Legacy types for backward compatibility
 export type DeploymentMode = ServingMode;
 export type GgufRunMode = 'build' | 'direct';

@@ -20,6 +20,8 @@ import { useApiClient } from '../lib/api-client';
 import type { DeploymentConfig, Engine, Model, RuntimeStatus, ModelTask, StorageVolume } from '@airunway/shared';
 import { toModelDeploymentManifest } from '@airunway/shared';
 import { getBadgeColors } from '../lib/theme';
+import { generateDeploymentName } from '../lib/deployment-name';
+import { storageVolumesAfterNamespaceChange } from '../lib/storage';
 import { StorageVolumesEditor } from '../components/StorageVolumesEditor';
 import { ManifestPreview } from '../components/ManifestPreview';
 
@@ -63,16 +65,6 @@ const STORAGE_SUPPORTED_RUNTIMES = new Set<RuntimeId>(['dynamo', 'kuberay', 'llm
 function isRuntimeCompatible(runtimeId: RuntimeId, modelEngines: Engine[]): boolean {
   const runtimeEngines = RUNTIME_ENGINES[runtimeId];
   return modelEngines.some((e) => runtimeEngines.includes(e));
-}
-
-// Generate deployment name from model ID
-function generateDeploymentName(modelId: string): string {
-  return modelId
-    .replace(/[/:.]/g, '-')
-    .toLowerCase()
-    .replace(/--+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 53);
 }
 
 export function CreateDeployment() {
@@ -223,11 +215,12 @@ export function CreateDeployment() {
 
   // Handle runtime change
   const handleRuntimeChange = useCallback((runtime: RuntimeId) => {
+    const nextNamespace = RUNTIME_INFO[runtime].defaultNamespace;
     setSelectedRuntime(runtime);
-    setNamespace(RUNTIME_INFO[runtime].defaultNamespace);
-    if (!STORAGE_SUPPORTED_RUNTIMES.has(runtime)) {
-      setStorageVolumes([]);
-    }
+    setNamespace(nextNamespace);
+    setStorageVolumes((volumes) => STORAGE_SUPPORTED_RUNTIMES.has(runtime)
+      ? storageVolumesAfterNamespaceChange(volumes, namespace, nextNamespace)
+      : []);
     if (runtime !== 'dynamo' && runtime !== 'llmd') {
       setMode('aggregated');
     }
@@ -240,7 +233,7 @@ export function CreateDeployment() {
         setEngine(availableEngines[0]);
       }
     }
-  }, [model, engine]);
+  }, [model, engine, namespace]);
 
   // Check if selected runtime supports disaggregated serving
   const supportsDisaggregated = selectedRuntime === 'dynamo' || selectedRuntime === 'llmd';

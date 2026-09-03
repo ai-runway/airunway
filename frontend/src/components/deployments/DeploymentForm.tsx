@@ -23,6 +23,7 @@ import { ManifestViewer } from './ManifestViewer'
 import { CostEstimate } from './CostEstimate'
 import { StorageVolumesSection } from './StorageVolumesSection'
 import { calculateGpuRecommendation, calculateMultiNode, type GpuRecommendation, type MultiNodeRecommendation } from '@/lib/gpu-recommendations'
+import { storageAfterNamespaceChange } from '@airunway/shared'
 
 const STORAGE_SUPPORTED_RUNTIMES = new Set(['dynamo', 'kuberay', 'llmd', 'vllm'])
 
@@ -596,14 +597,17 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     setSelectedRuntime(runtime)
     setConfig(prev => {
       const leavingDirectVllm = prev.provider === 'vllm' && runtime !== 'vllm'
+      const nextNamespace = getRuntimeDefaultNamespace(runtime)
       return {
         ...prev,
         provider: runtime,
-        namespace: getRuntimeDefaultNamespace(runtime),
+        namespace: nextNamespace,
         engine: runtime === 'vllm' ? 'vllm' : getDefaultEngineForRuntime(runtime),
         mode: runtime === 'kaito' || runtime === 'vllm' ? 'aggregated' : prev.mode,
         providerOverrides: runtime === 'vllm' ? undefined : prev.providerOverrides,
-        storage: runtimeSupportsPersistentStorage(runtime) ? prev.storage : undefined,
+        storage: runtimeSupportsPersistentStorage(runtime)
+          ? storageAfterNamespaceChange(prev.storage, prev.namespace, nextNamespace)
+          : undefined,
         modelSource: runtime === 'vllm' ? 'vllm' : leavingDirectVllm ? undefined : prev.modelSource,
         imageRef: runtime === 'vllm' ? (prev.imageRef || DIRECT_VLLM_NIGHTLY_IMAGE) : leavingDirectVllm ? undefined : prev.imageRef,
         recipeProvenance: runtime === 'vllm' ? prev.recipeProvenance : undefined,
@@ -946,11 +950,12 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       }
 
       const leavingDirectVllm = prev.provider === 'vllm' && runtime !== 'vllm'
+      const nextNamespace = getRuntimeDefaultNamespace(runtime)
 
       return {
         ...prev,
         provider: runtime,
-        namespace: getRuntimeDefaultNamespace(runtime),
+        namespace: nextNamespace,
         // Reset engine if current one isn't supported by new runtime
         engine: runtime === 'vllm' ? 'vllm' : nextEngine,
         // Reset router mode if switching away from Dynamo
@@ -958,7 +963,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         // Start single-runtime providers in standard aggregated mode
         mode: runtime === 'kaito' || runtime === 'vllm' ? 'aggregated' : prev.mode,
         providerOverrides: runtime === 'vllm' ? undefined : newProviderOverrides,
-        storage: runtimeSupportsPersistentStorage(runtime) ? prev.storage : undefined,
+        storage: runtimeSupportsPersistentStorage(runtime)
+          ? storageAfterNamespaceChange(prev.storage, prev.namespace, nextNamespace)
+          : undefined,
         engineArgs: newEngineArgs,
         modelSource: runtime === 'vllm' ? 'vllm' : leavingDirectVllm ? undefined : prev.modelSource,
         imageRef: runtime === 'vllm' ? directVllmImageRef : leavingDirectVllm ? undefined : prev.imageRef,

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { StorageVolume } from '@airunway/shared'
 import { StorageVolumesSection } from './StorageVolumesSection'
@@ -36,6 +36,34 @@ function ControlledStorageVolumesSection({
   )
 }
 
+function ReindexingStorageVolumesSection() {
+  const [volumes, setVolumes] = useState<StorageVolume[]>([
+    {
+      name: 'first-cache',
+      purpose: 'custom',
+      mountPath: '/first',
+      size: '100Gi',
+      accessMode: 'ReadWriteMany',
+    },
+    {
+      name: 'second-cache',
+      purpose: 'custom',
+      mountPath: '/second',
+      size: '200Gi',
+      accessMode: 'ReadWriteOnce',
+    },
+  ])
+
+  return (
+    <>
+      <button type="button" onClick={() => setVolumes((current) => [current[1]])}>
+        Remove first volume externally
+      </button>
+      <StorageVolumesSection volumes={volumes} onChange={setVolumes} />
+    </>
+  )
+}
+
 describe('StorageVolumesSection', () => {
   it('clears stale existing PVC selections when the available PVC list changes', async () => {
     const onChange = vi.fn()
@@ -67,5 +95,15 @@ describe('StorageVolumesSection', () => {
     )
 
     await waitFor(() => expect(onChange).not.toHaveBeenCalled())
+  })
+
+  it('derives the source mode from the retained volume after external filtering', () => {
+    render(<ReindexingStorageVolumesSection />)
+
+    fireEvent.click(screen.getAllByRole('radio', { name: 'Use existing disk' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Remove first volume externally' }))
+
+    expect(screen.getByRole('radio', { name: 'Create new disk' })).toBeChecked()
+    expect(screen.getByLabelText('Disk Size')).toHaveValue('200Gi')
   })
 })
