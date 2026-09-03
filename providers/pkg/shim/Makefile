@@ -1,6 +1,7 @@
 GOLANGCI_LINT ?= ../../../bin/golangci-lint
+GOVULNCHECK ?= ../../../bin/govulncheck
 
-.PHONY: test cover lint lint-fix lint-config golangci-lint
+.PHONY: test cover lint lint-fix lint-config golangci-lint govulncheck govulncheck-tool
 
 ## Run unit tests
 test:
@@ -26,3 +27,11 @@ lint-config: golangci-lint
 ## Ensure golangci-lint is installed via the controller toolchain pin
 golangci-lint:
 	@$(MAKE) -C ../../../controller golangci-lint
+
+## Run govulncheck against code
+govulncheck: govulncheck-tool
+	"$(GOVULNCHECK)" ./...
+
+## Ensure govulncheck is installed via the controller toolchain pin
+govulncheck-tool:
+	@$(MAKE) -C ../../../controller govulncheck-tool
