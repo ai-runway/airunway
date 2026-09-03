@@ -24,8 +24,12 @@ jobs:
           set -a
           source versions.env
           set +a
-          echo "GAIE_VERSION=${GAIE_VERSION}" >> "$GITHUB_ENV"
-          echo "KAITO_VERSION=${KAITO_VERSION}" >> "$GITHUB_ENV"
+          {
+            echo "GAIE_VERSION=${GAIE_VERSION}"
+            echo "GATEWAY_API_VERSION=${GATEWAY_API_VERSION}"
+            echo "ISTIO_VERSION=${ISTIO_VERSION}"
+            echo "KAITO_VERSION=${KAITO_VERSION}"
+          } >> "$GITHUB_ENV"
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -58,7 +62,7 @@ jobs:
 
       - name: Install Gateway API CRDs
         run: |
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
       - name: Install Gateway API Inference Extension CRDs
         run: |
@@ -67,7 +71,7 @@ jobs:
       - name: Install Istio with Inference Extension support
         run: |
           curl -L https://istio.io/downloadIstio | sh -
-          cd istio-*/bin
+          cd "istio-${ISTIO_VERSION}/bin"
           ./istioctl install --set profile=minimal \
             --set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true -y
           kubectl wait --for=condition=Available deployment/istiod -n istio-system --timeout=120s
