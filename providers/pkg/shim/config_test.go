@@ -172,7 +172,10 @@ func TestMarkProviderConfigUnregistered(t *testing.T) {
 		t.Fatalf("expected provider-specific status fields to be preserved, got %+v", stored.Status)
 	}
 	condition := meta.FindStatusCondition(stored.Status.Conditions, "UpstreamReady")
-	if condition == nil || condition.Reason != ReasonUnregistered || condition.Status != metav1.ConditionFalse {
+	if condition == nil ||
+		condition.Reason != ReasonUnregistered ||
+		condition.Message != MessageUnregistered ||
+		condition.Status != metav1.ConditionFalse {
 		t.Fatalf("unexpected shutdown condition: %+v", condition)
 	}
 }

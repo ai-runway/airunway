@@ -32,7 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const ReasonUnregistered = "Unregistered"
+const (
+	ReasonUnregistered  = "Unregistered"
+	MessageUnregistered = "AI Runway integration is shutting down."
+)
 
 // RegisterProviderConfig creates or updates the cluster-scoped InferenceProviderConfig
 // used to register a provider with the controller.
@@ -96,7 +99,7 @@ func MarkProviderConfigUnregistered(
 		Type:    "UpstreamReady",
 		Status:  metav1.ConditionFalse,
 		Reason:  ReasonUnregistered,
-		Message: "Shim is shutting down.",
+		Message: MessageUnregistered,
 	})
 
 	if err := kubeClient.Status().Update(ctx, config); err != nil {

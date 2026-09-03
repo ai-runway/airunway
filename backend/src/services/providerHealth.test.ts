@@ -101,6 +101,46 @@ describe('getProviderHealth', () => {
     expect(h.reason).toBe('Unregistered');
   });
 
+  test('treats a heartbeat exactly at the staleness threshold as connected', () => {
+    const realNow = Date.now;
+    const now = Date.parse('2026-09-03T00:03:00Z');
+
+    try {
+      Date.now = () => now;
+      const h = getProviderHealth('kaito', {
+        status: {
+          ready: false,
+          lastHeartbeat: new Date(now - 180_000).toISOString(),
+        },
+      });
+
+      expect(h.stale).toBe(false);
+      expect(h.connected).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test('treats a future heartbeat as connected despite clock skew', () => {
+    const realNow = Date.now;
+    const now = Date.parse('2026-09-03T00:00:00Z');
+
+    try {
+      Date.now = () => now;
+      const h = getProviderHealth('kaito', {
+        status: {
+          ready: false,
+          lastHeartbeat: new Date(now + 60_000).toISOString(),
+        },
+      });
+
+      expect(h.stale).toBe(false);
+      expect(h.connected).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test('does not treat an invalid heartbeat as connected', () => {
     const h = getProviderHealth('kaito', {
       ...mockKaitoCRNewShimHealthy,
