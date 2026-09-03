@@ -133,12 +133,14 @@ func downloadJobInputHash(
 }
 
 func downloadJobSchedulingHash(md *airunwayv1alpha1.ModelDeployment) string {
-	parts := []string{"nodeSelector"}
 	selectorKeys := make([]string, 0, len(md.Spec.NodeSelector))
 	for key := range md.Spec.NodeSelector {
 		selectorKeys = append(selectorKeys, key)
 	}
 	sort.Strings(selectorKeys)
+
+	parts := make([]string, 1, 1+2*len(selectorKeys)+1+len(md.Spec.Tolerations))
+	parts[0] = "nodeSelector"
 	for _, key := range selectorKeys {
 		parts = append(parts, key, md.Spec.NodeSelector[key])
 	}
@@ -223,61 +225,19 @@ func EnsureDownloadJob(
 	}, existing)
 
 	if errors.IsNotFound(err) {
-		// Create the download Job
-		job := buildDownloadJob(md, vol, downloadJobImage, inputHash)
-		logger.Info("Creating model download Job", "name", jobName, "model", md.Spec.Model.ID)
-		if createErr := c.Create(ctx, job); createErr != nil {
-			if !errors.IsAlreadyExists(createErr) {
-				return false, fmt.Errorf("failed to create download Job %s: %w", jobName, createErr)
-			}
-			logger.Info("Download Job already exists (concurrent creation)", "name", jobName)
-		}
-		return false, nil
+		return false, createDownloadJob(ctx, c, md, vol, downloadJobImage, inputHash)
 	}
 	if err != nil {
 		return false, fmt.Errorf("failed to get download Job %s: %w", jobName, err)
 	}
 
-	// A name collision is only safe to delete when the owner reference proves
-	// that the Job belongs to an older ModelDeployment with this same name.
-	if !IsOwnedByMD(existing, md.UID) {
-		if !isOwnedByPriorMD(existing, md) {
-			return false, fmt.Errorf(
-				"download Job %s already exists but is not owned by this ModelDeployment "+
-					"or a prior ModelDeployment with the same name; refusing to delete it",
-				jobName,
-			)
-		}
-		if err := deleteDownloadJob(ctx, c, existing, "owner UID mismatch"); err != nil {
-			return false, err
-		}
-		return false, nil // requeue → next reconcile creates fresh Job
+	current, err := ensureCurrentDownloadJob(ctx, c, md, existing, inputHash)
+	if err != nil || !current {
+		return false, err
 	}
 
-	if !existing.DeletionTimestamp.IsZero() {
-		return false, nil
-	}
-	if existing.Annotations[downloadJobInputHashAnnotation] != inputHash {
-		if err := deleteDownloadJob(ctx, c, existing, "model-cache inputs changed"); err != nil {
-			return false, err
-		}
-		return false, nil // requeue → next reconcile creates a Job for the current PVC/input identity
-	}
-
-	// Completed downloads remain valid when only scheduling constraints change:
-	// the immutable Job no longer needs to schedule, and the input hash still
-	// proves the model/PVC provenance.
-	for _, cond := range existing.Status.Conditions {
-		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobComplete {
-			logger.Info("Model download Job completed", "name", jobName)
-			return true, nil
-		}
-	}
-
-	// Fallback: counter-based completion detection for older clusters or edge cases
-	// where conditions haven't been set yet.
-	if existing.Status.Succeeded >= 1 {
-		logger.Info("Model download Job completed (counter)", "name", jobName)
+	if downloadJobCompleted(existing) {
+		logger.Info("Model download Job completed", "name", jobName)
 		return true, nil
 	}
 
@@ -288,27 +248,106 @@ func EnsureDownloadJob(
 		return false, nil // requeue → next reconcile creates a schedulable replacement Job
 	}
 
-	// Job is incomplete and still has current scheduling. Check terminal failure
-	// conditions before falling back to counters.
-	for _, cond := range existing.Status.Conditions {
-		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobFailed {
-			return false, fmt.Errorf("model download Job %s failed permanently: %s",
-				jobName, cond.Message)
-		}
-	}
-
-	backoffLimit := defaultBackoffLimit
-	if existing.Spec.BackoffLimit != nil {
-		backoffLimit = *existing.Spec.BackoffLimit
-	}
-	if existing.Status.Failed >= backoffLimit {
-		return false, fmt.Errorf("model download Job %s failed permanently (failed=%d, backoffLimit=%d)",
-			jobName, existing.Status.Failed, backoffLimit)
+	if err := downloadJobFailure(existing); err != nil {
+		return false, err
 	}
 
 	logger.Info("Model download Job still running", "name", jobName,
 		"active", existing.Status.Active, "failed", existing.Status.Failed)
 	return false, nil
+}
+
+func createDownloadJob(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	downloadJobImage string,
+	inputHash string,
+) error {
+	job := buildDownloadJob(md, vol, downloadJobImage, inputHash)
+	logger := log.FromContext(ctx)
+	logger.Info("Creating model download Job", "name", job.Name, "model", md.Spec.Model.ID)
+	if err := c.Create(ctx, job); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create download Job %s: %w", job.Name, err)
+		}
+		logger.Info("Download Job already exists (concurrent creation)", "name", job.Name)
+	}
+	return nil
+}
+
+func ensureCurrentDownloadJob(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	existing *batchv1.Job,
+	inputHash string,
+) (bool, error) {
+	// A name collision is only safe to delete when the owner reference proves
+	// that the Job belongs to an older ModelDeployment with this same name.
+	if !IsOwnedByMD(existing, md.UID) {
+		if !isOwnedByPriorMD(existing, md) {
+			return false, fmt.Errorf(
+				"download Job %s already exists but is not owned by this ModelDeployment "+
+					"or a prior ModelDeployment with the same name; refusing to delete it",
+				existing.Name,
+			)
+		}
+		if err := deleteDownloadJob(ctx, c, existing, "owner UID mismatch"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	if !existing.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	if existing.Annotations[downloadJobInputHashAnnotation] != inputHash {
+		if err := deleteDownloadJob(ctx, c, existing, "model-cache inputs changed"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func downloadJobCompleted(job *batchv1.Job) bool {
+	// Completed downloads remain valid when only scheduling constraints change:
+	// the immutable Job no longer needs to schedule, and the input hash still
+	// proves the model/PVC provenance.
+	for _, cond := range job.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobComplete {
+			return true
+		}
+	}
+
+	// Fallback: counter-based completion detection for older clusters or edge cases
+	// where conditions haven't been set yet.
+	return job.Status.Succeeded >= 1
+}
+
+func downloadJobFailure(job *batchv1.Job) error {
+	// Job is incomplete and still has current scheduling. Check terminal failure
+	// conditions before falling back to counters.
+	for _, cond := range job.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobFailed {
+			return fmt.Errorf("model download Job %s failed permanently: %s",
+				job.Name, cond.Message)
+		}
+	}
+
+	backoffLimit := defaultBackoffLimit
+	if job.Spec.BackoffLimit != nil {
+		backoffLimit = *job.Spec.BackoffLimit
+	}
+	if job.Status.Failed >= backoffLimit {
+		return fmt.Errorf("model download Job %s failed permanently (failed=%d, backoffLimit=%d)",
+			job.Name, job.Status.Failed, backoffLimit)
+	}
+
+	return nil
 }
 
 // EnsureDownloadJobAbsent removes a current or provably prior-owned download
