@@ -367,6 +367,10 @@ func buildHTTPProbe(initialDelaySeconds, periodSeconds, failureThreshold int64) 
 // kvTransferConfig is optional; pass "" for aggregated mode.
 // gpuCount overrides the GPU count used for tensor parallelism (0 means use top-level spec.resources).
 func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTransferConfig string, gpuCount int32) ([]string, error) {
+	if err := rejectPortOverride(md); err != nil {
+		return nil, err
+	}
+
 	var args []string
 
 	// Model
@@ -440,6 +444,26 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	}
 
 	return args, nil
+}
+
+// rejectPortOverride keeps the vLLM serving port aligned with the fixed
+// Service and health probes rendered by this transformer.
+func rejectPortOverride(md *airunwayv1alpha1.ModelDeployment) error {
+	if _, ok := md.Spec.Engine.Args["port"]; ok {
+		return fmt.Errorf(
+			"overriding --port is not allowed for llm-d vLLM deployments; serving port must remain %d",
+			DefaultVLLMPort,
+		)
+	}
+	for _, arg := range md.Spec.Engine.ExtraArgs {
+		if arg == "--port" || strings.HasPrefix(arg, "--port=") {
+			return fmt.Errorf(
+				"overriding --port is not allowed for llm-d vLLM deployments; serving port must remain %d",
+				DefaultVLLMPort,
+			)
+		}
+	}
+	return nil
 }
 
 // buildResourceLimits creates resource limits and requests from ResourceSpec.

@@ -611,6 +611,43 @@ func TestTransformAggregatedEngineExtraArgsAppendedAfterSortedEngineArgs(t *test
 	}
 }
 
+func TestTransformRejectsVLLMPortOverrides(t *testing.T) {
+	tests := []struct {
+		name       string
+		engineArgs map[string]string
+		extraArgs  []string
+	}{
+		{
+			name:       "structured args",
+			engineArgs: map[string]string{"port": "9000"},
+		},
+		{
+			name:      "extra args separate tokens",
+			extraArgs: []string{"--port", "9000"},
+		},
+		{
+			name:      "extra args equals token",
+			extraArgs: []string{"--port=9000"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			md := newTestMD("test-model", "default")
+			md.Spec.Engine.Args = tt.engineArgs
+			md.Spec.Engine.ExtraArgs = tt.extraArgs
+
+			_, err := NewTransformer().Transform(context.Background(), md)
+			if err == nil {
+				t.Fatal("expected --port override to be rejected")
+			}
+			if !strings.Contains(err.Error(), "--port") || !strings.Contains(err.Error(), "8000") {
+				t.Fatalf("expected port guidance in error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestTransformAggregatedInvalidEngineArgKey(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
