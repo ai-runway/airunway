@@ -158,12 +158,16 @@ class SecretsService {
   /**
    * Check if a secret exists in a namespace
    */
-  private async checkSecretInNamespace(namespace: string): Promise<boolean> {
+  private async readSecretInNamespace(namespace: string): Promise<k8s.V1Secret | undefined> {
     try {
-      await this.coreV1Api.readNamespacedSecret({ name: HF_SECRET_NAME, namespace });
-      return true;
-    } catch {
-      return false;
+      return await this.coreV1Api.readNamespacedSecret({ name: HF_SECRET_NAME, namespace });
+    } catch (error) {
+      if (getK8sErrorStatusCode(error) === 404) {
+        return undefined;
+      }
+
+      logger.error({ error, namespace }, 'Failed to read HuggingFace secret status');
+      throw error;
     }
   }
 
@@ -209,19 +213,15 @@ class SecretsService {
     let token: string | undefined;
 
     for (const namespace of TARGET_NAMESPACES) {
-      const exists = await this.checkSecretInNamespace(namespace);
+      const secret = await this.readSecretInNamespace(namespace);
+      const exists = secret !== undefined;
       namespaces.push({ name: namespace, exists });
 
       // Try to get the token from the first existing secret to validate it
-      if (exists && !token) {
-        try {
-          const secret = await this.coreV1Api.readNamespacedSecret({ name: HF_SECRET_NAME, namespace });
-          const tokenData = secret.data?.[HF_TOKEN_KEY];
-          if (tokenData) {
-            token = Buffer.from(tokenData, 'base64').toString('utf-8');
-          }
-        } catch {
-          // Ignore errors reading secret data
+      if (secret && !token) {
+        const tokenData = secret.data?.[HF_TOKEN_KEY];
+        if (tokenData) {
+          token = Buffer.from(tokenData, 'base64').toString('utf-8');
         }
       }
     }

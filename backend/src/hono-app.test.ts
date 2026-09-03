@@ -1,23 +1,17 @@
 import { describe, test, expect, afterEach } from 'bun:test';
-import app, { parseCorsOrigin } from './hono-app';
+import { Hono } from 'hono';
+import app, { handleAppError, parseCorsOrigin } from './hono-app';
 import { kubernetesService } from './services/kubernetes';
 import { configService } from './services/config';
 import { authService } from './services/auth';
 import { helmService } from './services/helm';
+import { secretsService } from './services/secrets';
 import { mockServiceMethod } from './test/helpers';
 import { mockDeployment } from './test/fixtures';
 import { HTTPException } from 'hono/http-exception';
+import { ApiException } from '@kubernetes/client-node/dist/gen/index.js';
+import type { AppEnv } from './types/hono';
 
-// Helper to add timeout to async operations for K8s-dependent tests
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`Operation timed out after ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]);
-}
-
-// Shorter timeout for tests that depend on K8s (which may not be available)
-const K8S_TEST_TIMEOUT = 2000;
 const AIRUNWAY_AUTH_ERROR_HEADER = 'X-Airunway-Auth-Error';
 
 function expectChatProxyCall(capturedArgs: unknown[] | undefined, expectedArgs: unknown[]): void {
@@ -60,13 +54,17 @@ function createChunkedErrorStream(chunks: string[]): {
   };
 }
 
-app.get('/__test/http-exception/internal', () => {
-  throw new HTTPException(500, { message: 'database password is secret' });
-});
-
-app.get('/__test/http-exception/bad-request', () => {
-  throw new HTTPException(400, { message: 'client supplied an invalid value' });
-});
+function createErrorHandlingTestApp(): Hono<AppEnv> {
+  const testApp = new Hono<AppEnv>();
+  testApp.get('/internal', () => {
+    throw new HTTPException(500, { message: 'database password is secret' });
+  });
+  testApp.get('/bad-request', () => {
+    throw new HTTPException(400, { message: 'client supplied an invalid value' });
+  });
+  testApp.onError(handleAppError);
+  return testApp;
+}
 
 describe('Hono Routes', () => {
   describe('Health Routes', () => {
@@ -162,6 +160,13 @@ describe('Hono Routes', () => {
     });
 
     test('GET /api/settings returns settings', async () => {
+      restores.push(
+        mockServiceMethod(configService, 'getConfig', async () => ({
+          defaultNamespace: 'airunway-system',
+        })),
+        mockServiceMethod(kubernetesService, 'listInferenceProviderConfigs', async () => []),
+      );
+
       const res = await app.request('/api/settings');
       expect(res.status).toBe(200);
       const data = await res.json();
@@ -169,6 +174,13 @@ describe('Hono Routes', () => {
     });
 
     test('GET /api/settings returns auth config', async () => {
+      restores.push(
+        mockServiceMethod(configService, 'getConfig', async () => ({
+          defaultNamespace: 'airunway-system',
+        })),
+        mockServiceMethod(kubernetesService, 'listInferenceProviderConfigs', async () => []),
+      );
+
       const res = await app.request('/api/settings');
       expect(res.status).toBe(200);
       const data = await res.json();
@@ -231,26 +243,85 @@ describe('Hono Routes', () => {
     });
 
     test('GET /api/deployments returns deployment list with pagination', async () => {
-      try {
-        const res = await withTimeout(app.request('/api/deployments'), K8S_TEST_TIMEOUT);
-        // May fail if no k8s cluster, but should return valid response structure
-        const status = res.status;
-        expect([200, 500]).toContain(status);
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => [mockDeployment]),
+      );
 
-        if (status === 200) {
-          const data = await res.json();
-          expect(data.deployments).toBeDefined();
-          expect(data.pagination).toBeDefined();
-          expect(Array.isArray(data.deployments)).toBe(true);
-        }
-      } catch (error) {
-        // If K8s is not available, the request may timeout - that's acceptable
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping test: K8s API not available (timeout)');
-          return;
-        }
-        throw error;
-      }
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.deployments).toEqual([mockDeployment]);
+      expect(data.pagination).toEqual({
+        total: 1,
+        limit: 1,
+        offset: 0,
+        hasMore: false,
+      });
+    });
+
+    test('GET /api/deployments surfaces Kubernetes listing failures', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => {
+          throw { code: 500, message: 'HTTP request failed' };
+        }),
+      );
+
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(500);
+
+      const data = await res.json();
+      expect(data.error).toEqual({
+        message: 'Internal Server Error',
+        statusCode: 500,
+      });
+    });
+
+    test('GET /api/deployments does not expose Kubernetes exception internals', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => {
+          throw new ApiException(
+            403,
+            'Forbidden',
+            { message: 'deployments are forbidden', reason: 'Forbidden', code: 403 },
+            { 'audit-id': 'sensitive-header-value' },
+          );
+        }),
+      );
+
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(403);
+
+      const data = await res.json();
+      expect(data.error).toEqual({
+        message: 'Failed to list deployments: deployments are forbidden',
+        statusCode: 403,
+      });
+      expect(JSON.stringify(data)).not.toContain('sensitive-header-value');
+      expect(JSON.stringify(data)).not.toContain('HTTP-Code');
+    });
+
+    test('GET /api/deployments sanitizes Kubernetes exceptions without a response body', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'listDeployments', async () => {
+          throw new ApiException(
+            401,
+            'Unauthorized',
+            undefined,
+            { 'audit-id': 'sensitive-header-value' },
+          );
+        }),
+      );
+
+      const res = await app.request('/api/deployments');
+      expect(res.status).toBe(401);
+
+      const data = await res.json();
+      expect(data.error).toEqual({
+        message: 'Failed to list deployments: Authentication failed. Check your cluster credentials.',
+        statusCode: 401,
+      });
+      expect(JSON.stringify(data)).not.toContain('sensitive-header-value');
+      expect(JSON.stringify(data)).not.toContain('HTTP-Code');
     });
 
     test('POST /api/deployments/:name/chat streams proxied chat completions', async () => {
@@ -1258,31 +1329,23 @@ describe('Hono Routes', () => {
 
   describe('Runtimes Routes', () => {
     test('GET /api/runtimes/status returns runtimes status', async () => {
+      const runtime = {
+        id: 'kaito',
+        name: 'KAITO',
+        installed: true,
+        healthy: true,
+      };
+      const restore = mockServiceMethod(
+        kubernetesService,
+        'getRuntimesStatus',
+        async () => [runtime] as never,
+      );
       try {
-        const res = await withTimeout(app.request('/api/runtimes/status'), K8S_TEST_TIMEOUT);
-        // May succeed or fail depending on k8s availability
-        const status = res.status;
-        expect([200, 500]).toContain(status);
-
-        if (status === 200) {
-          const data = await res.json();
-          expect(data.runtimes).toBeDefined();
-          expect(Array.isArray(data.runtimes)).toBe(true);
-          // Validate shape of each runtime if any are returned
-          for (const runtime of data.runtimes) {
-            expect(runtime.id).toBeDefined();
-            expect(runtime.name).toBeDefined();
-            expect(typeof runtime.installed).toBe('boolean');
-            expect(typeof runtime.healthy).toBe('boolean');
-          }
-        }
-      } catch (error) {
-        // If K8s is not available, the request may timeout - that's acceptable
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping test: K8s API not available (timeout)');
-          return;
-        }
-        throw error;
+        const res = await app.request('/api/runtimes/status');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ runtimes: [runtime] });
+      } finally {
+        restore();
       }
     });
   });
@@ -1321,28 +1384,33 @@ describe('Hono Routes', () => {
     test('public routes work without auth when AUTH_ENABLED=true', async () => {
       process.env.AUTH_ENABLED = 'true';
 
-      // Health endpoint should be public
-      const healthRes = await app.request('/api/health');
-      expect(healthRes.status).toBe(200);
+      const restores = [
+        mockServiceMethod(kubernetesService, 'checkClusterConnection', async () => ({
+          connected: true,
+          message: 'Connected',
+        })),
+        mockServiceMethod(kubernetesService, 'checkCRDInstallation', async () => ({
+          installed: true,
+          message: 'Installed',
+        }) as never),
+        mockServiceMethod(kubernetesService, 'listInferenceProviderConfigs', async () => []),
+        mockServiceMethod(configService, 'getConfig', async () => ({
+          defaultNamespace: 'default',
+        }) as never),
+      ];
 
-      // Cluster status should be public (may timeout without k8s)
       try {
-        const clusterRes = await withTimeout(
-          app.request('/api/cluster/status'),
-          K8S_TEST_TIMEOUT
-        );
-        expect([200, 500]).toContain(clusterRes.status); // May fail without k8s
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping cluster status check: K8s API not available (timeout)');
-        } else {
-          throw error;
-        }
-      }
+        const healthRes = await app.request('/api/health');
+        expect(healthRes.status).toBe(200);
 
-      // Settings should be public (frontend needs to check auth config)
-      const settingsRes = await app.request('/api/settings');
-      expect([200, 500]).toContain(settingsRes.status);
+        const clusterRes = await app.request('/api/cluster/status');
+        expect(clusterRes.status).toBe(200);
+
+        const settingsRes = await app.request('/api/settings');
+        expect(settingsRes.status).toBe(200);
+      } finally {
+        restores.forEach((restore) => restore());
+      }
     });
 
     test('protected routes work without auth when AUTH_ENABLED=false', async () => {
@@ -1411,7 +1479,7 @@ describe('Hono Routes', () => {
 
   describe('Error Handling', () => {
     test('sanitizes 5xx HTTPException messages', async () => {
-      const res = await app.request('/__test/http-exception/internal');
+      const res = await createErrorHandlingTestApp().request('/internal');
       expect(res.status).toBe(500);
       const data = await res.json();
       expect(data.error.message).toBe('Internal Server Error');
@@ -1419,7 +1487,7 @@ describe('Hono Routes', () => {
     });
 
     test('preserves 4xx HTTPException messages', async () => {
-      const res = await app.request('/__test/http-exception/bad-request');
+      const res = await createErrorHandlingTestApp().request('/bad-request');
       expect(res.status).toBe(400);
       const data = await res.json();
       expect(data.error.message).toBe('client supplied an invalid value');
@@ -1493,28 +1561,43 @@ describe('Hono Routes', () => {
 
   describe('HuggingFace Secrets Routes', () => {
     test('GET /api/secrets/huggingface/status returns status', async () => {
+      const status = {
+        configured: false,
+        namespaces: [{ namespace: 'default', exists: false }],
+      };
+      const restore = mockServiceMethod(
+        secretsService,
+        'getHfSecretStatus',
+        async () => status as never,
+      );
       try {
-        const res = await withTimeout(
-          app.request('/api/secrets/huggingface/status'),
-          K8S_TEST_TIMEOUT
-        );
-        // May fail without k8s, but should return valid response structure or 500
-        const status = res.status;
-        expect([200, 500]).toContain(status);
+        const res = await app.request('/api/secrets/huggingface/status');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(status);
+      } finally {
+        restore();
+      }
+    });
 
-        if (status === 200) {
-          const data = await res.json();
-          expect(data.configured).toBeDefined();
-          expect(data.namespaces).toBeDefined();
-          expect(Array.isArray(data.namespaces)).toBe(true);
-        }
-      } catch (error) {
-        // If K8s is not available, the request may timeout - that's acceptable
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping test: K8s API not available (timeout)');
-          return;
-        }
-        throw error;
+    test('GET /api/secrets/huggingface/status fails closed on Kubernetes errors', async () => {
+      const restore = mockServiceMethod(
+        secretsService,
+        'getHfSecretStatus',
+        async () => {
+          throw { code: 500, message: 'HTTP request failed' };
+        },
+      );
+      try {
+        const res = await app.request('/api/secrets/huggingface/status');
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({
+          error: {
+            message: 'Internal Server Error',
+            statusCode: 500,
+          },
+        });
+      } finally {
+        restore();
       }
     });
 

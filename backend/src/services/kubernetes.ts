@@ -294,7 +294,9 @@ function describeOperatorProbeNamespaces(operatorPods: NonNullable<ProviderHealt
 
 function getK8sStatusCode(error: unknown): number | undefined {
   const e = error as K8sApiError | undefined;
-  return e?.statusCode || e?.response?.statusCode;
+  if (e?.statusCode !== undefined) return e.statusCode;
+  if (e?.response?.statusCode !== undefined) return e.response.statusCode;
+  return typeof e?.code === 'number' ? e.code : undefined;
 }
 
 function getK8sErrorMessage(error: unknown): string {
@@ -483,13 +485,13 @@ class KubernetesService {
         return this.listDeploymentsAcrossAllowedNamespaces(userToken);
       }
 
-      if (getK8sErrorMessage(error) === 'HTTP request failed' || statusCode === 404) {
+      if (statusCode === 404) {
         logger.debug('ModelDeployment CRD not found');
         return [];
       }
 
       logger.error({ error: getK8sErrorMessage(error) }, 'Unexpected error listing deployments');
-      return [];
+      throw error;
     }
   }
 
@@ -512,13 +514,13 @@ class KubernetesService {
       return this.convertToDeploymentStatuses(response, namespace);
     } catch (error) {
       const statusCode = getK8sStatusCode(error);
-      if (getK8sErrorMessage(error) === 'HTTP request failed' || statusCode === 404 || statusCode === 403) {
+      if (statusCode === 404) {
         logger.debug({ namespace }, 'Cannot list deployments in namespace');
         return [];
       }
 
       logger.error({ error: getK8sErrorMessage(error) }, 'Unexpected error listing deployments');
-      return [];
+      throw error;
     }
   }
 
@@ -566,7 +568,7 @@ class KubernetesService {
         .filter((name): name is string => !!name);
     } catch (error) {
       logger.error({ error }, 'Failed to list namespaces for RBAC fallback');
-      return [];
+      throw error;
     }
 
     // Check which namespaces the user can list ModelDeployments in
@@ -595,7 +597,11 @@ class KubernetesService {
             allowedNamespaces.push(ns);
           }
         } catch (error) {
-          logger.debug({ namespace: ns, error }, 'SelfSubjectAccessReview failed for namespace');
+          logger.error(
+            { namespace: ns, error: getK8sErrorMessage(error) },
+            'SelfSubjectAccessReview failed for namespace'
+          );
+          throw error;
         }
       })
     );

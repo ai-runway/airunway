@@ -24,6 +24,12 @@ describe('isK8sRetryableError', () => {
     expect(isK8sRetryableError({ response: { statusCode: 429 } })).toBe(true);
   });
 
+  test('handles numeric Kubernetes client code values', () => {
+    expect(isK8sRetryableError({ code: 503 })).toBe(true);
+    expect(isK8sRetryableError({ code: 429 })).toBe(true);
+    expect(isK8sRetryableError({ code: 404 })).toBe(false);
+  });
+
   test('returns false for 4xx client errors', () => {
     expect(isK8sRetryableError({ statusCode: 400 })).toBe(false);
     expect(isK8sRetryableError({ statusCode: 404 })).toBe(false);

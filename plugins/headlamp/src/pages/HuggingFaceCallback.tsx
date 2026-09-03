@@ -5,12 +5,12 @@
  * for an access token, and saves it to Kubernetes secrets.
  */
 
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { useLocation, useHistory } from 'react-router-dom';
 import {
   SectionBox,
   StatusLabel,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useHistory, useLocation } from 'react-router-dom';
 import { useApiClient } from '../lib/api-client';
 import { ROUTES } from '../routes';
 

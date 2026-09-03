@@ -20,7 +20,13 @@ type MockableKubernetesService = {
   coreV1Api: Record<string, (arg: K8sCallArg) => Promise<unknown>>;
   apiExtensionsApi: Record<string, (arg: K8sCallArg) => Promise<unknown>>;
   customObjectsApi: Record<string, (arg: K8sCallArg) => Promise<unknown>>;
+  getCustomObjectsApi: (token?: string) => Record<string, (arg: K8sCallArg) => Promise<unknown>>;
   getGatewayStatus: () => Promise<unknown>;
+  createUserClients: (token: string) => {
+    authorizationV1Api: {
+      createSelfSubjectAccessReview: (arg: { body: unknown }) => Promise<unknown>;
+    };
+  };
   createUserKubeConfig: (token: string) => unknown;
   kc: unknown;
 };
@@ -130,6 +136,96 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
     } finally {
       service.apiExtensionsApi = originalApiExtensionsApi;
       service.getGatewayStatus = originalGetGatewayStatus;
+    }
+  });
+});
+
+
+describe('KubernetesService - deployment listing', () => {
+  test('returns an empty list when the ModelDeployment CRD is absent', async () => {
+    const service = asMockable();
+    const originalCustomObjectsApi = service.customObjectsApi;
+
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => {
+        throw { code: 404, message: 'HTTP request failed' };
+      },
+    };
+
+    try {
+      expect(await kubernetesService.listDeployments()).toEqual([]);
+    } finally {
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('propagates cluster-wide non-404 Kubernetes API failures', async () => {
+    const service = asMockable();
+    const originalCustomObjectsApi = service.customObjectsApi;
+    const apiError = { code: 401, message: 'HTTP request failed' };
+
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => {
+        throw apiError;
+      },
+    };
+
+    try {
+      await expect(kubernetesService.listDeployments()).rejects.toBe(apiError);
+    } finally {
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('propagates namespace-scoped permission failures', async () => {
+    const service = asMockable();
+    const originalCustomObjectsApi = service.customObjectsApi;
+    const apiError = { code: 403, message: 'HTTP request failed' };
+
+    service.customObjectsApi = {
+      listNamespacedCustomObject: async () => {
+        throw apiError;
+      },
+    };
+
+    try {
+      await expect(kubernetesService.listDeployments('default')).rejects.toBe(apiError);
+    } finally {
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('propagates SelfSubjectAccessReview failures during authenticated fallback', async () => {
+    const service = asMockable();
+    const originalCoreV1Api = service.coreV1Api;
+    const originalGetCustomObjectsApi = service.getCustomObjectsApi;
+    const originalCreateUserClients = service.createUserClients;
+    const apiError = { code: 503, message: 'HTTP request failed' };
+
+    service.getCustomObjectsApi = () => ({
+      listClusterCustomObject: async () => {
+        throw { code: 403, message: 'HTTP request failed' };
+      },
+    });
+    service.coreV1Api = {
+      listNamespace: async () => ({
+        items: [{ metadata: { name: 'default' } }],
+      }),
+    };
+    service.createUserClients = () => ({
+      authorizationV1Api: {
+        createSelfSubjectAccessReview: async () => {
+          throw apiError;
+        },
+      },
+    });
+
+    try {
+      await expect(kubernetesService.listDeployments(undefined, 'user-token')).rejects.toBe(apiError);
+    } finally {
+      service.coreV1Api = originalCoreV1Api;
+      service.getCustomObjectsApi = originalGetCustomObjectsApi;
+      service.createUserClients = originalCreateUserClients;
     }
   });
 });

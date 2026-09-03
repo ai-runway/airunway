@@ -4,20 +4,20 @@
  * Shows installation status and health of KAITO, KubeRay, and Dynamo runtimes.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import Button from '@mui/material/Button';
-import IconButton from '@mui/material/IconButton';
-import Tooltip from '@mui/material/Tooltip';
+import type { RuntimesStatusResponse, RuntimeStatus } from '@airunway/shared';
 import { Icon } from '@iconify/react';
 import {
-  SectionBox,
   Loader,
+  SectionBox,
   StatusLabel,
   StatusLabelProps,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import { useApiClient } from '../lib/api-client';
-import type { RuntimesStatusResponse, RuntimeStatus } from '@airunway/shared';
+import Button from '@mui/material/Button';
+import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
+import { useCallback, useEffect, useState } from 'react';
 import { ConnectionError } from '../components/ConnectionBanner';
+import { useApiClient } from '../lib/api-client';
 
 function getStatusColor(runtime: RuntimeStatus): StatusLabelProps['status'] {
   if (runtime.healthy) return 'success';

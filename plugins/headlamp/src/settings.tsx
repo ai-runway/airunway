@@ -4,19 +4,19 @@
  * Allows users to configure the AI Runway backend URL and other settings.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import Button from '@mui/material/Button';
 import { Icon } from '@iconify/react';
+import Button from '@mui/material/Button';
+import { useCallback, useEffect, useState } from 'react';
+import { api, resetApiClient } from './lib/api-client';
 import {
-  getBackendUrlFromSettings,
-  setBackendUrl,
-  getBackendNamespace,
-  setBackendNamespace,
+  type BackendConfig,
   clearBackendCache,
   getBackendConfig,
-  type BackendConfig,
+  getBackendNamespace,
+  getBackendUrlFromSettings,
+  setBackendNamespace,
+  setBackendUrl,
 } from './lib/backend-discovery';
-import { resetApiClient, api } from './lib/api-client';
 
 export function PluginSettings() {
   const [backendUrl, setBackendUrlState] = useState('');
@@ -84,10 +84,11 @@ export function PluginSettings() {
         <h2 style={{ fontSize: '18px', marginBottom: '16px' }}>Backend Configuration</h2>
 
         <div style={{ marginBottom: '16px' }}>
-          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
+          <label htmlFor="backend-url" style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
             Backend URL
           </label>
           <input
+            id="backend-url"
             type="text"
             value={backendUrl}
             onChange={(e) => setBackendUrlState(e.target.value)}
@@ -108,10 +109,11 @@ export function PluginSettings() {
         </div>
 
         <div style={{ marginBottom: '16px' }}>
-          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
+          <label htmlFor="backend-namespace" style={{ display: 'block', marginBottom: '8px', fontWeight: 500 }}>
             Backend Namespace
           </label>
           <input
+            id="backend-namespace"
             type="text"
             value={namespace}
             onChange={(e) => setNamespaceState(e.target.value)}

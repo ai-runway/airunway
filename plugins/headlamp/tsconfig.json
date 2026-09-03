@@ -19,7 +19,6 @@
     "forceConsistentCasingInFileNames": true,
     "declaration": false,
     "declarationMap": false,
-    "outDir": "./dist",
     "paths": {
       "@/*": ["./src/*"],
       "@airunway/shared": ["../../shared/types/index.ts"],

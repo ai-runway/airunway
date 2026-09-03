@@ -4,19 +4,19 @@
  * Browse curated models and search HuggingFace models.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { useHistory } from 'react-router-dom';
+import type { HfModelSearchResult, Model } from '@airunway/shared';
+import { Icon } from '@iconify/react';
+import { Router } from '@kinvolk/headlamp-plugin/lib';
 import {
-  SectionBox,
   Loader,
+  SectionBox,
   Tabs,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import { Router } from '@kinvolk/headlamp-plugin/lib';
 import Button from '@mui/material/Button';
-import { Icon } from '@iconify/react';
-import { useApiClient } from '../lib/api-client';
-import type { Model, HfModelSearchResult } from '@airunway/shared';
+import { useCallback, useEffect, useState } from 'react';
+import { useHistory } from 'react-router-dom';
 import { ConnectionError } from '../components/ConnectionBanner';
+import { useApiClient } from '../lib/api-client';
 import { getBadgeColors } from '../lib/theme';
 
 type TabType = 'curated' | 'huggingface';
