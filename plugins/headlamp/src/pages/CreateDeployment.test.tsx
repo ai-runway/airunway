@@ -114,4 +114,16 @@ describe('CreateDeployment', () => {
     fireEvent.click(installLink);
     expect(mocks.push).toHaveBeenCalledWith('/ai-runway-runtimes');
   });
+
+  it('labels each engine argument control for assistive technology', async () => {
+    render(<CreateDeployment />);
+
+    await screen.findByText('Qwen 3 0.6B');
+    fireEvent.click(screen.getByRole('button', { name: /Advanced Options/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add argument' }));
+
+    expect(screen.getByRole('textbox', { name: 'Engine argument 1 key' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Engine argument 1 value' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove engine argument 1' })).toBeInTheDocument();
+  });
 });

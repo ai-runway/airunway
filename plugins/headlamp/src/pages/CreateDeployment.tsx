@@ -712,13 +712,17 @@ export function CreateDeployment() {
           /* Disaggregated mode: separate prefill and decode scaling */
           <div style={{ display: 'grid', gap: '20px', maxWidth: '500px' }}>
             {/* Prefill Pipeline */}
-            <div style={{
+            <div
+              role="group"
+              aria-labelledby="prefill-pipeline-heading"
+              style={{
               border: '1px solid rgba(128, 128, 128, 0.3)',
               borderRadius: '8px',
               padding: '16px',
               backgroundColor: 'rgba(128, 128, 128, 0.05)',
-            }}>
-              <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
+              }}
+            >
+              <h4 id="prefill-pipeline-heading" style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
                 Prefill Pipeline
               </h4>
               <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
@@ -771,13 +775,17 @@ export function CreateDeployment() {
             </div>
 
             {/* Decode Pipeline */}
-            <div style={{
+            <div
+              role="group"
+              aria-labelledby="decode-pipeline-heading"
+              style={{
               border: '1px solid rgba(128, 128, 128, 0.3)',
               borderRadius: '8px',
               padding: '16px',
               backgroundColor: 'rgba(128, 128, 128, 0.05)',
-            }}>
-              <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
+              }}
+            >
+              <h4 id="decode-pipeline-heading" style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
                 Decode Pipeline
               </h4>
               <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
@@ -1009,8 +1017,8 @@ export function CreateDeployment() {
               </div>
 
               {/* Engine Arguments */}
-              <div>
-                <div style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Engine Arguments</div>
+              <div role="group" aria-labelledby="engine-arguments-label">
+                <div id="engine-arguments-label" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Engine Arguments</div>
                 <div style={{ fontSize: '12px', opacity: 0.6, marginBottom: '8px' }}>
                   Key-value pairs passed to the inference engine.
                 </div>
@@ -1018,6 +1026,7 @@ export function CreateDeployment() {
                   <div key={index} style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
                     <input
                       type="text"
+                      aria-label={`Engine argument ${index + 1} key`}
                       placeholder="Key"
                       value={arg.key}
                       onChange={(e) => {
@@ -1037,6 +1046,7 @@ export function CreateDeployment() {
                     />
                     <input
                       type="text"
+                      aria-label={`Engine argument ${index + 1} value`}
                       placeholder="Value"
                       value={arg.value}
                       onChange={(e) => {
@@ -1056,6 +1066,7 @@ export function CreateDeployment() {
                     />
                     <IconButton
                       size="small"
+                      aria-label={`Remove engine argument ${index + 1}`}
                       onClick={() => {
                         setEngineArgs((prev) => prev.filter((_, i) => i !== index));
                       }}

@@ -1,5 +1,6 @@
 import type { StorageVolume } from '@airunway/shared';
 import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { StorageVolumesEditor } from './StorageVolumesEditor';
 
@@ -58,23 +59,23 @@ describe('StorageVolumesEditor', () => {
     expect(screen.getByText('Maximum of 8 volumes reached')).toBeInTheDocument();
   });
 
-  it('does not toggle a volume when its remove button receives a keyboard event', () => {
+  it('removes a volume from the keyboard without toggling its details', async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     const volumes: StorageVolume[] = [
       { name: 'model-cache', purpose: 'modelCache', size: '100Gi' },
+      { name: 'scratch', purpose: 'custom', size: '20Gi' },
     ];
     render(<StorageVolumesEditor volumes={volumes} onChange={onChange} />);
 
-    const removeButton = screen.getByRole('button', { name: 'Remove model-cache' });
+    const removeButton = screen.getByRole('button', { name: 'Remove scratch' });
     const expandButton = screen.getByRole('button', { name: 'Hide model-cache details' });
     const expandedBefore = expandButton.getAttribute('aria-expanded');
 
-    fireEvent.keyDown(removeButton, { key: 'Enter' });
+    removeButton.focus();
+    await user.keyboard('{Enter}');
 
     expect(expandButton.getAttribute('aria-expanded')).toBe(expandedBefore);
-    expect(onChange).not.toHaveBeenCalled();
-
-    fireEvent.click(removeButton);
-    expect(onChange).toHaveBeenCalledWith([]);
+    expect(onChange).toHaveBeenCalledWith([volumes[0]]);
   });
 });
