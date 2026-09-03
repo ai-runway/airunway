@@ -371,9 +371,43 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	// Kubernetes garbage collection will handle cleanup when the ModelDeployment is deleted.
 
+	// A successful reconciliation resolves core-controller validation and
+	// selection failures. Clear the matching stale core-owned message without
+	// disturbing progress or readiness messages written by provider controllers.
+	clearResolvedCoreStatusMessage(base, &md)
+
 	logger.Info("Reconciliation complete", "name", md.Name, "phase", md.Status.Phase, "provider", md.Status.Provider)
 
 	return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
+}
+
+// clearResolvedCoreStatusMessage clears a message written by this controller
+// only when its matching condition is successful at the end of reconciliation.
+// Provider controllers also own status.message, so an unconditional clear
+// would erase their progress and readiness details.
+func clearResolvedCoreStatusMessage(base, current *airunwayv1alpha1.ModelDeployment) {
+	if base.Status.Message == "" || current.Status.Message != base.Status.Message {
+		return
+	}
+
+	resolvedFailures := []struct {
+		conditionType string
+		messagePrefix string
+	}{
+		{airunwayv1alpha1.ConditionTypeValidated, "Validation failed: "},
+		{airunwayv1alpha1.ConditionTypeEngineSelected, "Engine selection failed: "},
+		{airunwayv1alpha1.ConditionTypeProviderSelected, "Provider selection failed: "},
+		{airunwayv1alpha1.ConditionTypeProviderSelected, "No provider specified and provider-selector not enabled"},
+	}
+
+	for _, failure := range resolvedFailures {
+		resolved := meta.FindStatusCondition(current.Status.Conditions, failure.conditionType)
+		if resolved != nil && resolved.Status == metav1.ConditionTrue &&
+			strings.HasPrefix(base.Status.Message, failure.messagePrefix) {
+			current.Status.Message = ""
+			return
+		}
+	}
 }
 
 // isNoMatchError checks if an error indicates that a CRD/resource type is not registered.
