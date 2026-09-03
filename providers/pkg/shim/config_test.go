@@ -132,18 +132,20 @@ func TestRegisterProviderConfigUpdatesExistingConfig(t *testing.T) {
 	}
 }
 
+type providerConfigStatusTestCase struct {
+	name               string
+	ready              bool
+	version            string
+	upstreamCRDVersion string
+}
+
 func TestUpdateProviderConfigStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := airunwayv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("failed to add scheme: %v", err)
 	}
 
-	testCases := []struct {
-		name               string
-		ready              bool
-		version            string
-		upstreamCRDVersion string
-	}{
+	testCases := []providerConfigStatusTestCase{
 		{
 			name:               "dynamo",
 			ready:              true,
@@ -166,53 +168,58 @@ func TestUpdateProviderConfigStatus(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			existing := &airunwayv1alpha1.InferenceProviderConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: tc.name},
-				Spec: airunwayv1alpha1.InferenceProviderConfigSpec{
-					SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "true", Priority: 1}},
-				},
-			}
-
-			testClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(existing).
-				WithStatusSubresource(existing).
-				Build()
-
-			err := UpdateProviderConfigStatus(
-				context.Background(),
-				testClient,
-				tc.name,
-				tc.ready,
-				tc.version,
-				tc.upstreamCRDVersion,
-			)
-			if err != nil {
-				t.Fatalf("UpdateProviderConfigStatus() unexpected error: %v", err)
-			}
-
-			var updated airunwayv1alpha1.InferenceProviderConfig
-			if err := testClient.Get(context.Background(), types.NamespacedName{Name: tc.name}, &updated); err != nil {
-				t.Fatalf("failed to fetch updated config: %v", err)
-			}
-
-			if updated.Status.Ready != tc.ready {
-				t.Fatalf("status.ready = %v, want %v", updated.Status.Ready, tc.ready)
-			}
-			if updated.Status.Version != tc.version {
-				t.Fatalf("status.version = %q, want %q", updated.Status.Version, tc.version)
-			}
-			if updated.Status.UpstreamCRDVersion != tc.upstreamCRDVersion {
-				t.Fatalf("status.upstreamCRDVersion = %q, want %q", updated.Status.UpstreamCRDVersion, tc.upstreamCRDVersion)
-			}
-			if updated.Status.LastHeartbeat == nil {
-				t.Fatal("expected status.lastHeartbeat to be set")
-			}
-
-			if len(updated.Spec.SelectionRules) != 1 || updated.Spec.SelectionRules[0].Priority != 1 {
-				t.Fatalf("spec changed unexpectedly: %#v", updated.Spec.SelectionRules)
-			}
+			testProviderConfigStatusUpdate(t, scheme, tc)
 		})
+	}
+}
+
+func testProviderConfigStatusUpdate(t *testing.T, scheme *runtime.Scheme, tc providerConfigStatusTestCase) {
+	t.Helper()
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: tc.name},
+		Spec: airunwayv1alpha1.InferenceProviderConfigSpec{
+			SelectionRules: []airunwayv1alpha1.SelectionRule{{Condition: "true", Priority: 1}},
+		},
+	}
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithStatusSubresource(existing).
+		Build()
+
+	err := UpdateProviderConfigStatus(
+		context.Background(),
+		testClient,
+		tc.name,
+		tc.ready,
+		tc.version,
+		tc.upstreamCRDVersion,
+	)
+	if err != nil {
+		t.Fatalf("UpdateProviderConfigStatus() unexpected error: %v", err)
+	}
+
+	var updated airunwayv1alpha1.InferenceProviderConfig
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: tc.name}, &updated); err != nil {
+		t.Fatalf("failed to fetch updated config: %v", err)
+	}
+
+	if updated.Status.Ready != tc.ready {
+		t.Fatalf("status.ready = %v, want %v", updated.Status.Ready, tc.ready)
+	}
+	if updated.Status.Version != tc.version {
+		t.Fatalf("status.version = %q, want %q", updated.Status.Version, tc.version)
+	}
+	if updated.Status.UpstreamCRDVersion != tc.upstreamCRDVersion {
+		t.Fatalf("status.upstreamCRDVersion = %q, want %q", updated.Status.UpstreamCRDVersion, tc.upstreamCRDVersion)
+	}
+	if updated.Status.LastHeartbeat == nil {
+		t.Fatal("expected status.lastHeartbeat to be set")
+	}
+
+	if len(updated.Spec.SelectionRules) != 1 || updated.Spec.SelectionRules[0].Priority != 1 {
+		t.Fatalf("spec changed unexpectedly: %#v", updated.Spec.SelectionRules)
 	}
 }
 
