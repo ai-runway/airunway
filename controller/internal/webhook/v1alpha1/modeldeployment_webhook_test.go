@@ -1328,6 +1328,38 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("253-character"))
 		})
 
+		It("Should reject an overlong download Job name for a writable existing model cache", func() {
+			obj.Name = strings.Repeat("a", 250)
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Model.Source = airunwayv1alpha1.ModelSourceHuggingFace
+			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+				Name:      "model-cache",
+				ClaimName: "existing-cache",
+				Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+			}}}
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("download Job name"))
+		})
+
+		It("Should allow an overlong would-be Job name for a read-only existing model cache", func() {
+			obj.Name = strings.Repeat("a", 250)
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Model.Source = airunwayv1alpha1.ModelSourceHuggingFace
+			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+				Name:      "model-cache",
+				ClaimName: "existing-cache",
+				Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+				ReadOnly:  true,
+			}}}
+
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0]).To(ContainSubstring("model download will be skipped"))
+		})
+
 		It("Should not validate download job name when no managed modelCache volume exists", func() {
 			// 250-char MD name would trigger download job name validation
 			// but only if a managed modelCache volume exists

@@ -68,7 +68,27 @@ vi.mock('./CostEstimate', () => ({
 }))
 
 vi.mock('./StorageVolumesSection', () => ({
-  StorageVolumesSection: () => null,
+  StorageVolumesSection: ({
+    volumes,
+    onChange,
+  }: {
+    volumes: unknown[]
+    onChange: (volumes: unknown[]) => void
+  }) => (
+    <div data-testid="storage-volumes-section" data-volume-count={volumes.length}>
+      <button
+        type="button"
+        onClick={() => onChange([{
+          name: 'model-cache',
+          purpose: 'modelCache',
+          size: '100Gi',
+          accessMode: 'ReadWriteMany',
+        }])}
+      >
+        Add test volume
+      </button>
+    </div>
+  ),
 }))
 
 function createModel(overrides: Partial<Model> = {}): Model {
@@ -178,6 +198,52 @@ describe('DeploymentForm', () => {
 
     expect(kuberayCard).toHaveAttribute('aria-checked', 'true')
     expect(kaitoCard).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('shows persistent storage only for runtimes with portable pod storage support', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'kaito', name: 'KAITO', installed: true, healthy: true }),
+            createRuntime({ id: 'kuberay', name: 'KubeRay', installed: true, healthy: true }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByTestId('storage-volumes-section')).toBeInTheDocument()
+    expect(screen.getByText(/Dynamo configures it automatically, while other runtimes require a matching engine setting/i)).toBeInTheDocument()
+
+    const kaitoCard = screen.getByText('KAITO').closest('[role="radio"]') as HTMLElement
+    fireEvent.click(kaitoCard)
+
+    expect(screen.queryByTestId('storage-volumes-section')).not.toBeInTheDocument()
+  })
+
+  it('preserves storage when switching between supported runtimes', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'kuberay', name: 'KubeRay', installed: true, healthy: true }),
+            createRuntime({ id: 'llmd', name: 'llm-d', installed: true, healthy: true }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add test volume' }))
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+
+    fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
+
+    expect(screen.getByText('llm-d').closest('[role="radio"]')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
   })
 
   it('disables disaggregated mode when a custom runtime only advertises aggregated serving', () => {

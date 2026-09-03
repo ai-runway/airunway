@@ -72,7 +72,7 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics server.")
 	flag.StringVar(&downloadJobImage, "download-job-image", storage.DefaultDownloadJobImage,
-		"Container image for model download jobs.")
+		"Container image for model download Jobs. Release builds embed an immutable default.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)

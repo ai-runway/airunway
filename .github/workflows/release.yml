@@ -162,11 +162,10 @@ jobs:
 
   controller-docker:
     name: Build and Push Controller Docker Image
+    # Publish both immutable dependencies before the controller so newly
+    # reconciled model downloads and agents cannot observe missing image tags.
+    needs: [model-downloader-docker, agent-images-docker]
     runs-on: ubuntu-latest
-    # The in-process container provider reports a new build revision as soon as
-    # this image is deployed. Publish the matching immutable runtime image tags
-    # first so agents do not transiently fail to pull that revision.
-    needs: agent-images-docker
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -226,6 +225,7 @@ jobs:
             VERSION=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
             GAIE_VERSION=${{ env.GAIE_VERSION }}
+            MODEL_DOWNLOADER_IMAGE=ghcr.io/ai-runway/airunway/model-downloader@${{ needs.model-downloader-docker.outputs.digest }}
             AGENT_PROVIDER_VERSION=${{ steps.agent_provider_version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -233,6 +233,8 @@ jobs:
   model-downloader-docker:
     name: Build and Push Model Downloader Docker Image
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -263,6 +265,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') && !contains(github.ref, '-dev') }}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: images/model-downloader

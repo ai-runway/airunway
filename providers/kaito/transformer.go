@@ -19,6 +19,7 @@ package kaito
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -60,6 +61,14 @@ func NewTransformer() *Transformer {
 
 // Transform converts a ModelDeployment to a KAITO Workspace
 func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) ([]*unstructured.Unstructured, error) {
+	if md.Spec.Model.Storage != nil && len(md.Spec.Model.Storage.Volumes) > 0 {
+		return nil, errors.New(
+			"persistent model storage is not supported by the KAITO provider: " +
+				"preset workspaces do not expose a pod template, and the portable API " +
+				"does not define a llama.cpp model file path",
+		)
+	}
+
 	ws := &unstructured.Unstructured{}
 	ws.SetAPIVersion(fmt.Sprintf("%s/%s", KaitoAPIGroup, KaitoAPIVersion))
 	ws.SetKind(WorkspaceKind)

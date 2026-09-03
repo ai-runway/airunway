@@ -1497,8 +1497,11 @@ spec:
                               type: string
                             purpose:
                               default: custom
-                              description: purpose defines the intended use of this
-                                volume, enabling engine-aware defaults
+                              description: |-
+                                purpose defines the intended use of this volume and its default mount path.
+                                modelCache also configures Hugging Face cache lookup. compilationCache uses
+                                native provider integration where available; otherwise engine-specific cache
+                                configuration must be supplied explicitly through engine arguments or env.
                               enum:
                               - modelCache
                               - compilationCache
@@ -2161,6 +2164,16 @@ rules:
   - namespaces
   verbs:
   - get
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:

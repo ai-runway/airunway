@@ -24,6 +24,12 @@ import { CostEstimate } from './CostEstimate'
 import { StorageVolumesSection } from './StorageVolumesSection'
 import { calculateGpuRecommendation, calculateMultiNode, type GpuRecommendation, type MultiNodeRecommendation } from '@/lib/gpu-recommendations'
 
+const STORAGE_SUPPORTED_RUNTIMES = new Set(['dynamo', 'kuberay', 'llmd', 'vllm'])
+
+function runtimeSupportsPersistentStorage(runtime: string): boolean {
+  return STORAGE_SUPPORTED_RUNTIMES.has(runtime)
+}
+
 // Reusable GPU per Replica field component
 interface GpuPerReplicaFieldProps {
   id: string
@@ -597,6 +603,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         engine: runtime === 'vllm' ? 'vllm' : getDefaultEngineForRuntime(runtime),
         mode: runtime === 'kaito' || runtime === 'vllm' ? 'aggregated' : prev.mode,
         providerOverrides: runtime === 'vllm' ? undefined : prev.providerOverrides,
+        storage: runtimeSupportsPersistentStorage(runtime) ? prev.storage : undefined,
         modelSource: runtime === 'vllm' ? 'vllm' : leavingDirectVllm ? undefined : prev.modelSource,
         imageRef: runtime === 'vllm' ? (prev.imageRef || DIRECT_VLLM_NIGHTLY_IMAGE) : leavingDirectVllm ? undefined : prev.imageRef,
         recipeProvenance: runtime === 'vllm' ? prev.recipeProvenance : undefined,
@@ -607,7 +614,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
 
   // Fetch PVCs for the selected namespace (for existing disk selection)
   const { data: availablePVCs } = usePVCs(
-    selectedRuntime === 'dynamo' ? config.namespace : undefined
+    runtimeSupportsPersistentStorage(selectedRuntime) ? config.namespace : undefined
   )
 
   // Calculate GPU recommendation based on model characteristics.
@@ -951,6 +958,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         // Start single-runtime providers in standard aggregated mode
         mode: runtime === 'kaito' || runtime === 'vllm' ? 'aggregated' : prev.mode,
         providerOverrides: runtime === 'vllm' ? undefined : newProviderOverrides,
+        storage: runtimeSupportsPersistentStorage(runtime) ? prev.storage : undefined,
         engineArgs: newEngineArgs,
         modelSource: runtime === 'vllm' ? 'vllm' : leavingDirectVllm ? undefined : prev.modelSource,
         imageRef: runtime === 'vllm' ? directVllmImageRef : leavingDirectVllm ? undefined : prev.imageRef,
@@ -971,8 +979,6 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       setAiConfigRecommendedBackend(null)
       setAiConfigRecommendedMode(null)
       setAiConfigRecommendedValues(null)
-      // Clear storage config (storage volumes are only for Dynamo)
-      setConfig(prev => ({ ...prev, storage: undefined }))
     }
   }
 
@@ -2141,8 +2147,8 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       </div>
       )}
 
-      {/* Storage Volumes - only shown for Dynamo runtime */}
-      {selectedRuntime === 'dynamo' && (
+      {/* Storage Volumes - only shown for providers with portable pod storage support */}
+      {runtimeSupportsPersistentStorage(selectedRuntime) && (
         <div className="glass-panel">
           <h3 className="text-lg font-semibold flex items-center gap-2 mb-1">
             <HardDrive className="h-5 w-5" />
@@ -2150,7 +2156,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
             <span className="text-sm font-normal text-muted-foreground">(optional)</span>
           </h3>
           <p className="text-xs text-muted-foreground mb-4">
-            Add persistent disks to speed up deployments. A <strong>Model Cache</strong> disk automatically downloads and stores model weights so restarts and scale-ups skip the download. A <strong>Compilation Cache</strong> disk stores engine compilation artifacts to avoid recompilation.
+            Add persistent disks to speed up deployments. A <strong>Model Cache</strong> disk automatically downloads and stores model weights so restarts and scale-ups skip the download. A <strong>Compilation Cache</strong> disk provides a reusable folder for compiled engine files; Dynamo configures it automatically, while other runtimes require a matching engine setting.
           </p>
           <StorageVolumesSection
             volumes={config.storage?.volumes || []}

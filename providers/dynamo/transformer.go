@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -979,7 +980,7 @@ func (t *Transformer) buildVolumeMounts(md *airunwayv1alpha1.ModelDeployment) []
 	for _, vol := range md.Spec.Model.Storage.Volumes {
 		mount := map[string]interface{}{
 			"name":       vol.ResolvedClaimName(md.Name),
-			"mountPoint": vol.MountPath,
+			"mountPoint": storage.VolumeMountPath(vol),
 		}
 		if vol.Purpose == airunwayv1alpha1.VolumePurposeCompilationCache {
 			mount["useAsCompilationCache"] = true
@@ -1010,7 +1011,7 @@ func (t *Transformer) addStorageConfig(worker map[string]interface{}, md *airunw
 		if vol.Purpose == airunwayv1alpha1.VolumePurposeModelCache {
 			// Check if user already set HF_HOME in spec.env
 			if !hasEnvVar(md, "HF_HOME") {
-				t.injectEnvVar(worker, "HF_HOME", vol.MountPath)
+				t.injectEnvVar(worker, "HF_HOME", storage.VolumeMountPath(vol))
 			}
 			break
 		}

@@ -9,7 +9,9 @@ export type ServingMode = 'aggregated' | 'disaggregated';
 export type DeploymentPhase = 'Pending' | 'Deploying' | 'Running' | 'Failed' | 'Terminating';
 export type PodPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Unknown';
 
-// Storage types (mirrors controller StorageSpec / StorageVolume)
+// Storage types (mirrors controller StorageSpec / StorageVolume). Purpose
+// selects a default path; compilationCache has automatic engine wiring only
+// where the selected provider exposes a native integration.
 export type VolumePurpose = 'modelCache' | 'compilationCache' | 'custom';
 export type PersistentVolumeAccessMode = 'ReadWriteOnce' | 'ReadWriteMany' | 'ReadOnlyMany' | 'ReadWriteOncePod';
 

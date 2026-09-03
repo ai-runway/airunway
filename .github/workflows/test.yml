@@ -331,7 +331,7 @@ jobs:
             if ! awk -v job="$job" '
               $0 == "  " job ":" { in_job = 1; next }
               in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
-              in_job && $0 == "    needs: agent-images-docker" { found = 1 }
+              in_job && $0 ~ /^    needs:.*agent-images-docker/ { found = 1 }
               END { exit(found ? 0 : 1) }
             ' .github/workflows/release.yml; then
               echo "Release job $job must wait for agent-images-docker" >&2
@@ -493,21 +493,27 @@ jobs:
         run: make test-verify-versions
 
       - name: Build controller and assert ldflags injection
-        # `make controller-build` delegates to controller/Makefile, which
-        # injects both the pinned GAIE version and the in-process agent-provider
-        # version via ldflags. Check the emitted link command and then confirm
-        # both injected values actually landed in the binary.
+        # `controller/Makefile` injects all controller build defaults, including
+        # the pinned GAIE version, model-downloader image, and
+        # in-process agent-provider version via ldflags. Check the emitted link
+        # command and then confirm all three values landed in the binary.
         run: |
           set -euo pipefail
           gaie_version=ci-gaie-link-proof
+          model_downloader_image=example.test/model-downloader:ci-link-proof
           agent_provider_version=ci-agent-provider-link-proof
           build_command="$(
             make -C controller -n VERIFIED_VERSIONS=1 build \
               GAIE_VERSION="${gaie_version}" \
+              MODEL_DOWNLOADER_IMG="${model_downloader_image}" \
               AGENT_PROVIDER_VERSION="${agent_provider_version}"
           )"
           if ! grep -F -- "-X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=${gaie_version}" <<<"${build_command}"; then
             echo "❌ controller link flags omitted DefaultGAIEVersion=${gaie_version}"
+            exit 1
+          fi
+          if ! grep -F -- "-X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=${model_downloader_image}" <<<"${build_command}"; then
+            echo "❌ controller link flags omitted DefaultDownloadJobImage=${model_downloader_image}"
             exit 1
           fi
           if ! grep -F -- "-X main.agentProviderVersion=${agent_provider_version}" <<<"${build_command}"; then
@@ -516,16 +522,15 @@ jobs:
           fi
           make -C controller VERIFIED_VERSIONS=1 build \
             GAIE_VERSION="${gaie_version}" \
+            MODEL_DOWNLOADER_IMG="${model_downloader_image}" \
             AGENT_PROVIDER_VERSION="${agent_provider_version}"
-          if ! strings controller/bin/manager | grep -Fx -- "${gaie_version}"; then
-            echo "❌ ldflags injection of DefaultGAIEVersion=${gaie_version} did not land in controller/bin/manager"
-            exit 1
-          fi
-          if ! strings controller/bin/manager | grep -Fx -- "${agent_provider_version}"; then
-            echo "❌ ldflags injection of agentProviderVersion=${agent_provider_version} did not land in controller/bin/manager"
-            exit 1
-          fi
-          echo "✅ ldflags injection landed: DefaultGAIEVersion=${gaie_version}, agentProviderVersion=${agent_provider_version}"
+          for value in "${gaie_version}" "${model_downloader_image}" "${agent_provider_version}"; do
+            if ! strings controller/bin/manager | grep -Fx -- "${value}"; then
+              echo "❌ controller linker value ${value} did not land in controller/bin/manager"
+              exit 1
+            fi
+          done
+          echo "✅ controller ldflags injection landed for GAIE, model downloader, and agent provider"
 
       - name: Build dynamo provider and assert ldflags injection
         # Mirrors the controller assertion above. providers/dynamo/Makefile
@@ -541,6 +546,12 @@ jobs:
             exit 1
           fi
           echo "✅ ldflags injection landed: DynamoVersion=${DYNAMO_VERSION}"
+          if ! go version -m providers/dynamo/bin/provider \
+            | grep -F -- "-X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=ghcr.io/ai-runway/airunway/model-downloader:latest"; then
+            echo "❌ ldflags injection of DefaultDownloadJobImage did not land in providers/dynamo/bin/provider"
+            exit 1
+          fi
+          echo "✅ ldflags injection landed: DefaultDownloadJobImage"
 
   gpu-e2e-check:
     # Cluster-free gate for the GPU e2e module (test/e2e/gpu). The full suite

@@ -1,5 +1,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+MODEL_DOWNLOADER_IMG ?= ghcr.io/ai-runway/airunway/model-downloader:latest
 
 # Upstream component versions (single source of truth at /versions.env).
 # Each KEY=VALUE becomes a Make variable; we re-export so go/ldflags can read them.
@@ -14,6 +15,7 @@ GIT_DIRTY    := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo
 AGENT_PROVIDER_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 
 LDFLAGS := -X github.com/ai-runway/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)
+LDFLAGS += -X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=$(MODEL_DOWNLOADER_IMG)
 # Reported version for the in-process agent providers (AgentProviderConfig.status.version).
 LDFLAGS += -X main.agentProviderVersion=$(AGENT_PROVIDER_VERSION)
 
@@ -143,7 +145,7 @@ run: verify-versions manifests generate fmt vet ## Run a controller from your ho
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: verify-versions ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-arg GAIE_VERSION=$(GAIE_VERSION) --build-arg AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION) -f Dockerfile -t ${IMG} ..
+	$(CONTAINER_TOOL) build --build-arg GAIE_VERSION=$(GAIE_VERSION) --build-arg MODEL_DOWNLOADER_IMAGE=$(MODEL_DOWNLOADER_IMG) --build-arg AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION) -f Dockerfile -t ${IMG} ..
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -162,7 +164,7 @@ docker-buildx: verify-versions ## Build and push docker image for the manager fo
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name controller-builder
 	$(CONTAINER_TOOL) buildx use controller-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg GAIE_VERSION=$(GAIE_VERSION) --build-arg AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION) --tag ${IMG} -f Dockerfile.cross ..
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg GAIE_VERSION=$(GAIE_VERSION) --build-arg MODEL_DOWNLOADER_IMAGE=$(MODEL_DOWNLOADER_IMG) --build-arg AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION) --tag ${IMG} -f Dockerfile.cross ..
 	- $(CONTAINER_TOOL) buildx rm controller-builder
 	rm Dockerfile.cross
 
