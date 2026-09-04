@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { StorageVolume } from '@airunway/shared';
 import { describe, expect, it, vi } from 'vitest';
 import { CreateDeployment } from './CreateDeployment';
 
@@ -25,12 +26,20 @@ const mockApi = vi.hoisted(() => ({
   },
   runtimes: {
     getStatus: vi.fn().mockResolvedValue({
-      runtimes: [{
-        id: 'dynamo',
-        name: 'NVIDIA Dynamo',
-        installed: true,
-        healthy: true,
-      }],
+      runtimes: [
+        {
+          id: 'dynamo',
+          name: 'NVIDIA Dynamo',
+          installed: true,
+          healthy: true,
+        },
+        {
+          id: 'kuberay',
+          name: 'KubeRay',
+          installed: true,
+          healthy: true,
+        },
+      ],
     }),
   },
 }));
@@ -64,19 +73,33 @@ vi.mock('../components/StorageVolumesEditor', () => ({
     volumes,
     onChange,
   }: {
-    volumes: unknown[];
-    onChange: (volumes: unknown[]) => void;
+    volumes: StorageVolume[];
+    onChange: (volumes: StorageVolume[]) => void;
   }) => (
-    <div data-testid="storage-volumes-editor" data-volume-count={volumes.length}>
+    <div
+      data-testid="storage-volumes-editor"
+      data-volume-count={volumes.length}
+      data-volume-names={volumes.map((volume) => volume.name).join(',')}
+    >
       <button
         type="button"
-        onClick={() => onChange([{
+        onClick={() => onChange([...volumes, {
           name: 'existing-cache',
           purpose: 'modelCache',
           claimName: 'same-name-in-both-namespaces',
         }])}
       >
         Add existing claim volume
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange([...volumes, {
+          name: 'managed-cache',
+          purpose: 'modelCache',
+          size: '100Gi',
+        }])}
+      >
+        Add managed volume
       </button>
     </div>
   ),
@@ -87,16 +110,39 @@ describe('CreateDeployment', () => {
     render(<CreateDeployment />);
 
     await screen.findByText(/Storage Volumes/);
+    fireEvent.click(screen.getByRole('button', { name: 'Add managed volume' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }));
-    expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute('data-volume-count', '1');
+    expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute('data-volume-count', '2');
 
     const namespaceLabel = screen.getByText('Namespace');
     const namespaceInput = namespaceLabel.parentElement?.querySelector('input');
     expect(namespaceInput).not.toBeNull();
     fireEvent.change(namespaceInput!, { target: { value: 'other-namespace' } });
+    fireEvent.change(namespaceInput!, { target: { value: 'third-namespace' } });
 
     await waitFor(() => {
-      expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute('data-volume-count', '0');
+      expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute('data-volume-count', '1');
+      expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute(
+        'data-volume-names',
+        'managed-cache'
+      );
+    });
+  });
+
+  it('clears existing claims but preserves managed storage when a runtime changes namespace', async () => {
+    render(<CreateDeployment />);
+
+    await screen.findByText(/Storage Volumes/);
+    fireEvent.click(screen.getByRole('button', { name: 'Add managed volume' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }));
+    fireEvent.click(screen.getByText('KubeRay'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute('data-volume-count', '1');
+      expect(screen.getByTestId('storage-volumes-editor')).toHaveAttribute(
+        'data-volume-names',
+        'managed-cache'
+      );
     });
   });
 });

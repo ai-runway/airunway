@@ -72,13 +72,17 @@ vi.mock('./StorageVolumesSection', () => ({
     volumes,
     onChange,
   }: {
-    volumes: unknown[]
-    onChange: (volumes: unknown[]) => void
+    volumes: Array<{ name?: string }>
+    onChange: (volumes: Array<{ name?: string }>) => void
   }) => (
-    <div data-testid="storage-volumes-section" data-volume-count={volumes.length}>
+    <div
+      data-testid="storage-volumes-section"
+      data-volume-count={volumes.length}
+      data-volume-names={volumes.map((volume) => volume.name).join(',')}
+    >
       <button
         type="button"
-        onClick={() => onChange([{
+        onClick={() => onChange([...volumes, {
           name: 'model-cache',
           purpose: 'modelCache',
           size: '100Gi',
@@ -89,7 +93,7 @@ vi.mock('./StorageVolumesSection', () => ({
       </button>
       <button
         type="button"
-        onClick={() => onChange([{
+        onClick={() => onChange([...volumes, {
           name: 'existing-model-cache',
           purpose: 'modelCache',
           claimName: 'existing-model-cache',
@@ -342,13 +346,19 @@ describe('DeploymentForm', () => {
       </MemoryRouter>
     )
 
+    fireEvent.click(screen.getByRole('button', { name: 'Add test volume' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '2')
     fireEvent.click(screen.getByText(/Advanced Settings/i))
     fireEvent.change(screen.getByLabelText('Namespace'), {
       target: { value: 'other-namespace' },
     })
+    fireEvent.change(screen.getByLabelText('Namespace'), {
+      target: { value: 'third-namespace' },
+    })
 
-    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '0')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-names', 'model-cache')
   })
 
   it('disables disaggregated mode when a custom runtime only advertises aggregated serving', () => {
