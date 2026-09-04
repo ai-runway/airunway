@@ -197,16 +197,18 @@ func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
 
 // StartHeartbeat starts a goroutine that periodically updates the provider heartbeat
 func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
-	shim.StartHeartbeatLoop(ctx, HeartbeatInterval, func(ctx context.Context) error {
-		ready := m.checkBackendCRDInstalled()
-		if !ready {
-			log.FromContext(ctx).Info(
-				"Backend CRD not installed, reporting not ready",
-				"group", RayAPIGroup, "kind", RayServiceKind,
-			)
-		}
-		return m.UpdateStatus(ctx, ready)
-	})
+	shim.StartHeartbeatLoop(ctx, HeartbeatInterval, m.updateHeartbeat)
+}
+
+func (m *ProviderConfigManager) updateHeartbeat(ctx context.Context) error {
+	ready := m.checkBackendCRDInstalled()
+	if !ready {
+		log.FromContext(ctx).Info(
+			"Backend CRD not installed, reporting not ready",
+			"group", RayAPIGroup, "kind", RayServiceKind,
+		)
+	}
+	return m.UpdateStatus(ctx, ready)
 }
 
 // Unregister marks the provider as not ready
