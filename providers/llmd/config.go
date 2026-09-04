@@ -22,8 +22,6 @@ import (
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
@@ -179,24 +177,14 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 
 // UpdateStatus updates the status of the InferenceProviderConfig
 func (m *ProviderConfigManager) UpdateStatus(ctx context.Context, ready bool) error {
-	config := &airunwayv1alpha1.InferenceProviderConfig{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, config); err != nil {
-		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
-	}
-
-	now := metav1.Now()
-	config.Status = airunwayv1alpha1.InferenceProviderConfigStatus{
-		Ready:              ready,
-		Version:            ProviderVersion,
-		LastHeartbeat:      &now,
-		UpstreamCRDVersion: "apps/v1",
-	}
-
-	if err := m.client.Status().Update(ctx, config); err != nil {
-		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
-	}
-
-	return nil
+	return shim.UpdateProviderConfigStatus(
+		ctx,
+		m.client,
+		ProviderConfigName,
+		ready,
+		ProviderVersion,
+		"apps/v1",
+	)
 }
 
 // StartHeartbeat starts a goroutine that periodically updates the provider heartbeat

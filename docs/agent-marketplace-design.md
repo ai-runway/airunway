@@ -1,0 +1,191 @@
+# Agent Marketplace — Design Notes (post-review)
+
+> Working design doc for the Agent Marketplace (issue #200, PR #287). Records the design decisions behind the implementation, grounded against the code on `feat/200-agent-marketplace-api`. Not wired into the website sidebar — this is an ADR-style engineering record, not user-facing product docs.
+
+## Throughline
+
+The model side (`ModelDeployment` + `InferenceProviderConfig` + `providers/*`) already solved most of the problems the agent side is now hitting. The consistent answer is **reuse the model side's patterns** rather than invent parallel ones:
+
+- Model binding → prefer the OpenAI-native gateway path the model side already ships (base URL + served model name, routed by BBR).
+- Metadata that isn't runtime state → annotations, not spec (the model side keeps UI/catalog concerns out of `spec`).
+- Provider-specific logic → out-of-tree provider modules behind an interface, exactly like `providers/{dynamo,kaito,kuberay,llmd}/`.
+- Escape hatch for the long tail → a documented `provider.overrides` `RawExtension`, exactly like `ModelDeployment.spec.provider.overrides`.
+
+## Current state (grounded)
+
+- Binding: `AgentDeployment.spec.model` with exactly one of three modes — `deploymentRef`, `gatewayEndpoint`, `externalAPI`. Resolved output is written as `status.modelBinding` (singular), so providers consume one normalized binding contract without a slot-key indirection.
+- Catalog: `AgentProviderConfig` catalog is **annotation-level** (`airunway.ai/agent-catalog`), parsed by `CatalogItems()`. It is no longer a spec field — see decision 2. *(This bullet described the pre-T1 state; corrected after T1 landed.)*
+- Providers: agent provider **reconcilers are still in-tree** (`controller/internal/controller/agentprovider_{kagent,orka,container}_*.go`) even though `providers/agent-*/` modules and binaries now exist — those shims re-export the in-tree reconcilers via `controller/pkg/agentproviders`. Model providers are genuinely **out-of-tree own-module dirs** (`providers/*/` each with `go.mod` + `cmd/main.go` + `Dockerfile` + controller/transformer). `providers/README.md` states the intention is for *all* providers to live out-of-tree.
+- Provider readiness: each provider reporter writes `status.lastHeartbeat`; `AgentProviderConfigReconciler` requires that heartbeat to be fresh and combines it with backend/operator discovery before setting `status.ready`. A registered CRD alone can no longer make an absent shim look ready.
+- Reusable model-side patterns: `ModelDeployment.spec.model.servedName` (`modeldeployment_types.go:213`) and `ModelDeployment.spec.provider.overrides *runtime.RawExtension` (`modeldeployment_types.go:236`).
+
+## Decisions
+
+### 1. Model binding — converge on the OpenAI-native gateway path
+
+**Raised in review:** `deploymentRef` exposes a Kubernetes-native reference as the primary binding UX, which is the wrong altitude for the user-facing API. Alternatives considered: offering the served model name / model id instead, and keeping `externalAPI` but letting it point at an *internal* OpenAI-compatible service. Note that the served model name/id already lives on the `ModelDeployment`.
+
+**Decision (recommended):**
+- Make `gatewayEndpoint` (base URL + served model name, BBR-routed) the **canonical, recommended** binding. It is OpenAI-native and already implemented — nothing new to build for the happy path.
+- **Keep `deploymentRef`** as ergonomic sugar so "airunway does everything" still holds, but change it to **resolve through the gateway**: the core reads `ModelDeployment.spec.model.servedName` and produces the same resolved endpoint + served name a `gatewayEndpoint` binding would, instead of pointing the agent straight at the backing Service. `deploymentRef` becomes a convenience that lowers to `gatewayEndpoint`, not a separate routing path.
+- **Keep `externalAPI`** unchanged — its base URL is just a URL, so pointing it at an internal OpenAI-compatible Service already works today.
+- **Collapse `spec.models[]` → a single `spec.model` block** now that `MaxItems=1`. This deletes the confusing `name: default` slot key; `spec.config` references the single binding implicitly. Alpha API, unreleased, on a feature branch → a breaking rename is acceptable here.
+
+**Why this over the alternatives:** it is OpenAI-native *and* keeps AI Runway owning the whole path, without breaking the working PoCs — they keep using `deploymentRef`, it just resolves via `servedName` + gateway underneath.
+
+**Follow-up call:** whether/when to *deprecate or remove* `deploymentRef` entirely vs. keep it as sugar indefinitely. Current implementation keeps it as sugar.
+
+**Trade-offs:** routing `deploymentRef` through the gateway makes the gateway a hard dependency for the in-cluster happy path; today the PoCs can hit the model Service directly. Mitigation: fall back to direct-Service resolution when no gateway is present, and surface that in `status`.
+
+### 2. Catalog → annotation, not spec  **decided**
+
+**Raised:** the catalog belongs in an annotation rather than in `spec`. Catalog is curated UI metadata (tiles, icons, one-click recipes), not runtime state the controller reconciles.
+
+**Decision:** move `AgentProviderConfig.spec.catalog` out of `spec` into an annotation (e.g. `airunway.ai/agent-catalog`) carrying the catalog as a JSON document. Keep `GetCatalogItem` / `CatalogItemNames` helpers but source them from the parsed annotation.
+
+**Trade-offs:** annotations are unstructured (no CRD schema validation) and capped at ~256KB total per object. Mitigate with (a) a documented JSON shape + a small typed parser, and (b) optional webhook validation of the annotation payload so authors still get errors early. **(a) landed; (b) did not** — there is no `AgentProviderConfig` webhook, so a malformed catalog is admitted rather than rejected at apply time.
+
+Catalog validity is deliberately **not** a readiness gate. An earlier revision did gate on it, and that was worse than the problem: `status.ready=false` propagates to `FrameworkReady=False` on every agent, which stops core resolving their bindings, which makes the providers tear the workloads down — so one typo in marketplace UI metadata destroyed every running agent on the framework, including agents that set `spec.config.image` and never read the catalog, and CRD-backed agents where the catalog is never consulted at all. The container provider now defers the parse failure instead, so only an agent that actually needs a catalog image fails, and it fails with the parse error in its own status.
+
+### 3. Lift agent providers out-of-tree behind a provider interface  **decided**
+
+**Raised:** agent providers should sit behind a provider interface and live out-of-tree, exactly as the model providers do — keeping provider-specific code out of the core and lets new providers ship independently.
+
+**Decision:** extract the in-tree agent provider controllers into own-module directories mirroring `providers/*` (proposed: `providers/agent-kagent/`, `providers/agent-orka/`, `providers/agent-container/`), each behind a shared provider interface. The core controller resolves bindings + writes `status.modelBinding`; each provider module renders and reconciles its downstream CRs/workloads and reports readiness (the readiness reconciler added this round already establishes the self-reporting contract).
+
+**Trade-offs:** multi-module repo overhead (separate `go.mod`, build/test/release per provider — see the existing `providers/dynamo` module boundary). Worth it for the same reasons the model side already accepted it.
+
+### 4. Shims user-installed; install instructions in annotations  **decided**
+
+**Raised:** out-of-tree shims should be **user-installed**, with installation instructions carried in **annotations** (mentioned for orka and kagent; treat as the general rule).
+
+**Decision:** when a provider's operator/shim isn't present, the provider reports a non-ready condition (e.g. `OperatorNotInstalled`), and the UI reads an install-instructions annotation off the `AgentProviderConfig` to tell the user how to install it. This dovetails with decision 3 (self-reporting readiness): AI Runway automates everything **except** operator install, which stays a user/UI-triggered action.
+
+### 5. `providerOverrides` escape hatch for security context
+
+**Raised:** security-context overrides should follow the same `provider.overrides` pattern `ModelDeployment` already uses, and the provider shims must be able to apply whatever security-context overrides their framework requires.
+
+**Tension to resolve:** review feedback **removed** a user-facing `writableRootFilesystem` knob from `AgentDeployment.spec.config` and made the security posture **provider-owned** (a capability on `AgentProviderConfig`). Note 5 asks to add a user-facing override surface. These look contradictory.
+
+**Confirmed, not a deviation:** the current formal design doc states **"no `spec.security`"**, so provider-owned posture plus a validated override allow-list is the intended shape, and this decision stands as written. (An earlier draft of the formal doc listed `spec.security` as a cross-framework field; that draft is superseded. Do not re-open on the basis of it.)
+
+**Decision (recommended) — secure-by-default, override-by-exception:**
+- Provider **capabilities** keep owning the *default* security posture — `writableRootFilesystem` etc. remain provider-owned defaults, not a per-agent knob.
+- Add `AgentDeployment.spec.provider.overrides *runtime.RawExtension` mirroring `ModelDeployment.spec.provider.overrides` — a **documented, limited-key** escape hatch for advanced users who must override a `securityContext` for a specific provider requirement.
+- The webhook **validates** the override against the documented allowed keys and rejects unknown/dangerous keys, so the default path stays locked down and the escape hatch is explicit and auditable.
+
+This reframes [8] and note 5 as consistent: [8] removed an *unstructured, always-on* per-field knob in favor of provider-owned defaults; note 5 adds a *structured, opt-in, validated* override path. We didn't forbid overrides — we moved the default to secure and made overriding explicit.
+
+**Implemented guardrail:** user-facing security-context overrides are accepted only through a validated allow-list, and unknown/dangerous keys are rejected by webhook validation.
+
+## Decisions taken during implementation review
+
+Decisions 1–5 are API-shape calls from the original design review. The rest were forced by building it, and several are trade-offs rather than obvious fixes — recorded here so they can be argued with instead of rediscovered.
+
+### 6. Admission is a better error, never the only enforcement point
+
+**Why it came up:** `ENABLE_WEBHOOKS=false` is a supported mode, and an object admitted before a webhook existed is never re-validated. Anything enforced only in admission is therefore unenforced in real installs.
+
+**Decision:** every invariant that matters is enforced where it cannot be bypassed, with the webhook kept as the *friendlier* error rather than the guarantee.
+
+| Invariant | Enforced by | Webhook still does |
+|---|---|---|
+| `spec.framework.name` immutable | CRD CEL transition rule | same verdict, friendlier message |
+| `metadata.name` matches the RFC 1035 *pattern* | CRD CEL rule | clearer message, plus the 63-char cap |
+| Security floor (non-root, no privilege escalation, read-only root, seccomp, dropped caps) | clamped in the render path | rejects at apply time |
+| Requester may read a referenced Secret | webhook **only** — so the reconciler refuses credential-bearing bindings when the webhook is off | the check itself |
+
+The last row is the exception that proves the rule: authorization needs the requesting user's identity, which only exists during admission. Rather than enforce a weaker version elsewhere, the reconciler **fails closed** and reports `CredentialAuthorizationUnavailable`. Keyless bindings are unaffected, so a webhook-less development cluster still runs everything else.
+
+### 7. Referencing a Secret is authorized against the requester, on every edit
+
+**Why:** the controller validates a referenced Secret with its own privilege and injects it into a container whose image the same author chose. Without a check, `create agentdeployments` alone was enough to read any Secret in the namespace — a textbook confused deputy.
+
+**Decision:** the webhook issues a `SubjectAccessReview` for the requesting user against `get` on that Secret, and rejects if denied.
+
+**The non-obvious part:** this runs on *every* create and update that carries a reference, not only when the reference changes. A first version skipped unchanged references so routine edits would not fail for non-authors; review showed that left the whole escalation open — keep the reference identical and repoint `spec.config.image` at your own image. Being unable to edit a credential-bearing agent without read access to its credential is the intended policy.
+
+The authorization result is bound to the exact object UID, generation, and spec with an HMAC annotation. UPDATE admission can sign directly from the trusted old object. CREATE admission cannot mutate after Kubernetes assigns the UID, so validating admission writes a short-lived UID-bound ConfigMap in the controller namespace; reconciliation copies the proof to the AgentDeployment and a leader-elected janitor removes abandoned records. Dry-run requests perform authorization but never emit a reusable production proof.
+
+The signing key lives in the dedicated `airunway-credential-admission-key` Secret and must survive controller rollouts. Deleting or replacing that Secret intentionally invalidates existing proofs; credential-bearing AgentDeployments then fail closed until an authorized user resubmits an update. The same resubmission is required once for credential-bearing objects created by a version that predates attestations. Keyless bindings are unaffected.
+
+The credential-attesting mutating route is activated in two deployment phases.
+The normal controller bundle omits only that route while the Deployment rolls,
+because an old pod may still be a webhook Service endpoint and does not serve
+the new path. After rollout completion, the activation manifest installs the
+complete mutating configuration with `failurePolicy: Fail`. This is deployment
+coordination only; it does not weaken admission or change the AgentDeployment
+API/storage contract.
+
+### 8. Container-backed agent pods carry no ServiceAccount token
+
+The image is author-chosen, so the default token would let someone who can create an AgentDeployment — but not a Pod — execute code as the namespace's default ServiceAccount. Agents talk to a model endpoint, not the API server, so `automountServiceAccountToken: false`.
+
+The container provider uses a dedicated, provider-owned ServiceAccount with no
+token, `secrets`, or `imagePullSecrets`. The delegated-author boundary therefore
+assumes that a principal allowed to create AgentDeployments is **not** also
+allowed to create, update, patch, or delete provider-owned ServiceAccounts.
+Namespace administrators remain outside that boundary because platform-specific
+ServiceAccount annotations can grant workload identity independently of a token.
+
+One-shot agents similarly keep their per-generation claim and terminal outcome
+on the provider-owned agent ConfigMap. That ledger prevents accidental reruns
+across controller restarts and resource deletion, but it is not authenticated
+against a principal that can patch child ConfigMaps directly. AgentDeployment-only
+roles must not include ConfigMap write permissions. Supporting mutually untrusted
+ConfigMap writers would require moving the ledger to a write-protected status or
+admission-backed storage contract rather than another local reconciliation check.
+
+### 9. A lost binding is held for 10 minutes, then torn down
+
+**The trade-off, and the one most worth challenging.** Tearing down eagerly meant a single failed lookup destroyed healthy agents; holding indefinitely meant a deleted ModelDeployment left an agent advertising a dead endpoint (observed on the GPU cluster: 11 minutes later, still pointing at a Service that no longer existed). The window is keyed off the `ModelBound` condition's `LastTransitionTime`. **10 minutes is a judgement call, not a derived number.**
+
+### 10. Catalog validity is not a readiness gate
+
+Reversed mid-review. See decision 2 — gating readiness on it destroyed every running agent on a framework over a typo in UI metadata, including agents that never read the catalog.
+
+### 11. Losing a framework registration tears down what that provider rendered
+
+`spec.capabilities.backend` is immutable, so a framework can only change backend by being deleted and recreated. The delete is the leak window: without cleanup the rendered workload keeps running unmanaged, and once the framework returns on another backend a second workload appears beside it. Each provider now removes what it owns before standing aside, and writes no status — `ProviderReady` belongs to whichever provider owns the framework now.
+
+### 12. Operator readiness gates on API *version*, not just group
+
+`operatorAPIGroup` may carry `group/version` (e.g. `kagent.dev/v1alpha2`). A group-only check cannot tell an operator serving the version the renderer needs from one serving an older, incompatible version — the framework would report Ready, agents would bind, and every render would fail on an unserved kind. Bare group values still work unchanged.
+
+### 13. Gateway addresses come from published status, never derived DNS
+
+Three review comments asked for `deploymentRef` to resolve to `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local/v1`. **Declined, and the docs were corrected instead.** A Gateway resource name is not a Service DNS name. Gateway API does not require an implementation to name its data-plane Service after the Gateway, so that address does not resolve on some clusters. `resolveGatewayEndpoint` reads a usable IP or hostname from `Gateway.status.addresses` and combines it with a ready, HTTPRoute-capable HTTP(S) listener's protocol and port. A concrete listener hostname becomes the request authority because HTTP routing and TLS identity depend on it. Bindings that omit `gatewayRef.listenerName` work only when exactly one compatible listener exists. `gatewayName` and `gatewayNamespace` are recorded for diagnostics only. IPv6 literals from status are bracketed before use.
+
+## Task breakdown
+
+Ordered; blocked items are called out. Do **not** start blocked tasks until their dependencies land.
+
+| # | Task | Depends on | Status |
+|---|------|-----------|--------|
+| T1 | Catalog → annotation on `AgentProviderConfig` (parser + helpers + optional webhook validation + manifests regen) | — | **partial** — parser, helpers and manifests landed; the annotation-validating *webhook* did **not**, so a malformed catalog is admitted rather than rejected at apply time and surfaces only on an agent that needs a catalog image (`MissingImage`, carrying the parse error). Deliberately not a readiness gate — see decision 2. |
+| T2 | Resolve `deploymentRef` via `servedName` + gateway endpoint (lower it to the `gatewayEndpoint` path; direct-Service fallback when no gateway) | — | done |
+| T3 | Collapse `spec.models[]` → single `spec.model`; drop the `name: default` slot key; update config references, tests, demo manifests | T2 | done |
+| T4 | Extract agent providers to `providers/agent-*` own-module dirs behind a shared provider interface (kagent, orka, container) | — (do after T1/T2 to avoid churn) | **packaging only** — `providers/agent-*` exist as separate modules and binaries, but the reconcilers still live in `controller/internal/controller/` and are re-exported through `controller/pkg/agentproviders` to work around Go's `internal` rule. Rendering has not moved out of core, core's ClusterRole still carries `kagent.dev` and `core.orka.ai`, and the shims ship no RBAC or deploy manifests. Decision 3's "each provider module renders and reconciles its downstream CRs/workloads" is **not** met. |
+| T5 | Install-instructions annotation + `OperatorNotInstalled` condition | T4 | **partial** — the annotation and the condition land on CR status, and the message is carried onto each agent's `FrameworkReady`. Nothing in `backend/`, `frontend/` or `plugins/headlamp/` reads agent CRDs yet, so there is no UI surface — see the marketplace-metadata gap below. |
+| T6 | Add `spec.provider.overrides` `RawExtension` + webhook allow-list validation for security-context overrides | T4 | done |
+| T7 | Docs: update `docs/crd-reference.md` + `docs/gateway.md` for the binding convergence and catalog move | T1–T3 | done |
+
+## Known gaps against the authoritative design doc
+
+Recorded so they are decided rather than discovered. The design doc's target frameworks are Kagent, OpenClaw, CrewAI and LangGraph.
+
+| Gap | State |
+|---|---|
+| **Frameworks shipped ≠ frameworks designed** | Kagent ✅. **Orka** ships a full CRD-to-CRD provider but appears nowhere in the design — it was chosen to exercise the doc's own open question on Job-backed one-shot agents (`spec.lifecycle`). CrewAI, LangGraph and OpenClaw now have catalog registrations, deployment samples and repo-owned workload images. Hermes is included as an additional native agent runtime. Image sources, pinned upstream bases, local build targets and release publishing live under `images/agents/`; the runtime contract is in `docs/agent-container-runtime.md`. |
+| **`Localhost` seccomp profiles are not provider-owned** | Every other security-context override is one-way: the render path clamps it back if it would weaken the posture. `seccompProfile.type: Localhost` is the exception. An agent author cannot create a node-local profile (that needs node access or the Security Profiles Operator), but they can reference one, and a profile placed for another workload may permit more than `RuntimeDefault`. Forbidding `Localhost` would remove the legitimate hardening case, so the fix is to make the permitted profiles provider-owned — the pattern `capabilities.writableRootFilesystem` already uses. Not built. |
+| **Egress `NetworkPolicy` not built** | The formal design doc calls the auto-derived egress `NetworkPolicy` *"the one thing AI Runway actively materializes"*, with an `airunway.ai/egress: unrestricted` escape-hatch annotation. Neither exists — `grep -i networkpolicy` over all Go returns nothing. Listed as a follow-up in `controller/docs/agent-marketplace-poc.md`. This is the largest unbuilt item in the formal doc. |
+| **`spec.protocols` absent; provider `protocols` unenforced** | `protocols` exists only as a declared provider capability with no enforcement — `HasProtocol` has no non-test caller, unlike its sibling `HasBindingMode` which *is* enforced. MCP deferral is explicitly sanctioned by a design-doc comment; A2A is not. (`spec.security` is **not** a gap — the current formal doc specifies no `spec.security`; see decision 5.) |
+| **`InstallationInfo` not reused** | The design says to reuse the existing shape "where possible". Inference providers get structured `helmRepos`/`helmCharts`/`steps`; agent frameworks get a single plain-text sentence, so there is no UI-driven install flow for them. |
+| **Marketplace metadata incomplete** | Per-catalog-item `title`/`description`/`icon`/`tags` exist, but there is no provider-level display name, description, icon or tags, and no docs URL at any level. `AgentCatalogItem.Template` — the design's "deployable templates that prefill the wizard" — has no consumer. |
+| **Credential handling vs design-doc comment — no recorded rationale** | The design doc's inline comment flags `spec.model.externalAPI.credentialsRef` as carrying lateral-movement risk, and points at [kontxt](https://github.com/aramase/kontxt) / IETF Transaction Tokens: agents never hold credentials, an egress gateway exchanges the user's OAuth token for a short-lived, scope-narrowed TxToken per outbound call and injects the real upstream key itself. The implementation does the flagged thing on **every** backend — the key reaches the agent container as `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` env (container), `apiKeySecret` (kagent), `secretRef` (orka). Nothing in the repo acknowledges the risk or reserves a seam for token exchange. **This is the one deviation with no rationale recorded anywhere** — it needs either an accepted-risk note or a forward-compatibility seam (e.g. a binding mode that resolves to a gateway URL with no credential, so the API does not have to change later). |
+
+## Out of scope / follow-ups
+
+- Full per-provider Anthropic/Azure `apiType` mapping — separate follow-up; `apiType` is already preserved in `status.modelBinding`.
+- ~~The PR description scopes this to "API only" while the branch also ships a PoC controller.~~ **Resolved** — the description now states that it ships the `v1alpha1` API contract plus a proof-of-concept controller, and why the two are reviewed together (designing the API without an implementation risked cementing it before the problems surfaced).
+- Removing/deprecating `deploymentRef` outright (decision 1) — deferred; kept as sugar for now.

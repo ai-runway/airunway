@@ -1,10 +1,15 @@
 package vllm
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGetProviderConfigSpec(t *testing.T) {
@@ -122,5 +127,64 @@ func assertAPIFormats(t *testing.T, engine string, got, expected []airunwayv1alp
 		if !found {
 			t.Errorf("expected %s to support API format %s", engine, e)
 		}
+	}
+}
+
+func TestUpdateStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+	mgr := NewProviderConfigManager(c)
+
+	err := mgr.UpdateStatus(context.Background(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if !updated.Status.Ready {
+		t.Fatal("expected provider status to be ready")
+	}
+	if updated.Status.Version != ProviderVersion {
+		t.Fatalf("expected provider status version %q, got %q", ProviderVersion, updated.Status.Version)
+	}
+	if updated.Status.LastHeartbeat == nil {
+		t.Fatal("expected provider status to include last heartbeat")
+	}
+	if updated.Status.UpstreamCRDVersion != "apps/v1" {
+		t.Fatalf("expected provider upstream CRD version %q, got %q", "apps/v1", updated.Status.UpstreamCRDVersion)
+	}
+}
+
+func TestUnregister(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+	mgr := NewProviderConfigManager(c)
+
+	err := mgr.Unregister(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatal("expected provider status to be not ready after unregister")
 	}
 }

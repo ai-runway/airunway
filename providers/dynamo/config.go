@@ -22,9 +22,7 @@ import (
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -246,24 +244,14 @@ func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
 
 // UpdateStatus updates the status of the InferenceProviderConfig
 func (m *ProviderConfigManager) UpdateStatus(ctx context.Context, ready bool) error {
-	config := &airunwayv1alpha1.InferenceProviderConfig{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, config); err != nil {
-		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
-	}
-
-	now := metav1.Now()
-	config.Status = airunwayv1alpha1.InferenceProviderConfigStatus{
-		Ready:              ready,
-		Version:            ProviderVersion,
-		LastHeartbeat:      &now,
-		UpstreamCRDVersion: fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
-	}
-
-	if err := m.client.Status().Update(ctx, config); err != nil {
-		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
-	}
-
-	return nil
+	return shim.UpdateProviderConfigStatus(
+		ctx,
+		m.client,
+		ProviderConfigName,
+		ready,
+		ProviderVersion,
+		fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
+	)
 }
 
 // StartHeartbeat starts a goroutine that periodically updates the provider heartbeat

@@ -719,6 +719,10 @@ spec:
                   endpoint:
                     description: endpoint is the unified gateway endpoint URL
                     type: string
+                  gatewayName:
+                    description: gatewayName is the name of the Gateway resource used
+                      for routing.
+                    type: string
                   gatewayNamespace:
                     description: gatewayNamespace is the namespace of the Gateway
                       resource used for routing.
