@@ -77,9 +77,41 @@ func RegisterProviderConfig(
 	return nil
 }
 
+// UpdateProviderConfigStatus updates InferenceProviderConfig.status for a
+// provider without modifying spec or annotations.
+func UpdateProviderConfigStatus(
+	ctx context.Context,
+	kubeClient client.Client,
+	name string,
+	ready bool,
+	version string,
+	upstreamCRDVersion string,
+) error {
+	config := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Name: name}, config); err != nil {
+		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
+	}
+
+	now := metav1.Now()
+	config.Status = airunwayv1alpha1.InferenceProviderConfigStatus{
+		Ready:              ready,
+		Version:            version,
+		LastHeartbeat:      &now,
+		UpstreamCRDVersion: upstreamCRDVersion,
+	}
+
+	if err := kubeClient.Status().Update(ctx, config); err != nil {
+		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
+	}
+
+	return nil
+}
+
 // RetryStatusUpdate retries the supplied status update callback with a linear
 // backoff schedule: baseDelay, 2*baseDelay, ..., n*baseDelay.
-func RetryStatusUpdate(ctx context.Context, attempts int, baseDelay time.Duration, update func(context.Context) error) error {
+func RetryStatusUpdate(
+	ctx context.Context, attempts int, baseDelay time.Duration, update func(context.Context) error,
+) error {
 	if attempts < 1 {
 		attempts = 1
 	}
@@ -177,34 +209,4 @@ func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version
 	}
 
 	return false
-}
-
-// UpdateProviderConfigStatus updates InferenceProviderConfig.status for a
-// provider without modifying spec or annotations.
-func UpdateProviderConfigStatus(
-	ctx context.Context,
-	kubeClient client.Client,
-	name string,
-	ready bool,
-	version string,
-	upstreamCRDVersion string,
-) error {
-	config := &airunwayv1alpha1.InferenceProviderConfig{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: name}, config); err != nil {
-		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
-	}
-
-	now := metav1.Now()
-	config.Status = airunwayv1alpha1.InferenceProviderConfigStatus{
-		Ready:              ready,
-		Version:            version,
-		LastHeartbeat:      &now,
-		UpstreamCRDVersion: upstreamCRDVersion,
-	}
-
-	if err := kubeClient.Status().Update(ctx, config); err != nil {
-		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
-	}
-
-	return nil
 }
