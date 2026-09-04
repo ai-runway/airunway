@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
+import type { StorageVolume } from '@airunway/shared'
 import { server } from '@/test/mocks/server'
 import type { DetailedClusterCapacity, Model, RuntimeStatus } from '@/lib/api'
 import { DeploymentForm, setFp8PrecisionEngineArgs } from './DeploymentForm'
@@ -72,8 +73,8 @@ vi.mock('./StorageVolumesSection', () => ({
     volumes,
     onChange,
   }: {
-    volumes: Array<{ name?: string }>
-    onChange: (volumes: Array<{ name?: string }>) => void
+    volumes: StorageVolume[]
+    onChange: (volumes: StorageVolume[]) => void
   }) => (
     <div
       data-testid="storage-volumes-section"
