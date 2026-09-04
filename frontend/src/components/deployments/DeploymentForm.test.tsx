@@ -323,6 +323,34 @@ describe('DeploymentForm', () => {
     expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
   })
 
+  it('clears existing claim storage when the namespace is edited directly', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({
+              id: 'kuberay',
+              name: 'KubeRay',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'kuberay-system',
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    fireEvent.click(screen.getByText(/Advanced Settings/i))
+    fireEvent.change(screen.getByLabelText('Namespace'), {
+      target: { value: 'other-namespace' },
+    })
+
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '0')
+  })
+
   it('disables disaggregated mode when a custom runtime only advertises aggregated serving', () => {
     render(
       <MemoryRouter>

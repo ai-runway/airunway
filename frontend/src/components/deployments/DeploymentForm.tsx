@@ -1153,6 +1153,14 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     setConfig((prev) => ({ ...prev, [key]: value }))
   }
 
+  const handleNamespaceChange = (namespace: string) => {
+    setConfig((prev) => ({
+      ...prev,
+      namespace,
+      storage: storageAfterNamespaceChange(prev.storage, prev.namespace, namespace),
+    }))
+  }
+
   // Handler for applying AI Configurator recommendations
   const handleApplyAIConfig = useCallback((result: AIConfiguratorResult) => {
     const cfg = result.config
@@ -1557,7 +1565,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                 <Input
                   id="namespace"
                   value={config.namespace}
-                  onChange={(e) => updateConfig('namespace', e.target.value)}
+                  onChange={(e) => handleNamespaceChange(e.target.value)}
                   placeholder={getRuntimeDefaultNamespace(selectedRuntime)}
                   required
                 />

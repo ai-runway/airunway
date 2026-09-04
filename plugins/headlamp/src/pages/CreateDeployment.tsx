@@ -235,6 +235,13 @@ export function CreateDeployment() {
     }
   }, [model, engine, namespace]);
 
+  const handleNamespaceChange = useCallback((nextNamespace: string) => {
+    setStorageVolumes((volumes) =>
+      storageVolumesAfterNamespaceChange(volumes, namespace, nextNamespace)
+    );
+    setNamespace(nextNamespace);
+  }, [namespace]);
+
   // Check if selected runtime supports disaggregated serving
   const supportsDisaggregated = selectedRuntime === 'dynamo' || selectedRuntime === 'llmd';
 
@@ -664,7 +671,7 @@ export function CreateDeployment() {
               <input
                 type="text"
                 value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
+                onChange={(e) => handleNamespaceChange(e.target.value)}
                 style={{
                   width: '100%',
                   padding: '10px 12px',
