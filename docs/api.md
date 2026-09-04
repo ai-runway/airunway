@@ -422,11 +422,16 @@ Get provider installation status.
   "crdFound": true,
   "operatorRunning": true,
   "version": "dynamo-provider:v0.2.0",
-  "message": "Dynamo is installed and running"
+  "message": "Dynamo is installed and running",
+  "shimRegistered": true,
+  "shimConnected": true,
+  "shimLastHeartbeat": "2026-09-03T12:00:00.000Z"
 }
 ```
 
 `installationState` is `installed`, `not-installed`, or `unknown`. Prefer it over the legacy `installed` boolean when present; `unknown` means the provider has not supplied enough health metadata for AI Runway to verify the underlying runtime, so automated installation actions are withheld.
+
+`shimRegistered`, `shimConnected`, and `shimLastHeartbeat` are optional AI Runway integration fields. `shimRegistered` indicates that the integration has registered this provider, `shimConnected` indicates that its heartbeat is current, and `shimLastHeartbeat` is the raw reported ISO timestamp. Integration connectivity is independent of the underlying runtime's installation and readiness fields.
 
 ### GET /installation/providers/:id/commands
 
@@ -961,7 +966,10 @@ Get installation and health status of all runtimes.
       "installed": true,
       "healthy": true,
       "version": "dynamo-provider:v0.2.0",
-      "message": "Provider ready"
+      "message": "Provider ready",
+      "shimRegistered": true,
+      "shimConnected": true,
+      "shimLastHeartbeat": "2026-09-03T12:00:00.000Z"
     },
     {
       "id": "kuberay",
@@ -1007,11 +1015,15 @@ For runtimes that require an external operator or API, `installationState` disti
 - `healthy` - Whether runtime health checks pass
 - `version` - Detected version (if available)
 - `message` - Status message
+- `shimRegistered` - Optional; whether the AI Runway integration has registered this runtime
+- `shimConnected` - Optional; whether the integration's heartbeat is current, independently of runtime installation or readiness
+- `shimLastHeartbeat` - Optional; raw ISO timestamp last reported by the integration
 
 **Notes:**
 
 - Used by the frontend to show available runtimes in the deployment wizard
 - Checks provider configuration and available health signals for each provider/runtime; Direct vLLM is registered by the repo-local `providers/vllm` shim
+- Integration fields describe the AI Runway integration process and must not be treated as underlying runtime installation or health
 
 ### DELETE /deployments/:name
 

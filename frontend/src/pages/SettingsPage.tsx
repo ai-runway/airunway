@@ -719,7 +719,7 @@ export function SettingsPage() {
                           <span className="font-mono text-xs">{runtime.version}</span>
                         </div>
                       )}
-                      {runtimeRequiresCRD(runtime) && runtime.shimRegistered && (() => {
+                      {runtime.shimRegistered !== undefined && (() => {
                         const integration = describeIntegrationStatus(runtime)
                         return (
                           <div
@@ -840,33 +840,6 @@ export function SettingsPage() {
                           )}
                         </div>
                       </div>
-                      {(() => {
-                        if (installationStatus?.shimRegistered === undefined) {
-                          return null
-                        }
-                        const integration = describeIntegrationStatus(installationStatus)
-                        return (
-                          <div
-                            className="flex items-center justify-between rounded-lg bg-muted/60 p-3 text-sm"
-                            data-testid="integration-status-detail"
-                          >
-                            <div>
-                              <div className="font-medium">AI Runway integration</div>
-                              <p className="text-xs text-muted-foreground mt-0.5">
-                                {integration.description}
-                              </p>
-                            </div>
-                            <span className="flex items-center gap-1 shrink-0">
-                              {integration.tone === 'success' ? (
-                                <CheckCircle className="h-4 w-4 text-green-500" />
-                              ) : (
-                                <AlertCircle className="h-4 w-4 text-yellow-500" />
-                              )}
-                              <span className="text-xs">{integration.label}</span>
-                            </span>
-                          </div>
-                        )
-                      })()}
                     </>
                   ) : (
                     <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-sm text-muted-foreground">
@@ -878,6 +851,34 @@ export function SettingsPage() {
                       <span>{crdLessRuntimeReadinessMessage(isInstalled)}</span>
                     </div>
                   )}
+
+                  {(() => {
+                    if (installationStatus?.shimRegistered === undefined) {
+                      return null
+                    }
+                    const integration = describeIntegrationStatus(installationStatus)
+                    return (
+                      <div
+                        className="flex items-center justify-between rounded-lg bg-muted/60 p-3 text-sm"
+                        data-testid="integration-status-detail"
+                      >
+                        <div>
+                          <div className="font-medium">AI Runway integration</div>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {integration.description}
+                          </p>
+                        </div>
+                        <span className="flex items-center gap-1 shrink-0">
+                          {integration.tone === 'success' ? (
+                            <CheckCircle className="h-4 w-4 text-green-500" />
+                          ) : (
+                            <AlertCircle className="h-4 w-4 text-yellow-500" />
+                          )}
+                          <span className="text-xs">{integration.label}</span>
+                        </span>
+                      </div>
+                    )
+                  })()}
 
                   {selectedRuntimeRequiresCRD && (
                     <div className="flex gap-3">

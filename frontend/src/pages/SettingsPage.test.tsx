@@ -159,6 +159,9 @@ const getMockInstallationStatus = (providerId: string) => {
         operatorRunning: false,
         requiresCRD: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.requiresCRD ?? false,
         installationSteps: llmdSetupSteps,
+        shimRegistered: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.shimRegistered,
+        shimConnected: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.shimConnected,
+        shimLastHeartbeat: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.shimLastHeartbeat,
       }
     case 'custom-llmd-registration':
       return {
@@ -178,6 +181,9 @@ const getMockInstallationStatus = (providerId: string) => {
         operatorRunning: false,
         requiresCRD: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.requiresCRD ?? false,
         installationSteps: vllmSetupSteps,
+        shimRegistered: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.shimRegistered,
+        shimConnected: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.shimConnected,
+        shimLastHeartbeat: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.shimLastHeartbeat,
       }
     case 'custom-vllm-registration':
       return {
@@ -620,6 +626,39 @@ describe('SettingsPage', () => {
     expect(screen.queryByText('Install NVIDIA GPU Device Plugin')).not.toBeInTheDocument()
     expect(screen.queryByText('Install vLLM CRD')).not.toBeInTheDocument()
     expect(screen.queryByText('Start vLLM operator')).not.toBeInTheDocument()
+  })
+
+  it('shows a stale AI Runway integration for a CRD-less runtime without adding CRD controls', () => {
+    mockRuntimes = [
+      {
+        id: 'vllm',
+        name: 'vLLM',
+        installed: true,
+        healthy: true,
+        requiresCRD: false,
+        shimRegistered: true,
+        shimConnected: false,
+        shimLastHeartbeat: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const vllmCard = screen.getByText('vLLM').closest('.rounded-2xl') as HTMLElement
+    expect(within(vllmCard).getByText('Ready')).toBeInTheDocument()
+    expect(within(vllmCard).getByTestId('integration-status-vllm')).toHaveTextContent('Not responding')
+    expect(vllmCard).not.toHaveTextContent(/CRD|operator/i)
+
+    const vllmStatusPanel = screen.getByText('vLLM Status').closest('.rounded-2xl') as HTMLElement
+    const detailIntegration = within(vllmStatusPanel).getByTestId('integration-status-detail')
+    expect(detailIntegration).toHaveTextContent('Not responding')
+    expect(detailIntegration).toHaveTextContent('The AI Runway integration has not checked in recently')
+    expect(vllmStatusPanel).not.toHaveTextContent(/CRD|operator/i)
+    expect(within(vllmStatusPanel).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('uses display names to hide CRD controls for CRD-less providers with custom ids', async () => {

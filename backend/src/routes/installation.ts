@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { kubernetesService } from '../services/kubernetes';
+import { kubernetesService, type InferenceProviderConfigResource } from '../services/kubernetes';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { helmService } from '../services/helm';
@@ -14,7 +14,12 @@ import {
   estimatePerChatTokensPerSec,
   estimateConcurrentCapacity,
 } from '../services/gpuPerformance';
-import type { GpuThroughputEstimate, NodePoolInfo } from '@airunway/shared';
+import type {
+  GpuThroughputEstimate,
+  InstallationState,
+  NodePoolInfo,
+  ProviderDetails,
+} from '@airunway/shared';
 import logger from '../lib/logger';
 import { extractProviderDetails, type ProviderHelmChartDetails } from '../lib/providers';
 
@@ -143,6 +148,43 @@ function normalizeInstallCharts(providerId: string, charts: ProviderHelmChartDet
         }
       : chart
   ));
+}
+
+type ProviderInstallationStatus = Awaited<
+  ReturnType<typeof kubernetesService.checkProviderInstallationStatus>
+>;
+
+interface ProviderInstallationContext {
+  installationStatus: ProviderInstallationStatus;
+  installationState: InstallationState | undefined;
+  installationUnknown: boolean;
+}
+
+async function getProviderInstallationContext(
+  providerId: string,
+  config: InferenceProviderConfigResource,
+  provider: ProviderDetails,
+): Promise<ProviderInstallationContext> {
+  const installationStatus = await kubernetesService.checkProviderInstallationStatus(
+    providerId,
+    config.status || {},
+    provider.name,
+    provider.health,
+    provider.requiresCRD,
+  );
+  const runtimeRequiresExternalInstallation = installationStatus.requiresCRD
+    ?? provider.requiresCRD
+    ?? true;
+  const installationState = runtimeRequiresExternalInstallation
+    ? installationStatus.installationState
+      ?? (installationStatus.installed ? 'installed' : 'not-installed')
+    : undefined;
+
+  return {
+    installationStatus,
+    installationState,
+    installationUnknown: installationState === 'unknown',
+  };
 }
 
 const INSTALLER_PERMISSION_GUIDANCE = 'Automatic installation requires elevated installer permissions. Ask an admin to apply the optional dashboard installer permissions manifest (deploy/dashboard-installer-rbac.yaml) or run the commands manually.';
@@ -395,21 +437,15 @@ const installation = new Hono()
     const requiresCRD = provider.requiresCRD !== false;
     const installable = requiresCRD && hasInstallMetadata;
     const status = config.status || {};
-    const installationStatus = await kubernetesService.checkProviderInstallationStatus(
+    const {
+      installationStatus,
+      installationState,
+      installationUnknown,
+    } = await getProviderInstallationContext(
       providerId,
-      status,
-      provider.name,
-      provider.health,
-      provider.requiresCRD,
+      config,
+      provider,
     );
-    const runtimeRequiresExternalInstallation = installationStatus.requiresCRD
-      ?? provider.requiresCRD
-      ?? true;
-    const installationState = runtimeRequiresExternalInstallation
-      ? installationStatus.installationState
-        ?? (installationStatus.installed ? 'installed' : 'not-installed')
-      : undefined;
-    const installationUnknown = installationState === 'unknown';
     // Layer the shim's heartbeat-aware health view on top of the live
     // installation check. Prefer the shim's message whenever it has an
     // actionable signal — either a stale heartbeat OR a fresh UpstreamReady
@@ -460,12 +496,17 @@ const installation = new Hono()
     const provider = extractProviderDetails(config);
     const charts = normalizeInstallCharts(providerId, provider.helmCharts);
     const installable = provider.requiresCRD !== false && charts.length > 0;
+    const installationUnknown = provider.requiresCRD === false
+      ? false
+      : (await getProviderInstallationContext(providerId, config, provider)).installationUnknown;
 
     return c.json({
       providerId: provider.id,
       providerName: provider.name,
-      commands: installable ? helmService.getInstallCommands(provider.helmRepos, charts) : [],
-      steps: provider.installationSteps,
+      commands: installable && !installationUnknown
+        ? helmService.getInstallCommands(provider.helmRepos, charts)
+        : [],
+      steps: installationUnknown ? [] : provider.installationSteps,
     });
   })
   .post('/providers/:providerId/install', async (c) => {
@@ -482,6 +523,13 @@ const installation = new Hono()
     if (provider.requiresCRD === false) {
       throw new HTTPException(400, {
         message: `${provider.name} is managed by provider registration and cannot be installed from this page.`,
+      });
+    }
+
+    const installation = await getProviderInstallationContext(providerId, config, provider);
+    if (installation.installationUnknown) {
+      throw new HTTPException(409, {
+        message: `AI Runway cannot verify whether ${provider.name} is installed, so it cannot install this runtime automatically.`,
       });
     }
 
@@ -537,6 +585,13 @@ const installation = new Hono()
     if (provider.requiresCRD === false) {
       throw new HTTPException(400, {
         message: `${provider.name} is managed by provider registration and cannot be uninstalled from this page.`,
+      });
+    }
+
+    const installation = await getProviderInstallationContext(providerId, config, provider);
+    if (installation.installationUnknown) {
+      throw new HTTPException(409, {
+        message: `AI Runway cannot verify whether ${provider.name} is installed, so it cannot uninstall this runtime automatically.`,
       });
     }
 

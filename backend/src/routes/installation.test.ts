@@ -1,4 +1,4 @@
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach, beforeEach } from 'bun:test';
 import { PINNED_GAIE_VERSION } from '@airunway/shared';
 import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
@@ -546,6 +546,20 @@ describe('Installation Provider Routes', () => {
   // ==========================================================================
 
   describe('GET /api/installation/providers/:providerId/commands', () => {
+    let installationState: 'installed' | 'not-installed' | 'unknown';
+
+    beforeEach(() => {
+      installationState = 'not-installed';
+      restores.push(
+        mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
+          installationState,
+          installed: installationState === 'installed',
+          requiresCRD: true,
+          message: 'Runtime installation status checked.',
+        })),
+      );
+    });
+
     test('returns commands when provider found', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
@@ -633,6 +647,31 @@ describe('Installation Provider Routes', () => {
       expect(data.steps).toBeDefined();
     });
 
+    test('suppresses commands and installation guidance when installation state is unknown', async () => {
+      installationState = 'unknown';
+      let commandGenerationAttempts = 0;
+
+      restores.push(
+        mockServiceMethod(
+          kubernetesService,
+          'getInferenceProviderConfig',
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+        ),
+        mockServiceMethod(helmService, 'getInstallCommands', () => {
+          commandGenerationAttempts += 1;
+          return ['helm upgrade --install should-not-run'];
+        }),
+      );
+
+      const res = await app.request('/api/installation/providers/custom-llmd-registration/commands');
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.commands).toEqual([]);
+      expect(data.steps).toEqual([]);
+      expect(commandGenerationAttempts).toBe(0);
+    });
+
     test('returns 404 for unknown provider', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => null),
@@ -648,6 +687,20 @@ describe('Installation Provider Routes', () => {
   // ==========================================================================
 
   describe('POST /api/installation/providers/:providerId/install', () => {
+    let installationState: 'installed' | 'not-installed' | 'unknown';
+
+    beforeEach(() => {
+      installationState = 'not-installed';
+      restores.push(
+        mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
+          installationState,
+          installed: installationState === 'installed',
+          requiresCRD: true,
+          message: 'Runtime installation status checked.',
+        })),
+      );
+    });
+
     test('returns 404 for unknown provider', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => null),
@@ -747,6 +800,42 @@ describe('Installation Provider Routes', () => {
 
       const data = await res.json();
       expect(data.error.message).toContain('No installation metadata found for provider kaito');
+      expect(helmChecks).toBe(0);
+      expect(installAttempts).toBe(0);
+    });
+
+    test('rejects unknown installation state before checking helm or installing', async () => {
+      installationState = 'unknown';
+      let helmChecks = 0;
+      let installAttempts = 0;
+
+      restores.push(
+        mockServiceMethod(
+          kubernetesService,
+          'getInferenceProviderConfig',
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+        ),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => {
+          helmChecks += 1;
+          return { available: true, version: '3.14.0' };
+        }),
+        mockServiceMethod(helmService, 'installProvider', async () => {
+          installAttempts += 1;
+          return {
+            success: true,
+            results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
+          };
+        }),
+      );
+
+      const res = await app.request(
+        '/api/installation/providers/custom-llmd-registration/install',
+        { method: 'POST' },
+      );
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      expect(data.error.message).toContain('cannot verify whether LLM-D is installed');
       expect(helmChecks).toBe(0);
       expect(installAttempts).toBe(0);
     });
@@ -955,6 +1044,20 @@ describe('Installation Provider Routes', () => {
   // ==========================================================================
 
   describe('POST /api/installation/providers/:providerId/uninstall', () => {
+    let installationState: 'installed' | 'not-installed' | 'unknown';
+
+    beforeEach(() => {
+      installationState = 'installed';
+      restores.push(
+        mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
+          installationState,
+          installed: installationState === 'installed',
+          requiresCRD: true,
+          message: 'Runtime installation status checked.',
+        })),
+      );
+    });
+
     test('returns 404 for unknown provider', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => null),
@@ -999,6 +1102,39 @@ describe('Installation Provider Routes', () => {
 
       const data = await res.json();
       expect(data.error.message).toContain('LLM-D is managed by provider registration and cannot be uninstalled from this page.');
+      expect(helmChecks).toBe(0);
+      expect(uninstallAttempts).toBe(0);
+    });
+
+    test('rejects unknown installation state before checking helm or uninstalling', async () => {
+      installationState = 'unknown';
+      let helmChecks = 0;
+      let uninstallAttempts = 0;
+
+      restores.push(
+        mockServiceMethod(
+          kubernetesService,
+          'getInferenceProviderConfig',
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+        ),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => {
+          helmChecks += 1;
+          return { available: true, version: '3.14.0' };
+        }),
+        mockServiceMethod(helmService, 'uninstall', async () => {
+          uninstallAttempts += 1;
+          return { success: true, stdout: 'ok', stderr: '' };
+        }),
+      );
+
+      const res = await app.request(
+        '/api/installation/providers/custom-llmd-registration/uninstall',
+        { method: 'POST' },
+      );
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      expect(data.error.message).toContain('cannot verify whether LLM-D is installed');
       expect(helmChecks).toBe(0);
       expect(uninstallAttempts).toBe(0);
     });
