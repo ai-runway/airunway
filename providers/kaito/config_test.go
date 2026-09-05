@@ -103,6 +103,44 @@ func TestGetInstallationInfo(t *testing.T) {
 	if len(info.Steps) != 3 {
 		t.Fatalf("expected 3 installation steps, got %d", len(info.Steps))
 	}
+	chart := info.HelmCharts[0]
+	if !chart.SkipCRDs || !chart.PreInstallMissingCRDs {
+		t.Fatal("expected KAITO installation to preinstall only missing top-level CRDs and skip Helm CRD ownership")
+	}
+	if chart.Values == nil {
+		t.Fatal("expected KAITO installation values")
+	}
+	var values map[string]bool
+	if err := json.Unmarshal(chart.Values.Raw, &values); err != nil {
+		t.Fatalf("expected valid installation values JSON: %v", err)
+	}
+	expectedValues := map[string]bool{
+		"featureGates.disableNodeAutoProvisioning": true,
+		"nvidiaDevicePlugin.enabled":               false,
+		"localCSIDriver.useLocalCSIDriver":         false,
+		"gpu-feature-discovery.nfd.enabled":        false,
+		"gpu-feature-discovery.gfd.enabled":        false,
+	}
+	if len(values) != len(expectedValues) {
+		t.Fatalf("expected %d KAITO installation values, got %d", len(expectedValues), len(values))
+	}
+	for key, expected := range expectedValues {
+		if values[key] != expected {
+			t.Errorf("expected KAITO value %s=%t, got %t", key, expected, values[key])
+		}
+	}
+	if strings.Contains(info.Steps[2].Command, "nfd.master.deploy") || strings.Contains(info.Steps[2].Command, "nfd.worker.deploy") {
+		t.Error("manual installation command must use the dependency-level NFD enabled flag")
+	}
+	for _, expected := range []string{
+		"--set localCSIDriver.useLocalCSIDriver=false",
+		"--set gpu-feature-discovery.nfd.enabled=false",
+		"--set gpu-feature-discovery.gfd.enabled=false",
+	} {
+		if !strings.Contains(info.Steps[2].Command, expected) {
+			t.Errorf("expected manual installation command to contain %q", expected)
+		}
+	}
 }
 
 func TestNewProviderConfigManager(t *testing.T) {

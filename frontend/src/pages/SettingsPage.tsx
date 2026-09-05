@@ -1321,7 +1321,7 @@ export function SettingsPage() {
             <DialogTitle>Uninstall Runtime</DialogTitle>
             <DialogDescription>
               Are you sure you want to uninstall {runtimes.find(r => r.id === effectiveRuntime)?.name || 'this runtime'}?
-              This will remove the operator and all associated resources.
+              This removes the Helm-managed operator resources only. The namespace, CRDs, and custom resources are preserved.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -464,22 +464,19 @@ Install a provider via Helm.
 
 ### POST /installation/providers/:id/uninstall
 
-Uninstall a provider (preserves CRDs by default).
+Uninstall a provider's Helm release while preserving cluster-scoped APIs and
+workloads. Regular uninstall removes resources owned by the Helm release only;
+it retains the provider namespace, upstream CRDs, and all custom resources.
 
 **Response:**
 
 ```json
 {
   "success": true,
-  "message": "Provider uninstalled (CRDs preserved - use 'Uninstall CRDs' for complete removal)",
-  "installationStatus": {
-    "installed": false,
-    "crdFound": true,
-    "operatorRunning": false
-  },
+  "message": "Provider uninstalled successfully (namespace, CRDs, and custom resources preserved)",
   "results": [
     {
-      "step": "Uninstall Helm chart: kaito-workspace",
+      "step": "uninstall-kaito-workspace",
       "success": true,
       "output": "release \"kaito-workspace\" uninstalled"
     }
@@ -489,19 +486,18 @@ Uninstall a provider (preserves CRDs by default).
 
 ### POST /installation/providers/:id/uninstall-crds
 
-Delete CRDs for a provider (complete removal).
+Delete the provider's declared upstream CRDs (complete removal). This endpoint
+first requires every provider Helm release to be absent. It then verifies that
+each CRD is not owned by another tool and has no custom resources. All CRDs are
+preflighted before any deletion occurs; when a safety check fails, no CRD is
+deleted and the endpoint returns `409`.
 
 **Response:**
 
 ```json
 {
   "success": true,
-  "message": "Provider CRDs uninstalled",
-  "installationStatus": {
-    "installed": false,
-    "crdFound": false,
-    "operatorRunning": false
-  },
+  "message": "Provider CRDs removed successfully; custom resources were verified empty",
   "results": [
     {
       "step": "Delete CRD: workspaces.kaito.sh",
@@ -514,9 +510,12 @@ Delete CRDs for a provider (complete removal).
 
 **Notes:**
 
-- This is a destructive operation - existing workloads using the CRDs will be affected
-- Use regular uninstall first to remove Helm releases while preserving CRDs
-- Use this endpoint only when you want complete removal
+- This is a destructive operation. Existing custom resources block deletion so
+  that workloads are not silently removed; delete them separately only when
+  that is intentional.
+- A CRD owned by another tool also blocks deletion.
+- Use regular uninstall first to remove Helm releases while preserving the
+  namespace, CRDs, and custom resources.
 
 ### GET /installation/gpu-operator/status
 

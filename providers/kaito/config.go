@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,6 +42,13 @@ const (
 
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
+
+	// KaitoInstallationValues is the single BYO-node profile shared by the
+	// generated installation metadata and the manual installation command.
+	// Dotted keys intentionally match the dependency value paths in the KAITO
+	// chart; using gpu-feature-discovery.nfd.master.deploy/worker.deploy does
+	// not disable the NFD dependency and leaves cluster-wide resources behind.
+	KaitoInstallationValues = `{"featureGates.disableNodeAutoProvisioning":true,"nvidiaDevicePlugin.enabled":false,"localCSIDriver.useLocalCSIDriver":false,"gpu-feature-discovery.nfd.enabled":false,"gpu-feature-discovery.gfd.enabled":false}`
 )
 
 // shimVersion is this shim's reported version tag, injected at build time via:
@@ -130,11 +138,14 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 		},
 		HelmCharts: []airunwayv1alpha1.HelmChart{
 			{
-				Name:            "kaito-workspace",
-				Chart:           "kaito/workspace",
-				Version:         "0.10.0",
-				Namespace:       "kaito-workspace",
-				CreateNamespace: true,
+				Name:                  "kaito-workspace",
+				Chart:                 "kaito/workspace",
+				Version:               "0.10.0",
+				Namespace:             "kaito-workspace",
+				CreateNamespace:       true,
+				SkipCRDs:              true,
+				PreInstallMissingCRDs: true,
+				Values:                &runtime.RawExtension{Raw: []byte(KaitoInstallationValues)},
 			},
 		},
 		Steps: []airunwayv1alpha1.InstallationStep{
@@ -150,8 +161,8 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 			},
 			{
 				Title:       "Install KAITO Workspace Operator",
-				Command:     "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 -n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true --set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false --set gpu-feature-discovery.gfd.enabled=false --set gpu-feature-discovery.nfd.master.deploy=false --set gpu-feature-discovery.nfd.worker.deploy=false --wait",
-				Description: "Install the KAITO workspace operator v0.10.0 with Node Auto-Provisioning disabled (BYO nodes mode), and sub-chart dependencies disabled.",
+				Command:     "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 -n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true --set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false --set gpu-feature-discovery.nfd.enabled=false --set gpu-feature-discovery.gfd.enabled=false --wait",
+				Description: "Install the KAITO workspace operator v0.10.0 in BYO nodes mode. NVIDIA device plugin, local CSI, and both GPU Feature Discovery dependencies are disabled, so this profile does not add their cluster-wide resources.",
 			},
 		},
 	}

@@ -8,6 +8,9 @@ import { toDeploymentStatus, type ClusterStatus, type PodStatus, type ModelDeplo
 interface K8sCallArg {
   name?: string;
   namespace?: string;
+  group?: string;
+  version?: string;
+  plural?: string;
   labelSelector?: string;
   fieldSelector?: string;
   container?: string;
@@ -130,6 +133,121 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
     } finally {
       service.apiExtensionsApi = originalApiExtensionsApi;
       service.getGatewayStatus = originalGetGatewayStatus;
+    }
+  });
+});
+
+describe('KubernetesService - safe provider CRD removal', () => {
+  test('preflights an empty CRD and deletes only after resource verification', async () => {
+    const service = asMockable();
+    const originalApiExtensionsApi = service.apiExtensionsApi;
+    const originalCustomObjectsApi = service.customObjectsApi;
+    const deleted: string[] = [];
+    const listed: K8sCallArg[] = [];
+
+    service.apiExtensionsApi = {
+      readCustomResourceDefinition: async () => ({
+        metadata: { labels: { 'app.kubernetes.io/managed-by': 'Helm' }, annotations: { 'meta.helm.sh/release-name': 'kaito-workspace' } },
+        spec: {
+          group: 'kaito.sh',
+          names: { plural: 'workspaces' },
+          versions: [{ name: 'v1beta1', served: true }],
+        },
+      }),
+      deleteCustomResourceDefinition: async (arg: K8sCallArg) => {
+        deleted.push(arg.name as string);
+        return {};
+      },
+    };
+    service.customObjectsApi = {
+      listClusterCustomObject: async (arg: K8sCallArg) => {
+        listed.push(arg);
+        return { items: [] };
+      },
+    };
+
+    try {
+      const result = await kubernetesService.deleteCRDsSafely(['workspaces.kaito.sh'], ['kaito-workspace']);
+
+      expect(result.success).toBe(true);
+      expect(result.results[0].message).toBe('CRD workspaces.kaito.sh deleted');
+      expect(listed).toEqual([{ group: 'kaito.sh', version: 'v1beta1', plural: 'workspaces' }]);
+      expect(deleted).toEqual(['workspaces.kaito.sh']);
+    } finally {
+      service.apiExtensionsApi = originalApiExtensionsApi;
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('refuses deletion when custom resources exist and does not call delete', async () => {
+    const service = asMockable();
+    const originalApiExtensionsApi = service.apiExtensionsApi;
+    const originalCustomObjectsApi = service.customObjectsApi;
+    let deleteAttempts = 0;
+
+    service.apiExtensionsApi = {
+      readCustomResourceDefinition: async () => ({
+        metadata: {},
+        spec: {
+          group: 'kaito.sh',
+          names: { plural: 'workspaces' },
+          versions: [{ name: 'v1beta1', served: true }],
+        },
+      }),
+      deleteCustomResourceDefinition: async () => {
+        deleteAttempts += 1;
+        return {};
+      },
+    };
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => ({ items: [{ metadata: { name: 'demo' } }] }),
+    };
+
+    try {
+      const result = await kubernetesService.deleteCRDsSafely(['workspaces.kaito.sh']);
+
+      expect(result.success).toBe(false);
+      expect(result.results[0].message).toContain('1 existing custom resource');
+      expect(deleteAttempts).toBe(0);
+    } finally {
+      service.apiExtensionsApi = originalApiExtensionsApi;
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('refuses deletion when another tool owns the CRD', async () => {
+    const service = asMockable();
+    const originalApiExtensionsApi = service.apiExtensionsApi;
+    const originalCustomObjectsApi = service.customObjectsApi;
+    let listAttempts = 0;
+
+    service.apiExtensionsApi = {
+      readCustomResourceDefinition: async () => ({
+        metadata: { labels: { 'app.kubernetes.io/managed-by': 'some-other-tool' } },
+        spec: {
+          group: 'kaito.sh',
+          names: { plural: 'workspaces' },
+          versions: [{ name: 'v1beta1', served: true }],
+        },
+      }),
+      deleteCustomResourceDefinition: async () => ({}),
+    };
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => {
+        listAttempts += 1;
+        return { items: [] };
+      },
+    };
+
+    try {
+      const result = await kubernetesService.deleteCRDsSafely(['workspaces.kaito.sh']);
+
+      expect(result.success).toBe(false);
+      expect(result.results[0].message).toContain('owned by another tool');
+      expect(listAttempts).toBe(0);
+    } finally {
+      service.apiExtensionsApi = originalApiExtensionsApi;
+      service.customObjectsApi = originalCustomObjectsApi;
     }
   });
 });
