@@ -126,9 +126,21 @@ function selectGpuForEstimate(
   return best;
 }
 
+const KAITO_BYO_NODE_VALUES: Record<string, unknown> = {
+  'featureGates.disableNodeAutoProvisioning': true,
+  'nvidiaDevicePlugin.enabled': false,
+  'localCSIDriver.useLocalCSIDriver': false,
+  'gpu-feature-discovery.nfd.enabled': false,
+  'gpu-feature-discovery.gfd.enabled': false,
+};
+
+function isKaitoWorkspaceChart(providerId: string, chart: ProviderHelmChartDetails): boolean {
+  return providerId === 'kaito' && chart.chart === 'kaito/workspace';
+}
+
 function shouldPreInstallMissingCrds(providerId: string, chart: ProviderHelmChartDetails) {
   return (
-    (providerId === 'kaito' && chart.chart === 'kaito/workspace')
+    isKaitoWorkspaceChart(providerId, chart)
     || (providerId === 'dynamo' && chart.name === 'dynamo-platform')
   );
 }
@@ -140,6 +152,12 @@ function normalizeInstallCharts(providerId: string, charts: ProviderHelmChartDet
           ...chart,
           preInstallMissingCrds: true,
           skipCrds: true,
+          // Keep legacy provider annotations safe until the shim refreshes
+          // them. The chart's dependency conditions must be disabled in the
+          // same profile used by the Go shim and the Makefile.
+          ...(isKaitoWorkspaceChart(providerId, chart)
+            ? { values: { ...chart.values, ...KAITO_BYO_NODE_VALUES } }
+            : {}),
         }
       : chart
   ));
@@ -546,7 +564,7 @@ const installation = new Hono()
     return c.json({
       success: allSuccess,
       message: allSuccess
-        ? `${provider.name} uninstalled successfully`
+        ? `${provider.name} uninstalled successfully (namespace, CRDs, and custom resources preserved)`
         : installationFailureMessage(`${provider.name} uninstall failed`, failedOutput),
       results,
     });
@@ -559,21 +577,63 @@ const installation = new Hono()
       throw new HTTPException(404, { message: `Provider not found: ${providerId}` });
     }
 
-    logger.info({ providerId }, `Removing CRDs for ${providerId}`);
-
-    // The CRD name is typically plural.apiGroup — but since we don't store that in
-    // the CRD itself, we delete the InferenceProviderConfig instance for this provider
-    try {
-      await kubernetesService.deleteInferenceProviderConfig(providerId);
-      return c.json({
-        success: true,
-        message: `${providerId} provider config removed successfully`,
-      });
-    } catch (error) {
-      throw new HTTPException(500, {
-        message: `Failed to remove CRDs: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    const provider = extractProviderDetails(config);
+    if (provider.requiresCRD === false) {
+      throw new HTTPException(400, {
+        message: `${provider.name} is managed by provider registration and has no upstream CRDs to remove.`,
       });
     }
+
+    const crdNames = (provider.health?.crds || []).flatMap((crd) => {
+      const name = typeof crd === 'string' ? crd : crd?.name;
+      return name?.trim() ? [name.trim()] : [];
+    });
+    if (crdNames.length === 0) {
+      throw new HTTPException(400, {
+        message: `${provider.name} does not declare removable upstream CRDs; refusing to guess which cluster APIs to delete.`,
+      });
+    }
+
+    const releaseNames = provider.helmCharts.map((chart) => chart.name);
+    if (releaseNames.length > 0) {
+      const helmStatus = await helmService.checkHelmAvailable();
+      if (!helmStatus.available) {
+        throw new HTTPException(400, {
+          message: `Helm CLI not available: ${helmStatus.error}. Run the regular uninstall first, then retry complete removal.`,
+        });
+      }
+
+      for (const chart of provider.helmCharts) {
+        const release = await helmService.getReleaseInfo(chart.name, chart.namespace);
+        if (release.error) {
+          throw new HTTPException(400, {
+            message: `Unable to verify Helm release ${chart.name}: ${release.error}. Complete removal was not attempted.`,
+          });
+        }
+        if (release.exists) {
+          throw new HTTPException(409, {
+            message: `Helm release ${chart.name} is still installed. Run regular uninstall first; CRDs and custom resources were preserved.`,
+          });
+        }
+      }
+    }
+
+    logger.info({ providerId, crdNames }, `Removing upstream CRDs for ${providerId}`);
+    const removal = await kubernetesService.deleteCRDsSafely(crdNames, releaseNames);
+    const results = removal.results.map((result) => ({
+      step: `Delete CRD: ${result.crdName}`,
+      success: result.success,
+      output: result.message,
+      error: result.success ? undefined : result.message,
+    }));
+
+    return c.json({
+      success: removal.success,
+      message: removal.success
+        ? `${provider.name} CRDs removed successfully; custom resources were verified empty`
+        : `${provider.name} CRD removal was refused; no CRDs were deleted`,
+      results,
+    }, removal.success ? 200 : 409);
   })
   .get('/gateway/status', async (c) => {
     const status = await kubernetesService.checkGatewayCRDStatus();
