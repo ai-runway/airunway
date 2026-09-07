@@ -41,7 +41,7 @@ afterEach(() => {
 
 describe('RuntimesStatus', () => {
   it.each([true, false])('keeps unknown installation neutral when reported readiness is %s', async (healthy) => {
-    showRuntime({ installationState: 'unknown', healthy });
+    showRuntime({ installationState: 'unknown', installed: healthy, healthy });
 
     expect(await screen.findByText('Status unknown')).toHaveAttribute('data-status', '');
     expect(screen.getAllByText('Not checked')).toHaveLength(2);

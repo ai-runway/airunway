@@ -218,7 +218,7 @@ const getMockInstallationStatus = (providerId: string) => {
     case 'unverified-runtime':
       return {
         installationState: 'unknown' as const,
-        installed: false,
+        installed: mockRuntimes.find(runtime => runtime.id === providerId)?.installed ?? false,
         providerName: 'Unverified Runtime',
         message: 'Unverified Runtime has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.',
         requiresCRD: true,
@@ -537,7 +537,7 @@ describe('SettingsPage', () => {
         id: 'unverified-runtime',
         name: 'Unverified Runtime',
         installationState: 'unknown',
-        installed: false,
+        installed: healthy,
         healthy,
         requiresCRD: true,
         installable: true,

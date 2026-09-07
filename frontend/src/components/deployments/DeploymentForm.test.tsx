@@ -125,7 +125,7 @@ describe('DeploymentForm', () => {
     gatewayMock.data = { available: false }
   })
 
-  it('selects and deploys a ready custom runtime without claiming its installation is confirmed', async () => {
+  it.each([true, false])('selects and deploys a ready unknown runtime with legacy installed=%s', async (installed) => {
     render(
       <MemoryRouter>
         <DeploymentForm
@@ -137,7 +137,7 @@ describe('DeploymentForm', () => {
               id: 'custom-runtime',
               name: 'Custom Runtime',
               installationState: 'unknown',
-              installed: false,
+              installed,
               healthy: true,
               shimConnected: true,
             }),

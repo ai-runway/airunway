@@ -393,12 +393,14 @@ describe('Installation Provider Routes', () => {
       expect(data.message).toBe('Runtime is ready to use.');
     });
 
-    test('honors explicit requiresCRD metadata for custom-named CRD-less providers', async () => {
+    test.each([true, false])('preserves legacy readiness %s for custom providers with unknown installation', async (ready) => {
+      const config = createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd();
+      config.status.ready = ready;
       restores.push(
         mockServiceMethod(
           kubernetesService,
           'getInferenceProviderConfig',
-          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+          async () => config,
         ),
       );
 
@@ -411,10 +413,9 @@ describe('Installation Provider Routes', () => {
       // The point of this test: an explicit requiresCRD: true is honoured even
       // for a custom-named registration of an otherwise CRD-less engine.
       expect(data.requiresCRD).toBe(true);
-      // Issue #244: nothing to probe with, so a live heartbeat must not be
-      // reported as either installed or definitely absent.
+      // The explicit verdict stays unknown while the legacy flag retains readiness.
       expect(data.installationState).toBe('unknown');
-      expect(data.installed).toBe(false);
+      expect(data.installed).toBe(ready);
       expect(data.crdFound).toBeUndefined();
       expect(data.operatorRunning).toBeUndefined();
       expect(data.message).toContain('cannot be confirmed');
@@ -547,13 +548,15 @@ describe('Installation Provider Routes', () => {
 
   describe('GET /api/installation/providers/:providerId/commands', () => {
     let installationState: 'installed' | 'not-installed' | 'unknown';
+    let installed: boolean;
 
     beforeEach(() => {
       installationState = 'not-installed';
+      installed = false;
       restores.push(
         mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
           installationState,
-          installed: installationState === 'installed',
+          installed,
           requiresCRD: true,
           message: 'Runtime installation status checked.',
         })),
@@ -647,8 +650,9 @@ describe('Installation Provider Routes', () => {
       expect(data.steps).toBeDefined();
     });
 
-    test('suppresses commands and installation guidance when installation state is unknown', async () => {
+    test.each([true, false])('suppresses unknown installation guidance with legacy installed=%s', async (legacyInstalled) => {
       installationState = 'unknown';
+      installed = legacyInstalled;
       let commandGenerationAttempts = 0;
 
       restores.push(
@@ -688,13 +692,15 @@ describe('Installation Provider Routes', () => {
 
   describe('POST /api/installation/providers/:providerId/install', () => {
     let installationState: 'installed' | 'not-installed' | 'unknown';
+    let installed: boolean;
 
     beforeEach(() => {
       installationState = 'not-installed';
+      installed = false;
       restores.push(
         mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
           installationState,
-          installed: installationState === 'installed',
+          installed,
           requiresCRD: true,
           message: 'Runtime installation status checked.',
         })),
@@ -804,8 +810,9 @@ describe('Installation Provider Routes', () => {
       expect(installAttempts).toBe(0);
     });
 
-    test('rejects unknown installation state before checking helm or installing', async () => {
+    test.each([true, false])('rejects unknown installation before Helm calls with legacy installed=%s', async (legacyInstalled) => {
       installationState = 'unknown';
+      installed = legacyInstalled;
       let helmChecks = 0;
       let installAttempts = 0;
 
@@ -1045,13 +1052,15 @@ describe('Installation Provider Routes', () => {
 
   describe('POST /api/installation/providers/:providerId/uninstall', () => {
     let installationState: 'installed' | 'not-installed' | 'unknown';
+    let installed: boolean;
 
     beforeEach(() => {
       installationState = 'installed';
+      installed = true;
       restores.push(
         mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
           installationState,
-          installed: installationState === 'installed',
+          installed,
           requiresCRD: true,
           message: 'Runtime installation status checked.',
         })),
@@ -1106,8 +1115,9 @@ describe('Installation Provider Routes', () => {
       expect(uninstallAttempts).toBe(0);
     });
 
-    test('rejects unknown installation state before checking helm or uninstalling', async () => {
+    test.each([true, false])('rejects unknown uninstallation before Helm calls with legacy installed=%s', async (legacyInstalled) => {
       installationState = 'unknown';
+      installed = legacyInstalled;
       let helmChecks = 0;
       let uninstallAttempts = 0;
 

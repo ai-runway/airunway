@@ -429,7 +429,7 @@ Get provider installation status.
 }
 ```
 
-`installationState` is `installed`, `not-installed`, or `unknown`. Prefer it over the legacy `installed` boolean when present; `unknown` means the provider has not supplied enough health metadata for AI Runway to verify the underlying runtime, so automated installation actions are withheld.
+`installationState` is `installed`, `not-installed`, or `unknown`. Prefer it over the legacy `installed` boolean when present; `unknown` means the provider has not supplied enough health metadata for AI Runway to verify the underlying runtime, so automated installation actions are withheld. For `unknown`, `installed` preserves provider-reported readiness for older clients rather than claiming installation was verified; structural probe fields are omitted.
 
 `shimRegistered`, `shimConnected`, and `shimLastHeartbeat` are optional AI Runway integration fields. `shimRegistered` indicates that the integration has registered this provider, `shimConnected` indicates that its heartbeat is current, and `shimLastHeartbeat` is the raw reported ISO timestamp. Integration connectivity is independent of the underlying runtime's installation and readiness fields.
 
@@ -1005,7 +1005,7 @@ Get installation and health status of all runtimes.
 }
 ```
 
-For runtimes that require an external operator or API, `installationState` distinguishes a verified `installed` or `not-installed` result from `unknown`, where AI Runway has no configured installation probe. The legacy `installed` boolean remains for compatibility. When installation is `unknown`, `healthy` preserves provider-reported readiness so deployment clients can allow a ready provider without claiming its installation was verified; `installed` remains false and structural probe fields are omitted. Automatic runtime install/uninstall remains unavailable.
+For runtimes that require an external operator or API, `installationState` distinguishes a verified `installed` or `not-installed` result from `unknown`, where AI Runway has no configured installation probe. When installation is `unknown`, both `healthy` and the legacy `installed` boolean preserve provider-reported readiness so older deployment clients remain compatible; neither is proof that installation was verified. Modern clients must prioritize `installationState`, and structural probe fields are omitted. Automatic runtime install/uninstall remains unavailable even when the legacy boolean is true; older clients may still offer actions that the backend rejects.
 
 **Fields:**
 - `id` - Runtime identifier (`dynamo`, `kuberay`, `kaito`, `llmd`, or `vllm`)

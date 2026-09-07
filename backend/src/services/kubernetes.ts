@@ -1225,12 +1225,11 @@ class KubernetesService {
         break;
     }
 
-    // Provider-reported readiness is not installation evidence. Keep it separate
-    // from structural fields when there is nothing to probe, and withhold
-    // installation changes that could affect a runtime already present.
+    // Preserve the readiness fallback for legacy clients. Modern clients use
+    // the explicit unknown verdict rather than treating it as installation proof.
     return {
       installationState: 'unknown',
-      installed: false,
+      installed: statusReady,
       requiresCRD: true,
       message: `${displayName} has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.`,
     };

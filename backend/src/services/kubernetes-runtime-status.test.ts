@@ -290,13 +290,10 @@ describe('KubernetesService - Runtime Status', () => {
     // a custom-named registration of an otherwise CRD-less engine.
     expect(vllm?.requiresCRD).toBe(true);
     expect(vllm?.version).toBe('0.8.0');
-    // Issue #244: this registration declares it needs an upstream runtime but
-    // ships nothing to probe with, so a live heartbeat must not be promoted into
-    // "installed". Previously all three of these reported true purely because
-    // status.ready was true; reporting false is also inaccurate because nothing
-    // was checked.
+    // Preserve readiness for legacy clients without fabricating structural
+    // installation evidence for clients that understand the explicit verdict.
     expect(vllm?.installationState).toBe('unknown');
-    expect(vllm?.installed).toBe(false);
+    expect(vllm?.installed).toBe(true);
     expect(vllm?.crdFound).toBeUndefined();
     expect(vllm?.operatorRunning).toBeUndefined();
     expect(vllm?.healthy).toBe(true);

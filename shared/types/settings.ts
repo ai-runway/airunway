@@ -146,6 +146,7 @@ export interface RuntimeStatus {
   health?: ProviderHealthConfig;
   /** Explicit installation verdict. Prefer this over the legacy installed boolean when present. */
   installationState?: InstallationState;
+  /** Legacy installation/readiness flag; for unknown installation, preserves provider-reported readiness. */
   installed: boolean;
   /** Runtime readiness; for unknown installation, preserves provider-reported readiness without asserting installation. */
   healthy: boolean;

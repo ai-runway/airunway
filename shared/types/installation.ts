@@ -34,6 +34,7 @@ export interface InstallationStatus {
   providerName: string;
   /** Explicit installation verdict. Prefer this over the legacy installed boolean when present. */
   installationState?: InstallationState;
+  /** Legacy installation/readiness flag; for unknown installation, preserves provider-reported readiness. */
   installed: boolean;
   version?: string;
   message?: string;
