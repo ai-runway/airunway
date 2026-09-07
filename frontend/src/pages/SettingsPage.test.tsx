@@ -473,7 +473,7 @@ describe('SettingsPage', () => {
     expect(detailIntegration).toHaveTextContent('The AI Runway integration is checking in normally')
   })
 
-  it('issue #244: shows AI Runway integration as Not responding when the integration has not reported recently', () => {
+  it.each([0, 30 * 60 * 1000])('describes a disconnected integration without assuming its heartbeat is stale (age %s ms)', (heartbeatAge) => {
     mockRuntimes = [
       {
         id: 'kuberay',
@@ -485,7 +485,7 @@ describe('SettingsPage', () => {
         requiresCRD: true,
         shimRegistered: true,
         shimConnected: false,
-        shimLastHeartbeat: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        shimLastHeartbeat: new Date(Date.now() - heartbeatAge).toISOString(),
       },
     ]
 
@@ -498,7 +498,12 @@ describe('SettingsPage', () => {
     const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('Not responding')
-    expect(integrationRow.getAttribute('title')).toContain('The AI Runway integration has not checked in recently')
+    expect(integrationRow.getAttribute('title')).toContain('The AI Runway integration is disconnected (last checked in')
+    expect(integrationRow.getAttribute('title')).not.toContain('has not checked in recently')
+
+    const detailIntegration = screen.getByTestId('integration-status-detail')
+    expect(detailIntegration).toHaveTextContent('The AI Runway integration is disconnected (last checked in')
+    expect(detailIntegration).not.toHaveTextContent('has not checked in recently')
   })
 
   it('does not offer installation when a provider has no installation metadata', () => {
@@ -658,7 +663,7 @@ describe('SettingsPage', () => {
     const vllmStatusPanel = screen.getByText('vLLM Status').closest('.rounded-2xl') as HTMLElement
     const detailIntegration = within(vllmStatusPanel).getByTestId('integration-status-detail')
     expect(detailIntegration).toHaveTextContent('Not responding')
-    expect(detailIntegration).toHaveTextContent('The AI Runway integration has not checked in recently')
+    expect(detailIntegration).toHaveTextContent('The AI Runway integration is disconnected')
     expect(vllmStatusPanel).not.toHaveTextContent(/CRD|operator/i)
     expect(within(vllmStatusPanel).queryByRole('button')).not.toBeInTheDocument()
   })

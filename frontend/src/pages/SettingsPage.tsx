@@ -177,7 +177,7 @@ const describeIntegrationStatus = (source: ShimStatusSource | undefined | null):
     label: 'Not responding',
     tone: 'warning',
     description: age
-      ? `The AI Runway integration has not checked in recently (last checked in ${age}).`
+      ? `The AI Runway integration is disconnected (last checked in ${age}).`
       : 'The AI Runway integration has not checked in yet.',
   }
 }
