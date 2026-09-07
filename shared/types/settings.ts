@@ -147,6 +147,7 @@ export interface RuntimeStatus {
   /** Explicit installation verdict. Prefer this over the legacy installed boolean when present. */
   installationState?: InstallationState;
   installed: boolean;
+  /** Runtime readiness; for unknown installation, preserves provider-reported readiness without asserting installation. */
   healthy: boolean;
   crdFound?: boolean;
   operatorRunning?: boolean;

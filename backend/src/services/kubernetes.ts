@@ -989,7 +989,9 @@ class KubernetesService {
             health: providerInfo.health,
             installationState,
             installed: runtimeStatus.installed,
-            healthy: runtimeStatus.operatorRunning ?? false,
+            healthy: installationUnknown
+              ? getProviderStatusReady(status, providerInfo.health)
+              : runtimeStatus.operatorRunning ?? false,
             crdFound: installationUnknown
               ? undefined
               : runtimeStatus.crdFound ?? runtimeStatus.installed,
@@ -1223,13 +1225,9 @@ class KubernetesService {
         break;
     }
 
-    // This provider says it needs an upstream runtime (requiresCRD) but gave us
-    // nothing to probe — no built-in check and no health metadata describing its
-    // API or its pods. `statusReady` only tells us AI Runway's own integration
-    // is alive; promoting that into installed/crdFound/operatorRunning is
-    // exactly the false "installed" report from issue #244. Say we don't know
-    // instead. Automated install/uninstall actions are withheld because either
-    // one could modify a runtime that is already present.
+    // Provider-reported readiness is not installation evidence. Keep it separate
+    // from structural fields when there is nothing to probe, and withhold
+    // installation changes that could affect a runtime already present.
     return {
       installationState: 'unknown',
       installed: false,

@@ -1005,14 +1005,14 @@ Get installation and health status of all runtimes.
 }
 ```
 
-For runtimes that require an external operator or API, `installationState` distinguishes a verified `installed` or `not-installed` result from `unknown`, where AI Runway has no configured installation probe. The legacy `installed` boolean remains for compatibility.
+For runtimes that require an external operator or API, `installationState` distinguishes a verified `installed` or `not-installed` result from `unknown`, where AI Runway has no configured installation probe. The legacy `installed` boolean remains for compatibility. When installation is `unknown`, `healthy` preserves provider-reported readiness so deployment clients can allow a ready provider without claiming its installation was verified; `installed` remains false and structural probe fields are omitted. Automatic runtime install/uninstall remains unavailable.
 
 **Fields:**
 - `id` - Runtime identifier (`dynamo`, `kuberay`, `kaito`, `llmd`, or `vllm`)
 - `name` - Display name
 - `installationState` - Verified installation result: `installed`, `not-installed`, or `unknown`
 - `installed` - Legacy boolean installation/readiness flag retained for compatibility
-- `healthy` - Whether runtime health checks pass
+- `healthy` - Whether runtime health checks pass; for `unknown` installation, whether the provider reports readiness through its configured status fields
 - `version` - Detected version (if available)
 - `message` - Status message
 - `shimRegistered` - Optional; whether the AI Runway integration has registered this runtime

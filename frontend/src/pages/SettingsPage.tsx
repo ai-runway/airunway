@@ -237,7 +237,9 @@ export function SettingsPage() {
   const [showUninstallDialog, setShowUninstallDialog] = useState(false)
 
   const runtimes = runtimesStatus?.runtimes || []
-  const readyRuntimeCount = runtimes.filter(r => runtimeRequiresCRD(r) ? r.installed : (r.installed || r.healthy)).length
+  const readyRuntimeCount = runtimes.filter(r => r.installationState === 'unknown'
+    ? r.healthy
+    : runtimeRequiresCRD(r) ? r.installed : (r.installed || r.healthy)).length
   const helmAvailable = helmStatus?.available ?? false
   const defaultRuntime = selectDefaultRuntimeId(runtimesStatus?.runtimes)
 

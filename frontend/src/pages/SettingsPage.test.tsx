@@ -526,14 +526,14 @@ describe('SettingsPage', () => {
     expect(installationPanel).not.toHaveTextContent('Use the install button below')
   })
 
-  it('shows an unverified runtime neutrally and withholds installation actions', () => {
+  it.each([true, false])('keeps unverified installation neutral when reported readiness is %s', (healthy) => {
     mockRuntimes = [
       {
         id: 'unverified-runtime',
         name: 'Unverified Runtime',
         installationState: 'unknown',
         installed: false,
-        healthy: false,
+        healthy,
         requiresCRD: true,
         installable: true,
       },
@@ -558,6 +558,8 @@ describe('SettingsPage', () => {
     expect(within(installationPanel).queryByRole('button', { name: /uninstall/i })).not.toBeInTheDocument()
     expect(screen.queryByText('Manual Installation Steps')).not.toBeInTheDocument()
     expect(screen.queryByText('Helm CLI not available')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByText(`${healthy ? 1 : 0} of 1`)).toBeInTheDocument()
   })
 
   it('shows providers that do not require runtime operators without CRD controls', () => {

@@ -272,6 +272,7 @@ describe('KubernetesService - Runtime Status', () => {
       status: {
         ready: true,
         version: '0.8.0',
+        lastHeartbeat: new Date().toISOString(),
       },
     };
 
@@ -298,12 +299,21 @@ describe('KubernetesService - Runtime Status', () => {
     expect(vllm?.installed).toBe(false);
     expect(vllm?.crdFound).toBeUndefined();
     expect(vllm?.operatorRunning).toBeUndefined();
-    expect(vllm?.healthy).toBe(false);
+    expect(vllm?.healthy).toBe(true);
     expect(vllm?.installable).toBe(false);
     expect(vllm?.message).toContain('cannot be confirmed');
     // The integration itself is still reported as present and responding, so the
     // UI can distinguish "AI Runway is fine" from "the runtime is missing".
     expect(vllm?.shimRegistered).toBe(true);
+    expect(vllm?.shimConnected).toBe(true);
+
+    customVllmConfig.status.ready = false;
+    const [notReady] = await kubernetesService.getRuntimesStatus();
+    expect(notReady.installationState).toBe('unknown');
+    expect(notReady.healthy).toBe(false);
+    expect(notReady.shimConnected).toBe(true);
+    expect(notReady.installed).toBe(false);
+    expect(notReady.operatorRunning).toBeUndefined();
   });
 
   test('honors per-engine requiresCRD: false on the migrated schema for custom-named runtime entries', async () => {

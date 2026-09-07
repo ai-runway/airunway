@@ -125,6 +125,74 @@ describe('DeploymentForm', () => {
     gatewayMock.data = { available: false }
   })
 
+  it('selects and deploys a ready custom runtime without claiming its installation is confirmed', async () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel()}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'dynamo', installed: false, healthy: false }),
+            createRuntime({
+              id: 'custom-runtime',
+              name: 'Custom Runtime',
+              installationState: 'unknown',
+              installed: false,
+              healthy: true,
+              shimConnected: true,
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    const customCard = screen.getByRole('radio', { name: /Custom Runtime/ })
+    expect(customCard).toHaveAttribute('aria-checked', 'true')
+    expect(within(customCard).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(customCard).queryByText('Installed')).not.toBeInTheDocument()
+    expect(within(customCard).queryByRole('link', { name: /Install/ })).not.toBeInTheDocument()
+    const submit = screen.getByRole('button', { name: /Deploy Model/i })
+    expect(submit).toBeEnabled()
+    fireEvent.click(submit)
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'custom-runtime',
+    })))
+  })
+
+  it.each([
+    { installationState: 'unknown' as const, installed: false, healthy: false, label: 'Runtime Not Ready' },
+    { installationState: 'not-installed' as const, installed: false, healthy: true, label: 'Runtime Not Installed' },
+    { installationState: undefined, installed: false, healthy: true, label: 'Runtime Not Installed' },
+  ])('keeps unavailable runtimes blocked with $installationState installation', ({ label, ...status }) => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel()}
+          detailedCapacity={createCapacity()}
+          runtimes={[createRuntime({ ...status, shimConnected: true })]}
+        />
+      </MemoryRouter>
+    )
+    expect(screen.getByRole('button', { name: label })).toBeDisabled()
+    if (status.installationState === 'unknown') {
+      expect(screen.getByText('Status unknown')).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: /Install/ })).not.toBeInTheDocument()
+    }
+  })
+
+  it('preserves installed-only eligibility for legacy runtime responses', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel()}
+          detailedCapacity={createCapacity()}
+          runtimes={[createRuntime({ installed: true, healthy: false })]}
+        />
+      </MemoryRouter>
+    )
+    expect(screen.getByRole('button', { name: /Deploy Model/i })).toBeEnabled()
+  })
+
   it('renders native vLLM as a compatible registered runtime for vLLM models', () => {
     render(
       <MemoryRouter>
