@@ -397,12 +397,12 @@ describe('HelmService - getInstallCommands Logic', () => {
     expect(commands[0]).toContain('(KAITO_WORKSPACE_CHART_DIR=$(mktemp -d)');
     expect(commands[0]).toContain("trap 'rm -rf -- \"$KAITO_WORKSPACE_CHART_DIR\"' EXIT");
     expect(commands[0]).toContain('helm pull kaito/workspace --untar --untardir "$KAITO_WORKSPACE_CHART_DIR" --version 0.9.0');
-    expect(commands[0]).toContain('$KAITO_WORKSPACE_CHART_PATH/crds" -maxdepth 1');
-    expect(commands[0]).not.toContain('*/crds/');
+    expect(commands[0]).toContain('helm template "kaito-workspace" "$KAITO_WORKSPACE_CHART_PATH" --namespace "kaito-workspace" --include-crds');
+    expect(commands[0]).toContain('CustomResourceDefinition');
+    expect(commands[0]).toContain('awk -v output_dir=');
     expect(commands[0]).toContain('kubectl create --dry-run=client -f "$crd" -o name');
     expect(commands[0]).toContain('kubectl get "$crd_name" --ignore-not-found -o name');
     expect(commands[0]).toContain('kubectl apply --server-side --force-conflicts -f "$crd"');
-    expect(commands[0]).toContain('*.yml');
     expect(commands[0]).toContain('helm install kaito-workspace "$KAITO_WORKSPACE_CHART_PATH"');
     expect(commands[0]).not.toContain('helm install kaito-workspace "$KAITO_WORKSPACE_CHART_PATH" --namespace kaito-workspace --create-namespace --version');
     expect(commands[0]).toContain('--skip-crds');
@@ -475,51 +475,38 @@ describe('HelmService - Managed Chart CRDs', () => {
       if (args[0] === 'pull') {
         const untarDirIndex = args.indexOf('--untardir');
         const untarDir = args[untarDirIndex + 1];
-        mkdirSync(join(untarDir, 'workspace-0.9.0.tgz'), { recursive: true });
         const chartDir = join(untarDir, 'workspace');
-        const crdsDir = join(chartDir, 'crds');
-        mkdirSync(crdsDir, { recursive: true });
+        mkdirSync(chartDir, { recursive: true });
         writeFileSync(join(chartDir, 'Chart.yaml'), 'apiVersion: v2\nname: workspace\nversion: 0.9.0\n', 'utf8');
-        writeFileSync(
-          join(crdsDir, 'workspaces.kaito.sh.yaml'),
-          [
+
+        return { success: true, stdout: '', stderr: '', exitCode: 0 };
+      }
+
+      if (args[0] === 'template') {
+        expect(args).toContain('--include-crds');
+        expect(args).toContain('--namespace');
+        return {
+          success: true,
+          stdout: [
+            '---',
             'apiVersion: apiextensions.k8s.io/v1',
             'kind: CustomResourceDefinition',
             'metadata:',
             '  name: workspaces.kaito.sh',
-            'spec:',
-            '  group: kaito.sh',
-          ].join('\n'),
-          'utf8',
-        );
-        writeFileSync(
-          join(crdsDir, 'inferencepools.inference.networking.k8s.io.yaml'),
-          [
+            '---',
             'apiVersion: apiextensions.k8s.io/v1',
             'kind: CustomResourceDefinition',
             'metadata:',
             '  name: inferencepools.inference.networking.k8s.io',
-            'spec:',
-            '  group: inference.networking.k8s.io',
-          ].join('\n'),
-          'utf8',
-        );
-        const subchartCrdsDir = join(chartDir, 'charts', 'scheduler', 'crds');
-        mkdirSync(subchartCrdsDir, { recursive: true });
-        writeFileSync(
-          join(subchartCrdsDir, 'podgroups.scheduler.example.com.yaml'),
-          [
+            '---',
             'apiVersion: apiextensions.k8s.io/v1',
             'kind: CustomResourceDefinition',
             'metadata:',
             '  name: podgroups.scheduler.example.com',
-            'spec:',
-            '  group: scheduler.example.com',
           ].join('\n'),
-          'utf8',
-        );
-
-        return { success: true, stdout: '', stderr: '', exitCode: 0 };
+          stderr: '',
+          exitCode: 0,
+        };
       }
 
       if (args[0] === 'upgrade') {
@@ -548,6 +535,10 @@ describe('HelmService - Managed Chart CRDs', () => {
         };
       }
 
+      if (args[0] === 'get' && args[2] === 'podgroups.scheduler.example.com') {
+        return { success: true, stdout: '', stderr: '', exitCode: 0 };
+      }
+
       if (args[0] === 'apply') {
         return { success: true, stdout: 'applied', stderr: '', exitCode: 0 };
       }
@@ -570,8 +561,8 @@ describe('HelmService - Managed Chart CRDs', () => {
     expect(result.success).toBe(true);
     expect(result.results.some((step) => step.step === 'apply-crd-workspaces-kaito-sh')).toBe(true);
     expect(result.results.some((step) => step.step === 'skip-crd-inferencepools-inference-networking-k8s-io')).toBe(true);
-    expect(result.results.some((step) => step.step.includes('podgroups-scheduler-example-com'))).toBe(false);
-    expect(kubectlCalls.some((args) => args.includes('podgroups.scheduler.example.com'))).toBe(false);
+    expect(result.results.some((step) => step.step === 'apply-crd-podgroups-scheduler-example-com')).toBe(true);
+    expect(kubectlCalls.some((args) => args.includes('podgroups.scheduler.example.com'))).toBe(true);
     expect(kubectlCalls.some((args) => args[0] === 'apply')).toBe(true);
     expect(helmCalls.some((args) => args[0] === 'upgrade')).toBe(true);
   });

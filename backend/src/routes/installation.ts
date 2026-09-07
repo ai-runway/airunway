@@ -545,6 +545,17 @@ const installation = new Hono()
       });
     }
 
+    const crdNames = (provider.health?.crds || []).flatMap((crd) => {
+      const name = typeof crd === 'string' ? crd : crd?.name;
+      return name?.trim() ? [name.trim()] : [];
+    });
+    const preservation = await kubernetesService.snapshotCRDsForUninstall(crdNames);
+    if (!preservation.success) {
+      throw new HTTPException(409, {
+        message: `Unable to preserve ${provider.name} CRDs and custom resources: ${preservation.error || 'unknown error'}. No uninstall was attempted.`,
+      });
+    }
+
     logger.info({ providerId }, `Uninstalling ${provider.name}`);
     const results: Array<{ step: string; success: boolean; output: string; error?: string }> = [];
 
@@ -557,6 +568,14 @@ const installation = new Hono()
         error: result.stderr,
       });
     }
+
+    const restoration = await kubernetesService.restoreCRDsAfterUninstall(preservation.snapshots);
+    results.push(...restoration.results.map((result) => ({
+      step: `preserve-${result.crdName}`,
+      success: result.success,
+      output: result.message,
+      error: result.success ? undefined : result.message,
+    })));
 
     const allSuccess = results.every(r => r.success);
     const failedResult = results.find(r => !r.success);
@@ -594,8 +613,11 @@ const installation = new Hono()
       });
     }
 
-    const releaseNames = provider.helmCharts.map((chart) => chart.name);
-    if (releaseNames.length > 0) {
+    const releaseIdentities = provider.helmCharts.map((chart) => ({
+      name: chart.name,
+      namespace: chart.namespace,
+    }));
+    if (releaseIdentities.length > 0) {
       const helmStatus = await helmService.checkHelmAvailable();
       if (!helmStatus.available) {
         throw new HTTPException(400, {
@@ -619,7 +641,7 @@ const installation = new Hono()
     }
 
     logger.info({ providerId, crdNames }, `Removing upstream CRDs for ${providerId}`);
-    const removal = await kubernetesService.deleteCRDsSafely(crdNames, releaseNames);
+    const removal = await kubernetesService.deleteCRDsSafely(crdNames, releaseIdentities);
     const results = removal.results.map((result) => ({
       step: `Delete CRD: ${result.crdName}`,
       success: result.success,

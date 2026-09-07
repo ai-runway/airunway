@@ -367,7 +367,7 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
 		t.Fatalf("failed to decode health annotation: %v", err)
 	}
-	if len(health.CRDs) != 1 || health.CRDs[0].Name != "workspaces.kaito.sh" {
+	if len(health.CRDs) != 2 || health.CRDs[0].Name != "workspaces.kaito.sh" || health.CRDs[1].Name != "inferencesets.kaito.sh" {
 		t.Fatalf("expected KAITO CRD health probe, got %+v", health.CRDs)
 	}
 	if len(health.OperatorPods) < 2 {

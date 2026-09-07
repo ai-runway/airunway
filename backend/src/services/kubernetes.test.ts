@@ -138,6 +138,80 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 });
 
 describe('KubernetesService - safe provider CRD removal', () => {
+  test('snapshots and restores CRDs and custom resources around Helm uninstall', async () => {
+    const service = asMockable();
+    const originalApiExtensionsApi = service.apiExtensionsApi;
+    const originalCustomObjectsApi = service.customObjectsApi;
+    let crdReadCount = 0;
+    const createdCrdBodies: Record<string, unknown>[] = [];
+    const createdResourceBodies: Record<string, unknown>[] = [];
+
+    service.apiExtensionsApi = {
+      readCustomResourceDefinition: async () => {
+        crdReadCount += 1;
+        if (crdReadCount === 1) {
+          return {
+            metadata: {
+              name: 'workspaces.kaito.sh',
+              resourceVersion: '123',
+              uid: 'crd-uid',
+            },
+            spec: {
+              group: 'kaito.sh',
+              names: { plural: 'workspaces' },
+              versions: [{ name: 'v1beta1', served: true }],
+              scope: 'Cluster',
+            },
+            status: { acceptedNames: { plural: 'workspaces' } },
+          };
+        }
+        throw { statusCode: 404 };
+      },
+      createCustomResourceDefinition: async (arg: { body?: Record<string, unknown> }) => {
+        createdCrdBodies.push(arg.body || {});
+        return {};
+      },
+    };
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => ({
+        items: [{
+          apiVersion: 'kaito.sh/v1beta1',
+          kind: 'Workspace',
+          metadata: { name: 'demo', uid: 'resource-uid', resourceVersion: '456' },
+          spec: { model: 'demo-model' },
+          status: { ready: true },
+        }],
+      }),
+      getClusterCustomObject: async () => {
+        throw { statusCode: 404 };
+      },
+      createClusterCustomObject: async (arg: { body?: Record<string, unknown> }) => {
+        createdResourceBodies.push(arg.body || {});
+        return {};
+      },
+    };
+
+    try {
+      const snapshot = await kubernetesService.snapshotCRDsForUninstall(['workspaces.kaito.sh']);
+      expect(snapshot.success).toBe(true);
+      expect(snapshot.snapshots).toHaveLength(1);
+
+      const restored = await kubernetesService.restoreCRDsAfterUninstall(snapshot.snapshots);
+      expect(restored.success).toBe(true);
+      expect(createdCrdBodies[0]).not.toHaveProperty('status');
+      expect(createdCrdBodies[0].metadata).not.toHaveProperty('resourceVersion');
+      expect(createdResourceBodies[0]).toMatchObject({
+        metadata: { name: 'demo' },
+        spec: { model: 'demo-model' },
+      });
+      expect(createdResourceBodies[0]).not.toHaveProperty('status');
+      expect(createdResourceBodies[0].metadata).not.toHaveProperty('uid');
+    } finally {
+      service.apiExtensionsApi = originalApiExtensionsApi;
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
   test('preflights an empty CRD and deletes only after resource verification', async () => {
     const service = asMockable();
     const originalApiExtensionsApi = service.apiExtensionsApi;
@@ -147,7 +221,13 @@ describe('KubernetesService - safe provider CRD removal', () => {
 
     service.apiExtensionsApi = {
       readCustomResourceDefinition: async () => ({
-        metadata: { labels: { 'app.kubernetes.io/managed-by': 'Helm' }, annotations: { 'meta.helm.sh/release-name': 'kaito-workspace' } },
+        metadata: {
+          labels: { 'app.kubernetes.io/managed-by': 'Helm' },
+          annotations: {
+            'meta.helm.sh/release-name': 'kaito-workspace',
+            'meta.helm.sh/release-namespace': 'kaito-workspace',
+          },
+        },
         spec: {
           group: 'kaito.sh',
           names: { plural: 'workspaces' },
@@ -167,12 +247,60 @@ describe('KubernetesService - safe provider CRD removal', () => {
     };
 
     try {
-      const result = await kubernetesService.deleteCRDsSafely(['workspaces.kaito.sh'], ['kaito-workspace']);
+      const result = await kubernetesService.deleteCRDsSafely(
+        ['workspaces.kaito.sh'],
+        [{ name: 'kaito-workspace', namespace: 'kaito-workspace' }],
+      );
 
       expect(result.success).toBe(true);
       expect(result.results[0].message).toBe('CRD workspaces.kaito.sh deleted');
       expect(listed).toEqual([{ group: 'kaito.sh', version: 'v1beta1', plural: 'workspaces' }]);
       expect(deleted).toEqual(['workspaces.kaito.sh']);
+    } finally {
+      service.apiExtensionsApi = originalApiExtensionsApi;
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
+  test('refuses deletion when a Helm release with the same name belongs to another namespace', async () => {
+    const service = asMockable();
+    const originalApiExtensionsApi = service.apiExtensionsApi;
+    const originalCustomObjectsApi = service.customObjectsApi;
+    let listAttempts = 0;
+
+    service.apiExtensionsApi = {
+      readCustomResourceDefinition: async () => ({
+        metadata: {
+          labels: { 'app.kubernetes.io/managed-by': 'Helm' },
+          annotations: {
+            'meta.helm.sh/release-name': 'kaito-workspace',
+            'meta.helm.sh/release-namespace': 'other-namespace',
+          },
+        },
+        spec: {
+          group: 'kaito.sh',
+          names: { plural: 'workspaces' },
+          versions: [{ name: 'v1beta1', served: true }],
+        },
+      }),
+      deleteCustomResourceDefinition: async () => ({}),
+    };
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => {
+        listAttempts += 1;
+        return { items: [] };
+      },
+    };
+
+    try {
+      const result = await kubernetesService.deleteCRDsSafely(
+        ['workspaces.kaito.sh'],
+        [{ name: 'kaito-workspace', namespace: 'kaito-workspace' }],
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.results[0].message).toContain('owned by another tool');
+      expect(listAttempts).toBe(0);
     } finally {
       service.apiExtensionsApi = originalApiExtensionsApi;
       service.customObjectsApi = originalCustomObjectsApi;

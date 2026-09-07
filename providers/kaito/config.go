@@ -300,6 +300,7 @@ func buildAnnotations() (map[string]string, error) {
 	health := map[string]interface{}{
 		"crds": []map[string]string{
 			{"name": "workspaces.kaito.sh", "displayName": "KAITO workspace CRD"},
+			{"name": "inferencesets.kaito.sh", "displayName": "KAITO inference set CRD"},
 		},
 		"operatorPods": []map[string]interface{}{
 			{
