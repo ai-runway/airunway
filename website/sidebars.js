@@ -19,6 +19,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'controller-architecture',
+        'agent-container-runtime',
         'web-ui-architecture',
         'design-decisions',
       ],

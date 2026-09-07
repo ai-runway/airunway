@@ -7,10 +7,9 @@ their responsibilities.
 
 | Maintainer        | GitHub ID                                               | Affiliation |
 | ----------------- | ------------------------------------------------------- | ----------- |
-| Suraj Deshmukh    | [surajssd](https://github.com/surajssd)                 | Microsoft   |
+| Suraj Deshmukh    | [surajssd](https://github.com/surajssd)                 | CoreWeave   |
 | Robbie Cronin     | [robert-cronin](https://github.com/robert-cronin)       | Microsoft   |
 | Sertaç Özercan    | [sozercan](https://github.com/sozercan)                 | Microsoft   |
-
 
 ## Maintainer Responsibilities
 
