@@ -35,6 +35,9 @@ const (
 	// DefaultVLLMPort is the default serving port for vLLM
 	DefaultVLLMPort = int64(8000)
 
+	// DefaultVLLMHealthPath is the vLLM endpoint that reports engine health.
+	DefaultVLLMHealthPath = "/health"
+
 	// GPUResourceKey is the Kubernetes resource key for NVIDIA GPUs
 	GPUResourceKey = "nvidia.com/gpu"
 
@@ -312,10 +315,13 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 	}
 
 	container := map[string]interface{}{
-		"name":  "vllm",
-		"image": image,
-		"args":  argsList,
-		"ports": ports,
+		"name":           "vllm",
+		"image":          image,
+		"args":           argsList,
+		"ports":          ports,
+		"startupProbe":   buildStartupProbe(),
+		"livenessProbe":  buildLivenessProbe(),
+		"readinessProbe": buildReadinessProbe(),
 	}
 
 	// Resource limits/requests
@@ -333,10 +339,38 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 	return container, nil
 }
 
+func buildStartupProbe() map[string]any {
+	return buildHTTPProbe(15, 10, 60)
+}
+
+func buildLivenessProbe() map[string]any {
+	return buildHTTPProbe(15, 10, 3)
+}
+
+func buildReadinessProbe() map[string]any {
+	return buildHTTPProbe(15, 5, 3)
+}
+
+func buildHTTPProbe(initialDelaySeconds, periodSeconds, failureThreshold int64) map[string]any {
+	return map[string]any{
+		"initialDelaySeconds": initialDelaySeconds,
+		"periodSeconds":       periodSeconds,
+		"failureThreshold":    failureThreshold,
+		"httpGet": map[string]any{
+			"path": DefaultVLLMHealthPath,
+			"port": DefaultVLLMPort,
+		},
+	}
+}
+
 // buildVLLMArgs constructs the vLLM command-line arguments.
 // kvTransferConfig is optional; pass "" for aggregated mode.
 // gpuCount overrides the GPU count used for tensor parallelism (0 means use top-level spec.resources).
 func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTransferConfig string, gpuCount int32) ([]string, error) {
+	if err := rejectPortOverride(md); err != nil {
+		return nil, err
+	}
+
 	var args []string
 
 	// Model
@@ -410,6 +444,26 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	}
 
 	return args, nil
+}
+
+// rejectPortOverride keeps the vLLM serving port aligned with the fixed
+// Service and health probes rendered by this transformer.
+func rejectPortOverride(md *airunwayv1alpha1.ModelDeployment) error {
+	if _, ok := md.Spec.Engine.Args["port"]; ok {
+		return fmt.Errorf(
+			"overriding --port is not allowed for llm-d vLLM deployments; serving port must remain %d",
+			DefaultVLLMPort,
+		)
+	}
+	for _, arg := range md.Spec.Engine.ExtraArgs {
+		if arg == "--port" || strings.HasPrefix(arg, "--port=") {
+			return fmt.Errorf(
+				"overriding --port is not allowed for llm-d vLLM deployments; serving port must remain %d",
+				DefaultVLLMPort,
+			)
+		}
+	}
+	return nil
 }
 
 // buildResourceLimits creates resource limits and requests from ResourceSpec.
