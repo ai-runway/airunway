@@ -67,7 +67,12 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			// Minimal kagent CRD stubs so the kagent provider's rendered
+			// resources can be applied/read back in tests (see testdata/crds).
+			filepath.Join("testdata", "crds"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 

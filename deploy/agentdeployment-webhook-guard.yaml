@@ -1,0 +1,31 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    airunway.ai/description: Blocks AgentDeployment writes while controller webhook
+      versions are mixed
+  name: airunway-agentdeployment-upgrade-guard
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: airunway-agentdeployment-upgrade-guard
+      namespace: airunway-system
+      path: /deny-agentdeployment-writes-during-controller-rollout
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  name: agentdeployment-upgrade-guard.airunway.ai
+  rules:
+  - apiGroups:
+    - airunway.ai
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - agentdeployments
+    scope: Namespaced
+  sideEffects: None
+  timeoutSeconds: 1

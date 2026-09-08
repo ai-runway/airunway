@@ -516,6 +516,9 @@ type GatewayStatus struct {
 	// endpoint is the unified gateway endpoint URL
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+	// gatewayName is the name of the Gateway resource used for routing.
+	// +optional
+	GatewayName string `json:"gatewayName,omitempty"`
 	// modelName is the model name to use in API requests
 	// +optional
 	ModelName string `json:"modelName,omitempty"`

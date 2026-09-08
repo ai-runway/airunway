@@ -11,6 +11,7 @@ linters:
     - errcheck
     - ginkgolinter
     - goconst
+    - gocognit
     - gocyclo
     - govet
     - ineffassign
@@ -118,6 +119,10 @@ linters:
               desc: shared shim must not import provider implementations
     dupl:
       threshold: 50
+    gocognit:
+      min-complexity: 20
+    gocyclo:
+      min-complexity: 15
     revive:
       rules:
         - name: comment-spacings
@@ -130,12 +135,13 @@ linters:
     rules:
       - linters:
           - lll
-        path: ^controller/api/
+        path: ^(controller/)?api/
       - linters:
           - lll
-        path: ^controller/internal/
+        path: ^(controller/)?internal/
       - linters:
           - dupl
+          - lll
         path: _test\.go$
     paths:
       - ^controller/(third_party|builtin|examples)(/|$)
