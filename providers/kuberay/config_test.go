@@ -225,6 +225,30 @@ func TestStartHeartbeat(t *testing.T) {
 	cancel()
 }
 
+func TestUpdateHeartbeat(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+
+	if err := NewProviderConfigManager(c).updateHeartbeat(context.Background()); err != nil {
+		t.Fatalf("updateHeartbeat() unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatal("expected provider status to be not ready without backend CRD")
+	}
+	if updated.Status.LastHeartbeat == nil {
+		t.Fatal("expected provider status to include last heartbeat")
+	}
+}
+
 func TestUpdateStatusNotFound(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(scheme)
