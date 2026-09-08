@@ -213,7 +213,8 @@ func IsAPIResourceInstalled(
 }
 
 func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version, resource string) bool {
-resources, err := discoveryClient.ServerResourcesForGroupVersion(schema.GroupVersion{Group: group, Version: version}.String())
+	groupVersion := schema.GroupVersion{Group: group, Version: version}.String()
+	resources, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
 	if err != nil {
 		return false
 	}
