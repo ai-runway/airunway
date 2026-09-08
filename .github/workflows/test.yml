@@ -306,6 +306,12 @@ jobs:
         include:
           - id: controller
             module: controller
+          - id: agent-container
+            module: providers/agent-container
+          - id: agent-kagent
+            module: providers/agent-kagent
+          - id: agent-orka
+            module: providers/agent-orka
           - id: dynamo
             module: providers/dynamo
           - id: kaito

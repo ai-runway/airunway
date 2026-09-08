@@ -34,4 +34,8 @@ govulncheck: govulncheck-tool
 
 ## Ensure govulncheck is installed via the controller toolchain pin
 govulncheck-tool:
+ifneq ($(origin GOVULNCHECK), file)
+	@echo "Using supplied GOVULNCHECK binary: $(GOVULNCHECK)"
+else
 	@$(MAKE) -C ../../../controller govulncheck-tool
+endif
