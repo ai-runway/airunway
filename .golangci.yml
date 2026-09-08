@@ -43,6 +43,12 @@ linters:
             - ${base-path}/providers/dynamo/*.go
             - ${base-path}/providers/dynamo/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kuberay
@@ -57,6 +63,12 @@ linters:
             - ${base-path}/providers/kaito/*.go
             - ${base-path}/providers/kaito/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kuberay
@@ -71,6 +83,12 @@ linters:
             - ${base-path}/providers/kuberay/*.go
             - ${base-path}/providers/kuberay/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
@@ -85,6 +103,12 @@ linters:
             - ${base-path}/providers/llmd/*.go
             - ${base-path}/providers/llmd/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
@@ -99,6 +123,12 @@ linters:
             - ${base-path}/providers/vllm/*.go
             - ${base-path}/providers/vllm/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
@@ -113,6 +143,10 @@ linters:
             - ${base-path}/providers/agent-container/*.go
             - ${base-path}/providers/agent-container/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
@@ -129,6 +163,10 @@ linters:
             - ${base-path}/providers/agent-kagent/*.go
             - ${base-path}/providers/agent-kagent/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
@@ -145,6 +183,10 @@ linters:
             - ${base-path}/providers/agent-orka/*.go
             - ${base-path}/providers/agent-orka/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: provider modules must not import each other
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: provider modules must not import each other
             - pkg: github.com/ai-runway/airunway/providers/kaito
@@ -161,6 +203,12 @@ linters:
             - ${base-path}/providers/pkg/shim/*.go
             - ${base-path}/providers/pkg/shim/**/*.go
           deny:
+            - pkg: github.com/ai-runway/airunway/providers/agent-container
+              desc: shared shim must not import provider implementations
+            - pkg: github.com/ai-runway/airunway/providers/agent-kagent
+              desc: shared shim must not import provider implementations
+            - pkg: github.com/ai-runway/airunway/providers/agent-orka
+              desc: shared shim must not import provider implementations
             - pkg: github.com/ai-runway/airunway/providers/dynamo
               desc: shared shim must not import provider implementations
             - pkg: github.com/ai-runway/airunway/providers/kaito
