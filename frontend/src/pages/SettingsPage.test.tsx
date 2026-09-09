@@ -458,6 +458,7 @@ describe('SettingsPage', () => {
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('AI Runway integration')
     expect(integrationRow).toHaveTextContent('Connected')
+    expect(integrationRow.getAttribute('title')).toMatch(/checking in normally \(last reported \d+[smhd] ago\)\./)
 
     // Detail panel: install button still visible, runtime row icons are red
     fireEvent.click(screen.getByText('Kuberay'))
@@ -470,7 +471,7 @@ describe('SettingsPage', () => {
     const detailIntegration = within(installationPanel).getByTestId('integration-status-detail')
     expect(detailIntegration).toHaveTextContent('AI Runway integration')
     expect(detailIntegration).toHaveTextContent('Connected')
-    expect(detailIntegration).toHaveTextContent('The AI Runway integration is checking in normally')
+    expect(detailIntegration).toHaveTextContent(/checking in normally \(last reported \d+[smhd] ago\)\./)
   })
 
   it.each([0, 30 * 60 * 1000])('describes a disconnected integration without assuming its heartbeat is stale (age %s ms)', (heartbeatAge) => {
@@ -498,11 +499,11 @@ describe('SettingsPage', () => {
     const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('Not responding')
-    expect(integrationRow.getAttribute('title')).toContain('The AI Runway integration is disconnected (last checked in')
+    expect(integrationRow.getAttribute('title')).toMatch(/integration is disconnected \(last reported \d+[smhd] ago\)\./)
     expect(integrationRow.getAttribute('title')).not.toContain('has not checked in recently')
 
     const detailIntegration = screen.getByTestId('integration-status-detail')
-    expect(detailIntegration).toHaveTextContent('The AI Runway integration is disconnected (last checked in')
+    expect(detailIntegration).toHaveTextContent(/integration is disconnected \(last reported \d+[smhd] ago\)\./)
     expect(detailIntegration).not.toHaveTextContent('has not checked in recently')
   })
 
