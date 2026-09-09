@@ -22,12 +22,15 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"time"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -136,4 +139,125 @@ func MarkProviderConfigUnregistered(
 		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
 	}
 	return nil
+}
+
+// RetryStatusUpdate retries the supplied status update callback with linear
+// backoff delays between attempts: baseDelay, 2*baseDelay, ...,
+// (attempts-1)*baseDelay.
+func RetryStatusUpdate(
+	ctx context.Context, attempts int, baseDelay time.Duration, update func(context.Context) error,
+) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		err := update(ctx)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if i == attempts-1 {
+			break
+		}
+
+		delay := time.Duration(i+1) * baseDelay
+		if delay <= 0 {
+			continue
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
+}
+
+// StartHeartbeatLoop runs a provider heartbeat ticker loop in a goroutine.
+// The tick callback is executed every interval; callback errors are logged and
+// do not stop the loop.
+func StartHeartbeatLoop(ctx context.Context, interval time.Duration, tick func(context.Context) error) {
+	logger := log.FromContext(ctx)
+
+	go func() {
+		// Exit before creating the ticker when the context is already canceled.
+		// This avoids a select race where an immediately-ready ticker could win
+		// over ctx.Done() and execute one unwanted tick.
+		if err := ctx.Err(); err != nil {
+			logger.Info("Stopping heartbeat goroutine")
+			return
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			// Re-check cancellation before each select for the same reason: when
+			// both ticker.C and ctx.Done() are ready, select is intentionally fair.
+			if err := ctx.Err(); err != nil {
+				logger.Info("Stopping heartbeat goroutine")
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				logger.Info("Stopping heartbeat goroutine")
+				return
+			case <-ticker.C:
+				if err := tick(ctx); err != nil {
+					logger.Error(err, "Failed to update heartbeat")
+				}
+			}
+		}
+	}()
+}
+
+// IsAPIResourceInstalled checks whether a backend API resource is available.
+// It prefers discovery when a discovery client is provided, and falls back to
+// RESTMapper lookup otherwise.
+func IsAPIResourceInstalled(
+	kubeClient client.Client,
+	discoveryClient discovery.DiscoveryInterface,
+	group, version, kind, resource string,
+) bool {
+	if discoveryClient != nil {
+		return hasAPIResource(discoveryClient, group, version, resource)
+	}
+
+	mapper := kubeClient.RESTMapper()
+	if mapper == nil {
+		return false
+	}
+
+	_, err := mapper.RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
+	return err == nil
+}
+
+func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version, resource string) bool {
+	groupVersion := schema.GroupVersion{Group: group, Version: version}.String()
+	resources, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
+	if err != nil {
+		return false
+	}
+
+	for _, apiResource := range resources.APIResources {
+		if apiResource.Name == resource {
+			return true
+		}
+	}
+
+	return false
 }

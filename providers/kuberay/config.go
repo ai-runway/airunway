@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -163,14 +162,9 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 
 	// Update status — retry briefly after create to allow cache to sync
 	ready := m.checkBackendCRDInstalled()
-	var statusErr error
-	for i := 0; i < 5; i++ {
-		statusErr = m.UpdateStatus(ctx, ready)
-		if statusErr == nil {
-			break
-		}
-		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
-	}
+	statusErr := shim.RetryStatusUpdate(ctx, 5, 200*time.Millisecond, func(ctx context.Context) error {
+		return m.UpdateStatus(ctx, ready)
+	})
 	if !ready {
 		logger.Info("Backend CRD not installed, provider registered as not ready", "group", RayAPIGroup, "kind", RayServiceKind)
 	}
@@ -191,60 +185,30 @@ func (m *ProviderConfigManager) UpdateStatus(ctx context.Context, ready bool) er
 
 // checkBackendCRDInstalled checks if the upstream RayService CRD is installed
 func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
-	if m.discoveryClient != nil {
-		return hasAPIResource(m.discoveryClient, RayAPIGroup, RayAPIVersion, rayServiceResource)
-	}
-
-	mapper := m.client.RESTMapper()
-	if mapper == nil {
-		return false
-	}
-	_, err := mapper.RESTMapping(schema.GroupKind{
-		Group: RayAPIGroup,
-		Kind:  RayServiceKind,
-	}, RayAPIVersion)
-	return err == nil
-}
-
-func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version, resource string) bool {
-	resources, err := discoveryClient.ServerResourcesForGroupVersion(fmt.Sprintf("%s/%s", group, version))
-	if err != nil {
-		return false
-	}
-
-	for _, apiResource := range resources.APIResources {
-		if apiResource.Name == resource {
-			return true
-		}
-	}
-
-	return false
+	return shim.IsAPIResourceInstalled(
+		m.client,
+		m.discoveryClient,
+		RayAPIGroup,
+		RayAPIVersion,
+		RayServiceKind,
+		rayServiceResource,
+	)
 }
 
 // StartHeartbeat starts a goroutine that periodically updates the provider heartbeat
 func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
-	logger := log.FromContext(ctx)
+	shim.StartHeartbeatLoop(ctx, HeartbeatInterval, m.updateHeartbeat)
+}
 
-	go func() {
-		ticker := time.NewTicker(HeartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				logger.Info("Stopping heartbeat goroutine")
-				return
-			case <-ticker.C:
-				ready := m.checkBackendCRDInstalled()
-				if !ready {
-					logger.Info("Backend CRD not installed, reporting not ready", "group", RayAPIGroup, "kind", RayServiceKind)
-				}
-				if err := m.UpdateStatus(ctx, ready); err != nil {
-					logger.Error(err, "Failed to update heartbeat")
-				}
-			}
-		}
-	}()
+func (m *ProviderConfigManager) updateHeartbeat(ctx context.Context) error {
+	ready := m.checkBackendCRDInstalled()
+	if !ready {
+		log.FromContext(ctx).Info(
+			"Backend CRD not installed, reporting not ready",
+			"group", RayAPIGroup, "kind", RayServiceKind,
+		)
+	}
+	return m.UpdateStatus(ctx, ready)
 }
 
 // Unregister marks the provider as not ready
