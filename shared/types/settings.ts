@@ -125,6 +125,8 @@ export interface Settings {
   auth: AuthConfig;
 }
 
+export type InstallationState = 'installed' | 'not-installed' | 'unknown';
+
 /**
  * Runtime status for the runtimes endpoint
  * Used to show installation and health status of each runtime
@@ -142,12 +144,32 @@ export interface RuntimeStatus {
   capabilities?: ProviderCapabilities;
   deploymentDefaults?: ProviderDeploymentDefaults;
   health?: ProviderHealthConfig;
+  /** Explicit installation verdict. Prefer this over the legacy installed boolean when present. */
+  installationState?: InstallationState;
+  /** Legacy installation/readiness flag; for unknown installation, preserves provider-reported readiness. */
   installed: boolean;
+  /** Runtime readiness; for unknown installation, preserves provider-reported readiness without asserting installation. */
   healthy: boolean;
   crdFound?: boolean;
   operatorRunning?: boolean;
   version?: string;
   message?: string;
+  /**
+   * True when AI Runway's own integration for this runtime has registered an
+   * InferenceProviderConfig in the cluster. True for anything appearing in this
+   * list; stated explicitly so the UI can distinguish the integration being
+   * present from the underlying runtime being installed.
+   */
+  shimRegistered?: boolean;
+  /**
+   * True when AI Runway's integration for this runtime is responding. Derived
+   * from a valid heartbeat within PROVIDER_HEALTH_STALENESS_MS (3 minutes by
+   * default), independently of whether the underlying runtime is ready.
+   * Distinct from {@link installed}, which describes the underlying runtime.
+   */
+  shimConnected?: boolean;
+  /** ISO timestamp of the last check-in from the integration, if reported. */
+  shimLastHeartbeat?: string;
 }
 
 /**

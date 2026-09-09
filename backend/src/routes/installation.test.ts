@@ -1,4 +1,4 @@
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach, beforeEach } from 'bun:test';
 import { PINNED_GAIE_VERSION } from '@airunway/shared';
 import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
@@ -393,12 +393,14 @@ describe('Installation Provider Routes', () => {
       expect(data.message).toBe('Runtime is ready to use.');
     });
 
-    test('honors explicit requiresCRD metadata for custom-named CRD-less providers', async () => {
+    test.each([true, false])('preserves legacy readiness %s for custom providers with unknown installation', async (ready) => {
+      const config = createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd();
+      config.status.ready = ready;
       restores.push(
         mockServiceMethod(
           kubernetesService,
           'getInferenceProviderConfig',
-          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+          async () => config,
         ),
       );
 
@@ -408,11 +410,17 @@ describe('Installation Provider Routes', () => {
       const data = await res.json();
       expect(data.providerId).toBe('custom-llmd-registration');
       expect(data.providerName).toBe('LLM-D');
-      expect(data.installed).toBe(true);
+      // The point of this test: an explicit requiresCRD: true is honoured even
+      // for a custom-named registration of an otherwise CRD-less engine.
       expect(data.requiresCRD).toBe(true);
-      expect(data.installable).toBe(true);
-      expect(data.helmCommands.length).toBeGreaterThan(0);
-      expect(data.message).toBe('LLM-D is installed and running');
+      // The explicit verdict stays unknown while the legacy flag retains readiness.
+      expect(data.installationState).toBe('unknown');
+      expect(data.installed).toBe(ready);
+      expect(data.crdFound).toBeUndefined();
+      expect(data.operatorRunning).toBeUndefined();
+      expect(data.message).toContain('cannot be confirmed');
+      expect(data.installable).toBe(false);
+      expect(data.helmCommands).toEqual([]);
     });
 
     test('honors per-engine requiresCRD: false on the migrated schema for custom providers', async () => {
@@ -443,6 +451,53 @@ describe('Installation Provider Routes', () => {
 
       const res = await app.request('/api/installation/providers/unknown/status');
       expect(res.status).toBe(404);
+    });
+
+    test('includes AI Runway integration (shim) status derived from the provider config heartbeat', async () => {
+      const recentHeartbeat = new Date().toISOString();
+      // Strip the health/capabilities annotations so this exercises the mocked
+      // KAITO probe below. With them present, checkProviderInstallationStatus
+      // takes the annotation-driven path (or the !requiresCRD early return,
+      // which reports crdFound: true unconditionally) and the mock never runs.
+      const configWithHeartbeat = withoutHealthAnnotation({
+        ...mockInferenceProviderConfig,
+        status: {
+          ...mockInferenceProviderConfig.status,
+          ready: false,
+          lastHeartbeat: recentHeartbeat,
+          conditions: [
+            {
+              type: 'UpstreamReady',
+              status: 'False',
+              reason: 'UpstreamControllerMissing',
+              message: 'The KAITO workspace controller is not running.',
+            },
+          ],
+        },
+      });
+
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => configWithHeartbeat),
+        mockServiceMethod(kubernetesService, 'checkKaitoInstallationStatus', async () => ({
+          installed: false,
+          crdFound: false,
+          operatorRunning: false,
+          message: 'KAITO workspace CRD not found',
+        })),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/status');
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      // Runtime install status still reflects the live probe, not shim heartbeat
+      expect(data.installed).toBe(false);
+      expect(data.crdFound).toBe(false);
+      expect(data.operatorRunning).toBe(false);
+      // Shim status is exposed separately so the UI can clarify the distinction
+      expect(data.shimRegistered).toBe(true);
+      expect(data.shimConnected).toBe(true);
+      expect(data.shimLastHeartbeat).toBe(recentHeartbeat);
     });
 
     test('surfaces shim refuse-fast message when UpstreamReady=False is fresh', async () => {
@@ -492,6 +547,22 @@ describe('Installation Provider Routes', () => {
   // ==========================================================================
 
   describe('GET /api/installation/providers/:providerId/commands', () => {
+    let installationState: 'installed' | 'not-installed' | 'unknown';
+    let installed: boolean;
+
+    beforeEach(() => {
+      installationState = 'not-installed';
+      installed = false;
+      restores.push(
+        mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
+          installationState,
+          installed,
+          requiresCRD: true,
+          message: 'Runtime installation status checked.',
+        })),
+      );
+    });
+
     test('returns commands when provider found', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
@@ -579,6 +650,32 @@ describe('Installation Provider Routes', () => {
       expect(data.steps).toBeDefined();
     });
 
+    test.each([true, false])('suppresses unknown installation guidance with legacy installed=%s', async (legacyInstalled) => {
+      installationState = 'unknown';
+      installed = legacyInstalled;
+      let commandGenerationAttempts = 0;
+
+      restores.push(
+        mockServiceMethod(
+          kubernetesService,
+          'getInferenceProviderConfig',
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+        ),
+        mockServiceMethod(helmService, 'getInstallCommands', () => {
+          commandGenerationAttempts += 1;
+          return ['helm upgrade --install should-not-run'];
+        }),
+      );
+
+      const res = await app.request('/api/installation/providers/custom-llmd-registration/commands');
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.commands).toEqual([]);
+      expect(data.steps).toEqual([]);
+      expect(commandGenerationAttempts).toBe(0);
+    });
+
     test('returns 404 for unknown provider', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => null),
@@ -594,6 +691,22 @@ describe('Installation Provider Routes', () => {
   // ==========================================================================
 
   describe('POST /api/installation/providers/:providerId/install', () => {
+    let installationState: 'installed' | 'not-installed' | 'unknown';
+    let installed: boolean;
+
+    beforeEach(() => {
+      installationState = 'not-installed';
+      installed = false;
+      restores.push(
+        mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
+          installationState,
+          installed,
+          requiresCRD: true,
+          message: 'Runtime installation status checked.',
+        })),
+      );
+    });
+
     test('returns 404 for unknown provider', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => null),
@@ -693,6 +806,43 @@ describe('Installation Provider Routes', () => {
 
       const data = await res.json();
       expect(data.error.message).toContain('No installation metadata found for provider kaito');
+      expect(helmChecks).toBe(0);
+      expect(installAttempts).toBe(0);
+    });
+
+    test.each([true, false])('rejects unknown installation before Helm calls with legacy installed=%s', async (legacyInstalled) => {
+      installationState = 'unknown';
+      installed = legacyInstalled;
+      let helmChecks = 0;
+      let installAttempts = 0;
+
+      restores.push(
+        mockServiceMethod(
+          kubernetesService,
+          'getInferenceProviderConfig',
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+        ),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => {
+          helmChecks += 1;
+          return { available: true, version: '3.14.0' };
+        }),
+        mockServiceMethod(helmService, 'installProvider', async () => {
+          installAttempts += 1;
+          return {
+            success: true,
+            results: [{ step: 'install', result: { success: true, stdout: 'ok', stderr: '' } }],
+          };
+        }),
+      );
+
+      const res = await app.request(
+        '/api/installation/providers/custom-llmd-registration/install',
+        { method: 'POST' },
+      );
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      expect(data.error.message).toContain('cannot verify whether LLM-D is installed');
       expect(helmChecks).toBe(0);
       expect(installAttempts).toBe(0);
     });
@@ -901,6 +1051,22 @@ describe('Installation Provider Routes', () => {
   // ==========================================================================
 
   describe('POST /api/installation/providers/:providerId/uninstall', () => {
+    let installationState: 'installed' | 'not-installed' | 'unknown';
+    let installed: boolean;
+
+    beforeEach(() => {
+      installationState = 'installed';
+      installed = true;
+      restores.push(
+        mockServiceMethod(kubernetesService, 'checkProviderInstallationStatus', async () => ({
+          installationState,
+          installed,
+          requiresCRD: true,
+          message: 'Runtime installation status checked.',
+        })),
+      );
+    });
+
     test('returns 404 for unknown provider', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => null),
@@ -945,6 +1111,40 @@ describe('Installation Provider Routes', () => {
 
       const data = await res.json();
       expect(data.error.message).toContain('LLM-D is managed by provider registration and cannot be uninstalled from this page.');
+      expect(helmChecks).toBe(0);
+      expect(uninstallAttempts).toBe(0);
+    });
+
+    test.each([true, false])('rejects unknown uninstallation before Helm calls with legacy installed=%s', async (legacyInstalled) => {
+      installationState = 'unknown';
+      installed = legacyInstalled;
+      let helmChecks = 0;
+      let uninstallAttempts = 0;
+
+      restores.push(
+        mockServiceMethod(
+          kubernetesService,
+          'getInferenceProviderConfig',
+          async () => createCustomNamedNoCrdProviderConfigWithExplicitRequiresCrd(),
+        ),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => {
+          helmChecks += 1;
+          return { available: true, version: '3.14.0' };
+        }),
+        mockServiceMethod(helmService, 'uninstall', async () => {
+          uninstallAttempts += 1;
+          return { success: true, stdout: 'ok', stderr: '' };
+        }),
+      );
+
+      const res = await app.request(
+        '/api/installation/providers/custom-llmd-registration/uninstall',
+        { method: 'POST' },
+      );
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      expect(data.error.message).toContain('cannot verify whether LLM-D is installed');
       expect(helmChecks).toBe(0);
       expect(uninstallAttempts).toBe(0);
     });
