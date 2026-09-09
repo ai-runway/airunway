@@ -194,3 +194,89 @@ func TestReconcileAllowsSameExplicitProvider(t *testing.T) {
 		t.Fatalf("unexpected ProviderChangeNotSupported for an unchanged provider")
 	}
 }
+
+func TestReconcileClearsResolvedCoreValidationMessage(t *testing.T) {
+	tests := []struct {
+		name              string
+		conditionStatus   metav1.ConditionStatus
+		conditionReason   string
+		conditionMessage  string
+		deploymentMessage string
+	}{
+		{
+			name:              "failure resolves during this reconciliation",
+			conditionStatus:   metav1.ConditionFalse,
+			conditionReason:   "ValidationFailed",
+			conditionMessage:  "model.id is required when source is huggingface",
+			deploymentMessage: "Validation failed: model.id is required when source is huggingface",
+		},
+		{
+			name:              "condition recovered before controller upgrade",
+			conditionStatus:   metav1.ConditionTrue,
+			conditionReason:   "ValidationPassed",
+			conditionMessage:  "Schema validation passed",
+			deploymentMessage: "Validation failed: stale error from an earlier reconciliation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			md := newProviderSwitchMD("recovered-validation", "dynamo", "dynamo")
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+			md.Status.Message = tt.deploymentMessage
+			md.Status.Conditions = []metav1.Condition{{
+				Type:               airunwayv1alpha1.ConditionTypeValidated,
+				Status:             tt.conditionStatus,
+				Reason:             tt.conditionReason,
+				Message:            tt.conditionMessage,
+				LastTransitionTime: metav1.Now(),
+			}}
+
+			r := newTestReconciler(scheme, nil, md)
+			r.EnableProviderSelector = false
+
+			if _, err := r.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+			}); err != nil {
+				t.Fatalf("reconcile failed: %v", err)
+			}
+
+			var got airunwayv1alpha1.ModelDeployment
+			if err := r.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &got); err != nil {
+				t.Fatalf("failed to get reconciled ModelDeployment: %v", err)
+			}
+			if got.Status.Message != "" {
+				t.Fatalf("expected resolved core validation message to be cleared, got %q", got.Status.Message)
+			}
+			validated := meta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeValidated)
+			if validated == nil || validated.Status != metav1.ConditionTrue {
+				t.Fatalf("expected Validated=True after recovery, got %#v", validated)
+			}
+		})
+	}
+}
+
+func TestReconcilePreservesProviderStatusMessage(t *testing.T) {
+	scheme := newTestScheme()
+	md := newProviderSwitchMD("provider-progress", "dynamo", "dynamo")
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+	md.Status.Message = "DynamoGraphDeployment created, waiting for pods to be ready"
+
+	r := newTestReconciler(scheme, nil, md)
+	r.EnableProviderSelector = false
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+	}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var got airunwayv1alpha1.ModelDeployment
+	if err := r.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &got); err != nil {
+		t.Fatalf("failed to get reconciled ModelDeployment: %v", err)
+	}
+	if got.Status.Message != md.Status.Message {
+		t.Fatalf("expected provider-owned status message to be preserved, got %q", got.Status.Message)
+	}
+}
