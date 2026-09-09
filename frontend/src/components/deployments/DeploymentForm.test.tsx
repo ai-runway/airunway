@@ -161,6 +161,7 @@ describe('DeploymentForm', () => {
 
   it.each([
     { installationState: 'unknown' as const, installed: false, healthy: false, label: 'Runtime Not Ready' },
+    { installationState: 'unknown' as const, installed: true, healthy: false, label: 'Runtime Not Ready' },
     { installationState: 'not-installed' as const, installed: false, healthy: true, label: 'Runtime Not Installed' },
     { installationState: undefined, installed: false, healthy: true, label: 'Runtime Not Installed' },
   ])('keeps unavailable runtimes blocked with $installationState installation', ({ label, ...status }) => {
@@ -180,17 +181,90 @@ describe('DeploymentForm', () => {
     }
   })
 
-  it('preserves installed-only eligibility for legacy runtime responses', () => {
+  it.each([undefined, 'installed'] as const)('preserves installed eligibility independently of health (%s)', (installationState) => {
     render(
       <MemoryRouter>
         <DeploymentForm
           model={createModel()}
           detailedCapacity={createCapacity()}
-          runtimes={[createRuntime({ installed: true, healthy: false })]}
+          runtimes={[createRuntime({ installationState, installed: true, healthy: false })]}
         />
       </MemoryRouter>
     )
     expect(screen.getByRole('button', { name: /Deploy Model/i })).toBeEnabled()
+  })
+
+  it.each([
+    { installationState: 'installed', requiresCRD: true },
+    { installationState: 'not-installed', requiresCRD: true },
+    { installationState: 'installed', requiresCRD: false },
+    { installationState: 'not-installed', requiresCRD: false },
+  ] as const)('honors explicit $installationState for deployment controls (requiresCRD=$requiresCRD)', async ({ installationState, requiresCRD }) => {
+    const installed = installationState === 'installed'
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel()}
+          detailedCapacity={createCapacity()}
+          runtimes={[createRuntime({
+            id: 'precedence-runtime',
+            name: 'Precedence Runtime',
+            installationState,
+            installed: !installed,
+            healthy: true,
+            requiresCRD,
+          })]}
+        />
+      </MemoryRouter>
+    )
+
+    const card = screen.getByRole('radio', { name: /Precedence Runtime/ })
+    expect(within(card).getByText(installed
+      ? requiresCRD ? 'Installed' : 'Registered'
+      : requiresCRD ? 'Not Installed' : 'Not Ready')).toBeInTheDocument()
+    if (!installed && requiresCRD) {
+      expect(within(card).getByRole('link', { name: /Install/ })).toBeInTheDocument()
+    } else {
+      expect(within(card).queryByRole('link', { name: /Install/ })).not.toBeInTheDocument()
+    }
+
+    if (installed) {
+      const submit = screen.getByRole('button', { name: /Deploy Model/i })
+      expect(submit).toBeEnabled()
+      fireEvent.click(submit)
+      await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+        provider: 'precedence-runtime',
+      })))
+    } else {
+      const submit = screen.getByRole('button', {
+        name: requiresCRD ? 'Runtime Not Installed' : 'Runtime Not Ready',
+      })
+      expect(submit).toBeDisabled()
+      fireEvent.click(submit)
+      expect(mutateAsync).not.toHaveBeenCalled()
+    }
+  })
+
+  it('defaults to the explicit installed runtime and blocks an explicitly absent manual selection', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel()}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'dynamo', name: 'Dynamo', installationState: 'not-installed', installed: true }),
+            createRuntime({ id: 'confirmed-runtime', name: 'Confirmed Runtime', installationState: 'installed', installed: false }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByRole('radio', { name: /Confirmed Runtime/ })).toHaveAttribute('aria-checked', 'true')
+    const absentCard = screen.getByRole('radio', { name: /Dynamo/ })
+    fireEvent.click(absentCard)
+    expect(absentCard).toHaveAttribute('aria-checked', 'true')
+    expect(within(absentCard).getByRole('link', { name: /Install Dynamo/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Runtime Not Installed' })).toBeDisabled()
   })
 
   it('renders native vLLM as a compatible registered runtime for vLLM models', () => {

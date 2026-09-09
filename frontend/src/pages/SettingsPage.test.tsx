@@ -215,6 +215,19 @@ const getMockInstallationStatus = (providerId: string) => {
         installable: false,
         installationSteps: [],
       }
+    case 'precedence-runtime': {
+      const runtime = mockRuntimes.find(runtime => runtime.id === providerId)
+      if (!runtime) throw new Error('Missing precedence-runtime fixture')
+      return {
+        installationState: runtime.installationState,
+        installed: runtime.installed,
+        providerName: runtime.name,
+        crdFound: runtime.crdFound,
+        operatorRunning: runtime.operatorRunning,
+        requiresCRD: runtime.requiresCRD,
+        installationSteps: [],
+      }
+    }
     case 'unverified-runtime':
       return {
         installationState: 'unknown' as const,
@@ -532,13 +545,18 @@ describe('SettingsPage', () => {
     expect(installationPanel).not.toHaveTextContent('Use the install button below')
   })
 
-  it.each([true, false])('keeps unverified installation neutral when reported readiness is %s', (healthy) => {
+  it.each([
+    { healthy: true, installed: true },
+    { healthy: true, installed: false },
+    { healthy: false, installed: true },
+    { healthy: false, installed: false },
+  ])('keeps unverified installation neutral (ready=$healthy, legacy installed=$installed)', ({ healthy, installed }) => {
     mockRuntimes = [
       {
         id: 'unverified-runtime',
         name: 'Unverified Runtime',
         installationState: 'unknown',
-        installed: healthy,
+        installed,
         healthy,
         requiresCRD: true,
         installable: true,
@@ -566,6 +584,103 @@ describe('SettingsPage', () => {
     expect(screen.queryByText('Helm CLI not available')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'General' }))
     expect(screen.getByText(`${healthy ? 1 : 0} of 1`)).toBeInTheDocument()
+  })
+
+  it.each([
+    { installationState: 'installed', requiresCRD: true, label: 'Installed', count: '1 of 1' },
+    { installationState: 'not-installed', requiresCRD: true, label: 'Not Installed', count: '0 of 1' },
+    { installationState: 'installed', requiresCRD: false, label: 'Ready', count: '1 of 1' },
+    { installationState: 'not-installed', requiresCRD: false, label: 'Registered', count: '0 of 1' },
+  ] as const)('honors explicit $installationState across Settings (requiresCRD=$requiresCRD)', ({ installationState, requiresCRD, label, count }) => {
+    const installed = installationState === 'installed'
+    mockRuntimes = [{
+      id: 'precedence-runtime',
+      name: 'Precedence Runtime',
+      installationState,
+      installed: !installed,
+      healthy: !installed,
+      requiresCRD,
+      crdFound: installed,
+      operatorRunning: installed,
+    }]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getAllByText(label)).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByText(count)).toBeInTheDocument()
+  })
+
+  it('uses the explicit verdict when selecting the default Settings runtime', () => {
+    mockRuntimes = [
+      { id: 'precedence-runtime', name: 'Precedence Runtime', installationState: 'not-installed', installed: true, healthy: true },
+      { id: 'installed-runtime', name: 'Installed Runtime', installationState: 'installed', installed: false, healthy: true },
+    ]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('Installed Runtime').closest('.rounded-2xl')).toHaveClass('ring-2')
+  })
+
+  it.each([true, false])('uses reported readiness for an unknown CRD-less runtime (%s)', (healthy) => {
+    mockRuntimes = [{
+      id: 'precedence-runtime',
+      name: 'Precedence Runtime',
+      installationState: 'unknown',
+      installed: !healthy,
+      healthy,
+      requiresCRD: false,
+    }]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getAllByText(healthy ? 'Ready' : 'Registered')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByText(`${healthy ? 1 : 0} of 1`)).toBeInTheDocument()
+  })
+
+  it.each([true, false])('uses reported readiness when defaulting an unknown Settings runtime (%s)', (healthy) => {
+    mockRuntimes = [
+      { id: 'unverified-runtime', name: 'Unverified Runtime', installationState: 'unknown', installed: !healthy, healthy },
+      { id: 'installed-runtime', name: 'Installed Runtime', installed: true, healthy: true },
+    ]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText(healthy ? 'Unverified Runtime' : 'Installed Runtime').closest('.rounded-2xl'))
+      .toHaveClass('ring-2')
+  })
+
+  it.each([
+    { installed: true, healthy: false, count: '1 of 1' },
+    { installed: false, healthy: true, count: '1 of 1' },
+    { installed: false, healthy: false, count: '0 of 1' },
+  ])('retains legacy CRD-less readiness fallback (installed=$installed, healthy=$healthy)', ({ count, ...status }) => {
+    mockRuntimes = [{
+      id: 'precedence-runtime',
+      name: 'Precedence Runtime',
+      requiresCRD: false,
+      ...status,
+    }]
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText(count)).toBeInTheDocument()
   })
 
   it('shows providers that do not require runtime operators without CRD controls', () => {

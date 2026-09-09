@@ -62,6 +62,7 @@ type RuntimeCrdMetadata = {
 type RuntimeSelectionMetadata = RuntimeCrdMetadata & {
   installationState?: InstallationState | null
   installed?: boolean | null
+  healthy?: boolean | null
 }
 
 const KNOWN_RUNTIME_IDS = new Set(['dynamo', 'kuberay', 'kaito', 'llmd', 'vllm'])
@@ -100,6 +101,14 @@ const runtimeRequiresCRD = (runtime: RuntimeCrdMetadata | null | undefined, fall
   }
 
   return true
+}
+
+const runtimeIsReady = (runtime: RuntimeSelectionMetadata): boolean => {
+  if (runtime.installationState === 'unknown') return runtime.healthy === true
+  if (runtime.installationState == null && !runtimeRequiresCRD(runtime)) {
+    return Boolean(runtime.installed || runtime.healthy)
+  }
+  return runtimeInstallationState(runtime) === 'installed'
 }
 
 const runtimeDescription = (id: string, name?: string | null) => {
@@ -187,9 +196,11 @@ const selectDefaultRuntimeId = (runtimes: RuntimeSelectionMetadata[] | undefined
     return null
   }
 
-  const installedRuntime = runtimes.find(r => r.installed && r.id)
-  if (installedRuntime?.id) {
-    return canonicalizeRuntimeId(installedRuntime.id)
+  const readyRuntime = runtimes.find(r => r.id && (
+    r.installationState === 'unknown' ? r.healthy === true : runtimeInstallationState(r) === 'installed'
+  ))
+  if (readyRuntime?.id) {
+    return canonicalizeRuntimeId(readyRuntime.id)
   }
 
   const dynamoRuntime = runtimes.find(r => runtimeIdsMatch(r.id, 'dynamo') && r.id)
@@ -237,9 +248,7 @@ export function SettingsPage() {
   const [showUninstallDialog, setShowUninstallDialog] = useState(false)
 
   const runtimes = runtimesStatus?.runtimes || []
-  const readyRuntimeCount = runtimes.filter(r => r.installationState === 'unknown'
-    ? r.healthy
-    : runtimeRequiresCRD(r) ? r.installed : (r.installed || r.healthy)).length
+  const readyRuntimeCount = runtimes.filter(runtimeIsReady).length
   const helmAvailable = helmStatus?.available ?? false
   const defaultRuntime = selectDefaultRuntimeId(runtimesStatus?.runtimes)
 
@@ -325,9 +334,9 @@ export function SettingsPage() {
     ?? currentRuntime?.installationState
     ?? runtimeInstallationState(installationStatus ?? currentRuntime)
   const isInstallationUnknown = selectedRuntimeRequiresCRD && selectedInstallationState === 'unknown'
-  const isInstalled = selectedRuntimeRequiresCRD
-    ? selectedInstallationState === 'installed'
-    : installationStatus?.installed ?? currentRuntime?.installed ?? false
+  const isInstalled = selectedInstallationState === 'unknown'
+    ? !selectedRuntimeRequiresCRD && currentRuntime?.healthy === true
+    : selectedInstallationState === 'installed'
   const isWaitingForInstall = selectedRuntimeRequiresCRD
     && selectedInstallationState === 'not-installed'
     && pendingInstallRuntime !== null
@@ -621,6 +630,7 @@ export function SettingsPage() {
               {runtimes.map((runtime) => {
                 const installationState = runtimeInstallationState(runtime)
                 const installationUnknown = runtimeRequiresCRD(runtime) && installationState === 'unknown'
+                const ready = runtimeIsReady(runtime)
 
                 return (
                 <div
@@ -637,7 +647,7 @@ export function SettingsPage() {
                     <div className="flex items-center justify-between">
                       <span className="font-heading font-bold">{runtime.name}</span>
                       {!runtimeRequiresCRD(runtime) ? (
-                        runtime.installed || runtime.healthy ? (
+                        ready ? (
                           <Badge variant="success" className="shrink-0">
                             <CheckCircle className="h-4 w-4" />
                             {crdLessRuntimeStateLabel(true)}
@@ -678,12 +688,12 @@ export function SettingsPage() {
                     <div className="space-y-2 text-sm">
                       {!runtimeRequiresCRD(runtime) ? (
                         <div className="flex items-center gap-2 rounded-lg bg-muted/60 p-3 text-muted-foreground">
-                          {runtime.installed || runtime.healthy ? (
+                          {ready ? (
                             <CheckCircle className="h-4 w-4 text-green-400" />
                           ) : (
                             <AlertCircle className="h-4 w-4 text-yellow-500" />
                           )}
-                          <span>{crdLessRuntimeReadinessMessage(runtime.installed || runtime.healthy)}</span>
+                          <span>{crdLessRuntimeReadinessMessage(ready)}</span>
                         </div>
                       ) : (
                         <>

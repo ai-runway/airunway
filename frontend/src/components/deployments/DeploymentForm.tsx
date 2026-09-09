@@ -121,9 +121,11 @@ function RecipeCodePanel({ title, value }: RecipeCodePanelProps) {
 }
 
 function canDeployWithRuntime(runtime?: RuntimeStatus): boolean {
-  return runtime?.installationState === 'unknown'
-    ? runtime.healthy
-    : runtime?.installed ?? false
+  const installationState = runtime?.installationState
+    ?? (runtime?.installed ? 'installed' : 'not-installed')
+  return installationState === 'unknown'
+    ? runtime?.healthy ?? false
+    : installationState === 'installed'
 }
 
 interface DeploymentFormProps {
@@ -469,8 +471,8 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
   const runtimeManuallySelectedRef = useRef(false)
   const selectedRuntimeStatus = runtimes?.find(r => r.id === selectedRuntime)
   const isSelectedCrdLessRuntime = selectedRuntimeStatus?.requiresCRD === false
-  const isSelectedCrdLessRuntimeNotReady = isSelectedCrdLessRuntime && !selectedRuntimeStatus?.installed
   const isRuntimeReady = canDeployWithRuntime(selectedRuntimeStatus)
+  const isSelectedCrdLessRuntimeNotReady = isSelectedCrdLessRuntime && !isRuntimeReady
 
   // AI Configurator state - tracks supported backends and recommended mode
   const [aiConfigSupportedBackends, setAiConfigSupportedBackends] = useState<string[] | null>(null)
@@ -1386,9 +1388,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
               const displayName = getRuntimeDisplayName(runtimeId)
               const description = getRuntimeDescription(runtime)
               const isCrdLessRuntime = runtime.requiresCRD === false
-              const isCrdLessRuntimeNotReady = isCrdLessRuntime && !runtime.installed
               const installationUnknown = runtime.installationState === 'unknown'
               const isReady = canDeployWithRuntime(runtime)
+              const isCrdLessRuntimeNotReady = isCrdLessRuntime && !isReady
 
               return (
                 <div
@@ -1448,7 +1450,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                         <Badge variant="outline" className="text-muted-foreground border-muted text-xs">
                           Status unknown
                         </Badge>
-                      ) : runtime.installed ? (
+                      ) : isReady ? (
                         <Badge variant="outline" className="text-green-400 border-green-500/50 bg-green-500/10 text-xs">
                           <CheckCircle2 className="h-3 w-3 mr-1" />
                           {isCrdLessRuntime ? 'Registered' : 'Installed'}
@@ -1473,7 +1475,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                         This model requires {model.supportedEngines.includes('llamacpp') ? 'llama.cpp' : model.supportedEngines.join('/')} which is not supported by this deployment method.
                       </p>
                     )}
-                    {isCompatible && isSelected && (installationUnknown || !runtime.installed) && (
+                    {isCompatible && isSelected && (installationUnknown || !isReady) && (
                       <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-2">
                         {installationUnknown ? (
                           isReady
