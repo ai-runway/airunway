@@ -872,6 +872,13 @@ describe('Installation Provider Routes', () => {
       expect(installCharts[0].chart).toBe('kaito/workspace');
       expect(installCharts[0].preInstallMissingCrds).toBe(true);
       expect(installCharts[0].skipCrds).toBe(true);
+      expect(installCharts[0].values).toMatchObject({
+        'featureGates.disableNodeAutoProvisioning': true,
+        'nvidiaDevicePlugin.enabled': false,
+        'localCSIDriver.useLocalCSIDriver': false,
+        'gpu-feature-discovery.nfd.enabled': false,
+        'gpu-feature-discovery.gfd.enabled': false,
+      });
     });
 
     test('uses CRD-safe chart install behavior for Dynamo', async () => {
@@ -1079,8 +1086,10 @@ describe('Installation Provider Routes', () => {
     test('returns 200 on successful uninstall', async () => {
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(kubernetesService, 'snapshotCRDsForUninstall', async () => ({ success: true, snapshots: [] })),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'uninstall', async () => ({ success: true, stdout: 'ok', stderr: '' })),
+        mockServiceMethod(kubernetesService, 'restoreCRDsAfterUninstall', async () => ({ success: true, results: [] })),
       );
 
       const res = await app.request('/api/installation/providers/kaito/uninstall', { method: 'POST' });
@@ -1088,6 +1097,28 @@ describe('Installation Provider Routes', () => {
 
       const data = await res.json();
       expect(data.success).toBe(true);
+    });
+
+    test('refuses to uninstall when CRD preservation cannot be prepared', async () => {
+      let uninstallAttempts = 0;
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(kubernetesService, 'snapshotCRDsForUninstall', async () => ({
+          success: false,
+          snapshots: [],
+          error: 'custom resource list permission denied',
+        })),
+        mockServiceMethod(helmService, 'uninstall', async () => {
+          uninstallAttempts += 1;
+          return { success: true, stdout: 'ok', stderr: '' };
+        }),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/uninstall', { method: 'POST' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error.message).toContain('No uninstall was attempted');
+      expect(uninstallAttempts).toBe(0);
     });
 
     test('rejects CRD-less provider uninstalls before checking helm', async () => {
@@ -1165,9 +1196,18 @@ describe('Installation Provider Routes', () => {
     });
 
     test('returns 200 on successful CRD removal', async () => {
+      let releaseIdentities: Array<{ name: string; namespace: string }> = [];
       restores.push(
         mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
-        mockServiceMethod(kubernetesService, 'deleteInferenceProviderConfig', async () => undefined),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(helmService, 'getReleaseInfo', async () => ({ exists: false })),
+        mockServiceMethod(kubernetesService, 'deleteCRDsSafely', async (_crdNames, identities) => {
+          releaseIdentities = identities;
+          return {
+            success: true,
+            results: [{ crdName: 'workspaces.kaito.sh', success: true, message: 'CRD workspaces.kaito.sh deleted' }],
+          };
+        }),
       );
 
       const res = await app.request('/api/installation/providers/kaito/uninstall-crds', { method: 'POST' });
@@ -1175,6 +1215,49 @@ describe('Installation Provider Routes', () => {
 
       const data = await res.json();
       expect(data.success).toBe(true);
+      expect(data.results[0].step).toBe('Delete CRD: workspaces.kaito.sh');
+      expect(releaseIdentities).toEqual([{ name: 'workspace', namespace: 'kaito-workspace' }]);
+    });
+
+    test('requires the Helm release to be removed before deleting CRDs', async () => {
+      let removalAttempts = 0;
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(helmService, 'getReleaseInfo', async () => ({ exists: true, status: 'deployed' })),
+        mockServiceMethod(kubernetesService, 'deleteCRDsSafely', async () => {
+          removalAttempts += 1;
+          return { success: true, results: [] };
+        }),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/uninstall-crds', { method: 'POST' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error.message).toContain('Run regular uninstall first');
+      expect(removalAttempts).toBe(0);
+    });
+
+    test('returns a conflict and preserves CRDs when the safety preflight refuses removal', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => mockInferenceProviderConfig),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(helmService, 'getReleaseInfo', async () => ({ exists: false })),
+        mockServiceMethod(kubernetesService, 'deleteCRDsSafely', async () => ({
+          success: false,
+          results: [{
+            crdName: 'workspaces.kaito.sh',
+            success: false,
+            message: 'CRD workspaces.kaito.sh has 1 existing custom resource; refusing to delete the CRD and preserve those resources.',
+          }],
+        })),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/uninstall-crds', { method: 'POST' });
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.success).toBe(false);
+      expect(data.message).toContain('no CRDs were deleted');
+      expect(data.results[0].error).toContain('existing custom resource');
     });
   });
 });

@@ -125,6 +125,7 @@ setup-kaito: verify-versions
 		--create-namespace \
 		--set featureGates.disableNodeAutoProvisioning=true \
 		--set nvidiaDevicePlugin.enabled=false \
+		--set localCSIDriver.useLocalCSIDriver=false \
 		--set gpu-feature-discovery.nfd.enabled=false \
 		--set gpu-feature-discovery.gfd.enabled=false \
 		--wait --timeout=5m
@@ -133,5 +134,4 @@ setup-kaito: verify-versions
 ## Uninstall KAITO workspace operator from the cluster
 cleanup-kaito:
 	@helm uninstall $(KAITO_RELEASE) --namespace $(KAITO_NAMESPACE) --ignore-not-found
-	@kubectl delete namespace $(KAITO_NAMESPACE) --ignore-not-found
-	@echo "✅ KAITO workspace operator uninstalled from namespace $(KAITO_NAMESPACE)"
+	@echo "✅ KAITO workspace operator uninstalled; namespace and CRDs were preserved"

@@ -196,6 +196,79 @@ interface HealthCrdProbe {
   displayName?: string;
 }
 
+interface DeletableCrd {
+  metadata?: {
+    name?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
+  spec?: {
+    group?: string;
+    names?: { plural?: string };
+    version?: string;
+    versions?: Array<{ name?: string; served?: boolean }>;
+    scope?: 'Cluster' | 'Namespaced';
+  };
+}
+
+interface SafeCrdDeletionResult {
+  success: boolean;
+  message: string;
+  crdName: string;
+}
+
+export interface HelmReleaseIdentity {
+  name: string;
+  namespace: string;
+}
+
+interface PreservedCrdSnapshot {
+  crdName: string;
+  manifest: Record<string, unknown>;
+  group: string;
+  version: string;
+  plural: string;
+  scope: 'Cluster' | 'Namespaced';
+  customResources: Record<string, unknown>[];
+}
+
+interface CrdApiDetails {
+  group: string;
+  version: string;
+  plural: string;
+  scope: 'Cluster' | 'Namespaced';
+}
+
+function getCrdApiDetails(crd: DeletableCrd): CrdApiDetails | undefined {
+  const group = crd.spec?.group;
+  const plural = crd.spec?.names?.plural;
+  const version = crd.spec?.versions?.find((entry) => entry.served !== false)?.name || crd.spec?.version;
+  if (!group || !plural || !version) return undefined;
+
+  return {
+    group,
+    version,
+    plural,
+    scope: crd.spec?.scope === 'Namespaced' ? 'Namespaced' : 'Cluster',
+  };
+}
+
+function stripKubernetesServerMetadata(resource: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...resource };
+  delete copy.status;
+
+  const metadata = resource.metadata;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    const cleanMetadata = { ...(metadata as Record<string, unknown>) };
+    for (const field of ['uid', 'resourceVersion', 'generation', 'creationTimestamp', 'managedFields']) {
+      delete cleanMetadata[field];
+    }
+    copy.metadata = cleanMetadata;
+  }
+
+  return copy;
+}
+
 
 function normalizeHealthCrds(health?: ProviderHealthConfig): HealthCrdProbe[] {
   return (health?.crds || []).flatMap((crd): HealthCrdProbe[] => {
@@ -2214,6 +2287,354 @@ class KubernetesService {
       logger.error({ error, crdName }, 'Error deleting CRD');
       return { success: false, message: `Failed to delete CRD ${crdName}: ${getK8sErrorMessage(error)}` };
     }
+  }
+
+  /**
+   * Capture provider CRDs and their custom resources before a Helm uninstall.
+   * Some provider charts render CRDs as ordinary Helm resources, so Helm
+   * removes them during uninstall even though the UI promises preservation.
+   */
+  async snapshotCRDsForUninstall(
+    crdNames: string[],
+  ): Promise<{ success: boolean; snapshots: PreservedCrdSnapshot[]; error?: string }> {
+    const snapshots: PreservedCrdSnapshot[] = [];
+    const uniqueNames = Array.from(new Set(crdNames.map((name) => name.trim()).filter(Boolean)));
+
+    for (const crdName of uniqueNames) {
+      let response: unknown;
+      try {
+        response = await withRetry(
+          () => this.apiExtensionsApi.readCustomResourceDefinition({ name: crdName }),
+          { operationName: `snapshotCRDForUninstall:${crdName}`, maxRetries: 1 },
+        );
+      } catch (error) {
+        if (getK8sStatusCode(error) === 404) continue;
+        return {
+          success: false,
+          snapshots: [],
+          error: `Failed to inspect CRD ${crdName}: ${getK8sErrorMessage(error)}`,
+        };
+      }
+
+      const crd = ((response as { body?: DeletableCrd })?.body || response) as DeletableCrd;
+      const api = getCrdApiDetails(crd);
+      if (!api) {
+        return {
+          success: false,
+          snapshots: [],
+          error: `CRD ${crdName} does not expose enough API metadata to preserve its custom resources.`,
+        };
+      }
+
+      try {
+        const resourceResponse = await withRetry(
+          () => this.customObjectsApi.listClusterCustomObject({
+            group: api.group,
+            version: api.version,
+            plural: api.plural,
+          }),
+          { operationName: `snapshotCRDResourcesForUninstall:${crdName}`, maxRetries: 1 },
+        );
+        const resourceList = ((resourceResponse as { body?: { items?: unknown[] }; items?: unknown[] })?.body
+          || resourceResponse) as { items?: unknown[] };
+        if (!Array.isArray(resourceList.items)) {
+          return {
+            success: false,
+            snapshots: [],
+            error: `Failed to list custom resources for CRD ${crdName}: the Kubernetes API returned no item list.`,
+          };
+        }
+
+        const customResources = resourceList.items.filter(
+          (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item),
+        );
+        if (customResources.some((resource) => {
+          const metadata = resource.metadata;
+          return !metadata || typeof metadata !== 'object' || typeof (metadata as { name?: unknown }).name !== 'string';
+        })) {
+          return {
+            success: false,
+            snapshots: [],
+            error: `Failed to preserve custom resources for CRD ${crdName}: at least one resource has no name.`,
+          };
+        }
+
+        snapshots.push({
+          crdName,
+          manifest: stripKubernetesServerMetadata(crd as unknown as Record<string, unknown>),
+          ...api,
+          customResources,
+        });
+      } catch (error) {
+        return {
+          success: false,
+          snapshots: [],
+          error: `Failed to list custom resources for CRD ${crdName}: ${getK8sErrorMessage(error)}`,
+        };
+      }
+    }
+
+    return { success: true, snapshots };
+  }
+
+  /**
+   * Restore CRDs and any custom resources captured before Helm uninstall.
+   * Existing objects are retained, so this is safe when a chart already keeps
+   * a CRD or custom resource instead of deleting it.
+   */
+  async restoreCRDsAfterUninstall(
+    snapshots: PreservedCrdSnapshot[],
+  ): Promise<{ success: boolean; results: Array<{ crdName: string; success: boolean; message: string }> }> {
+    const results: Array<{ crdName: string; success: boolean; message: string }> = [];
+
+    for (const snapshot of snapshots) {
+      let crdExists = false;
+      try {
+        await withRetry(
+          () => this.apiExtensionsApi.readCustomResourceDefinition({ name: snapshot.crdName }),
+          { operationName: `checkRestoredCRD:${snapshot.crdName}`, maxRetries: 1 },
+        );
+        crdExists = true;
+      } catch (error) {
+        if (getK8sStatusCode(error) !== 404) {
+          results.push({
+            crdName: snapshot.crdName,
+            success: false,
+            message: `Failed to check preserved CRD ${snapshot.crdName}: ${getK8sErrorMessage(error)}`,
+          });
+          continue;
+        }
+      }
+
+      if (!crdExists) {
+        try {
+          await withRetry(
+            () => this.apiExtensionsApi.createCustomResourceDefinition({
+              body: snapshot.manifest as unknown as k8s.V1CustomResourceDefinition,
+            }),
+            { operationName: `restoreCRD:${snapshot.crdName}`, maxRetries: 1 },
+          );
+        } catch (error) {
+          results.push({
+            crdName: snapshot.crdName,
+            success: false,
+            message: `Failed to restore CRD ${snapshot.crdName}: ${getK8sErrorMessage(error)}`,
+          });
+          continue;
+        }
+      }
+
+      let success = true;
+      for (const resource of snapshot.customResources) {
+        const metadata = resource.metadata as { name: string; namespace?: string };
+        const name = metadata.name;
+        const namespace = metadata.namespace;
+        if (snapshot.scope === 'Namespaced' && !namespace) {
+          success = false;
+          results.push({
+            crdName: snapshot.crdName,
+            success: false,
+            message: `Cannot restore custom resource ${name}: CRD ${snapshot.crdName} is namespaced but the resource has no namespace.`,
+          });
+          continue;
+        }
+
+        try {
+          if (snapshot.scope === 'Namespaced') {
+            await this.customObjectsApi.getNamespacedCustomObject({
+              group: snapshot.group,
+              version: snapshot.version,
+              namespace: namespace as string,
+              plural: snapshot.plural,
+              name,
+            });
+          } else {
+            await this.customObjectsApi.getClusterCustomObject({
+              group: snapshot.group,
+              version: snapshot.version,
+              plural: snapshot.plural,
+              name,
+            });
+          }
+          continue;
+        } catch (error) {
+          if (getK8sStatusCode(error) !== 404) {
+            success = false;
+            results.push({
+              crdName: snapshot.crdName,
+              success: false,
+              message: `Failed to check preserved custom resource ${name}: ${getK8sErrorMessage(error)}`,
+            });
+            continue;
+          }
+        }
+
+        try {
+          const body = stripKubernetesServerMetadata(resource);
+          if (snapshot.scope === 'Namespaced') {
+            await this.customObjectsApi.createNamespacedCustomObject({
+              group: snapshot.group,
+              version: snapshot.version,
+              namespace: namespace as string,
+              plural: snapshot.plural,
+              body,
+            });
+          } else {
+            await this.customObjectsApi.createClusterCustomObject({
+              group: snapshot.group,
+              version: snapshot.version,
+              plural: snapshot.plural,
+              body,
+            });
+          }
+        } catch (error) {
+          success = false;
+          results.push({
+            crdName: snapshot.crdName,
+            success: false,
+            message: `Failed to restore custom resource ${name}: ${getK8sErrorMessage(error)}`,
+          });
+        }
+      }
+
+      if (success) {
+        results.push({
+          crdName: snapshot.crdName,
+          success: true,
+          message: `CRD ${snapshot.crdName} and ${snapshot.customResources.length} custom resource${snapshot.customResources.length === 1 ? '' : 's'} preserved`,
+        });
+      }
+    }
+
+    return {
+      success: results.every((result) => result.success),
+      results,
+    };
+  }
+
+  /**
+   * Delete provider CRDs only after a complete, read-only safety preflight.
+   *
+   * Regular Helm uninstall deliberately leaves CRDs and custom resources in
+   * place. This explicit operation is the destructive path, so it refuses to
+   * delete a CRD that is owned by another tool or still has custom resources.
+   * All CRDs are checked before any deletion begins to avoid partial removal.
+   */
+  async deleteCRDsSafely(
+    crdNames: string[],
+    allowedHelmReleases: HelmReleaseIdentity[] = [],
+  ): Promise<{ success: boolean; results: SafeCrdDeletionResult[] }> {
+    const uniqueNames = Array.from(new Set(crdNames.map((name) => name.trim()).filter(Boolean)));
+    const results: SafeCrdDeletionResult[] = [];
+    const deletable: string[] = [];
+
+    for (const crdName of uniqueNames) {
+      let response: unknown;
+      try {
+        response = await withRetry(
+          () => this.apiExtensionsApi.readCustomResourceDefinition({ name: crdName }),
+          { operationName: `inspectCRDForDeletion:${crdName}`, maxRetries: 1 },
+        );
+      } catch (error) {
+        if (getK8sStatusCode(error) === 404) {
+          results.push({
+            crdName,
+            success: true,
+            message: `CRD ${crdName} not found (already deleted)`,
+          });
+        } else {
+          results.push({
+            crdName,
+            success: false,
+            message: `Failed to inspect CRD ${crdName}: ${getK8sErrorMessage(error)}`,
+          });
+        }
+        continue;
+      }
+
+      const crd = ((response as { body?: DeletableCrd })?.body || response) as DeletableCrd;
+      const labels = crd.metadata?.labels || {};
+      const annotations = crd.metadata?.annotations || {};
+      const managedBy = labels['app.kubernetes.io/managed-by'];
+      const airunwayManager = labels['airunway.ai/managed-by'];
+      const helmReleaseName = annotations['meta.helm.sh/release-name'];
+      const helmReleaseNamespace = annotations['meta.helm.sh/release-namespace'];
+      const isAllowedHelmOwner = managedBy === 'Helm'
+        && !!helmReleaseName
+        && !!helmReleaseNamespace
+        && allowedHelmReleases.some((release) => (
+          release.name === helmReleaseName && release.namespace === helmReleaseNamespace
+        ));
+
+      if (
+        (airunwayManager && airunwayManager !== 'airunway')
+        || (managedBy && managedBy !== 'Helm' && managedBy !== 'airunway')
+        || (managedBy === 'Helm' && !isAllowedHelmOwner)
+        || (helmReleaseName && !allowedHelmReleases.some((release) => (
+          release.name === helmReleaseName && release.namespace === helmReleaseNamespace
+        )))
+      ) {
+        results.push({
+          crdName,
+          success: false,
+          message: `CRD ${crdName} is owned by another tool; refusing to delete it.`,
+        });
+        continue;
+      }
+
+      const group = crd.spec?.group;
+      const plural = crd.spec?.names?.plural;
+      const version = crd.spec?.versions?.find((entry) => entry.served !== false)?.name || crd.spec?.version;
+      if (!group || !plural || !version) {
+        results.push({
+          crdName,
+          success: false,
+          message: `CRD ${crdName} does not expose enough API metadata to verify custom resources; refusing to delete it.`,
+        });
+        continue;
+      }
+
+      try {
+        const resourceResponse = await withRetry(
+          () => this.customObjectsApi.listClusterCustomObject({ group, version, plural }),
+          { operationName: `listCRDResourcesForDeletion:${crdName}`, maxRetries: 1 },
+        );
+        const resourceList = ((resourceResponse as { body?: { items?: unknown[] }; items?: unknown[] })?.body
+          || resourceResponse) as { items?: unknown[] };
+        const itemCount = Array.isArray(resourceList.items) ? resourceList.items.length : 0;
+        if (itemCount > 0) {
+          results.push({
+            crdName,
+            success: false,
+            message: `CRD ${crdName} has ${itemCount} existing custom resource${itemCount === 1 ? '' : 's'}; refusing to delete the CRD and preserve those resources.`,
+          });
+          continue;
+        }
+      } catch (error) {
+        results.push({
+          crdName,
+          success: false,
+          message: `Failed to verify custom resources for CRD ${crdName}: ${getK8sErrorMessage(error)}`,
+        });
+        continue;
+      }
+
+      deletable.push(crdName);
+    }
+
+    if (results.some((result) => !result.success)) {
+      return { success: false, results };
+    }
+
+    for (const crdName of deletable) {
+      const result = await this.deleteCRD(crdName);
+      results.push({ crdName, ...result });
+    }
+
+    return {
+      success: results.every((result) => result.success),
+      results,
+    };
   }
 
   /**
