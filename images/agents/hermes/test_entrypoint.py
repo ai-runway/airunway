@@ -317,6 +317,19 @@ class HermesEntrypointTest(unittest.TestCase):
             self.assertEqual(raised.exception.code, HTTPStatus.SERVICE_UNAVAILABLE)
             raised.exception.close()
 
+            # The rejected health probe can briefly hold the shared connection
+            # slot while its 503 response is being written. Wait for that
+            # rejection path to drain before asserting work traffic still has
+            # its reserved capacity.
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                if proxy._connection_slots.acquire(blocking=False):
+                    proxy._connection_slots.release()
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("readyz rejection did not release its connection slot")
+
             work_request = urllib.request.Request(
                 f"http://127.0.0.1:{proxy.server_port}/v1/models",
                 headers={"Authorization": "Bearer external-key"},
