@@ -25,6 +25,7 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -51,6 +52,48 @@ const (
 
 // Transformer handles transformation of ModelDeployment to RayService
 type Transformer struct{}
+
+// Application represents a single RayServe application
+type Application struct {
+	Name        string          `json:"name" yaml:"name"`
+	RoutePrefix string          `json:"route_prefix" yaml:"route_prefix"`
+	ImportPath  string          `json:"import_path" yaml:"import_path"`
+	Args        ApplicationArgs `json:"args" yaml:"args"`
+}
+
+// ServeConfig represents the top-level RayServe configuration
+type ServeConfig struct {
+	Applications []Application `json:"applications" yaml:"applications"`
+}
+
+// ModelLoadingConfig represents the configuration for loading a model in the RayService spec
+type ModelLoadingConfig struct {
+	ModelID     string `json:"model_id" yaml:"model_id"`
+	ModelSource string `json:"model_source" yaml:"model_source"`
+}
+
+// AutoscalingConfig holds autoscaling settings for a deployment
+type AutoscalingConfig struct {
+	MinReplicas int64 `json:"min_replicas" yaml:"min_replicas"`
+	MaxReplicas int64 `json:"max_replicas" yaml:"max_replicas"`
+}
+
+// DeploymentConfig holds deployment configuration including autoscaling
+type DeploymentConfig struct {
+	AutoscalingConfig AutoscalingConfig `json:"autoscaling_config" yaml:"autoscaling_config"`
+}
+
+// LLMConfig represents the configuration for loading a model in the RayService spec
+type LLMConfig struct {
+	ModelLoadingConfig ModelLoadingConfig     `json:"model_loading_config" yaml:"model_loading_config"`
+	EngineArgs         map[string]interface{} `json:"engine_kwargs,omitempty" yaml:"engine_kwargs,omitempty"`
+	DeploymentConfig   DeploymentConfig       `json:"deployment_config" yaml:"deployment_config"`
+}
+
+// ApplicationArgs holds the args for a RayServe application
+type ApplicationArgs struct {
+	LLMConfigs []LLMConfig `json:"llm_configs" yaml:"llm_configs"`
+}
 
 // NewTransformer creates a new KubeRay transformer
 func NewTransformer() *Transformer {
@@ -109,26 +152,70 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 	return []*unstructured.Unstructured{rs}, nil
 }
 
-// buildSpec creates the spec for a RayService
-func (t *Transformer) buildSpec(md *airunwayv1alpha1.ModelDeployment) (map[string]interface{}, error) {
-	spec := map[string]interface{}{}
-
-	// Build serveConfigV2
+// buildServeConfig constructs the structured ServeConfig for a ModelDeployment
+func (t *Transformer) buildServeConfig(md *airunwayv1alpha1.ModelDeployment) ServeConfig {
 	replicas := int64(1)
 	if md.Spec.Scaling != nil && md.Spec.Scaling.Replicas > 0 {
 		replicas = int64(md.Spec.Scaling.Replicas)
 	}
 
-	serveConfig := fmt.Sprintf(`applications:
-  - name: llm
-    route_prefix: /
-    import_path: vllm_serve:deployment
-    deployments:
-      - name: VLLMDeployment
-        num_replicas: %d
-`, replicas)
+	modelLoadingConfig := ModelLoadingConfig{
+		ModelID:     md.Spec.Model.ID,
+		ModelSource: md.Spec.Model.ID,
+	}
 
-	spec["serveConfigV2"] = serveConfig
+	deploymentConfig := DeploymentConfig{
+		AutoscalingConfig: AutoscalingConfig{
+			MinReplicas: replicas,
+			MaxReplicas: replicas,
+		},
+	}
+
+	llmConfig := LLMConfig{
+		ModelLoadingConfig: modelLoadingConfig,
+		DeploymentConfig:   deploymentConfig,
+	}
+
+	if md.Spec.Engine.ContextLength != nil {
+		llmConfig.EngineArgs = map[string]interface{}{
+			"max_model_len": *md.Spec.Engine.ContextLength,
+		}
+	}
+
+	if md.Spec.Engine.Args != nil {
+		if llmConfig.EngineArgs == nil {
+			llmConfig.EngineArgs = make(map[string]interface{})
+		}
+		for k, v := range md.Spec.Engine.Args {
+			llmConfig.EngineArgs[k] = v
+		}
+	}
+
+	return ServeConfig{
+		Applications: []Application{
+			{
+				Name:        "llm",
+				RoutePrefix: "/",
+				ImportPath:  "ray.serve.llm:build_openai_app",
+				Args: ApplicationArgs{
+					LLMConfigs: []LLMConfig{llmConfig},
+				},
+			},
+		},
+	}
+}
+
+// buildSpec creates the spec for a RayService
+func (t *Transformer) buildSpec(md *airunwayv1alpha1.ModelDeployment) (map[string]interface{}, error) {
+	spec := map[string]interface{}{}
+
+	// Build serveConfigV2 from structured data
+	serveConfig := t.buildServeConfig(md)
+	serveConfigYAML, err := yaml.Marshal(serveConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal serve config: %w", err)
+	}
+	spec["serveConfigV2"] = string(serveConfigYAML)
 
 	// Build rayClusterConfig
 	rayClusterConfig, err := t.buildRayClusterConfig(md)
@@ -170,24 +257,6 @@ func (t *Transformer) buildHeadGroupSpec(md *airunwayv1alpha1.ModelDeployment) m
 		headMemory = md.Spec.Resources.Memory
 	}
 
-	// Build engine args
-	engineArgs := t.buildEngineArgs(md)
-
-	// Build env vars
-	envVars := []interface{}{
-		map[string]interface{}{
-			"name":  "MODEL_ID",
-			"value": md.Spec.Model.ID,
-		},
-		map[string]interface{}{
-			"name":  "VLLM_ENGINE_ARGS",
-			"value": engineArgs,
-		},
-	}
-
-	// Add HF_TOKEN from secret if specified
-	envVars = append(envVars, t.buildEnvVars(md)...)
-
 	headGroupSpec := map[string]interface{}{
 		"rayStartParams": map[string]interface{}{
 			"dashboard-host": "0.0.0.0",
@@ -209,7 +278,6 @@ func (t *Transformer) buildHeadGroupSpec(md *airunwayv1alpha1.ModelDeployment) m
 								"memory": headMemory,
 							},
 						},
-						"env": envVars,
 					},
 				},
 			},
@@ -244,6 +312,9 @@ func (t *Transformer) buildAggregatedWorkerGroup(md *airunwayv1alpha1.ModelDeplo
 		limits[gpuType] = fmt.Sprintf("%d", md.Spec.Resources.GPU.Count)
 	}
 
+	// Build env var with HF_TOKEN from secret if specified
+	envVars := append([]interface{}{}, t.buildEnvVars(md)...)
+
 	workerGroup := map[string]interface{}{
 		"replicas":       replicas,
 		"minReplicas":    replicas,
@@ -264,6 +335,7 @@ func (t *Transformer) buildAggregatedWorkerGroup(md *airunwayv1alpha1.ModelDeplo
 						"resources": map[string]interface{}{
 							"limits": limits,
 						},
+						"env": envVars,
 					},
 				},
 			},
@@ -277,6 +349,9 @@ func (t *Transformer) buildAggregatedWorkerGroup(md *airunwayv1alpha1.ModelDeplo
 func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelDeployment) []interface{} {
 	image := t.getImage(md)
 	var workerGroups []interface{}
+
+	// Build env var with HF_TOKEN from secret if specified
+	envVars := append([]interface{}{}, t.buildEnvVars(md)...)
 
 	// Build prefill worker group
 	if md.Spec.Scaling != nil && md.Spec.Scaling.Prefill != nil {
@@ -315,6 +390,7 @@ func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelD
 							"resources": map[string]interface{}{
 								"limits": prefillLimits,
 							},
+							"env": envVars,
 						},
 					},
 				},
@@ -360,6 +436,7 @@ func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelD
 							"resources": map[string]interface{}{
 								"limits": decodeLimits,
 							},
+							"env": envVars,
 						},
 					},
 				},
