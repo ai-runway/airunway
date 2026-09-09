@@ -735,19 +735,21 @@ export function SettingsPage() {
                         const integration = describeIntegrationStatus(runtime)
                         return (
                           <div
-                            className="flex items-center justify-between"
-                            title={integration.description}
+                            className="space-y-1"
                             data-testid={`integration-status-${runtime.id}`}
                           >
-                            <span className="text-muted-foreground">AI Runway integration</span>
-                            <span className="flex items-center gap-1 text-xs">
-                              {integration.tone === 'success' ? (
-                                <CheckCircle className="h-3.5 w-3.5 text-green-400" />
-                              ) : (
-                                <AlertCircle className="h-3.5 w-3.5 text-yellow-500" />
-                              )}
-                              <span>{integration.label}</span>
-                            </span>
+                            <div className="flex items-center justify-between">
+                              <span className="text-muted-foreground">AI Runway integration</span>
+                              <span className="flex items-center gap-1 text-xs">
+                                {integration.tone === 'success' ? (
+                                  <CheckCircle className="h-3.5 w-3.5 text-green-400" />
+                                ) : (
+                                  <AlertCircle className="h-3.5 w-3.5 text-yellow-500" />
+                                )}
+                                <span>{integration.label}</span>
+                              </span>
+                            </div>
+                            <p className="text-xs text-muted-foreground">{integration.description}</p>
                           </div>
                         )
                       })()}

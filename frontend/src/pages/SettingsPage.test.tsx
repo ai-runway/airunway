@@ -471,7 +471,7 @@ describe('SettingsPage', () => {
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('AI Runway integration')
     expect(integrationRow).toHaveTextContent('Connected')
-    expect(integrationRow.getAttribute('title')).toMatch(/checking in normally \(last reported \d+[smhd] ago\)\./)
+    expect(within(integrationRow).getByText(/checking in normally \(last reported \d+[smhd] ago\)\./)).toBeVisible()
 
     // Detail panel: install button still visible, runtime row icons are red
     fireEvent.click(screen.getByText('Kuberay'))
@@ -512,12 +512,33 @@ describe('SettingsPage', () => {
     const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
     const integrationRow = within(card).getByTestId('integration-status-kuberay')
     expect(integrationRow).toHaveTextContent('Not responding')
-    expect(integrationRow.getAttribute('title')).toMatch(/integration is disconnected \(last reported \d+[smhd] ago\)\./)
-    expect(integrationRow.getAttribute('title')).not.toContain('has not checked in recently')
+    expect(within(integrationRow).getByText(/integration is disconnected \(last reported \d+[smhd] ago\)\./)).toBeVisible()
+    expect(integrationRow).not.toHaveTextContent('has not checked in recently')
 
     const detailIntegration = screen.getByTestId('integration-status-detail')
     expect(detailIntegration).toHaveTextContent(/integration is disconnected \(last reported \d+[smhd] ago\)\./)
     expect(detailIntegration).not.toHaveTextContent('has not checked in recently')
+  })
+
+  it('hides integration status when older backend responses omit its fields', () => {
+    mockRuntimes = [
+      {
+        id: 'kuberay',
+        name: 'Kuberay',
+        installed: false,
+        healthy: false,
+        requiresCRD: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('Kuberay Installation')).toBeInTheDocument()
+    expect(screen.queryByText('AI Runway integration')).not.toBeInTheDocument()
   })
 
   it('does not offer installation when a provider has no installation metadata', () => {
