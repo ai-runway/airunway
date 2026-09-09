@@ -1,5 +1,5 @@
 # Build the provider binary
-FROM --platform=$BUILDPLATFORM golang:1.25@sha256:fc32980f4e03a79db932b28485cf190a28067be1f2431844405451105fd0525f AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.13@sha256:cbff9d1a9041b316010f2da6b701b6c0d597718cb90928c85eb597334a0d23d4 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # SHIM_VERSION is the reported shim version tag. Required so a hand-run
