@@ -49,9 +49,22 @@ spec:
   gateway:
     enabled: true                # Optional: defaults to true when Gateway detected
     modelName: ""                # Optional: override model name for routing
+    poolRef: ""                  # Optional: existing same-namespace InferencePool
+    httpRouteRef: ""             # Optional: existing same-namespace HTTPRoute
 ```
 
 > **Note:** If `gateway.enabled` is explicitly set to `true` but the Gateway API Inference Extension CRDs are not installed, the controller sets a `GatewayReady=False` condition with reason `CRDsNotAvailable`. This surfaces as a status warning on the `ModelDeployment`.
+
+### spec.gateway
+
+`spec.gateway` controls the optional Gateway API Inference Extension integration.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | bool | no | Enables or disables gateway integration. Defaults to enabled when the required Gateway resources are detected. |
+| `modelName` | string | no | Overrides the model name used for gateway routing. |
+| `poolRef` | string | no | Name of an existing InferencePool in the same namespace. The controller verifies its existence and surfaces rejected or unresolved status, uses it as the HTTPRoute backend, and does not create, update, or delete the pool or its EPP. A user-set value takes precedence over provider-managed pool capabilities. |
+| `httpRouteRef` | string | no | Name of an existing HTTPRoute in the same namespace. The controller does not create or delete the referenced route. |
 
 ### spec.engine
 
