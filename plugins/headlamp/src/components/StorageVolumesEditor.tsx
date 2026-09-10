@@ -8,6 +8,7 @@
 import { useRef, useState } from 'react';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import { Icon } from '@iconify/react';
 import type { StorageVolume, VolumePurpose, PersistentVolumeAccessMode } from '@airunway/shared';
 import { PURPOSE_LABELS } from '../lib/constants';
@@ -65,6 +66,20 @@ const labelStyle: React.CSSProperties = {
   fontWeight: 500,
   fontSize: '13px',
 };
+
+function InfoHint({ text }: { text: string }) {
+  return (
+    <Tooltip title={text} arrow>
+      <span
+        tabIndex={0}
+        aria-label={text}
+        style={{ display: 'inline-flex', marginLeft: '6px', verticalAlign: 'middle', opacity: 0.7 }}
+      >
+        <Icon icon="mdi:information-outline" width={15} />
+      </span>
+    </Tooltip>
+  );
+}
 
 export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditorProps) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(
@@ -206,7 +221,10 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                   {/* Purpose + Size row */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                     <div>
-                      <label style={labelStyle}>Purpose</label>
+                      <label style={labelStyle}>
+                        Purpose
+                        <InfoHint text="Model Cache automatically downloads and reuses model weights. Compilation Cache provides a reusable folder for compiled engine files; Dynamo connects to it automatically, while other runtimes need an advanced engine setting. Custom storage is fully user-managed." />
+                      </label>
                       <select
                         value={purpose}
                         onChange={(e) =>

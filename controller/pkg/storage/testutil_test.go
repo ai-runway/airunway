@@ -26,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+const testDownloadJobImage = "example.test/model-downloader:v1"
+
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = airunwayv1alpha1.AddToScheme(s)

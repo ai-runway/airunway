@@ -24,6 +24,7 @@ import (
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -119,7 +120,7 @@ func TestEnsureDownloadJobCreation(t *testing.T) {
 	md := newDownloadMD("my-model", "default")
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	completed, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,8 +139,8 @@ func TestEnsureDownloadJobCreation(t *testing.T) {
 	}
 
 	// Verify Job spec
-	if job.Spec.Template.Spec.Containers[0].Image != DefaultDownloadJobImage {
-		t.Errorf("expected image %s, got %s", DefaultDownloadJobImage, job.Spec.Template.Spec.Containers[0].Image)
+	if job.Spec.Template.Spec.Containers[0].Image != testDownloadJobImage {
+		t.Errorf("expected image %s, got %s", testDownloadJobImage, job.Spec.Template.Spec.Containers[0].Image)
 	}
 	expectedBackoffLimit := int32(6)
 	if job.Spec.BackoffLimit == nil {
@@ -243,6 +244,129 @@ func TestEnsureDownloadJobCreation(t *testing.T) {
 	}
 }
 
+func TestBuildDownloadJobCopiesWorkloadSchedulingConstraints(t *testing.T) {
+	md := newDownloadMD("my-model", "default")
+	tolerationSeconds := int64(60)
+	const gpuPool = "gpu"
+	md.Spec.NodeSelector = map[string]string{
+		"agentpool":                   gpuPool,
+		"topology.kubernetes.io/zone": "eastus-1",
+	}
+	md.Spec.Tolerations = []corev1.Toleration{{
+		Key:               "sku",
+		Operator:          corev1.TolerationOpEqual,
+		Value:             gpuPool,
+		Effect:            corev1.TaintEffectNoSchedule,
+		TolerationSeconds: &tolerationSeconds,
+	}}
+
+	job := buildDownloadJob(
+		md,
+		&md.Spec.Model.Storage.Volumes[0],
+		testDownloadJobImage,
+		"input-hash",
+	)
+
+	if got := job.Spec.Template.Spec.NodeSelector["agentpool"]; got != gpuPool {
+		t.Fatalf("expected downloader nodeSelector to target gpu pool, got %q", got)
+	}
+	if got := job.Spec.Template.Spec.NodeSelector["topology.kubernetes.io/zone"]; got != "eastus-1" {
+		t.Fatalf("expected downloader topology selector, got %q", got)
+	}
+	if len(job.Spec.Template.Spec.Tolerations) != 1 {
+		t.Fatalf("expected one downloader toleration, got %v", job.Spec.Template.Spec.Tolerations)
+	}
+	gotToleration := job.Spec.Template.Spec.Tolerations[0]
+	if gotToleration.Key != "sku" || gotToleration.Value != gpuPool || gotToleration.Effect != corev1.TaintEffectNoSchedule {
+		t.Fatalf("unexpected downloader toleration: %#v", gotToleration)
+	}
+
+	// The Job must not retain mutable references to the ModelDeployment spec.
+	md.Spec.NodeSelector["agentpool"] = "system"
+	*md.Spec.Tolerations[0].TolerationSeconds = 1
+	if job.Spec.Template.Spec.NodeSelector["agentpool"] != gpuPool {
+		t.Fatal("expected downloader nodeSelector to be copied")
+	}
+	if got := *job.Spec.Template.Spec.Tolerations[0].TolerationSeconds; got != 60 {
+		t.Fatalf("expected downloader toleration to be deep-copied, got %d", got)
+	}
+}
+
+func TestDownloadJobSchedulingHashIsCanonical(t *testing.T) {
+	seconds := int64(60)
+	first := newDownloadMD("my-model", "default")
+	first.Spec.NodeSelector = map[string]string{"zone": "a", "pool": "gpu"}
+	first.Spec.Tolerations = []corev1.Toleration{
+		{Key: "sku", Operator: corev1.TolerationOpEqual, Value: "gpu", Effect: corev1.TaintEffectNoSchedule},
+		{Key: "spot", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &seconds},
+	}
+
+	second := first.DeepCopy()
+	second.Spec.NodeSelector = map[string]string{"pool": "gpu", "zone": "a"}
+	second.Spec.Tolerations[0], second.Spec.Tolerations[1] = second.Spec.Tolerations[1], second.Spec.Tolerations[0]
+
+	if got, want := downloadJobSchedulingHash(second), downloadJobSchedulingHash(first); got != want {
+		t.Fatalf("equivalent scheduling constraints produced different hashes: got %s want %s", got, want)
+	}
+}
+
+func TestEnsureDownloadJobReplacesIncompleteJobWhenSchedulingChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).Build()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.NodeSelector = map[string]string{"pool": "system"}
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	md.Spec.NodeSelector["pool"] = "gpu"
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling changed scheduling: %v", err)
+	}
+	if completed {
+		t.Fatal("incomplete Job with stale scheduling must not be reported complete")
+	}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale pending Job deletion, got %v", err)
+	}
+}
+
+func TestEnsureDownloadJobPreservesCompletedJobWhenSchedulingChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).Build()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.NodeSelector = map[string]string{"pool": "system"}
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	job := &batchv1.Job{}
+	if err := c.Get(ctx, key, job); err != nil {
+		t.Fatalf("getting initial Job: %v", err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := c.Status().Update(ctx, job); err != nil {
+		t.Fatalf("completing initial Job: %v", err)
+	}
+
+	md.Spec.NodeSelector["pool"] = "gpu"
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling completed Job after scheduling change: %v", err)
+	}
+	if !completed {
+		t.Fatal("completed download provenance should survive scheduling-only changes")
+	}
+	if err := c.Get(ctx, key, &batchv1.Job{}); err != nil {
+		t.Fatalf("completed Job was unexpectedly deleted: %v", err)
+	}
+}
+
 func TestEnsureDownloadJobWithHFToken(t *testing.T) {
 	scheme := newScheme()
 	_ = batchv1.AddToScheme(scheme)
@@ -254,7 +378,7 @@ func TestEnsureDownloadJobWithHFToken(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	_, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -309,10 +433,11 @@ func TestEnsureDownloadJobCompleted(t *testing.T) {
 			},
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	completed, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -350,10 +475,11 @@ func TestEnsureDownloadJobStillRunning(t *testing.T) {
 			Failed: 1,
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	completed, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -397,10 +523,11 @@ func TestEnsureDownloadJobFailed(t *testing.T) {
 			},
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	_, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	_, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err == nil {
 		t.Fatal("expected error for permanently failed Job")
 	}
@@ -445,10 +572,11 @@ func TestEnsureDownloadJobFailedByConditionOnly(t *testing.T) {
 			},
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	_, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	_, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err == nil {
 		t.Fatal("expected error for Job failed by condition (activeDeadlineSeconds)")
 	}
@@ -489,10 +617,11 @@ func TestEnsureDownloadJobFailedAtBackoffLimit(t *testing.T) {
 			Failed: 3, // exactly at backoffLimit, no conditions
 		},
 	}
+	stampCurrentDownloadJob(existingJob, md)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	_, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	_, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err == nil {
 		t.Fatal("expected error when Failed == BackoffLimit (fallback detection)")
 	}
@@ -645,7 +774,7 @@ func TestEnsureDownloadJobStaleCompleted(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	completed, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -692,7 +821,7 @@ func TestEnsureDownloadJobStaleFailed(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	completed, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -735,7 +864,7 @@ func TestEnsureDownloadJobStaleRunning(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingJob).WithStatusSubresource(existingJob).Build()
 
-	completed, err := EnsureDownloadJob(context.Background(), c, md, DefaultDownloadJobImage)
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -812,5 +941,230 @@ func TestIsOwnedByMD(t *testing.T) {
 				t.Errorf("IsOwnedByMD() = %v, want %v", got, tt.expect)
 			}
 		})
+	}
+}
+
+func TestEnsureDownloadJobUsesDefaultModelCacheMountPath(t *testing.T) {
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].MountPath = ""
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if completed {
+		t.Fatal("expected a newly created Job to be incomplete")
+	}
+
+	job := &batchv1.Job{}
+	jobKey := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(context.Background(), jobKey, job); err != nil {
+		t.Fatalf("expected download Job: %v", err)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if got := container.Env[0].Value; got != DefaultModelCacheMountPath {
+		t.Fatalf("HF_HOME = %q, want %q", got, DefaultModelCacheMountPath)
+	}
+	if got := container.VolumeMounts[0].MountPath; got != DefaultModelCacheMountPath {
+		t.Fatalf("mountPath = %q, want %q", got, DefaultModelCacheMountPath)
+	}
+}
+
+func TestEnsureDownloadJobPreservesForeignNameCollision(t *testing.T) {
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	foreign := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      downloadJobName(md.Name),
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Name:       "foreign-owner",
+			UID:        types.UID("foreign-uid"),
+			Controller: boolPtr(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
+
+	completed, err := EnsureDownloadJob(context.Background(), c, md, testDownloadJobImage)
+	if err == nil {
+		t.Fatal("expected a foreign same-named Job to block reconciliation")
+	}
+	if completed {
+		t.Fatal("foreign Job collision must not be reported complete")
+	}
+	if !strings.Contains(err.Error(), "refusing to delete") {
+		t.Fatalf("expected safe collision error, got %v", err)
+	}
+	got := &batchv1.Job{}
+	foreignKey := types.NamespacedName{Name: foreign.Name, Namespace: foreign.Namespace}
+	if getErr := c.Get(context.Background(), foreignKey, got); getErr != nil {
+		t.Fatalf("foreign Job was deleted: %v", getErr)
+	}
+}
+
+func TestEnsureDownloadJobReplacesCompletedJobWhenClaimChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "cache-a"
+	pvcA := testDownloadPVC("cache-a", md.Namespace, "pvc-a")
+	pvcB := testDownloadPVC("cache-b", md.Namespace, "pvc-b")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).WithObjects(pvcA, pvcB).Build()
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	job := &batchv1.Job{}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, job); err != nil {
+		t.Fatalf("getting initial Job: %v", err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := c.Status().Update(ctx, job); err != nil {
+		t.Fatalf("completing initial Job: %v", err)
+	}
+
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "cache-b"
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling changed claim: %v", err)
+	}
+	if completed {
+		t.Fatal("completed Job for the old claim must not be reused")
+	}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected obsolete Job deletion, got %v", err)
+	}
+}
+
+func TestEnsureDownloadJobReplacesCompletedJobWhenPVCIsRecreated(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "shared-cache"
+	oldPVC := testDownloadPVC("shared-cache", md.Namespace, "pvc-old")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&batchv1.Job{}).WithObjects(oldPVC).Build()
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	job := &batchv1.Job{}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, job); err != nil {
+		t.Fatalf("getting initial Job: %v", err)
+	}
+	job.Status.Succeeded = 1
+	if err := c.Status().Update(ctx, job); err != nil {
+		t.Fatalf("completing initial Job: %v", err)
+	}
+	if err := c.Delete(ctx, oldPVC); err != nil {
+		t.Fatalf("deleting old PVC: %v", err)
+	}
+	if err := c.Create(ctx, testDownloadPVC("shared-cache", md.Namespace, "pvc-new")); err != nil {
+		t.Fatalf("creating replacement PVC: %v", err)
+	}
+
+	completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("reconciling recreated PVC: %v", err)
+	}
+	if completed {
+		t.Fatal("completed Job for the deleted PVC identity must not be reused")
+	}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected obsolete Job deletion, got %v", err)
+	}
+}
+
+func TestEnsureDownloadJobAbsentDeletesPriorOwnedJob(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	stale := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      downloadJobName(md.Name),
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       md.Name,
+			UID:        types.UID("prior-md-uid"),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale).Build()
+
+	absent, err := EnsureDownloadJobAbsent(ctx, c, md)
+	if err != nil {
+		t.Fatalf("deleting prior-owned Job: %v", err)
+	}
+	if absent {
+		t.Fatal("deletion request must remain pending until the Job is observed absent")
+	}
+	key := types.NamespacedName{Name: stale.Name, Namespace: stale.Namespace}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected prior-owned Job deletion, got %v", err)
+	}
+
+	absent, err = EnsureDownloadJobAbsent(ctx, c, md)
+	if err != nil || !absent {
+		t.Fatalf("expected confirmed absence after deletion: absent=%v err=%v", absent, err)
+	}
+}
+
+func TestPrepareDeletesDownloadJobWhenItIsNoLongerNeeded(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme()
+	md := newDownloadMD("my-model", "default")
+	md.Spec.Model.Storage.Volumes[0].Size = nil
+	md.Spec.Model.Storage.Volumes[0].ClaimName = "shared-cache"
+	pvc := testDownloadPVC("shared-cache", md.Namespace, "pvc-uid")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&batchv1.Job{}, &corev1.PersistentVolumeClaim{}).
+		WithObjects(pvc).
+		Build()
+
+	if completed, err := EnsureDownloadJob(ctx, c, md, testDownloadJobImage); err != nil || completed {
+		t.Fatalf("creating initial Job: completed=%v err=%v", completed, err)
+	}
+	md.Spec.Model.Storage.Volumes[0].ReadOnly = true
+	stage, err := Prepare(ctx, c, md, testDownloadJobImage)
+	if err != nil {
+		t.Fatalf("cleaning obsolete Job: %v", err)
+	}
+	if stage != PreparationDownloadPending {
+		t.Fatalf("cleanup stage = %q, want %q", stage, PreparationDownloadPending)
+	}
+	key := types.NamespacedName{Name: downloadJobName(md.Name), Namespace: md.Namespace}
+	if err := c.Get(ctx, key, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected obsolete Job deletion, got %v", err)
+	}
+
+	stage, err = Prepare(ctx, c, md, testDownloadJobImage)
+	if err != nil || stage != PreparationReady {
+		t.Fatalf("expected ready after cleanup: stage=%q err=%v", stage, err)
+	}
+}
+
+func testDownloadPVC(name, namespace string, uid types.UID) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: uid},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+}
+
+func stampCurrentDownloadJob(job *batchv1.Job, md *airunwayv1alpha1.ModelDeployment) {
+	job.Annotations = map[string]string{
+		downloadJobInputHashAnnotation: downloadJobInputHash(
+			md,
+			findModelCacheVolume(md),
+			testDownloadJobImage,
+			"",
+		),
+		downloadJobSchedulingHashAnnotation: downloadJobSchedulingHash(md),
 	}
 }

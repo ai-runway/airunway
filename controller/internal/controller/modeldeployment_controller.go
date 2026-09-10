@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -26,6 +27,8 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -46,6 +49,7 @@ import (
 	"github.com/ai-runway/airunway/controller/internal/gateway"
 	airmetrics "github.com/ai-runway/airunway/controller/internal/metrics"
 	"github.com/ai-runway/airunway/controller/internal/validation"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 // ModelDeploymentReconciler reconciles a ModelDeployment object
@@ -62,6 +66,11 @@ type ModelDeploymentReconciler struct {
 	// ProviderResolver looks up gateway capabilities from InferenceProviderConfig CRs.
 	// When nil, the reconciler treats all providers as having no gateway capabilities.
 	ProviderResolver gateway.ProviderCapabilityResolver
+
+	// DownloadJobImage is used by provider-agnostic model-cache download Jobs.
+	// An empty value uses the build-injected storage.DefaultDownloadJobImage;
+	// storage preparation fails explicitly if neither value is configured.
+	DownloadJobImage string
 
 	// phaseCache tracks the last observed phase per ModelDeployment for detecting transitions.
 	phaseCacheMu sync.RWMutex
@@ -110,7 +119,14 @@ func getCELEnv() (*cel.Env, error) {
 }
 
 const (
-	ExplicitProviderSelectionReason = "explicit provider selection"
+	ExplicitProviderSelectionReason      = "explicit provider selection"
+	providerNameKubeRay                  = "kuberay"
+	providerNameLLMD                     = "llmd"
+	providerNameVLLM                     = "vllm"
+	modelDeploymentPVCReferenceField     = "airunway.ai/modeldeployment-pvc-reference"
+	conditionReasonPVCFailed             = "PVCFailed"
+	conditionReasonDownloadFailed        = "DownloadFailed"
+	conditionReasonDownloadCleanupFailed = "DownloadCleanupFailed"
 )
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -123,7 +139,9 @@ const (
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=referencegrants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;update
 // +kubebuilder:rbac:groups=inference.networking.x-k8s.io,resources=inferenceobjectives;inferencemodelrewrites,verbs=get;list;watch
@@ -131,11 +149,12 @@ const (
 
 // Reconcile handles the reconciliation loop for ModelDeployment resources.
 //
-// The core controller is intentionally minimal - it does NOT create provider resources.
+// The core controller is intentionally minimal - it does NOT create provider workload resources.
 // Instead, it:
 // 1. Validates the ModelDeployment spec
 // 2. Runs provider selection (if enabled and spec.provider.name is empty)
-// 3. Updates status conditions
+// 3. Prepares portable model storage for providers that use native pod volumes
+// 4. Updates status conditions
 //
 // Provider controllers (out-of-tree) watch for ModelDeployments where status.provider.name
 // matches their name and handle the actual resource creation.
@@ -207,6 +226,18 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Initialize status if needed
 	if md.Status.Phase == "" {
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+	}
+
+	// Releasing a terminating PVC takes precedence over validation and provider
+	// selection. Provider reconcilers need this current-generation condition to
+	// stop older workloads, even when the desired spec cannot otherwise proceed.
+	if md.Status.Provider != nil &&
+		providerUsesCoreStorageLifecycle(md.Status.Provider.Name) &&
+		storage.HasStorageVolumes(&md) {
+		result, handled, err := r.reconcileTerminatingStorage(ctx, &md, base)
+		if handled {
+			return result, err
+		}
 	}
 
 	// Step 1: List all InferenceProviderConfigs once for use across validation and selection.
@@ -332,6 +363,18 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
+	// Step 9.5: Prepare storage for providers whose pod specs use the portable
+	// Kubernetes volume contract. Dynamo retains its provider-local lifecycle
+	// because it also maps claims through DynamoGraphDeployment.spec.pvcs.
+	if md.Status.Provider != nil &&
+		providerUsesCoreStorageLifecycle(md.Status.Provider.Name) &&
+		(storage.HasStorageVolumes(&md) || storage.HasPreparationConditions(&md)) {
+		result, handled, err := r.reconcileStorage(ctx, &md, base)
+		if handled {
+			return result, err
+		}
+	}
+
 	// The core controller does NOT create provider resources.
 	// Provider controllers watch for ModelDeployments where status.provider.name matches
 	// their name and handle the actual resource creation.
@@ -374,6 +417,216 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	logger.Info("Reconciliation complete", "name", md.Name, "phase", md.Status.Phase, "provider", md.Status.Provider)
 
 	return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
+}
+
+func providerUsesCoreStorageLifecycle(providerName string) bool {
+	switch providerName {
+	case providerNameKubeRay, providerNameLLMD, providerNameVLLM:
+		return true
+	default:
+		return false
+	}
+}
+
+// reconcileTerminatingStorage performs only the teardown-safe subset of
+// storage reconciliation. It deliberately runs before normal spec validation
+// so an invalid update cannot keep existing PVC consumers alive.
+func (r *ModelDeploymentReconciler) reconcileTerminatingStorage(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	base *airunwayv1alpha1.ModelDeployment,
+) (ctrl.Result, bool, error) {
+	terminating, detectionErr := storage.HasTerminatingPVCs(ctx, r.Client, md)
+	if !terminating {
+		if detectionErr != nil {
+			return ctrl.Result{}, true, detectionErr
+		}
+		return ctrl.Result{}, false, nil
+	}
+
+	_, cleanupErr := storage.EnsureDownloadJobAbsent(ctx, r.Client, md)
+	preparationErr := errors.Join(detectionErr, cleanupErr)
+	r.markStorageTerminating(md, preparationErr)
+	patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+	if preparationErr != nil {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true, patchErr
+	}
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, true, patchErr
+}
+
+func (r *ModelDeploymentReconciler) markStorageTerminating(
+	md *airunwayv1alpha1.ModelDeployment,
+	preparationErr error,
+) {
+	storageMessage := "Stopping provider workloads and waiting for terminating storage PVCs"
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+	md.Status.Message = storageMessage
+	if preparationErr != nil {
+		storageMessage = preparationErr.Error()
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = fmt.Sprintf("Failed while releasing terminating storage PVCs: %s", preparationErr)
+	}
+	r.setCondition(
+		md,
+		airunwayv1alpha1.ConditionTypeStorageReady,
+		metav1.ConditionFalse,
+		storage.ConditionReasonPVCsTerminating,
+		storageMessage,
+	)
+	r.setCondition(
+		md,
+		airunwayv1alpha1.ConditionTypeReady,
+		metav1.ConditionFalse,
+		"StorageUnavailable",
+		"Provider workload is stopping to release terminating storage PVCs",
+	)
+	md.Status.Endpoint = nil
+	md.Status.Replicas = nil
+}
+
+// reconcileStorage blocks provider workloads until all same-namespace claims
+// are usable and any required HuggingFace model download has completed.
+func (r *ModelDeploymentReconciler) reconcileStorage(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	base *airunwayv1alpha1.ModelDeployment,
+) (ctrl.Result, bool, error) {
+	recoveringStorageFailure := hasCurrentStorageFailure(md) || hasHistoricalStorageFailure(md)
+	stage, prepareErr := storage.Prepare(ctx, r.Client, md, r.DownloadJobImage)
+	if prepareErr != nil {
+		if stage == storage.PreparationPVCsTerminating {
+			r.markStorageTerminating(md, prepareErr)
+			patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, true, patchErr
+		}
+		conditionType := airunwayv1alpha1.ConditionTypeStorageReady
+		reason := conditionReasonPVCFailed
+		messagePrefix := "Failed to prepare model storage"
+		switch stage {
+		case storage.PreparationDownloadPending:
+			conditionType = airunwayv1alpha1.ConditionTypeModelDownloaded
+			if storage.NeedsDownloadJob(md) {
+				reason = conditionReasonDownloadFailed
+				messagePrefix = "Model download failed"
+			} else {
+				reason = conditionReasonDownloadCleanupFailed
+				messagePrefix = "Failed to clean up obsolete model download Job"
+			}
+			if storage.HasStorageVolumes(md) {
+				r.setCondition(md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionTrue, "PVCsReady", "All storage PVCs are ready")
+			}
+		}
+		r.setCondition(md, conditionType, metav1.ConditionFalse, reason, prepareErr.Error())
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = fmt.Sprintf("%s: %s", messagePrefix, prepareErr)
+		patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true, patchErr
+	}
+
+	switch stage {
+	case storage.PreparationPVCsTerminating:
+		r.markStorageTerminating(md, nil)
+		patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, patchErr
+	case storage.PreparationPVCsPending:
+		r.setCondition(md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionFalse, "PVCsPending", "Waiting for storage PVCs to become ready")
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+		md.Status.Message = "Waiting for storage PVCs to become ready"
+		patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, true, patchErr
+	case storage.PreparationDownloadPending:
+		if !storage.NeedsDownloadJob(md) {
+			storage.PrunePreparationConditions(md)
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+			md.Status.Message = "Cleaning up obsolete model download Job"
+			patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, true, patchErr
+		}
+		r.setCondition(md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionTrue, "PVCsReady", "All storage PVCs are ready")
+		r.setCondition(md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionFalse, "DownloadInProgress", "Model download in progress")
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+		md.Status.Message = "Model download in progress"
+		patchErr := r.Status().Patch(ctx, md, client.MergeFrom(base))
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, true, patchErr
+	case storage.PreparationReady:
+		if storage.HasStorageVolumes(md) {
+			r.setCondition(md, airunwayv1alpha1.ConditionTypeStorageReady, metav1.ConditionTrue, "PVCsReady", "All storage PVCs are ready")
+		}
+		if storage.NeedsDownloadJob(md) {
+			r.setCondition(md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionTrue, "DownloadComplete", "Model download completed")
+		}
+		storage.PrunePreparationConditions(md)
+		markStorageReady(md, recoveringStorageFailure)
+	}
+
+	return ctrl.Result{}, false, nil
+}
+
+func markStorageReady(md *airunwayv1alpha1.ModelDeployment, recoveringStorageFailure bool) {
+	if recoveringStorageFailure && md.Status.Phase == airunwayv1alpha1.DeploymentPhaseFailed {
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+		md.Status.Message = "Model storage is ready; waiting for the provider workload"
+		return
+	}
+
+	if md.Status.Phase != airunwayv1alpha1.DeploymentPhasePending {
+		return
+	}
+
+	switch md.Status.Message {
+	case "", "Waiting for storage PVCs to become ready", "Stopping provider workloads and waiting for terminating storage PVCs", "Model download in progress", "Cleaning up obsolete model download Job":
+		md.Status.Message = "Model storage is ready; waiting for the provider workload"
+	}
+}
+
+func hasCurrentStorageFailure(md *airunwayv1alpha1.ModelDeployment) bool {
+	for _, conditionType := range []string{
+		airunwayv1alpha1.ConditionTypeStorageReady,
+		airunwayv1alpha1.ConditionTypeModelDownloaded,
+	} {
+		condition := meta.FindStatusCondition(md.Status.Conditions, conditionType)
+		if condition != nil &&
+			condition.Status == metav1.ConditionFalse &&
+			condition.ObservedGeneration == md.Generation &&
+			(condition.Reason == conditionReasonPVCFailed || condition.Reason == conditionReasonDownloadFailed) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHistoricalStorageFailure(md *airunwayv1alpha1.ModelDeployment) bool {
+	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed ||
+		!hasStorageFailureMessage(md.Status.Message) {
+		return false
+	}
+	for _, conditionType := range []string{
+		airunwayv1alpha1.ConditionTypeStorageReady,
+		airunwayv1alpha1.ConditionTypeModelDownloaded,
+	} {
+		condition := meta.FindStatusCondition(md.Status.Conditions, conditionType)
+		if condition != nil &&
+			condition.Status == metav1.ConditionFalse &&
+			(condition.Reason == conditionReasonPVCFailed ||
+				condition.Reason == conditionReasonDownloadFailed ||
+				condition.Reason == conditionReasonDownloadCleanupFailed) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasStorageFailureMessage(message string) bool {
+	for _, prefix := range []string{
+		"Failed to prepare model storage",
+		"Model download failed",
+		"Failed to clean up obsolete model download Job",
+	} {
+		if message == prefix || strings.HasPrefix(message, prefix+": ") {
+			return true
+		}
+	}
+	return false
 }
 
 // isNoMatchError checks if an error indicates that a CRD/resource type is not registered.
@@ -988,12 +1241,61 @@ func (r *ModelDeploymentReconciler) mapProviderConfigToModelDeployments(ctx cont
 	return requests
 }
 
+func modelDeploymentPVCReferenceIndexValues(obj client.Object) []string {
+	md, ok := obj.(*airunwayv1alpha1.ModelDeployment)
+	if !ok {
+		return nil
+	}
+	return storage.ReferencedPVCNames(md)
+}
+
+func (r *ModelDeploymentReconciler) mapPVCToModelDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	pvc, ok := obj.(*corev1.PersistentVolumeClaim)
+	if !ok {
+		return nil
+	}
+
+	var mdList airunwayv1alpha1.ModelDeploymentList
+	if err := r.List(
+		ctx,
+		&mdList,
+		client.InNamespace(pvc.Namespace),
+		client.MatchingFields{modelDeploymentPVCReferenceField: pvc.Name},
+	); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ModelDeployments for PVC change", "pvc", pvc.Name, "namespace", pvc.Namespace)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(mdList.Items))
+	for i := range mdList.Items {
+		md := &mdList.Items[i]
+		requests = append(requests, reconcile.Request{
+			NamespacedName: k8stypes.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+		})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.phaseCache = make(map[k8stypes.NamespacedName]phaseEntry)
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&airunwayv1alpha1.ModelDeployment{},
+		modelDeploymentPVCReferenceField,
+		modelDeploymentPVCReferenceIndexValues,
+	); err != nil {
+		return fmt.Errorf("failed to index ModelDeployment PVC references: %w", err)
+	}
 
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&airunwayv1alpha1.ModelDeployment{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&batchv1.Job{}).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPVCToModelDeployments),
+		).
 		Watches(
 			&airunwayv1alpha1.InferenceProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.mapProviderConfigToModelDeployments),

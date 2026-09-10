@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	storageutil "github.com/ai-runway/airunway/controller/pkg/storage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -215,6 +216,7 @@ func (t *Transformer) buildHeadGroupSpec(md *airunwayv1alpha1.ModelDeployment) m
 			},
 		},
 	}
+	t.addStorageToPodTemplate(md, headGroupSpec["template"].(map[string]any))
 
 	return headGroupSpec
 }
@@ -269,6 +271,7 @@ func (t *Transformer) buildAggregatedWorkerGroup(md *airunwayv1alpha1.ModelDeplo
 			},
 		},
 	}
+	t.addStorageToPodTemplate(md, workerGroup["template"].(map[string]any))
 
 	return []interface{}{workerGroup}
 }
@@ -320,6 +323,7 @@ func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelD
 				},
 			},
 		}
+		t.addStorageToPodTemplate(md, prefillGroup["template"].(map[string]any))
 		workerGroups = append(workerGroups, prefillGroup)
 	}
 
@@ -365,10 +369,33 @@ func (t *Transformer) buildDisaggregatedWorkerGroups(md *airunwayv1alpha1.ModelD
 				},
 			},
 		}
+		t.addStorageToPodTemplate(md, decodeGroup["template"].(map[string]any))
 		workerGroups = append(workerGroups, decodeGroup)
 	}
 
 	return workerGroups
+}
+
+// addStorageToPodTemplate mounts every configured PVC and points HuggingFace
+// cache lookups at the persistent model-cache volume. Ray may place serving
+// actors on the head or worker groups, so every pod template receives storage.
+func (t *Transformer) addStorageToPodTemplate(md *airunwayv1alpha1.ModelDeployment, template map[string]any) {
+	volumes := storageutil.PodVolumes(md)
+	if len(volumes) == 0 {
+		return
+	}
+
+	podSpec := template["spec"].(map[string]any)
+	podSpec["volumes"] = volumes
+	containers := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	container["volumeMounts"] = storageutil.ContainerVolumeMounts(md)
+
+	if env, ok := container["env"].([]any); ok {
+		container["env"] = storageutil.AppendModelCacheEnv(md, env)
+	} else if env := t.buildEnvVars(md); len(env) > 0 {
+		container["env"] = env
+	}
 }
 
 // buildEngineArgs constructs the vLLM engine arguments string
@@ -446,7 +473,7 @@ func (t *Transformer) buildEnvVars(md *airunwayv1alpha1.ModelDeployment) []inter
 		})
 	}
 
-	return envVars
+	return storageutil.AppendModelCacheEnv(md, envVars)
 }
 
 // getImage returns the container image to use

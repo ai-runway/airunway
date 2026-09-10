@@ -57,6 +57,8 @@ const RUNTIME_ENGINES: Record<RuntimeId, Engine[]> = {
   llmd: ['vllm'],
 };
 
+const STORAGE_SUPPORTED_RUNTIMES = new Set<RuntimeId>(['dynamo', 'kuberay', 'llmd']);
+
 // Check runtime compatibility with model
 function isRuntimeCompatible(runtimeId: RuntimeId, modelEngines: Engine[]): boolean {
   const runtimeEngines = RUNTIME_ENGINES[runtimeId];
@@ -223,6 +225,9 @@ export function CreateDeployment() {
   const handleRuntimeChange = useCallback((runtime: RuntimeId) => {
     setSelectedRuntime(runtime);
     setNamespace(RUNTIME_INFO[runtime].defaultNamespace);
+    if (!STORAGE_SUPPORTED_RUNTIMES.has(runtime)) {
+      setStorageVolumes([]);
+    }
     if (runtime !== 'dynamo' && runtime !== 'llmd') {
       setMode('aggregated');
     }
@@ -874,16 +879,18 @@ export function CreateDeployment() {
       </div>
 
       {/* Storage Volumes */}
-      <div style={{ marginBottom: '24px' }}>
-        <h3 style={{ marginBottom: '12px' }}>💾 Storage Volumes</h3>
-        <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
-          Attach persistent storage for model caching or custom data
+      {STORAGE_SUPPORTED_RUNTIMES.has(selectedRuntime) && (
+        <div style={{ marginBottom: '24px' }}>
+          <h3 style={{ marginBottom: '12px' }}>💾 Storage Volumes</h3>
+          <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
+            Attach persistent storage for model caching or custom data
+          </div>
+          <StorageVolumesEditor
+            volumes={storageVolumes}
+            onChange={setStorageVolumes}
+          />
         </div>
-        <StorageVolumesEditor
-          volumes={storageVolumes}
-          onChange={setStorageVolumes}
-        />
-      </div>
+      )}
 
       {/* Advanced Options */}
       <div style={{ marginBottom: '24px' }}>
