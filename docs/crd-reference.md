@@ -190,6 +190,80 @@ Providers should declare scheduling capabilities in `spec.capabilities`. They ma
 |---|---|---|
 | `airunway.ai/installation` | JSON string | Installation metadata (description, defaultNamespace, helmRepos, helmCharts, steps). The backend parses this JSON to show installation commands and steps in the UI. |
 
+## AgentProviderConfig
+
+Cluster-scoped resource for agent framework registration. Capabilities stay in `spec`, while marketplace metadata and install guidance are carried in annotations.
+
+```yaml
+apiVersion: airunway.ai/v1alpha1
+kind: AgentProviderConfig
+metadata:
+  name: kagent
+  annotations:
+    airunway.ai/agent-catalog: |
+      [
+        {
+          "name": "kagent-k8s-sre",
+          "title": "Kubernetes SRE (Kagent)",
+          "description": "Diagnose deployments, pods, and networking.",
+          "tags": ["devops", "observability"]
+        }
+      ]
+    airunway.ai/install-instructions: "Install the Kagent operator before deploying agents with this framework."
+spec:
+  capabilities:
+    backend: crd
+    requiresOperator: true
+    operatorAPIGroup: kagent.dev/v1alpha2
+    modelBindingModes: [deploymentRef, gatewayEndpoint, externalAPI]
+    protocols: [mcp, a2a, openaiTools]
+status:
+  ready: true
+  version: "agent-kagent-provider:v0.1.0"
+```
+
+### AgentProviderConfig annotations
+
+| Annotation | Type | Description |
+|---|---|---|
+| `airunway.ai/agent-catalog` | JSON string | Catalog entries shown in the agent marketplace UI. Value must be a JSON array of items with unique `name` and non-empty `title`. |
+| `airunway.ai/install-instructions` | string | Plain-text install guidance. Appended to the provider config's `Ready` message for `OperatorNotInstalled` and `OperatorAPIGroupMissing`, and onto each dependent AgentDeployment's `FrameworkReady` message for any not-ready reason. |
+
+## AgentDeployment model binding behavior
+
+For `spec.model.gatewayEndpoint`, the core controller combines a published IP
+or hostname from `Gateway.status.addresses` with an HTTP(S) listener's protocol
+and port. Set `gatewayRef.listenerName` when the Gateway has more than one
+HTTPRoute-capable HTTP(S) listener. It may be omitted when exactly one compatible
+listener exists. The selected listener must report current `Accepted`,
+`ResolvedRefs`, and `Programmed` conditions as true. The resolved URL always
+includes the listener port and the OpenAI-compatible `/v1` path.
+
+When the selected listener declares a concrete hostname, that hostname becomes
+the URL authority so HTTP Host matching and HTTPS SNI/certificate validation use
+the listener identity. A wildcard hostname cannot identify one concrete model
+endpoint and is rejected. A listener without a hostname uses the published
+Gateway address.
+
+For `spec.model.externalAPI`, `baseURL` must be an absolute `http` or `https`
+URL with a host, no embedded user information, and a port from 1 through 65535
+when a port is present. Invalid values are rejected during admission on both
+create and update, and reconciliation repeats the check for objects created
+while the webhook was unavailable.
+
+For `spec.model.deploymentRef`, the core controller resolves the model binding in this order:
+
+1. If `ModelDeployment.status.gateway` records a Gateway identity, resolve that Gateway and its sole compatible ready listener, then combine the listener authority, protocol, and port into an OpenAI-compatible `/v1` base URL. This also recovers when the Gateway publishes its first address after the ModelDeployment status was written. Gateway-backed bindings are periodically rechecked because Gateway status is not watched directly. If the Gateway has multiple compatible ready listeners, `deploymentRef` preserves the endpoint already published in `ModelDeployment.status.gateway.endpoint` because this binding mode has no listener selector. It does not preserve that endpoint when none of those listeners are ready.
+2. Else fall back to the model Service endpoint from `ModelDeployment.status.endpoint`.
+
+`status.gateway.gatewayName` and `gatewayNamespace` identify which Gateway was selected, but are **not** used to construct an address. A Gateway resource name is not a Service DNS name. Gateway API does not require an implementation to name its data-plane Service after the Gateway, and implementations differ. Deriving `http://<gatewayName>.<gatewayNamespace>.svc.cluster.local` from them would produce an address that does not resolve on some clusters.
+
+The resolved `status.modelBinding.modelName` prefers `status.gateway.modelName`, then `spec.model.servedName`, then `spec.model.id`.
+
+For keyless in-cluster `deploymentRef` bindings, core leaves `status.modelBinding.credentialsRef` empty. Container backends inject `OPENAI_API_KEY=not-required` directly, while CRD backends provision an Airunway-managed per-agent no-auth Secret and reference it in their rendered CRs.
+
+`spec.provider.overrides` is an escape hatch for validated security-context overrides. Supported sections are `workload` and `container`, each allowing only `podSecurityContext` and `securityContext` keys with allow-listed security fields.
+
 ## See also
 
 - [Architecture Overview](architecture.md)

@@ -22,10 +22,7 @@ import (
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -235,87 +232,47 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 
 // checkBackendCRDInstalled checks if the upstream DynamoGraphDeployment CRD is installed
 func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
-	if m.discoveryClient != nil {
-		return hasAPIResource(m.discoveryClient, DynamoAPIGroup, DynamoAPIVersion, dynamoGraphDeploymentResource)
-	}
-
-	mapper := m.client.RESTMapper()
-	if mapper == nil {
-		return false
-	}
-	_, err := mapper.RESTMapping(schema.GroupKind{
-		Group: DynamoAPIGroup,
-		Kind:  DynamoGraphDeploymentKind,
-	}, DynamoAPIVersion)
-	return err == nil
-}
-
-func hasAPIResource(discoveryClient discovery.DiscoveryInterface, group, version, resource string) bool {
-	resources, err := discoveryClient.ServerResourcesForGroupVersion(fmt.Sprintf("%s/%s", group, version))
-	if err != nil {
-		return false
-	}
-
-	for _, apiResource := range resources.APIResources {
-		if apiResource.Name == resource {
-			return true
-		}
-	}
-
-	return false
+	return shim.IsAPIResourceInstalled(
+		m.client,
+		m.discoveryClient,
+		DynamoAPIGroup,
+		DynamoAPIVersion,
+		DynamoGraphDeploymentKind,
+		dynamoGraphDeploymentResource,
+	)
 }
 
 // UpdateStatus updates the status of the InferenceProviderConfig
 func (m *ProviderConfigManager) UpdateStatus(ctx context.Context, ready bool) error {
-	config := &airunwayv1alpha1.InferenceProviderConfig{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: ProviderConfigName}, config); err != nil {
-		return fmt.Errorf("failed to get InferenceProviderConfig: %w", err)
-	}
-
-	now := metav1.Now()
-	config.Status = airunwayv1alpha1.InferenceProviderConfigStatus{
-		Ready:              ready,
-		Version:            ProviderVersion,
-		LastHeartbeat:      &now,
-		UpstreamCRDVersion: fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
-	}
-
-	if err := m.client.Status().Update(ctx, config); err != nil {
-		return fmt.Errorf("failed to update InferenceProviderConfig status: %w", err)
-	}
-
-	return nil
+	return shim.UpdateProviderConfigStatus(
+		ctx,
+		m.client,
+		ProviderConfigName,
+		ready,
+		ProviderVersion,
+		fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
+	)
 }
 
 // StartHeartbeat starts a goroutine that periodically updates the provider heartbeat
 func (m *ProviderConfigManager) StartHeartbeat(ctx context.Context) {
-	logger := log.FromContext(ctx)
+	shim.StartHeartbeatLoop(ctx, HeartbeatInterval, m.updateHeartbeat)
+}
 
-	go func() {
-		ticker := time.NewTicker(HeartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				logger.Info("Stopping heartbeat goroutine")
-				return
-			case <-ticker.C:
-				ready := m.checkBackendCRDInstalled()
-				if !ready {
-					logger.Info("Backend CRD not installed, reporting not ready", "group", DynamoAPIGroup, "kind", DynamoGraphDeploymentKind)
-				}
-				if err := m.UpdateStatus(ctx, ready); err != nil {
-					logger.Error(err, "Failed to update heartbeat")
-				}
-			}
-		}
-	}()
+func (m *ProviderConfigManager) updateHeartbeat(ctx context.Context) error {
+	ready := m.checkBackendCRDInstalled()
+	if !ready {
+		log.FromContext(ctx).Info(
+			"Backend CRD not installed, reporting not ready",
+			"group", DynamoAPIGroup, "kind", DynamoGraphDeploymentKind,
+		)
+	}
+	return m.UpdateStatus(ctx, ready)
 }
 
 // Unregister marks the provider as not ready
 func (m *ProviderConfigManager) Unregister(ctx context.Context) error {
-	return m.UpdateStatus(ctx, false)
+	return shim.MarkProviderConfigUnregistered(ctx, m.client, ProviderConfigName)
 }
 
 func buildAnnotations() (map[string]string, error) {

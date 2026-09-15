@@ -23,6 +23,12 @@ KAITO_CONFIG="providers/kaito/config.go"
 VLLM_TRANSFORMER="providers/vllm/transformer.go"
 LLMD_CONFIG="providers/llmd/config.go"
 VERSIONS_TS="shared/types/versions.generated.ts"
+AGENT_DOCKERFILES=(
+    "images/agents/crewai/Dockerfile"
+    "images/agents/langgraph/Dockerfile"
+    "images/agents/openclaw/Dockerfile"
+    "images/agents/hermes/Dockerfile"
+)
 
 BACKUPS=(
     "${GO_MOD}.bak"
@@ -33,6 +39,9 @@ BACKUPS=(
     "${LLMD_CONFIG}.bak"
     "${VERSIONS_TS}.bak"
 )
+for dockerfile in "${AGENT_DOCKERFILES[@]}"; do
+    BACKUPS+=("${dockerfile}.bak")
+done
 
 restore() {
     local rc=$?
@@ -59,6 +68,13 @@ expect_fail() {
 echo "== Sanity check: verify-versions passes on a clean tree =="
 make verify-versions >/dev/null
 echo "✅ clean tree passes"
+
+echo "== Overriding an agent base with a mutable tag =="
+if make verify-versions AGENT_OPENCLAW_BASE=ghcr.io/openclaw/openclaw:latest >/dev/null 2>&1; then
+    echo "❌ verify-versions accepted a mutable agent base image tag"
+    exit 1
+fi
+echo "✅ verify-versions rejected a mutable agent base image tag"
 
 echo "== Mutating ${GO_MOD} =="
 sed -i.bak -E 's|(gateway-api-inference-extension )v[0-9][^[:space:]]*|\1v0.0.0-bogus|' "${GO_MOD}"
@@ -94,6 +110,13 @@ echo "== Mutating ${LLMD_CONFIG} =="
 sed -i.bak -E 's|^var LLMDSchedulerImage = "[^"]*"$|var LLMDSchedulerImage = "ghcr.io/llm-d/llm-d-inference-scheduler:v0.0.0-bogus"|' "${LLMD_CONFIG}"
 expect_fail "${LLMD_CONFIG}"
 mv -f "${LLMD_CONFIG}.bak" "${LLMD_CONFIG}"
+
+for dockerfile in "${AGENT_DOCKERFILES[@]}"; do
+    echo "== Mutating ${dockerfile} (inline base fallback) =="
+    sed -i.bak -E 's|^ARG ([A-Z_]+)$|ARG \1=mutable:latest|' "${dockerfile}"
+    expect_fail "${dockerfile} inline base fallback"
+    mv -f "${dockerfile}.bak" "${dockerfile}"
+done
 
 echo "== Mutating ${VERSIONS_TS} =="
 # Now that verify-versions diffs a temp regen against the working-tree
