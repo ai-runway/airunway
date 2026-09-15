@@ -395,7 +395,7 @@ func TestRenderedObjectHasNoUnknownRootFields(t *testing.T) {
 	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
 		Name: "dynamo",
 		Overrides: &runtime.RawExtension{
-			Raw: []byte(`{"routerMode":"kv","RouterMode":"round-robin","epp":{"image":"custom:v1"}}`),
+			Raw: []byte(`{"deploymentMode":"manual","routerMode":"kv","RouterMode":"round-robin","epp":{"image":"custom:v1"}}`),
 		},
 	}
 
@@ -668,11 +668,11 @@ func TestDocumentedOverrideKeysStillAccepted(t *testing.T) {
 	}{
 		{
 			name: "documented spelling",
-			raw:  `{"routerMode":"kv","epp":{"image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`,
+			raw:  `{"deploymentMode":"manual","routerMode":"kv","epp":{"image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`,
 		},
 		{
 			name: "case-insensitive consumed keys",
-			raw:  `{"RouterMode":"kv","EPP":{"Image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`,
+			raw:  `{"DeploymentMode":"manual","RouterMode":"kv","EPP":{"Image":"custom:v1"},"spec":{"backendFramework":"sglang"}}`,
 		},
 	}
 

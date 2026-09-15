@@ -237,6 +237,13 @@ func TestCheckBackendCRDInstalledUsesDiscoveryFreshResults(t *testing.T) {
 				{Name: dynamoGraphDeploymentResource},
 			},
 		},
+		{
+			// Provider readiness requires the DGDR API used by the new default path.
+			GroupVersion: DynamoAPIGroup + "/" + DynamoGraphDeploymentRequestAPIVersion,
+			APIResources: []metav1.APIResource{
+				{Name: dynamoGraphDeploymentRequestResource},
+			},
+		},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -422,8 +429,20 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
 		t.Fatalf("failed to decode health annotation: %v", err)
 	}
-	if len(health.CRDs) != 1 || health.CRDs[0].Name != "dynamographdeployments.nvidia.com" {
-		t.Fatalf("expected Dynamo CRD health probe, got %+v", health.CRDs)
+	// The default DGDR flow requires both the request and generated-deployment APIs.
+	expectedCRDs := map[string]bool{
+		"dynamographdeployments.nvidia.com":        false,
+		"dynamographdeploymentrequests.nvidia.com": false,
+	}
+	for _, crd := range health.CRDs {
+		if _, expected := expectedCRDs[crd.Name]; expected {
+			expectedCRDs[crd.Name] = true
+		}
+	}
+	for crd, found := range expectedCRDs {
+		if !found {
+			t.Fatalf("expected %s health probe, got %+v", crd, health.CRDs)
+		}
 	}
 	if len(health.OperatorPods) == 0 || len(health.OperatorPods[0].Selectors) == 0 {
 		t.Fatalf("expected operator pod health probes, got %+v", health.OperatorPods)

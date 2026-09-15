@@ -23,11 +23,18 @@ metadata:
 rules:
 - apiGroups:
   - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+- apiGroups:
+  - ""
   resourceNames:
   - hf-token-secret
   resources:
   - secrets
   verbs:
+  - get
   - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -97,6 +104,24 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests/status
+  verbs:
+  - get
+- apiGroups:
   - ""
   resources:
   - persistentvolumeclaims
@@ -149,7 +174,7 @@ roleRef:
   name: airunway-hf-secret
 subjects:
 - kind: ServiceAccount
-  name: airunway
+  name: airunway-dynamo-provider
   namespace: airunway-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -15,7 +15,7 @@ import (
 )
 
 func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
-	return &airunwayv1alpha1.ModelDeployment{
+	md := &airunwayv1alpha1.ModelDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
@@ -36,11 +36,22 @@ func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
 			},
 		},
 	}
+	// Most existing transformer tests exercise direct DGD details; opt those
+	// fixtures into manual mode while individual default-mode tests clear it.
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: "dynamo",
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{"deploymentMode":"manual"}`),
+		},
+	}
+	return md
 }
 
 func TestTransformAggregated(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
+	// No deploymentMode exercises the new DGDR default for a fresh deployment.
+	md.Spec.Provider.Overrides = nil
 
 	resources, err := tr.Transform(context.Background(), md)
 	if err != nil {
@@ -50,25 +61,25 @@ func TestTransformAggregated(t *testing.T) {
 		t.Fatalf("expected 1 resource, got %d", len(resources))
 	}
 
-	dgd := resources[0]
-	if dgd.GetKind() != DynamoGraphDeploymentKind {
-		t.Errorf("expected kind %s, got %s", DynamoGraphDeploymentKind, dgd.GetKind())
+	dgdr := resources[0]
+	if dgdr.GetKind() != DynamoGraphDeploymentRequestKind {
+		t.Errorf("expected kind %s, got %s", DynamoGraphDeploymentRequestKind, dgdr.GetKind())
 	}
 	expectedName := "test-model"
-	if dgd.GetName() != expectedName {
-		t.Errorf("expected name %q, got %s", expectedName, dgd.GetName())
+	if dgdr.GetName() != expectedName {
+		t.Errorf("expected name %q, got %s", expectedName, dgdr.GetName())
 	}
-	if dgd.GetAPIVersion() != "nvidia.com/v1alpha1" {
-		t.Errorf("expected apiVersion 'nvidia.com/v1alpha1', got %s", dgd.GetAPIVersion())
+	if dgdr.GetAPIVersion() != "nvidia.com/v1beta1" {
+		t.Errorf("expected apiVersion 'nvidia.com/v1beta1', got %s", dgdr.GetAPIVersion())
 	}
 
-	// Check namespace — DGD should be in the same namespace as the ModelDeployment
-	if dgd.GetNamespace() != "default" {
-		t.Errorf("expected namespace %q, got %q", "default", dgd.GetNamespace())
+	// DGDR should be in the same namespace as the ModelDeployment.
+	if dgdr.GetNamespace() != "default" {
+		t.Errorf("expected namespace %q, got %q", "default", dgdr.GetNamespace())
 	}
 
 	// Check labels
-	labels := dgd.GetLabels()
+	labels := dgdr.GetLabels()
 	if labels[airunwayv1alpha1.LabelManagedBy] != "airunway" {
 		t.Errorf("expected managed-by label 'airunway'")
 	}
@@ -77,7 +88,7 @@ func TestTransformAggregated(t *testing.T) {
 	}
 
 	// Check OwnerReference
-	ownerRefs := dgd.GetOwnerReferences()
+	ownerRefs := dgdr.GetOwnerReferences()
 	if len(ownerRefs) != 1 {
 		t.Fatalf("expected 1 OwnerReference, got %d", len(ownerRefs))
 	}
@@ -100,21 +111,29 @@ func TestTransformAggregated(t *testing.T) {
 		t.Errorf("expected OwnerReference BlockOwnerDeletion to be true")
 	}
 
-	// Check spec
-	spec, _, _ := unstructured.NestedMap(dgd.Object, "spec")
-	if spec["backendFramework"] != "vllm" {
-		t.Errorf("expected backendFramework 'vllm', got %v", spec["backendFramework"])
+	// Check the minimal intent spec and pinned generated-DGD name.
+	spec, _, _ := unstructured.NestedMap(dgdr.Object, "spec")
+	if spec["model"] != md.Spec.Model.ID || spec["backend"] != "vllm" {
+		t.Errorf("unexpected DGDR model/backend: %#v", spec)
 	}
+	if spec["searchStrategy"] != "rapid" || spec["autoApply"] != true {
+		t.Errorf("unexpected DGDR defaults: %#v", spec)
+	}
+	generatedName, found, _ := unstructured.NestedString(dgdr.Object, "spec", "overrides", "dgd", "metadata", "name")
+	if !found || generatedName != md.Name {
+		t.Errorf("expected generated DGD name %q, got %q", md.Name, generatedName)
+	}
+}
 
-	services, _ := spec["services"].(map[string]interface{})
-	if _, ok := services["Frontend"]; ok {
-		t.Error("did not expect Frontend service when gateway is enabled (default)")
-	}
-	if _, ok := services["Epp"]; !ok {
-		t.Error("expected Epp service when gateway is enabled (default)")
-	}
-	if _, ok := services["VllmWorker"]; !ok {
-		t.Error("expected VllmWorker service in aggregated mode")
+func TestTransformDGDRRejectsCustomHuggingFaceSecret(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Provider.Overrides = nil
+	md.Spec.Secrets = &airunwayv1alpha1.SecretsSpec{HuggingFaceToken: "model-specific-token"}
+
+	_, err := tr.Transform(context.Background(), md)
+	if err == nil || !strings.Contains(err.Error(), HuggingFaceTokenSecretName) || !strings.Contains(err.Error(), DeploymentModeManual) {
+		t.Fatalf("expected canonical Secret guidance, got %v", err)
 	}
 }
 
@@ -1020,6 +1039,7 @@ func TestApplyOverridesEscapeHatch(t *testing.T) {
 		Name: "dynamo",
 		Overrides: &runtime.RawExtension{
 			Raw: []byte(`{
+				"deploymentMode": "manual",
 				"routerMode": "kv",
 				"spec": {
 					"customField": "customValue"
@@ -1271,6 +1291,7 @@ func TestTransformOverrideCanOverwriteServices(t *testing.T) {
 		Name: "dynamo",
 		Overrides: &runtime.RawExtension{
 			Raw: []byte(`{
+				"deploymentMode": "manual",
 				"spec": {
 					"services": {
 						"VllmWorker": {

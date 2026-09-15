@@ -79,11 +79,37 @@ The Web UI backend reads provider information (capabilities, installation steps,
 
 | Provider      | Upstream CRD          | Status      | Shim YAML | Description                                                                    |
 | ------------- | --------------------- | ----------- | --------- | ------------------------------------------------------------------------------ |
-| NVIDIA Dynamo | DynamoGraphDeployment | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | High-performance GPU inference with KV-cache routing and disaggregated serving |
+| NVIDIA Dynamo | DynamoGraphDeploymentRequest | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | Intent-based GPU inference with automatic profiling and topology selection |
 | KubeRay       | RayService            | ✅ Available | [kuberay.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kuberay/deploy/kuberay.yaml) | Ray-based distributed inference with autoscaling                               |
 | KAITO         | Workspace             | ✅ Available | [kaito.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kaito/deploy/kaito.yaml) | Flexible inference with vLLM (GPU) or llama.cpp (CPU/GPU)                      |
 | llm-d         | none                  | ✅ Available | [llmd.yaml](https://github.com/ai-runway/airunway/blob/main/providers/llmd/deploy/llmd.yaml) | Flexible inference with vLLM (GPU) with KV-cache routing and disaggregated serving |
 | Direct vLLM   | Deployment            | ✅ Available | [vllm.yaml](https://github.com/ai-runway/airunway/blob/main/providers/vllm/deploy/vllm.yaml) | Direct vLLM OpenAI-compatible server deployments using `spec.engine.image`; see [Direct vLLM guide](providers/vllm.md) |
+
+### Dynamo Deployment Modes
+
+Dynamo deployments use `DynamoGraphDeploymentRequest` by default. Dynamo profiles the available
+hardware, selects a serving layout, and creates the `DynamoGraphDeployment` automatically. New
+requests use rapid profiling and apply the selected deployment immediately.
+
+Use direct deployment only when you need to maintain a hand-tuned or compatibility configuration:
+
+```yaml
+spec:
+    provider:
+        name: dynamo
+        overrides:
+            deploymentMode: manual
+```
+
+Direct-DGD settings such as `routerMode`, `frontend`, `epp`, and raw `spec` overrides require
+manual mode. DGDR intent cannot be changed after profiling starts; delete and recreate the
+`ModelDeployment` to apply a different intent. Existing DGD-backed deployments remain on the
+manual path during provider upgrades so a serving deployment is not replaced implicitly.
+
+Dynamo DGDR uses the namespace-level Secret `hf-token-secret` with key `HF_TOKEN` for both
+profiling and serving. For public models, AI Runway creates an empty placeholder when that Secret
+does not exist and never overwrites an existing credential. Set `spec.secrets.huggingFaceToken` to
+`hf-token-secret` for private models. Custom Secret names remain supported in manual mode.
 
 ### KAITO Provider
 

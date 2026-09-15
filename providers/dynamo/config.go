@@ -43,6 +43,8 @@ const (
 
 	dynamoPlatformValuesJSON      = `{"global.grove.install":true}`
 	dynamoGraphDeploymentResource = "dynamographdeployments"
+	// The default intent path requires the request CRD in addition to the DGD it generates.
+	dynamoGraphDeploymentRequestResource = "dynamographdeploymentrequests"
 )
 
 // shimVersion is this shim's reported version tag, injected at build time via:
@@ -230,9 +232,9 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	return m.UpdateStatus(ctx, ready)
 }
 
-// checkBackendCRDInstalled checks if the upstream DynamoGraphDeployment CRD is installed
+// checkBackendCRDInstalled checks both APIs required by the default DGDR flow.
 func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
-	return shim.IsAPIResourceInstalled(
+	dgdInstalled := shim.IsAPIResourceInstalled(
 		m.client,
 		m.discoveryClient,
 		DynamoAPIGroup,
@@ -240,6 +242,15 @@ func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
 		DynamoGraphDeploymentKind,
 		dynamoGraphDeploymentResource,
 	)
+	dgdrInstalled := shim.IsAPIResourceInstalled(
+		m.client,
+		m.discoveryClient,
+		DynamoAPIGroup,
+		DynamoGraphDeploymentRequestAPIVersion,
+		DynamoGraphDeploymentRequestKind,
+		dynamoGraphDeploymentRequestResource,
+	)
+	return dgdInstalled && dgdrInstalled
 }
 
 // UpdateStatus updates the status of the InferenceProviderConfig
@@ -280,6 +291,7 @@ func buildAnnotations() (map[string]string, error) {
 	health := map[string]interface{}{
 		"crds": []map[string]string{
 			{"name": "dynamographdeployments.nvidia.com", "displayName": "DynamoGraphDeployment CRD"},
+			{"name": "dynamographdeploymentrequests.nvidia.com", "displayName": "DynamoGraphDeploymentRequest CRD"},
 		},
 		"operatorPods": []map[string]interface{}{
 			{

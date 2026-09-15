@@ -53,6 +53,12 @@ import (
 )
 
 const (
+	// HuggingFaceTokenSecretName is the namespace-level Secret name required by Dynamo DGDR workloads.
+	HuggingFaceTokenSecretName = "hf-token-secret"
+	huggingFaceTokenSecretKey  = "HF_TOKEN"
+)
+
+const (
 	// ProviderName is the name of this provider
 	ProviderName = "dynamo"
 
@@ -165,6 +171,22 @@ type resourceWriteError struct {
 	resourceWasOwnedActiveAndServing bool
 }
 
+// dgdrIntentImmutableError reports a ModelDeployment spec generation that cannot
+// be applied to an existing DGDR after Dynamo has started profiling it.
+type dgdrIntentImmutableError struct {
+	existingGeneration string
+	desiredGeneration  string
+}
+
+func (e *dgdrIntentImmutableError) Error() string {
+	return fmt.Sprintf("DynamoGraphDeploymentRequest intent is immutable after creation (existing ModelDeployment generation %s, desired generation %s); delete and recreate the ModelDeployment to apply the new intent", e.existingGeneration, e.desiredGeneration)
+}
+
+func isDGDRIntentImmutable(err error) bool {
+	var immutableErr *dgdrIntentImmutableError
+	return stderrors.As(err, &immutableErr)
+}
+
 func (e *resourceWriteError) Error() string { return e.err.Error() }
 func (e *resourceWriteError) Unwrap() error { return e.err }
 
@@ -183,6 +205,7 @@ func canPreserveLastKnownStatus(err error) bool {
 // DynamoProviderReconciler reconciles ModelDeployment resources for the Dynamo provider
 type DynamoProviderReconciler struct {
 	client.Client
+	APIReader        client.Reader
 	Scheme           *runtime.Scheme
 	Transformer      *Transformer
 	StatusTranslator *StatusTranslator
@@ -190,17 +213,61 @@ type DynamoProviderReconciler struct {
 }
 
 // NewDynamoProviderReconciler creates a new Dynamo provider reconciler
-func NewDynamoProviderReconciler(client client.Client, scheme *runtime.Scheme, downloadJobImage string) *DynamoProviderReconciler {
+func NewDynamoProviderReconciler(kubeClient client.Client, scheme *runtime.Scheme, downloadJobImage string, apiReaders ...client.Reader) *DynamoProviderReconciler {
 	if downloadJobImage == "" {
 		downloadJobImage = storage.DefaultDownloadJobImage
 	}
+	apiReader := client.Reader(kubeClient)
+	if len(apiReaders) > 0 && apiReaders[0] != nil {
+		apiReader = apiReaders[0]
+	}
 	return &DynamoProviderReconciler{
-		Client:           client,
+		Client:           kubeClient,
+		APIReader:        apiReader,
 		Scheme:           scheme,
 		Transformer:      NewTransformer(),
 		StatusTranslator: NewStatusTranslator(),
 		DownloadJobImage: downloadJobImage,
 	}
+}
+
+// ensureDGDRHuggingFaceSecret creates Dynamo's required empty placeholder for
+// public models, but never creates or changes a Secret declared by the user.
+func (r *DynamoProviderReconciler) ensureDGDRHuggingFaceSecret(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+	key := types.NamespacedName{Name: HuggingFaceTokenSecretName, Namespace: md.Namespace}
+	secret := &corev1.Secret{}
+	// Bypass the shared cache so this exact-name read does not start a
+	// cluster-wide Secret informer that would require list/watch privileges.
+	if err := r.APIReader.Get(ctx, key, secret); err == nil {
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
+		return fmt.Errorf("Secret %s/%s declared by spec.secrets.huggingFaceToken does not exist", md.Namespace, HuggingFaceTokenSecretName)
+	}
+
+	// The empty token is valid for public models and avoids mutating a token that
+	// may be managed independently by the dashboard or a cluster administrator.
+	secret = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      HuggingFaceTokenSecretName,
+			Namespace: md.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "airunway",
+				"airunway.ai/secret-type":      "huggingface-token",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			huggingFaceTokenSecretKey: {},
+		},
+	}
+	if err := r.Create(ctx, secret); err != nil && !errors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
 }
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;update;patch
@@ -209,8 +276,11 @@ func NewDynamoProviderReconciler(client client.Client, scheme *runtime.Scheme, d
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create
 
 // Reconcile handles the reconciliation loop for ModelDeployments assigned to the Dynamo provider
 func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -324,8 +394,26 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Create or update the DynamoGraphDeployment
 	for _, resource := range resources {
+		if resource.GetKind() == DynamoGraphDeploymentRequestKind {
+			// Public Hugging Face models still need Dynamo's fixed Secret reference
+			// to resolve before the profiler and generated serving pods can start.
+			if err := r.ensureDGDRHuggingFaceSecret(ctx, &md); err != nil {
+				return ctrl.Result{}, fmt.Errorf("ensure Dynamo Hugging Face Secret: %w", err)
+			}
+		}
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
+			if isDGDRIntentImmutable(err) {
+				// Preserve the serving upstream object but fail the desired generation
+				// explicitly so users are not told an unapplied intent is healthy.
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "ImmutableIntent", err.Error())
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ImmutableIntent", err.Error())
+				md.Status.Endpoint = nil
+				md.Status.Replicas = nil
+				md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+				md.Status.Message = err.Error()
+				return ctrl.Result{}, r.Status().Update(ctx, &md)
+			}
 			// Strict field validation rejected the write: the cluster does not accept a field
 			// this provider renders. Give it its own reason so an operator can tell it apart
 			// from a generic create failure, and keep requeueing — the remedy is
@@ -398,7 +486,7 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			md.Status.Endpoint = nil
 			md.Status.Replicas = nil
 			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
-			md.Status.Message = fmt.Sprintf("Failed to create DynamoGraphDeployment: %s", err.Error())
+			md.Status.Message = fmt.Sprintf("Failed to create %s: %s", resource.GetKind(), err.Error())
 			if statusErr := r.Status().Update(ctx, &md); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -406,11 +494,14 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionTrue, "ResourceCreated", "DynamoGraphDeployment created successfully")
+	primaryResource := resources[0]
+	r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionTrue, "ResourceCreated", fmt.Sprintf("%s created successfully", primaryResource.GetKind()))
 
 	// Update provider status
-	md.Status.Provider.ResourceName = md.Name
-	md.Status.Provider.ResourceKind = DynamoGraphDeploymentKind
+	// Report the primary object Airunway owns; in intent mode the generated DGD
+	// remains a Dynamo-managed child discovered through DGDR status and labels.
+	md.Status.Provider.ResourceName = primaryResource.GetName()
+	md.Status.Provider.ResourceKind = primaryResource.GetKind()
 
 	// Sync status from upstream resource
 	if len(resources) > 0 {
@@ -424,7 +515,7 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning &&
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
-		md.Status.Message = "DynamoGraphDeployment created, waiting for pods to be ready"
+		md.Status.Message = fmt.Sprintf("%s created, waiting for deployment to be ready", primaryResource.GetKind())
 	}
 
 	if err := r.Status().Update(ctx, &md); err != nil {
@@ -532,6 +623,20 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(ctx context.Context, r
 	// Verify ownership before updating
 	if err := verifyDynamoOwnership(existing, md.UID); err != nil {
 		return err
+	}
+	if resource.GetKind() == DynamoGraphDeploymentRequestKind {
+		// DGDR intent becomes immutable once profiling begins. Compare the source
+		// generation marker instead of live specs because the webhook defaults
+		// fields such as the profiler image on creation.
+		existingGeneration := existing.GetAnnotations()["airunway.ai/model-deployment-generation"]
+		desiredGeneration := resource.GetAnnotations()["airunway.ai/model-deployment-generation"]
+		if existingGeneration != desiredGeneration {
+			return &dgdrIntentImmutableError{
+				existingGeneration: existingGeneration,
+				desiredGeneration:  desiredGeneration,
+			}
+		}
+		return nil
 	}
 	resourceWasOwnedActiveAndServing := false
 	if existing.GetDeletionTimestamp() == nil && r.StatusTranslator != nil {
@@ -694,9 +799,9 @@ func (r *DynamoProviderReconciler) syncStatus(ctx context.Context, md *airunwayv
 	if statusResult.Message != "" {
 		md.Status.Message = statusResult.Message
 	} else if statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
-		// The translator reports no message for a healthy DynamoGraphDeployment;
-		// replace the stale "waiting for pods" message so status reflects Running.
-		md.Status.Message = "DynamoGraphDeployment created, pods are ready"
+		// Replace stale progress text when either upstream kind reaches its healthy
+		// terminal state and does not provide a more specific message.
+		md.Status.Message = fmt.Sprintf("%s is ready", upstream.GetKind())
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint
@@ -729,67 +834,89 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		logger.Error(err, "Failed to update status to Terminating")
 	}
 
-	// Delete the DGD first so its Pods terminate before we remove PVCs/Jobs
-	dgd := &unstructured.Unstructured{}
-	dgd.SetGroupVersionKind(schema.GroupVersionKind{
+	// DGDR-created DGDs are independent resources, so collect their identity and
+	// explicitly delete both upstream objects before releasing managed storage.
+	dgdNames := map[string]struct{}{md.Name: {}}
+	upstreamDeletionPending := false
+	var cleanupErrs []error
+
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   DynamoAPIGroup,
-		Version: DynamoAPIVersion,
-		Kind:    DynamoGraphDeploymentKind,
+		Version: DynamoGraphDeploymentRequestAPIVersion,
+		Kind:    DynamoGraphDeploymentRequestKind,
 	})
-
-	dgdName := md.Name
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      dgdName,
-		Namespace: md.Namespace,
-	}, dgd)
-
-	if err == nil {
-		// Verify ownership before deleting
-		if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
-			logger.Info("Resource exists but is not managed by this ModelDeployment, skipping deletion", "name", dgdName)
-			controllerutil.RemoveFinalizer(md, FinalizerName)
-			return ctrl.Result{}, r.Update(ctx, md)
-		}
-
-		// Resource exists and is owned by us, delete it
-		logger.Info("Deleting DynamoGraphDeployment", "name", dgdName)
-		if err := r.Delete(ctx, dgd); err != nil {
-			if upstreamResourceUnavailable(err) {
-				logger.Info("DynamoGraphDeployment unavailable during deletion, continuing managed cleanup", "name", dgdName)
-			} else {
-				logger.Error(err, "Failed to delete DynamoGraphDeployment")
-
-				// Check if we should force-remove the finalizer
-				deletionTime := md.DeletionTimestamp.Time
-				if time.Since(deletionTime) > FinalizerTimeout {
-					logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-					controllerutil.RemoveFinalizer(md, FinalizerName)
-					return ctrl.Result{}, r.Update(ctx, md)
-				}
-
-				// Requeue to retry deletion
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
+	if err := r.Get(ctx, types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, dgdr); err == nil {
+		if ownershipErr := verifyDynamoOwnership(dgdr, md.UID); ownershipErr != nil {
+			logger.Info("DynamoGraphDeploymentRequest is not managed by this ModelDeployment, skipping deletion", "name", dgdr.GetName())
 		} else {
-			// Requeue to wait for DGD and its Pods to be fully terminated
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			// Capture status.dgdName before deleting the DGDR because Dynamo does not
+			// retain an owner reference from the generated DGD back to the request.
+			if dgdName, found, _ := unstructured.NestedString(dgdr.Object, "status", "dgdName"); found && dgdName != "" {
+				dgdNames[dgdName] = struct{}{}
+			}
+			if dgdr.GetDeletionTimestamp() == nil {
+				logger.Info("Deleting DynamoGraphDeploymentRequest", "name", dgdr.GetName())
+				if deleteErr := r.Delete(ctx, dgdr); deleteErr != nil && !upstreamResourceUnavailable(deleteErr) {
+					cleanupErrs = append(cleanupErrs, deleteErr)
+				}
+			}
+			upstreamDeletionPending = true
 		}
+	} else if !upstreamResourceUnavailable(err) {
+		cleanupErrs = append(cleanupErrs, err)
 	}
 
-	if !upstreamResourceUnavailable(err) {
-		// Unexpected error fetching DGD — check timeout before requeueing
-		deletionTime := md.DeletionTimestamp.Time
-		if time.Since(deletionTime) > FinalizerTimeout {
-			logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
+	linkedNames, err := r.findLinkedDGDNames(ctx, md)
+	if err != nil && !upstreamResourceUnavailable(err) {
+		cleanupErrs = append(cleanupErrs, err)
+	}
+	for _, name := range linkedNames {
+		dgdNames[name] = struct{}{}
+	}
+
+	for dgdName := range dgdNames {
+		dgd := &unstructured.Unstructured{}
+		dgd.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   DynamoAPIGroup,
+			Version: DynamoAPIVersion,
+			Kind:    DynamoGraphDeploymentKind,
+		})
+		if err := r.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: md.Namespace}, dgd); err != nil {
+			if !upstreamResourceUnavailable(err) {
+				cleanupErrs = append(cleanupErrs, err)
+			}
+			continue
+		}
+		if !dgdBelongsToModelDeployment(dgd, md) {
+			logger.Info("DynamoGraphDeployment is not linked to this ModelDeployment, skipping deletion", "name", dgdName)
+			continue
+		}
+		if dgd.GetDeletionTimestamp() == nil {
+			logger.Info("Deleting DynamoGraphDeployment", "name", dgdName)
+			if deleteErr := r.Delete(ctx, dgd); deleteErr != nil && !upstreamResourceUnavailable(deleteErr) {
+				cleanupErrs = append(cleanupErrs, deleteErr)
+			}
+		}
+		upstreamDeletionPending = true
+	}
+
+	if len(cleanupErrs) > 0 || upstreamDeletionPending {
+		if time.Since(md.DeletionTimestamp.Time) > FinalizerTimeout {
+			logger.Info("Finalizer timeout reached, removing finalizer without complete upstream cleanup")
 			controllerutil.RemoveFinalizer(md, FinalizerName)
 			return ctrl.Result{}, r.Update(ctx, md)
 		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		if len(cleanupErrs) > 0 {
+			logger.Error(stderrors.Join(cleanupErrs...), "Failed to clean up Dynamo upstream resources")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// The upstream resource is already gone or its CRD is no longer installed,
 	// so continue with managed Jobs/PVC cleanup and remove the finalizer.
-	var cleanupErrs []error
+	cleanupErrs = nil
 	if err := storage.DeleteManagedJobs(ctx, r.Client, md); err != nil {
 		logger.Error(err, "Failed to delete managed Jobs")
 		cleanupErrs = append(cleanupErrs, err)
@@ -813,6 +940,42 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 	logger.Info("All resources deleted, removing finalizer", "name", md.Name)
 	controllerutil.RemoveFinalizer(md, FinalizerName)
 	return ctrl.Result{}, r.Update(ctx, md)
+}
+
+// findLinkedDGDNames locates generated DGDs by Dynamo's stable DGDR label; the
+// pinned same-name DGD is handled separately by the deletion caller.
+func (r *DynamoProviderReconciler) findLinkedDGDNames(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) ([]string, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   DynamoAPIGroup,
+		Version: DynamoAPIVersion,
+		Kind:    DynamoGraphDeploymentKind + "List",
+	})
+	if err := r.List(ctx, list,
+		client.InNamespace(md.Namespace),
+		client.MatchingLabels{"dgdr.nvidia.com/name": md.Name},
+	); err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		names = append(names, list.Items[i].GetName())
+	}
+	return names, nil
+}
+
+// dgdBelongsToModelDeployment accepts either direct DGD ownership or the labels
+// propagated through the DGDR override and added by Dynamo itself.
+func dgdBelongsToModelDeployment(dgd *unstructured.Unstructured, md *airunwayv1alpha1.ModelDeployment) bool {
+	for _, ref := range dgd.GetOwnerReferences() {
+		if ref.UID == md.UID {
+			return true
+		}
+	}
+	labels := dgd.GetLabels()
+	return labels[airunwayv1alpha1.LabelModelDeployment] == md.Name ||
+		labels["dgdr.nvidia.com/name"] == md.Name
 }
 
 func upstreamResourceUnavailable(err error) bool {
@@ -909,6 +1072,32 @@ func (r *DynamoProviderReconciler) mapProviderConfigToModelDeployments(ctx conte
 	return requests
 }
 
+// mapDynamoResourceToModelDeployments maps owned DGDRs and both direct and
+// generated DGDs back to the ModelDeployment reconciliation key.
+func mapDynamoResourceToModelDeployments(_ context.Context, obj client.Object) []reconcile.Request {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() && ref.Kind == "ModelDeployment" {
+			return []reconcile.Request{{
+				NamespacedName: types.NamespacedName{Name: ref.Name, Namespace: obj.GetNamespace()},
+			}}
+		}
+	}
+
+	labels := obj.GetLabels()
+	deploymentName := labels[airunwayv1alpha1.LabelModelDeployment]
+	if deploymentName == "" {
+		// Dynamo adds this label to generated DGDs even though it does not add an
+		// owner reference back to the DGDR.
+		deploymentName = labels["dgdr.nvidia.com/name"]
+	}
+	if deploymentName == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: deploymentName, Namespace: obj.GetNamespace()},
+	}}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
@@ -928,6 +1117,17 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Without this check, the manager crashes at startup when
 	// the backend CRDs are not present (see #178).
 	mapper := mgr.GetRESTMapper()
+	if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentRequestKind}, DynamoGraphDeploymentRequestAPIVersion); err == nil {
+		logger := mgr.GetLogger()
+		logger.Info("DynamoGraphDeploymentRequest CRD detected, enabling event-driven watch")
+		builder = builder.Watches(
+			&unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion),
+				"kind":       DynamoGraphDeploymentRequestKind,
+			}},
+			handler.EnqueueRequestsFromMapFunc(mapDynamoResourceToModelDeployments),
+		)
+	}
 	if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind}, DynamoAPIVersion); err == nil {
 		logger := mgr.GetLogger()
 		logger.Info("DynamoGraphDeployment CRD detected, enabling event-driven watch")
@@ -936,35 +1136,7 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
 				"kind":       DynamoGraphDeploymentKind,
 			}},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				for _, ref := range obj.GetOwnerReferences() {
-					if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
-						ref.Kind == "ModelDeployment" {
-						return []reconcile.Request{
-							{
-								NamespacedName: types.NamespacedName{
-									Name:      ref.Name,
-									Namespace: obj.GetNamespace(),
-								},
-							},
-						}
-					}
-				}
-				labels := obj.GetLabels()
-				if labels[airunwayv1alpha1.LabelManagedBy] == "airunway" {
-					if deployment := labels[airunwayv1alpha1.LabelModelDeployment]; deployment != "" {
-						return []reconcile.Request{
-							{
-								NamespacedName: types.NamespacedName{
-									Name:      deployment,
-									Namespace: obj.GetNamespace(),
-								},
-							},
-						}
-					}
-				}
-				return nil
-			}),
+			handler.EnqueueRequestsFromMapFunc(mapDynamoResourceToModelDeployments),
 		)
 	}
 

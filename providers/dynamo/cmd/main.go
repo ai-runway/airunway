@@ -121,7 +121,7 @@ func main() {
 	}
 
 	// Set up the Dynamo provider reconciler
-	reconciler := dynamo.NewDynamoProviderReconciler(mgr.GetClient(), mgr.GetScheme(), downloadJobImage)
+	reconciler := dynamo.NewDynamoProviderReconciler(mgr.GetClient(), mgr.GetScheme(), downloadJobImage, mgr.GetAPIReader())
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoProvider")
 		os.Exit(1)

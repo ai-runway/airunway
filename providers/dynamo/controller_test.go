@@ -46,7 +46,9 @@ func newMDForController(name, ns string) *airunwayv1alpha1.ModelDeployment {
 			Resources: &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
 		},
 		Status: airunwayv1alpha1.ModelDeploymentStatus{
-			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName},
+			// Existing controller tests exercise direct DGD behavior unless they
+			// explicitly clear ResourceKind to test the new-deployment default.
+			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName, ResourceKind: DynamoGraphDeploymentKind},
 		},
 	}
 }
@@ -381,6 +383,8 @@ func TestReconcileNilProvider(t *testing.T) {
 func TestReconcileSuccessfulCreate(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
+	// A fresh deployment with no recorded upstream kind defaults to DGDR.
+	md.Status.Provider.ResourceKind = ""
 	controllerutil.AddFinalizer(md, FinalizerName)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
@@ -396,11 +400,44 @@ func TestReconcileSuccessfulCreate(t *testing.T) {
 		t.Errorf("expected requeue after %v, got %v", RequeueInterval, result.RequeueAfter)
 	}
 
-	dgd := &unstructured.Unstructured{}
-	setDGDGVK(dgd)
-	err = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, dgd)
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetAPIVersion(fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion))
+	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
+	err = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, dgdr)
 	if err != nil {
-		t.Fatalf("expected DynamoGraphDeployment to be created: %v", err)
+		t.Fatalf("expected DynamoGraphDeploymentRequest to be created: %v", err)
+	}
+
+	// Dynamo references this Secret even for public models, so intent
+	// reconciliation must provision an empty placeholder before creating DGDR.
+	secret := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: HuggingFaceTokenSecretName, Namespace: "default"}, secret); err != nil {
+		t.Fatalf("expected Dynamo Hugging Face Secret to be created: %v", err)
+	}
+	if token, found := secret.Data[huggingFaceTokenSecretKey]; !found || len(token) != 0 {
+		t.Fatalf("expected an empty %s placeholder, got present=%t length=%d", huggingFaceTokenSecretKey, found, len(token))
+	}
+}
+
+func TestEnsureDGDRHuggingFaceSecretPreservesExistingToken(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: HuggingFaceTokenSecretName, Namespace: "default"},
+		Data:       map[string][]byte{huggingFaceTokenSecretKey: []byte("existing-token")},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	if err := r.ensureDGDRHuggingFaceSecret(context.Background(), md); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	actual := &corev1.Secret{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(existing), actual); err != nil {
+		t.Fatalf("get existing Secret: %v", err)
+	}
+	if string(actual.Data[huggingFaceTokenSecretKey]) != "existing-token" {
+		t.Fatal("existing Hugging Face token was changed")
 	}
 }
 
@@ -798,7 +835,9 @@ func newMDWithStorage(name, ns string) *airunwayv1alpha1.ModelDeployment {
 			Resources: &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
 		},
 		Status: airunwayv1alpha1.ModelDeploymentStatus{
-			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName},
+			// Storage orchestration tests predate DGDR and continue to exercise the
+			// direct DGD pipeline through the upgrade-grandfathering contract.
+			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName, ResourceKind: DynamoGraphDeploymentKind},
 		},
 	}
 }

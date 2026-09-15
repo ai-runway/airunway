@@ -38,6 +38,9 @@ type ProviderStatusResult struct {
 // DynamoState represents the state of a DynamoGraphDeployment
 type DynamoState string
 
+// DynamoGraphDeploymentRequestPhase represents the lifecycle reported by DGDR.
+type DynamoGraphDeploymentRequestPhase string
+
 const (
 	// DynamoStateInitializing indicates the deployment is initializing.
 	DynamoStateInitializing DynamoState = "initializing"
@@ -49,6 +52,14 @@ const (
 	DynamoStateFailed DynamoState = "failed"
 	// DynamoStatePending indicates the deployment is pending
 	DynamoStatePending DynamoState = "pending"
+
+	// DGDR phases are title-cased by the v1beta1 API.
+	DynamoGraphDeploymentRequestPhasePending   DynamoGraphDeploymentRequestPhase = "Pending"
+	DynamoGraphDeploymentRequestPhaseProfiling DynamoGraphDeploymentRequestPhase = "Profiling"
+	DynamoGraphDeploymentRequestPhaseReady     DynamoGraphDeploymentRequestPhase = "Ready"
+	DynamoGraphDeploymentRequestPhaseDeploying DynamoGraphDeploymentRequestPhase = "Deploying"
+	DynamoGraphDeploymentRequestPhaseDeployed  DynamoGraphDeploymentRequestPhase = "Deployed"
+	DynamoGraphDeploymentRequestPhaseFailed    DynamoGraphDeploymentRequestPhase = "Failed"
 )
 
 // StatusTranslator handles translating DynamoGraphDeployment status to ModelDeployment status
@@ -64,11 +75,20 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	if upstream == nil {
 		return nil, fmt.Errorf("upstream resource is nil")
 	}
+	if upstream.GetKind() == DynamoGraphDeploymentRequestKind {
+		// DGDR has a distinct phase and deploymentInfo schema, so translate it
+		// before entering the legacy DGD state-based path.
+		return t.translateDGDRStatus(upstream)
+	}
 
 	result := &ProviderStatusResult{
 		ResourceName: upstream.GetName(),
-		ResourceKind: DynamoGraphDeploymentKind,
+		ResourceKind: upstream.GetKind(),
 		Phase:        airunwayv1alpha1.DeploymentPhasePending,
+	}
+	if result.ResourceKind == "" {
+		// Keep direct unit callers that omit TypeMeta compatible with the DGD path.
+		result.ResourceKind = DynamoGraphDeploymentKind
 	}
 
 	// Get status object
@@ -102,6 +122,91 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	result.Endpoint = t.extractEndpoint(upstream, status)
 
 	return result, nil
+}
+
+// translateDGDRStatus maps the installed v1beta1 request lifecycle to the
+// provider-neutral ModelDeployment status consumed by AI Runway.
+func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructured) (*ProviderStatusResult, error) {
+	result := &ProviderStatusResult{
+		ResourceName: upstream.GetName(),
+		ResourceKind: DynamoGraphDeploymentRequestKind,
+		Phase:        airunwayv1alpha1.DeploymentPhasePending,
+	}
+
+	status, found, err := unstructured.NestedMap(upstream.Object, "status")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get DGDR status: %w", err)
+	}
+	if !found {
+		return result, nil
+	}
+
+	phase, phaseFound, err := unstructured.NestedString(status, "phase")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get DGDR phase: %w", err)
+	}
+	if phaseFound {
+		result.Phase = t.mapDGDRPhaseToPhase(DynamoGraphDeploymentRequestPhase(phase))
+	}
+
+	// DGDR reports useful diagnostics through conditions rather than a top-level
+	// status.message field, so surface the first non-empty condition message.
+	if conditions, found, _ := unstructured.NestedSlice(status, "conditions"); found {
+		for _, item := range conditions {
+			condition, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if message, ok := condition["message"].(string); ok && message != "" {
+				result.Message = message
+				if conditionStatus, _ := condition["status"].(string); conditionStatus == "False" {
+					break
+				}
+			}
+		}
+	}
+
+	if deploymentInfo, found, _ := unstructured.NestedMap(status, "deploymentInfo"); found {
+		replicas := &airunwayv1alpha1.ReplicaStatus{}
+		if desired, found, _ := unstructured.NestedInt64(deploymentInfo, "replicas"); found {
+			replicas.Desired = int32(desired)
+		}
+		if available, found, _ := unstructured.NestedInt64(deploymentInfo, "availableReplicas"); found {
+			replicas.Ready = int32(available)
+			replicas.Available = int32(available)
+		}
+		result.Replicas = replicas
+	}
+
+	if result.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
+		// The transformer pins the generated DGD name to the ModelDeployment name,
+		// which in turn preserves Dynamo's <name>-frontend Service convention.
+		result.Endpoint = &airunwayv1alpha1.EndpointStatus{
+			Service: fmt.Sprintf("%s-frontend", upstream.GetName()),
+			Port:    8000,
+		}
+	}
+
+	return result, nil
+}
+
+// mapDGDRPhaseToPhase collapses profiling-specific states into AI Runway's
+// existing deployment phase vocabulary.
+func (t *StatusTranslator) mapDGDRPhaseToPhase(phase DynamoGraphDeploymentRequestPhase) airunwayv1alpha1.DeploymentPhase {
+	switch phase {
+	case DynamoGraphDeploymentRequestPhaseDeployed:
+		return airunwayv1alpha1.DeploymentPhaseRunning
+	case DynamoGraphDeploymentRequestPhaseFailed:
+		return airunwayv1alpha1.DeploymentPhaseFailed
+	case DynamoGraphDeploymentRequestPhaseProfiling,
+		DynamoGraphDeploymentRequestPhaseReady,
+		DynamoGraphDeploymentRequestPhaseDeploying:
+		return airunwayv1alpha1.DeploymentPhaseDeploying
+	case DynamoGraphDeploymentRequestPhasePending:
+		return airunwayv1alpha1.DeploymentPhasePending
+	default:
+		return airunwayv1alpha1.DeploymentPhasePending
+	}
 }
 
 // mapStateToPhase converts Dynamo state to ModelDeployment phase
@@ -214,6 +319,11 @@ func hasFrontendService(upstream *unstructured.Unstructured) bool {
 func (t *StatusTranslator) IsReady(upstream *unstructured.Unstructured) bool {
 	if upstream == nil {
 		return false
+	}
+	if upstream.GetKind() == DynamoGraphDeploymentRequestKind {
+		// A DGDR is ready only after autoApply has produced a healthy DGD.
+		phase, found, err := unstructured.NestedString(upstream.Object, "status", "phase")
+		return err == nil && found && DynamoGraphDeploymentRequestPhase(phase) == DynamoGraphDeploymentRequestPhaseDeployed
 	}
 
 	state, found, err := unstructured.NestedString(upstream.Object, "status", "state")
