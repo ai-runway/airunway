@@ -98,9 +98,7 @@ function validateMountPath(mountPath: string | undefined, purpose: VolumePurpose
 }
 
 function getStorageSourceMode(volume: StorageVolume): 'new' | 'existing' {
-  if (volume.size?.trim()) return 'new'
-  if (volume.claimName !== undefined) return 'existing'
-  return 'new'
+  return volume.size?.trim() ? 'new' : 'existing'
 }
 
 export function StorageVolumesSection({ volumes, onChange, deploymentName, availablePVCs }: StorageVolumesSectionProps) {

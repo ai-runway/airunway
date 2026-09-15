@@ -18,9 +18,11 @@ const availablePVCs = [
 function ControlledStorageVolumesSection({
   initialVolumes,
   onChange,
+  discoveredPVCs = availablePVCs,
 }: {
   initialVolumes: StorageVolume[]
   onChange: (volumes: StorageVolume[]) => void
+  discoveredPVCs?: typeof availablePVCs
 }) {
   const [volumes, setVolumes] = useState(initialVolumes)
 
@@ -31,7 +33,7 @@ function ControlledStorageVolumesSection({
         onChange(updatedVolumes)
         setVolumes(updatedVolumes)
       }}
-      availablePVCs={availablePVCs}
+      availablePVCs={discoveredPVCs}
     />
   )
 }
@@ -81,6 +83,18 @@ describe('StorageVolumesSection', () => {
       ])
     })
     expect(screen.getByText('A disk name is required when using existing storage')).toBeInTheDocument()
+  })
+
+  it('keeps an empty manually entered existing disk visible and correctable', () => {
+    render(<ControlledStorageVolumesSection initialVolumes={[staleExistingVolume]} onChange={vi.fn()} discoveredPVCs={[]} />)
+    const claim = screen.getByPlaceholderText('my-shared-storage')
+    fireEvent.change(claim, { target: { value: '' } })
+    fireEvent.blur(claim)
+    expect(screen.getByRole('radio', { name: 'Use existing disk' })).toBeChecked()
+    expect(screen.getByPlaceholderText('my-shared-storage')).toHaveValue('')
+    expect(screen.getByText('A disk name is required when using existing storage')).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('my-shared-storage'), { target: { value: 'replacement' } })
+    expect(screen.getByPlaceholderText('my-shared-storage')).toHaveValue('replacement')
   })
 
   it('keeps a selected PVC that is still available', async () => {

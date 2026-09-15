@@ -129,6 +129,11 @@ const (
 	conditionReasonDownloadCleanupFailed = "DownloadCleanupFailed"
 )
 
+// +kubebuilder:rbac:groups=apps,resources=replicasets;statefulsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ray.io,resources=rayservices;rayclusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments;dynamocomponentdeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=podcliques;podcliquescalinggroups;podcliquesets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/finalizers,verbs=update
@@ -232,8 +237,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// selection. Provider reconcilers need this current-generation condition to
 	// stop older workloads, even when the desired spec cannot otherwise proceed.
 	if md.Status.Provider != nil &&
-		providerUsesCoreStorageLifecycle(md.Status.Provider.Name) &&
-		storage.HasStorageVolumes(&md) {
+		providerUsesCoreStorageLifecycle(md.Status.Provider.Name) {
 		result, handled, err := r.reconcileTerminatingStorage(ctx, &md, base)
 		if handled {
 			return result, err
@@ -1292,6 +1296,12 @@ func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&airunwayv1alpha1.ModelDeployment{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return storage.MapPodConsumer(ctx, r.Client, obj)
+		})).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return storage.MapPVCConsumers(ctx, r.Client, obj)
+		})).
 		Watches(
 			&corev1.PersistentVolumeClaim{},
 			handler.EnqueueRequestsFromMapFunc(r.mapPVCToModelDeployments),

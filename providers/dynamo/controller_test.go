@@ -851,6 +851,16 @@ func TestReconcilePVCNotBound(t *testing.T) {
 }
 
 func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("storage-removed-%v", removed), func(t *testing.T) {
+			testDynamoTerminatingConsumerTeardown(t, removed)
+		})
+	}
+}
+
+func testDynamoTerminatingConsumerTeardown(t *testing.T, removed bool) {
+	t.Helper()
+
 	scheme := newScheme()
 	md := newMDWithStorage("terminating-dynamo", "dynamo-storage-recovery")
 	controllerutil.AddFinalizer(md, FinalizerName)
@@ -879,7 +889,14 @@ func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
 	setDGDGVK(dgd)
 	dgd.SetName(md.Name)
 	dgd.SetNamespace(md.Namespace)
-	dgd.SetOwnerReferences([]metav1.OwnerReference{{UID: md.UID}})
+	controlled := true
+	dgd.SetUID("dgd-uid")
+	dgd.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: airunwayv1alpha1.GroupVersion.String(), Kind: "ModelDeployment", Name: md.Name, UID: md.UID, Controller: &controlled}})
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "old-consumer", Namespace: md.Namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: dgd.GetAPIVersion(), Kind: dgd.GetKind(), Name: dgd.GetName(), UID: dgd.GetUID(), Controller: &controlled}}}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "old", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}}}}}
+	md.Spec.Model.Storage.Volumes = md.Spec.Model.Storage.Volumes[:1]
+	if removed {
+		md.Spec.Model.Storage = nil
+	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name:      md.Name + "-model-download",
 		Namespace: md.Namespace,
@@ -893,7 +910,7 @@ func TestReconcileTerminatingPVCPrioritizesOwnedConsumerTeardown(t *testing.T) {
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(md, pvc, dgd, job).
+		WithObjects(md, pvc, dgd, job, pod).
 		WithStatusSubresource(md, pvc, &batchv1.Job{}).
 		Build()
 	r := NewDynamoProviderReconciler(c, scheme, testModelDownloaderImage)

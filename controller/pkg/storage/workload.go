@@ -75,7 +75,11 @@ func EnsureConsumerWorkloadsAbsent(
 
 		logger.Info("Deleting storage consumer to release terminating PVC",
 			"kind", ref.GroupVersionKind.Kind, "name", ref.Name)
-		deleteErr := c.Delete(ctx, workload, &client.DeleteOptions{PropagationPolicy: &foreground})
+		uid, version := workload.GetUID(), workload.GetResourceVersion()
+		deleteErr := c.Delete(ctx, workload, &client.DeleteOptions{
+			PropagationPolicy: &foreground,
+			Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
+		})
 		if deleteErr != nil && !errors.IsNotFound(deleteErr) {
 			return false, fmt.Errorf(
 				"failed to delete storage consumer %s %s: %w",

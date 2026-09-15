@@ -110,6 +110,16 @@ func TestReconcileRejectsConflictingImageFieldsBeforeSelection(t *testing.T) {
 }
 
 func TestReconcilePrioritizesTerminatingPVCBeforeValidation(t *testing.T) {
+	for _, desired := range []string{"shared-cache", "missing-b", ""} {
+		t.Run("desired-"+desired, func(t *testing.T) {
+			testTerminatingPVCBeforeValidation(t, desired)
+		})
+	}
+}
+
+func testTerminatingPVCBeforeValidation(t *testing.T, desired string) {
+	t.Helper()
+
 	scheme := newTestScheme()
 	now := metav1.Now()
 	md := &airunwayv1alpha1.ModelDeployment{
@@ -153,7 +163,16 @@ func TestReconcilePrioritizesTerminatingPVCBeforeValidation(t *testing.T) {
 			UID:        md.UID,
 		}},
 	}}
-	r := newTestReconciler(scheme, nil, md, pvc, job)
+	job.UID = "download-uid"
+	controlled := true
+	job.OwnerReferences[0].Controller = &controlled
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "old-consumer", Namespace: md.Namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controlled}}}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "old", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}}}}}
+	if desired == "" {
+		md.Spec.Model.Storage = nil
+	} else {
+		md.Spec.Model.Storage.Volumes[0].ClaimName = desired
+	}
+	r := newTestReconciler(scheme, nil, md, pvc, job, pod)
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},

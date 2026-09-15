@@ -119,7 +119,9 @@ A `compilationCache` defaults to `/compilation-cache`. Dynamo marks the mount wi
 | KubeRay | Claims are rendered on the Ray head and every worker-group pod template emitted by the provider. |
 | llm-d | Claims are rendered on every model-serving Deployment emitted by the provider. |
 | Direct vLLM | Claims are rendered on its aggregated Deployment. Direct vLLM advertises aggregated serving only. |
-| KAITO | Not supported. KAITO presets do not expose a pod template, and the portable API does not define the exact llama.cpp model file inside a claim. The provider reports an explicit transform error instead of ignoring storage. |
+| KAITO | Not supported. KAITO presets do not expose a pod template, and the portable API does not define the exact llama.cpp model file inside a claim. Admission rejects new storage settings when KAITO is explicitly or already selected. Previously accepted unsupported settings can be removed; the provider retains an explicit transform error as a backstop when admission is bypassed. |
+
+Changing an existing claim reference keeps the previous workload running while replacement storage is pending. If a claim still used by its owned Pods is deleted, AI Runway detects it through the live controller-owner chain, including old Pods during a rollout, and stops the owned consumers so Kubernetes can release the claim. Removing storage from the desired configuration does not hide those active claims. User-owned claims are not adopted or deleted by this cleanup.
 
 For workloads that can place consumers on different nodes—including disaggregated serving, multiple replicas, and Dynamo `multinode` overrides—the claim must support the required simultaneous mounts. Managed claims default to `ReadWriteMany`. For existing claims, AI Runway cannot derive or change the claim's access modes; choosing a suitable claim remains the operator's responsibility. StorageClass capability and topology also determine whether a requested access mode can bind.
 

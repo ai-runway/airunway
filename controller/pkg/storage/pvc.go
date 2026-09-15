@@ -75,7 +75,7 @@ func ReferencedPVCNames(md *airunwayv1alpha1.ModelDeployment) []string {
 	return references
 }
 
-// HasTerminatingPVCs checks the configured claims without creating, deleting,
+// HasTerminatingPVCs checks desired and live-consumer claims without creating, deleting,
 // or otherwise preparing them. It lets reconcilers prioritize consumer
 // teardown even when normal validation cannot proceed.
 func HasTerminatingPVCs(
@@ -83,15 +83,15 @@ func HasTerminatingPVCs(
 	c client.Client,
 	md *airunwayv1alpha1.ModelDeployment,
 ) (bool, error) {
-	if md.Spec.Model.Storage == nil {
-		return false, nil
+	claims, firstErr := consumedPVCNames(ctx, c, md)
+	if md.Spec.Model.Storage != nil {
+		for i := range md.Spec.Model.Storage.Volumes {
+			claims = append(claims, md.Spec.Model.Storage.Volumes[i].ResolvedClaimName(md.Name))
+		}
 	}
-
-	seen := make(map[string]struct{}, len(md.Spec.Model.Storage.Volumes))
+	seen := make(map[string]struct{}, len(claims))
 	terminating := false
-	var firstErr error
-	for i := range md.Spec.Model.Storage.Volumes {
-		claimName := md.Spec.Model.Storage.Volumes[i].ResolvedClaimName(md.Name)
+	for _, claimName := range claims {
 		if claimName == "" {
 			continue
 		}

@@ -17,7 +17,11 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"context"
 	"strings"
+
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -160,4 +164,110 @@ var _ = Describe("ModelDeployment storage API", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(withoutStorage), withoutStorage)).To(Succeed())
 		Expect(withoutStorage.Spec.Model.Storage).To(BeNil())
 	})
+	It("rejects unsupported KAITO storage edits without persisting or disrupting the supported object", func() {
+		for _, explicit := range []bool{false, true} {
+			name := "selected-kaito"
+			if explicit {
+				name = "explicit-kaito"
+			}
+			md := deployment(name, nil)
+			if explicit {
+				md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "kaito"}
+			}
+			Expect(k8sClient.Create(ctx, md)).To(Succeed())
+			md.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "kaito"}
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+			Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+			before := md.DeepCopy()
+			md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{Name: "cache", ClaimName: "existing", Purpose: airunwayv1alpha1.VolumePurposeCustom, MountPath: "/cache"}}}
+			err := k8sClient.Update(ctx, md)
+			Expect(err).To(MatchError(And(ContainSubstring("denied the request"), ContainSubstring("KAITO does not support storage"))))
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(md), md)).To(Succeed())
+			Expect(md.Spec).To(Equal(before.Spec))
+			Expect(md.Status).To(Equal(before.Status))
+			md.Status.Message = "still serving"
+			Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+		}
+		md := deployment("invalid-kaito-create", &airunwayv1alpha1.StorageVolume{Name: "cache", ClaimName: "existing", Purpose: airunwayv1alpha1.VolumePurposeCustom, MountPath: "/cache"})
+		md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{Name: "kaito"}
+		Expect(k8sClient.Create(ctx, md)).To(MatchError(ContainSubstring("KAITO does not support storage")))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(md), &airunwayv1alpha1.ModelDeployment{}))).To(BeTrue())
+	})
+
+	It("allows removal and status updates for legacy unsupported managed KAITO storage", func() {
+		size := resource.MustParse("1Gi")
+		md := deployment("legacy-kaito", &airunwayv1alpha1.StorageVolume{Name: "cache", Size: &size, Purpose: airunwayv1alpha1.VolumePurposeCustom, MountPath: "/cache"})
+		// Represents a formerly accepted object whose provider was selected later.
+		Expect(k8sClient.Create(ctx, md)).To(Succeed())
+		md.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "kaito"}
+		Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+		md.Status.Message = "legacy storage unsupported"
+		Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+		md.Spec.Model.Storage = nil
+		Expect(k8sClient.Update(ctx, md)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(md), md)).To(Succeed())
+		Expect(md.Spec.Model.Storage).To(BeNil())
+	})
+
+	It("verifies live owner UIDs and protects a consumer changed between read and delete", func() {
+		md := deployment("owned-consumer", nil)
+		Expect(k8sClient.Create(ctx, md)).To(Succeed())
+		md.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "vllm"}
+		Expect(k8sClient.Status().Update(ctx, md)).To(Succeed())
+		yes := true
+		labels := map[string]string{"app": md.Name}
+		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: airunwayv1alpha1.GroupVersion.String(), Kind: "ModelDeployment", Name: md.Name, UID: md.UID, Controller: &yes}}}, Spec: appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "consumer", Image: "example.test/proof:v1"}}}}}}
+		Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "old-consumer", Namespace: namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: dep.Name, UID: dep.UID, Controller: &yes}}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "consumer", Image: "example.test/proof:v1"}}, Volumes: []corev1.Volume{{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "old-a"}}}}}}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		Expect(storageutil.MapPodConsumer(ctx, k8sClient, pod)).To(HaveLen(1))
+		wrong := pod.DeepCopy()
+		wrong.ObjectMeta = metav1.ObjectMeta{Name: "foreign-consumer", Namespace: namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: dep.Name, UID: "prior-root-uid", Controller: &yes}}}
+		Expect(k8sClient.Create(ctx, wrong)).To(Succeed())
+		Expect(storageutil.MapPodConsumer(ctx, k8sClient, wrong)).To(BeEmpty())
+		otherNamespace := wrong.DeepCopy()
+		otherNamespace.ObjectMeta = metav1.ObjectMeta{Name: "foreign-namespace", Namespace: "default", OwnerReferences: pod.OwnerReferences}
+		Expect(k8sClient.Create(ctx, otherNamespace)).To(Succeed())
+		Expect(storageutil.MapPodConsumer(ctx, k8sClient, otherNamespace)).To(BeEmpty())
+		changing := &storageOwnershipChangeClient{Client: k8sClient, beforeDelete: func() {
+			current := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dep), current)).To(Succeed())
+			current.OwnerReferences = nil
+			Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		}}
+		_, err := storageutil.EnsureConsumerWorkloadsAbsent(ctx, changing, md, storageutil.ConsumerWorkload{GroupVersionKind: schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, Name: dep.Name})
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "API must reject a stale deletion after ownership changes")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dep), dep)).To(Succeed())
+		Expect(dep.OwnerReferences).To(BeEmpty())
+		Expect(storageutil.MapPodConsumer(ctx, k8sClient, pod)).To(BeEmpty())
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-model-download", Namespace: namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: airunwayv1alpha1.GroupVersion.String(), Kind: "ModelDeployment", Name: md.Name, UID: md.UID, Controller: &yes}}}, Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, Containers: []corev1.Container{{Name: "download", Image: "example.test/proof:v1"}}}}}}
+		Expect(k8sClient.Create(ctx, job)).To(Succeed())
+		changing.beforeDelete = func() {
+			current := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(job), current)).To(Succeed())
+			current.OwnerReferences = nil
+			Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		}
+		_, err = storageutil.EnsureDownloadJobAbsent(ctx, changing, md)
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "the same server-side guard must protect downloader Jobs")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(job), job)).To(Succeed())
+		Expect(job.OwnerReferences).To(BeEmpty())
+	})
+
 })
+
+// This decorator changes ownership on the real API immediately before Delete,
+// exercising server-side preconditions rather than fake-client behavior.
+type storageOwnershipChangeClient struct {
+	client.Client
+	beforeDelete func()
+}
+
+func (c *storageOwnershipChangeClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if c.beforeDelete != nil {
+		callback := c.beforeDelete
+		c.beforeDelete = nil
+		callback()
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}

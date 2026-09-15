@@ -206,6 +206,13 @@ func NewDynamoProviderReconciler(client client.Client, scheme *runtime.Scheme, d
 	}
 }
 
+// +kubebuilder:rbac:groups=apps,resources=replicasets;statefulsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ray.io,resources=rayservices;rayclusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments;dynamocomponentdeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=podcliques;podcliquescalinggroups;podcliquesets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments/finalizers,verbs=update
@@ -255,7 +262,7 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Consumer teardown for a terminating PVC must happen before compatibility
 	// validation. Otherwise an invalid update can leave the old DGD or downloader
 	// holding pvc-protection indefinitely.
-	if storage.HasStorageVolumes(&md) {
+	{
 		result, handled, err := r.reconcileTerminatingStorage(ctx, &md)
 		if handled {
 			return result, err
@@ -1133,6 +1140,18 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Watch PVCs and Jobs owned by ModelDeployments (auto-reconcile on status changes)
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return storage.MapPodConsumer(ctx, r.Client, obj)
+			}),
+		).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return storage.MapPVCConsumers(ctx, r.Client, obj)
+			}),
+		).
 		Watches(
 			&corev1.PersistentVolumeClaim{},
 			handler.EnqueueRequestsFromMapFunc(r.mapPVCToModelDeployments),

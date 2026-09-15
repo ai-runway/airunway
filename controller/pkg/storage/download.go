@@ -100,8 +100,10 @@ func deleteDownloadJob(ctx context.Context, c client.Client, job *batchv1.Job, r
 	logger := log.FromContext(ctx)
 	logger.Info("Deleting model download Job", "name", job.Name, "reason", reason)
 	propagation := metav1.DeletePropagationForeground
+	uid, version := job.UID, job.ResourceVersion
 	if err := c.Delete(ctx, job, &client.DeleteOptions{
 		PropagationPolicy: &propagation,
+		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete download Job %s: %w", job.Name, err)
 	}
