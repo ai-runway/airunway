@@ -148,6 +148,11 @@ func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructur
 	if phaseFound {
 		result.Phase = t.mapDGDRPhaseToPhase(DynamoGraphDeploymentRequestPhase(phase))
 	}
+	if phase == string(DynamoGraphDeploymentRequestPhaseReady) {
+		if autoApply, found, _ := unstructured.NestedBool(upstream.Object, "spec", "autoApply"); found && !autoApply {
+			result.Message = "DGDR plan is ready; autoApply is false"
+		}
+	}
 
 	// DGDR reports useful diagnostics through conditions rather than a top-level
 	// status.message field, so surface the first non-empty condition message.
@@ -179,10 +184,12 @@ func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructur
 	}
 
 	if result.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
-		// The transformer pins the generated DGD name to the ModelDeployment name,
-		// which in turn preserves Dynamo's <name>-frontend Service convention.
+		dgdName, found, _ := unstructured.NestedString(status, "dgdName")
+		if !found || dgdName == "" {
+			dgdName = upstream.GetName()
+		}
 		result.Endpoint = &airunwayv1alpha1.EndpointStatus{
-			Service: fmt.Sprintf("%s-frontend", upstream.GetName()),
+			Service: fmt.Sprintf("%s-frontend", dgdName),
 			Port:    8000,
 		}
 	}

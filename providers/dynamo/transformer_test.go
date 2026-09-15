@@ -131,6 +131,69 @@ func TestTransformDGDRRejectsCustomHuggingFaceSecret(t *testing.T) {
 	}
 }
 
+func TestTransformDGDRMapsIntentAndOverrides(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources.GPU.Count = 4
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{
+			Name:      "weights",
+			ClaimName: "shared-weights",
+			MountPath: "/cache/huggingface",
+			Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+		},
+	}}
+	md.Spec.Provider.Overrides = &runtime.RawExtension{Raw: []byte(`{
+		"deploymentMode":"intent",
+		"searchStrategy":"thorough",
+		"autoApply":false,
+		"plannerImage":"planner:test",
+		"spec":{
+			"model":"must-not-win",
+			"backend":"auto",
+			"workload":{"isl":2048,"requestRate":3},
+			"sla":{"ttft":500},
+			"hardware":{"gpuSku":"h100_sxm","totalGpus":99},
+			"modelCache":{"pvcModelPath":"hub/models--meta-llama--Llama/snapshots/revision"},
+			"overrides":{
+				"profilingJob":{"template":{"spec":{"containers":[],"nodeSelector":{"pool":"gpu"}}}},
+				"dgd":{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","metadata":{"labels":{"custom":"kept"}}}
+			}
+		}
+	}`)}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dgdr := resources[0]
+
+	assertNestedValue := func(want interface{}, fields ...string) {
+		t.Helper()
+		got, found, err := unstructured.NestedFieldNoCopy(dgdr.Object, fields...)
+		if err != nil || !found || got != want {
+			t.Errorf("%v = %#v, found=%t, err=%v; want %#v", fields, got, found, err, want)
+		}
+	}
+	assertNestedValue(md.Spec.Model.ID, "spec", "model")
+	assertNestedValue("vllm", "spec", "backend")
+	assertNestedValue("thorough", "spec", "searchStrategy")
+	assertNestedValue(false, "spec", "autoApply")
+	assertNestedValue("planner:test", "spec", "image")
+	assertNestedValue(int64(4), "spec", "hardware", "totalGpus")
+	assertNestedValue("h100_sxm", "spec", "hardware", "gpuSku")
+	assertNestedValue("shared-weights", "spec", "modelCache", "pvcName")
+	assertNestedValue("/cache/huggingface", "spec", "modelCache", "pvcMountPath")
+	assertNestedValue("hub/models--meta-llama--Llama/snapshots/revision", "spec", "modelCache", "pvcModelPath")
+	assertNestedValue(float64(2048), "spec", "workload", "isl")
+	assertNestedValue(float64(500), "spec", "sla", "ttft")
+	assertNestedValue("gpu", "spec", "overrides", "profilingJob", "template", "spec", "nodeSelector", "pool")
+	assertNestedValue("nvidia.com/v1beta1", "spec", "overrides", "dgd", "apiVersion")
+	assertNestedValue("kept", "spec", "overrides", "dgd", "metadata", "labels", "custom")
+	assertNestedValue("test-model", "spec", "overrides", "dgd", "metadata", "name")
+	assertNestedValue("test-model", "spec", "overrides", "dgd", "metadata", "labels", airunwayv1alpha1.LabelModelDeployment)
+}
+
 func TestTransformDisaggregated(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")

@@ -84,6 +84,15 @@ type DynamoOverrides struct {
 	// DeploymentMode selects the intent DGDR or direct manual DGD path.
 	DeploymentMode string `json:"deploymentMode,omitempty"`
 
+	// SearchStrategy controls DGDR profiling depth.
+	SearchStrategy string `json:"searchStrategy,omitempty"`
+
+	// AutoApply controls whether DGDR deploys its selected configuration.
+	AutoApply *bool `json:"autoApply,omitempty"`
+
+	// PlannerImage overrides the image used by the DGDR profiling job.
+	PlannerImage string `json:"plannerImage,omitempty"`
+
 	// RouterMode is the request routing strategy: kv, round-robin, none
 	RouterMode string `json:"routerMode,omitempty"`
 
@@ -96,6 +105,10 @@ type DynamoOverrides struct {
 	// hasDirectDGDOverrides records root-key presence so intent mode rejects even
 	// empty manual-only override objects instead of silently discarding them.
 	hasDirectDGDOverrides bool
+
+	// dgdrSpec is the mode-dependent opaque spec override. In manual mode the
+	// same root remains the existing raw-DGD escape hatch.
+	dgdrSpec map[string]interface{}
 }
 
 // FrontendOverrides contains frontend component configuration
@@ -121,6 +134,9 @@ type ResourceOverrides struct {
 // upstream DynamoGraphDeployment and validated against the installed CRD.
 type dynamoOverridesWire struct {
 	DeploymentMode string             `json:"deploymentMode,omitempty"`
+	SearchStrategy string             `json:"searchStrategy,omitempty"`
+	AutoApply      *bool              `json:"autoApply,omitempty"`
+	PlannerImage   string             `json:"plannerImage,omitempty"`
 	RouterMode     string             `json:"routerMode,omitempty"`
 	Frontend       *FrontendOverrides `json:"frontend,omitempty"`
 	Epp            *EPPOverrides      `json:"epp,omitempty"`
@@ -218,9 +234,17 @@ func (t *Transformer) resolveDeploymentMode(md *airunwayv1alpha1.ModelDeployment
 	}
 
 	switch overrides.DeploymentMode {
-	case DeploymentModeIntent, DeploymentModeManual:
-		return overrides.DeploymentMode, nil
+	case DeploymentModeIntent:
+		return DeploymentModeIntent, nil
+	case DeploymentModeManual:
+		if overrides.SearchStrategy != "" || overrides.AutoApply != nil || overrides.PlannerImage != "" {
+			return "", fmt.Errorf("Dynamo searchStrategy, autoApply, and plannerImage overrides require provider.overrides.deploymentMode %q", DeploymentModeIntent)
+		}
+		return DeploymentModeManual, nil
 	case "":
+		if overrides.SearchStrategy != "" || overrides.AutoApply != nil || overrides.PlannerImage != "" {
+			return "", fmt.Errorf("Dynamo searchStrategy, autoApply, and plannerImage overrides require provider.overrides.deploymentMode %q", DeploymentModeIntent)
+		}
 		return DeploymentModeManual, nil
 	default:
 		return "", fmt.Errorf("unsupported Dynamo deploymentMode %q: must be %q or %q", overrides.DeploymentMode, DeploymentModeIntent, DeploymentModeManual)
@@ -281,7 +305,7 @@ func (t *Transformer) transformDGDR(md *airunwayv1alpha1.ModelDeployment, overri
 	for key, value := range labels {
 		generatedDGDLabels[key] = value
 	}
-	dgdr.Object["spec"] = map[string]interface{}{
+	spec := map[string]interface{}{
 		"model":          md.Spec.Model.ID,
 		"backend":        backend,
 		"searchStrategy": "rapid",
@@ -301,6 +325,73 @@ func (t *Transformer) transformDGDR(md *airunwayv1alpha1.ModelDeployment, overri
 			},
 		},
 	}
+	if overrides.dgdrSpec != nil {
+		spec = deepMerge(spec, overrides.dgdrSpec)
+	}
+	if overrides.SearchStrategy != "" {
+		spec["searchStrategy"] = overrides.SearchStrategy
+	}
+	if overrides.AutoApply != nil {
+		spec["autoApply"] = *overrides.AutoApply
+	}
+	if overrides.PlannerImage != "" {
+		spec["image"] = overrides.PlannerImage
+	}
+
+	// Airunway fields remain authoritative when an equivalent field exists.
+	spec["model"] = md.Spec.Model.ID
+	spec["backend"] = backend
+	if md.Spec.Resources != nil && md.Spec.Resources.GPU != nil && md.Spec.Resources.GPU.Count > 0 {
+		hardware, _ := spec["hardware"].(map[string]interface{})
+		if hardware == nil {
+			hardware = map[string]interface{}{}
+		}
+		hardware["totalGpus"] = int64(md.Spec.Resources.GPU.Count)
+		spec["hardware"] = hardware
+	}
+	if md.Spec.Model.Storage != nil {
+		for _, volume := range md.Spec.Model.Storage.Volumes {
+			if volume.Purpose != airunwayv1alpha1.VolumePurposeModelCache {
+				continue
+			}
+			mountPath := volume.MountPath
+			if mountPath == "" {
+				mountPath = "/model-cache"
+			}
+			modelCache, _ := spec["modelCache"].(map[string]interface{})
+			if modelCache == nil {
+				modelCache = map[string]interface{}{}
+			}
+			modelCache["pvcName"] = volume.ResolvedClaimName(md.Name)
+			modelCache["pvcMountPath"] = mountPath
+			spec["modelCache"] = modelCache
+			break
+		}
+	}
+
+	// Preserve user DGD customization while forcing stable linkage metadata.
+	dgdOverride, _, _ := unstructured.NestedMap(spec, "overrides", "dgd")
+	if dgdOverride == nil {
+		dgdOverride = map[string]interface{}{}
+	}
+	metadata, _ := dgdOverride["metadata"].(map[string]interface{})
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata["name"] = md.Name
+	userLabels, _ := metadata["labels"].(map[string]interface{})
+	if userLabels == nil {
+		userLabels = map[string]interface{}{}
+	}
+	for key, value := range generatedDGDLabels {
+		userLabels[key] = value
+	}
+	metadata["labels"] = userLabels
+	dgdOverride["metadata"] = metadata
+	if err := unstructured.SetNestedMap(spec, dgdOverride, "overrides", "dgd"); err != nil {
+		return nil, fmt.Errorf("failed to set generated DGD override: %w", err)
+	}
+	dgdr.Object["spec"] = spec
 
 	return []*unstructured.Unstructured{dgdr}, nil
 }
@@ -329,12 +420,23 @@ func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*Dyn
 		return nil, fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
 
+	var dgdrSpec map[string]interface{}
+	if len(wire.Spec) > 0 {
+		if err := json.Unmarshal(wire.Spec, &dgdrSpec); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal spec override: %w", err)
+		}
+	}
+
 	return &DynamoOverrides{
 		DeploymentMode:        wire.DeploymentMode,
+		SearchStrategy:        wire.SearchStrategy,
+		AutoApply:             wire.AutoApply,
+		PlannerImage:          wire.PlannerImage,
 		RouterMode:            wire.RouterMode,
 		Frontend:              wire.Frontend,
 		Epp:                   wire.Epp,
 		hasDirectDGDOverrides: hasDirectDGDOverrideRoots(overrideRoots),
+		dgdrSpec:              dgdrSpec,
 	}, nil
 }
 
@@ -342,9 +444,6 @@ func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*Dyn
 // deploymentMode control key before intent rendering can discard any values.
 func hasDirectDGDOverrideRoots(overrideRoots map[string]interface{}) bool {
 	for key := range overrideRoots {
-		if key == "spec" {
-			return true
-		}
 		switch strings.ToLower(key) {
 		case "routermode", "frontend", "epp":
 			return true
@@ -1344,7 +1443,15 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 
 // consumedOverrideKeys are the provider.overrides root keys parseOverrides decodes into
 // DynamoOverrides. Lowercased, because encoding/json matches field names case-insensitively.
-var consumedOverrideKeys = map[string]bool{"deploymentmode": true, "routermode": true, "frontend": true, "epp": true}
+var consumedOverrideKeys = map[string]bool{
+	"deploymentmode": true,
+	"searchstrategy": true,
+	"autoapply":      true,
+	"plannerimage":   true,
+	"routermode":     true,
+	"frontend":       true,
+	"epp":            true,
+}
 
 func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 	// Block dangerous top-level keys to prevent privilege escalation.
@@ -1368,7 +1475,7 @@ func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 
 	sort.Strings(unsupported)
 	return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
-		"Dynamo-specific keys deploymentMode, routerMode, frontend and epp are supported (note the webhook "+
+		"Dynamo-specific keys deploymentMode, searchStrategy, autoApply, plannerImage, routerMode, frontend and epp are supported (note the webhook "+
 		"rejects replicas/resources anywhere inside overrides, so only epp.image and "+
 		"routerMode are settable in practice)", unsupported)
 }

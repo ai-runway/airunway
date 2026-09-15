@@ -550,6 +550,70 @@ func TestReconcileDeletionWithUpstreamResource(t *testing.T) {
 	}
 }
 
+func TestMapGeneratedDGDToModelDeployment(t *testing.T) {
+	dgd := &unstructured.Unstructured{}
+	setDGDGVK(dgd)
+	dgd.SetNamespace("dynamo-system")
+	dgd.SetLabels(map[string]string{"dgdr.nvidia.com/name": "test-model"})
+
+	requests := mapDynamoResourceToModelDeployments(context.Background(), dgd)
+	if len(requests) != 1 || requests[0].NamespacedName != (types.NamespacedName{Name: "test-model", Namespace: "dynamo-system"}) {
+		t.Fatalf("unexpected reconcile requests %#v", requests)
+	}
+}
+
+func TestReconcileDeletionRemovesDGDRAndGeneratedDGD(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	now := metav1.Now()
+	md.DeletionTimestamp = &now
+
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetAPIVersion(fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion))
+	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
+	dgdr.SetName("test")
+	dgdr.SetNamespace("default")
+	dgdr.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: airunwayv1alpha1.GroupVersion.String(),
+		Kind:       "ModelDeployment",
+		Name:       md.Name,
+		UID:        md.UID,
+	}})
+	dgdr.Object["status"] = map[string]interface{}{"dgdName": "generated-dgd"}
+
+	dgd := &unstructured.Unstructured{}
+	setDGDGVK(dgd)
+	dgd.SetName("generated-dgd")
+	dgd.SetNamespace("default")
+	dgd.SetLabels(map[string]string{
+		"dgdr.nvidia.com/name":                md.Name,
+		"dgdr.nvidia.com/namespace":           md.Namespace,
+		airunwayv1alpha1.LabelModelDeployment: md.Name,
+	})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, dgdr, dgd).WithStatusSubresource(md).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(md)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("expected upstream deletion requeue, got %#v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(dgdr), &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": dgdr.GetAPIVersion(), "kind": dgdr.GetKind(),
+	}}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected DGDR deletion, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(dgd), &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": dgd.GetAPIVersion(), "kind": dgd.GetKind(),
+	}}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected generated DGD deletion, got %v", err)
+	}
+}
+
 func TestReconcileDeletionWithMissingUpstreamCRDCleansUpManagedResources(t *testing.T) {
 	scheme := newScheme()
 	md := newMDWithStorage("test", "default")

@@ -23,6 +23,24 @@ func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured 
 	return &unstructured.Unstructured{Object: obj}
 }
 
+func newDGDRWithStatus(spec, status map[string]interface{}) *unstructured.Unstructured {
+	obj := map[string]interface{}{
+		"apiVersion": "nvidia.com/v1beta1",
+		"kind":       DynamoGraphDeploymentRequestKind,
+		"metadata": map[string]interface{}{
+			"name":      "test-dgdr",
+			"namespace": "default",
+		},
+	}
+	if spec != nil {
+		obj["spec"] = spec
+	}
+	if status != nil {
+		obj["status"] = status
+	}
+	return &unstructured.Unstructured{Object: obj}
+}
+
 func TestNewStatusTranslator(t *testing.T) {
 	st := NewStatusTranslator()
 	if st == nil {
@@ -148,6 +166,35 @@ func TestTranslateStatusUnknownState(t *testing.T) {
 	}
 	if result.Phase != airunwayv1alpha1.DeploymentPhasePending {
 		t.Errorf("expected Pending phase for unknown state, got %s", result.Phase)
+	}
+}
+
+func TestTranslateDGDRStatusReadyWithoutAutoApply(t *testing.T) {
+	result, err := NewStatusTranslator().TranslateStatus(newDGDRWithStatus(
+		map[string]interface{}{"autoApply": false},
+		map[string]interface{}{"phase": "Ready"},
+	))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+		t.Errorf("expected Deploying phase, got %s", result.Phase)
+	}
+	if result.Message != "DGDR plan is ready; autoApply is false" {
+		t.Errorf("unexpected message %q", result.Message)
+	}
+}
+
+func TestTranslateDGDRStatusUsesGeneratedDGDName(t *testing.T) {
+	result, err := NewStatusTranslator().TranslateStatus(newDGDRWithStatus(nil, map[string]interface{}{
+		"phase":   "Deployed",
+		"dgdName": "generated-dgd",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Endpoint == nil || result.Endpoint.Service != "generated-dgd-frontend" || result.Endpoint.Port != 8000 {
+		t.Fatalf("unexpected endpoint %#v", result.Endpoint)
 	}
 }
 

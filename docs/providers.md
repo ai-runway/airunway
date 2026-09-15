@@ -102,8 +102,15 @@ spec:
 ```
 
 Direct-DGD settings such as `routerMode`, `frontend`, `epp`, and raw `spec` overrides use the
-default manual mode. DGDR intent cannot be changed after profiling starts; delete and recreate the
-`ModelDeployment` to apply a different intent.
+default manual mode. In intent mode, `spec` is merged into the DGDR spec so fields such as
+`workload`, `sla`, `hardware`, `modelCache`, `features`, and `overrides.profilingJob` can be set
+directly. Generated-DGD customization belongs under `spec.overrides.dgd`. The provider control
+fields `searchStrategy`, `autoApply`, and `plannerImage` override their DGDR spec equivalents.
+
+AI Runway maps the model ID, resolved engine, aggregate GPU count, and model-cache PVC name and
+mount path into the DGDR. A cached model's snapshot path can be supplied as
+`spec.modelCache.pvcModelPath`. DGDR intent cannot be changed after profiling starts; delete and
+recreate the `ModelDeployment` to apply a different intent.
 
 Dynamo DGDR uses the namespace-level Secret `hf-token-secret` with key `HF_TOKEN` for both
 profiling and serving. For public models, AI Runway creates an empty placeholder when that Secret
