@@ -417,13 +417,21 @@ Get provider installation status.
 {
   "providerId": "dynamo",
   "providerName": "Dynamo",
+  "installationState": "installed",
   "installed": true,
   "crdFound": true,
   "operatorRunning": true,
   "version": "dynamo-provider:v0.2.0",
-  "message": "Dynamo is installed and running"
+  "message": "Dynamo is installed and running",
+  "shimRegistered": true,
+  "shimConnected": true,
+  "shimLastHeartbeat": "2026-09-03T12:00:00.000Z"
 }
 ```
+
+`installationState` is `installed`, `not-installed`, or `unknown`. Prefer it over the legacy `installed` boolean when present; `unknown` means the provider has not supplied enough health metadata for AI Runway to verify the underlying runtime, so automated installation actions are withheld. For `unknown`, `installed` preserves provider-reported readiness for older clients rather than claiming installation was verified; structural probe fields are omitted.
+
+`shimRegistered`, `shimConnected`, and `shimLastHeartbeat` are optional AI Runway integration fields. `shimRegistered` indicates that the integration has registered this provider, `shimConnected` indicates that its heartbeat is current, and `shimLastHeartbeat` is the raw reported ISO timestamp. Integration connectivity is independent of the underlying runtime's installation and readiness fields.
 
 ### GET /installation/providers/:id/commands
 
@@ -954,14 +962,19 @@ Get installation and health status of all runtimes.
     {
       "id": "dynamo",
       "name": "Dynamo",
+      "installationState": "installed",
       "installed": true,
       "healthy": true,
       "version": "dynamo-provider:v0.2.0",
-      "message": "Provider ready"
+      "message": "Provider ready",
+      "shimRegistered": true,
+      "shimConnected": true,
+      "shimLastHeartbeat": "2026-09-03T12:00:00.000Z"
     },
     {
       "id": "kuberay",
       "name": "KubeRay",
+      "installationState": "not-installed",
       "installed": false,
       "healthy": false,
       "message": "CRD not found"
@@ -992,18 +1005,25 @@ Get installation and health status of all runtimes.
 }
 ```
 
+For runtimes that require an external operator or API, `installationState` distinguishes a verified `installed` or `not-installed` result from `unknown`, where AI Runway has no configured installation probe. When installation is `unknown`, both `healthy` and the legacy `installed` boolean preserve provider-reported readiness so older deployment clients remain compatible; neither is proof that installation was verified. Modern clients must prioritize `installationState`, and structural probe fields are omitted. Automatic runtime install/uninstall remains unavailable even when the legacy boolean is true; older clients may still offer actions that the backend rejects.
+
 **Fields:**
 - `id` - Runtime identifier (`dynamo`, `kuberay`, `kaito`, `llmd`, or `vllm`)
 - `name` - Display name
-- `installed` - Whether the runtime/provider is ready to use
-- `healthy` - Whether runtime health checks pass
+- `installationState` - Verified installation result: `installed`, `not-installed`, or `unknown`
+- `installed` - Legacy boolean installation/readiness flag retained for compatibility
+- `healthy` - Whether runtime health checks pass; for `unknown` installation, whether the provider reports readiness through its configured status fields
 - `version` - Detected version (if available)
 - `message` - Status message
+- `shimRegistered` - Optional; whether the AI Runway integration has registered this runtime
+- `shimConnected` - Optional; whether the integration's heartbeat is current, independently of runtime installation or readiness
+- `shimLastHeartbeat` - Optional; raw ISO timestamp last reported by the integration
 
 **Notes:**
 
 - Used by the frontend to show available runtimes in the deployment wizard
 - Checks provider configuration and available health signals for each provider/runtime; Direct vLLM is registered by the repo-local `providers/vllm` shim
+- Integration fields describe the AI Runway integration process and must not be treated as underlying runtime installation or health
 
 ### DELETE /deployments/:name
 

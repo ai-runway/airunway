@@ -36,8 +36,9 @@ LDFLAGS += -X $(MODULE).shimVersion=$(SHIM_VERSION)
 LDFLAGS += -X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=$(MODEL_DOWNLOADER_IMG)
 
 GOLANGCI_LINT ?= ../../bin/golangci-lint
+GOVULNCHECK ?= ../../bin/govulncheck
 
-.PHONY: build vet test cover lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests setup-dynamo setup-dynamo-mocker cleanup-dynamo test-e2e test-e2e-mocker verify-versions
+.PHONY: build vet test cover lint lint-fix lint-config golangci-lint govulncheck govulncheck-tool docker-build deploy generate-deploy-manifests setup-dynamo setup-dynamo-mocker cleanup-dynamo test-e2e test-e2e-mocker verify-versions
 
 ## Verify upstream versions are in sync (delegates to root Makefile).
 verify-versions:
@@ -70,6 +71,18 @@ lint-config: golangci-lint
 ## Ensure golangci-lint is installed via the controller toolchain pin
 golangci-lint:
 	@$(MAKE) -C ../../controller golangci-lint
+
+## Run govulncheck against code
+govulncheck: govulncheck-tool
+	"$(GOVULNCHECK)" ./...
+
+## Ensure govulncheck is installed via the controller toolchain pin
+govulncheck-tool:
+ifneq ($(origin GOVULNCHECK), file)
+	@echo "Using supplied GOVULNCHECK binary: $(GOVULNCHECK)"
+else
+	@$(MAKE) -C ../../controller govulncheck-tool
+endif
 
 ## Run unit tests with coverage profile output
 cover: vet

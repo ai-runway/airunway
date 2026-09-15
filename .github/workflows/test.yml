@@ -125,10 +125,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Load pinned agent base
         id: agent_base
@@ -196,10 +196,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # These controllers need Kubernetes API discovery to run, so PR CI
       # exercises the complete image build for both release architectures
@@ -297,6 +297,49 @@ jobs:
 
       - name: Test provider shim
         run: go test -C providers/pkg/shim ./...
+
+  go-vulnerability-checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: controller
+            module: controller
+          - id: agent-container
+            module: providers/agent-container
+          - id: agent-kagent
+            module: providers/agent-kagent
+          - id: agent-orka
+            module: providers/agent-orka
+          - id: dynamo
+            module: providers/dynamo
+          - id: kaito
+            module: providers/kaito
+          - id: kuberay
+            module: providers/kuberay
+          - id: llmd
+            module: providers/llmd
+          - id: vllm
+            module: providers/vllm
+          - id: pkg/shim
+            module: providers/pkg/shim
+
+    name: govulncheck (${{ matrix.id }})
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.25"
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: Run govulncheck (advisory)
+        continue-on-error: true
+        run: make -C ${{ matrix.module }} govulncheck
 
   actionlint:
     runs-on: ubuntu-latest

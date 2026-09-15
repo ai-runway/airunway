@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/providers/pkg/shim"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
@@ -310,8 +312,9 @@ func TestUnregister(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
 		t.Fatalf("failed to get updated provider config: %v", err)
 	}
-	if updated.Status.Ready {
-		t.Fatal("expected provider status to be not ready after unregister")
+	condition := meta.FindStatusCondition(updated.Status.Conditions, "UpstreamReady")
+	if updated.Status.Ready || condition == nil || condition.Reason != shim.ReasonUnregistered {
+		t.Fatalf("unexpected unregistered status: %+v", updated.Status)
 	}
 }
 
@@ -329,6 +332,30 @@ func TestStartHeartbeat(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	mgr.StartHeartbeat(ctx)
 	cancel()
+}
+
+func TestUpdateHeartbeat(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+
+	if err := NewProviderConfigManager(c).updateHeartbeat(context.Background()); err != nil {
+		t.Fatalf("updateHeartbeat() unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatal("expected provider status to be not ready without backend CRD")
+	}
+	if updated.Status.LastHeartbeat == nil {
+		t.Fatal("expected provider status to include last heartbeat")
+	}
 }
 
 func TestUpdateStatusNotFound(t *testing.T) {
