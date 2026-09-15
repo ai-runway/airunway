@@ -425,14 +425,18 @@ class HelmService {
     const chartPathVar = `${varPrefix}_CHART_PATH`;
     const chartDirRef = `$${chartDirVar}`;
     const chartPathRef = `$${chartPathVar}`;
+    const templateArgs = `helm template "${chart.name}" "${chartPathRef}" --namespace "${chart.namespace}" --include-crds${chart.values ? ` ${valuesToSetJsonCommandArgs(chart.values).join(' ')}` : ''}`;
+    const splitDocuments = (renderedPath: string, documentsDir: string) =>
+      `awk -v output_dir="${documentsDir}" 'BEGIN { count = 1; document = output_dir "/doc-1.yaml" } /^---[[:space:]]*$/ { close(document); document = output_dir "/doc-" ++count ".yaml"; next } { print > document }' "${renderedPath}"`;
 
     return [
       `(${chartDirVar}=$(mktemp -d)`,
+      'set -e',
       `trap 'rm -rf -- "${chartDirRef}"' EXIT`,
       this.buildPullChartCommand(chart, `"${chartDirRef}"`),
       `${chartPathVar}=$(find "${chartDirRef}" -mindepth 1 -maxdepth 1 -type d -print -quit)`,
       `test -n "${chartPathRef}"`,
-      `CRD_DOCUMENTS_DIR="${chartPathRef}/.airunway-crd-documents" && mkdir -p "$CRD_DOCUMENTS_DIR" && helm template "${chart.name}" "${chartPathRef}" --namespace "${chart.namespace}" --include-crds${chart.values ? ` ${valuesToSetJsonCommandArgs(chart.values).join(' ')}` : ''} > "${chartPathRef}/.airunway-rendered.yaml" && awk -v output_dir="$CRD_DOCUMENTS_DIR" 'BEGIN { count = 1; document = output_dir "/doc-1.yaml" } /^---[[:space:]]*$/ { close(document); document = output_dir "/doc-" ++count ".yaml"; next } { print > document }' "${chartPathRef}/.airunway-rendered.yaml" && find "$CRD_DOCUMENTS_DIR" -maxdepth 1 -type f -name "*.yaml" -print | sort | while IFS= read -r crd; do if grep -Eq '^[[:space:]]*kind:[[:space:]]*CustomResourceDefinition[[:space:]]*$' "$crd"; then missing=0; for crd_name in $(kubectl create --dry-run=client -f "$crd" -o name); do if [ -z "$(kubectl get "$crd_name" --ignore-not-found -o name)" ]; then missing=1; fi; done; if [ "$missing" = "1" ]; then kubectl apply --server-side --force-conflicts -f "$crd"; fi; fi; done`,
+      `CRD_DOCUMENTS_DIR="${chartPathRef}/.airunway-crd-documents" && SKIP_CRD_DOCUMENTS_DIR="${chartPathRef}/.airunway-skip-crd-documents" && SKIP_CRD_NAMES="${chartPathRef}/.airunway-skip-crd-names" && mkdir -p "$CRD_DOCUMENTS_DIR" "$SKIP_CRD_DOCUMENTS_DIR" && : > "$SKIP_CRD_NAMES" && ${templateArgs} > "${chartPathRef}/.airunway-rendered.yaml" && ${templateArgs} --skip-crds > "${chartPathRef}/.airunway-rendered-skip-crds.yaml" && ${splitDocuments(`${chartPathRef}/.airunway-rendered.yaml`, '$CRD_DOCUMENTS_DIR')} && ${splitDocuments(`${chartPathRef}/.airunway-rendered-skip-crds.yaml`, '$SKIP_CRD_DOCUMENTS_DIR')} && find "$SKIP_CRD_DOCUMENTS_DIR" -maxdepth 1 -type f -name "*.yaml" -print | sort | while IFS= read -r crd; do if grep -Eq '^[[:space:]]*kind:[[:space:]]*CustomResourceDefinition[[:space:]]*$' "$crd"; then crd_names=$(kubectl create --dry-run=client -f "$crd" -o name) || exit $?; for crd_name in $crd_names; do printf '%s\\n' "$crd_name" >> "$SKIP_CRD_NAMES"; done; fi; done && find "$CRD_DOCUMENTS_DIR" -maxdepth 1 -type f -name "*.yaml" -print | sort | while IFS= read -r crd; do if grep -Eq '^[[:space:]]*kind:[[:space:]]*CustomResourceDefinition[[:space:]]*$' "$crd"; then missing=0; crd_names=$(kubectl create --dry-run=client -f "$crd" -o name) || exit $?; for crd_name in $crd_names; do if grep -Fqx "$crd_name" "$SKIP_CRD_NAMES"; then continue; fi; existing=$(kubectl get "$crd_name" --ignore-not-found -o name) || exit $?; if [ -z "$existing" ]; then missing=1; fi; done; if [ "$missing" = "1" ]; then kubectl apply --server-side --force-conflicts -f "$crd" || exit $?; fi; fi; done`,
       `${this.buildInstallCommand(chart, `"${chartPathRef}"`, false)})`,
     ].join(' && ');
   }
@@ -496,10 +500,11 @@ class HelmService {
     chartPath: string,
     onStream?: StreamCallback,
   ): Promise<{ success: boolean; documents: ChartCrdDocument[]; result?: HelmResult }> {
-    // Let Helm resolve dependency conditions and tags before selecting CRDs.
-    // Walking charts/<dependency>/crds ourselves would either miss packaged
-    // subcharts or install CRDs from dependencies disabled by the chart values.
-    const templateResult = await this.execute([
+    // Render twice so Helm resolves dependency conditions and tags for us.
+    // `--skip-crds` removes packaged CRDs, but leaves CRDs declared in chart
+    // templates. Those template-managed CRDs must remain under Helm's control;
+    // only the packaged CRDs missing from the skip output need pre-applying.
+    const templateArgs = [
       'template',
       chart.name,
       chartPath,
@@ -507,39 +512,51 @@ class HelmService {
       chart.namespace,
       '--include-crds',
       ...(chart.values ? valuesToSetJsonArgs(chart.values) : []),
-    ], onStream);
-    if (!templateResult.success) {
-      return { success: false, documents: [], result: templateResult };
+    ];
+    const templateResult = await this.execute(templateArgs, onStream);
+    if (!templateResult.success) return { success: false, documents: [], result: templateResult };
+
+    const skipCrdTemplateResult = await this.execute([...templateArgs, '--skip-crds'], onStream);
+    if (!skipCrdTemplateResult.success) {
+      return { success: false, documents: [], result: skipCrdTemplateResult };
     }
 
-    const crdDocuments = new Map<string, ChartCrdDocument>();
     try {
-      for (const document of loadAll(templateResult.stdout)) {
-        if (!document || typeof document !== 'object') continue;
-
-        const kind = (document as { kind?: string }).kind;
-        const metadata = (document as { metadata?: { name?: string } }).metadata;
-        if (kind !== 'CustomResourceDefinition' || !metadata?.name || crdDocuments.has(metadata.name)) continue;
-
-        crdDocuments.set(metadata.name, {
-          name: metadata.name,
-          manifest: dump(document, { noRefs: true }),
-        });
-      }
+      const skipCrdNames = new Set(
+        this.parseChartCrdDocuments(skipCrdTemplateResult.stdout).map((crd) => crd.name),
+      );
+      const documents = this.parseChartCrdDocuments(templateResult.stdout)
+        .filter((crd) => !skipCrdNames.has(crd.name));
+      return { success: true, documents };
     } catch (error) {
       return {
         success: false,
         documents: [],
         result: {
           success: false,
-          stdout: templateResult.stdout,
+          stdout: `${templateResult.stdout}\n${skipCrdTemplateResult.stdout}`,
           stderr: `Failed to parse rendered chart CRDs: ${error instanceof Error ? error.message : String(error)}`,
           exitCode: 1,
         },
       };
     }
+  }
 
-    return { success: true, documents: Array.from(crdDocuments.values()) };
+  private parseChartCrdDocuments(stdout: string): ChartCrdDocument[] {
+    const crdDocuments = new Map<string, ChartCrdDocument>();
+    for (const document of loadAll(stdout)) {
+      if (!document || typeof document !== 'object') continue;
+
+      const kind = (document as { kind?: string }).kind;
+      const metadata = (document as { metadata?: { name?: string } }).metadata;
+      if (kind !== 'CustomResourceDefinition' || !metadata?.name || crdDocuments.has(metadata.name)) continue;
+
+      crdDocuments.set(metadata.name, {
+        name: metadata.name,
+        manifest: dump(document, { noRefs: true }),
+      });
+    }
+    return Array.from(crdDocuments.values());
   }
 
   private async ensureChartCrdsInstalled(

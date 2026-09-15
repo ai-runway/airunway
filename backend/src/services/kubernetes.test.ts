@@ -343,6 +343,42 @@ describe('KubernetesService - safe provider CRD removal', () => {
     }
   });
 
+  test('fails closed when custom-resource listing has no item list', async () => {
+    const service = asMockable();
+    const originalApiExtensionsApi = service.apiExtensionsApi;
+    const originalCustomObjectsApi = service.customObjectsApi;
+    let deleteAttempts = 0;
+
+    service.apiExtensionsApi = {
+      readCustomResourceDefinition: async () => ({
+        metadata: {},
+        spec: {
+          group: 'kaito.sh',
+          names: { plural: 'workspaces' },
+          versions: [{ name: 'v1beta1', served: true }],
+        },
+      }),
+      deleteCustomResourceDefinition: async () => {
+        deleteAttempts += 1;
+        return {};
+      },
+    };
+    service.customObjectsApi = {
+      listClusterCustomObject: async () => ({}),
+    };
+
+    try {
+      const result = await kubernetesService.deleteCRDsSafely(['workspaces.kaito.sh']);
+
+      expect(result.success).toBe(false);
+      expect(result.results[0].message).toContain('returned no item list');
+      expect(deleteAttempts).toBe(0);
+    } finally {
+      service.apiExtensionsApi = originalApiExtensionsApi;
+      service.customObjectsApi = originalCustomObjectsApi;
+    }
+  });
+
   test('refuses deletion when another tool owns the CRD', async () => {
     const service = asMockable();
     const originalApiExtensionsApi = service.apiExtensionsApi;

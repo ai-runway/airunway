@@ -653,7 +653,7 @@ const installation = new Hono()
       success: removal.success,
       message: removal.success
         ? `${provider.name} CRDs removed successfully; custom resources were verified empty`
-        : `${provider.name} CRD removal was refused; no CRDs were deleted`,
+        : `${provider.name} CRD removal failed; inspect the per-CRD results to determine what was removed`,
       results,
     }, removal.success ? 200 : 409);
   })

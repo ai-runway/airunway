@@ -493,16 +493,18 @@ describe('HelmService - Managed Chart CRDs', () => {
             'kind: CustomResourceDefinition',
             'metadata:',
             '  name: workspaces.kaito.sh',
-            '---',
-            'apiVersion: apiextensions.k8s.io/v1',
-            'kind: CustomResourceDefinition',
-            'metadata:',
-            '  name: inferencepools.inference.networking.k8s.io',
-            '---',
-            'apiVersion: apiextensions.k8s.io/v1',
-            'kind: CustomResourceDefinition',
-            'metadata:',
-            '  name: podgroups.scheduler.example.com',
+            ...(args.includes('--skip-crds') ? [] : [
+              '---',
+              'apiVersion: apiextensions.k8s.io/v1',
+              'kind: CustomResourceDefinition',
+              'metadata:',
+              '  name: inferencepools.inference.networking.k8s.io',
+              '---',
+              'apiVersion: apiextensions.k8s.io/v1',
+              'kind: CustomResourceDefinition',
+              'metadata:',
+              '  name: podgroups.scheduler.example.com',
+            ]),
           ].join('\n'),
           stderr: '',
           exitCode: 0,
@@ -559,11 +561,27 @@ describe('HelmService - Managed Chart CRDs', () => {
     ]);
 
     expect(result.success).toBe(true);
-    expect(result.results.some((step) => step.step === 'apply-crd-workspaces-kaito-sh')).toBe(true);
+    expect(result.results.some((step) => step.step === 'apply-crd-workspaces-kaito-sh')).toBe(false);
     expect(result.results.some((step) => step.step === 'skip-crd-inferencepools-inference-networking-k8s-io')).toBe(true);
+    expect(result.results.some((step) => step.step === 'apply-crd-inferencepools-inference-networking-k8s-io')).toBe(false);
     expect(result.results.some((step) => step.step === 'apply-crd-podgroups-scheduler-example-com')).toBe(true);
     expect(kubectlCalls.some((args) => args.includes('podgroups.scheduler.example.com'))).toBe(true);
     expect(kubectlCalls.some((args) => args[0] === 'apply')).toBe(true);
     expect(helmCalls.some((args) => args[0] === 'upgrade')).toBe(true);
+  });
+
+  test('stops generated CRD installation when kubectl fails', () => {
+    const command = helmService.getInstallCommands([], [{
+      name: 'kaito-workspace',
+      chart: 'kaito/workspace',
+      namespace: 'kaito-workspace',
+      preInstallMissingCrds: true,
+      skipCrds: true,
+    }])[0];
+
+    expect(command).toContain('set -e');
+    expect(command).toContain('kubectl create --dry-run=client');
+    expect(command).toContain('kubectl apply --server-side --force-conflicts -f "$crd" || exit $?');
+    expect(command).not.toContain('kubectl apply --server-side --force-conflicts -f "$crd"; fi; fi; done');
   });
 });

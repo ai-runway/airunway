@@ -1056,7 +1056,7 @@ describe('Installation Provider Routes', () => {
       expect(res.status).toBe(409);
       const data = await res.json();
       expect(data.success).toBe(false);
-      expect(data.message).toContain('no CRDs were deleted');
+      expect(data.message).toContain('inspect the per-CRD results');
       expect(data.results[0].error).toContain('existing custom resource');
     });
   });

@@ -2582,7 +2582,16 @@ class KubernetesService {
         );
         const resourceList = ((resourceResponse as { body?: { items?: unknown[] }; items?: unknown[] })?.body
           || resourceResponse) as { items?: unknown[] };
-        const itemCount = Array.isArray(resourceList.items) ? resourceList.items.length : 0;
+        if (!Array.isArray(resourceList.items)) {
+          results.push({
+            crdName,
+            success: false,
+            message: `Failed to verify custom resources for CRD ${crdName}: the Kubernetes API returned no item list.`,
+          });
+          continue;
+        }
+
+        const itemCount = resourceList.items.length;
         if (itemCount > 0) {
           results.push({
             crdName,

@@ -54,6 +54,11 @@ rules:
     resources:
       - customresourcedefinitions
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kaito.sh"]
+    resources:
+      - workspaces
+      - inferencesets
+    verbs: ["get", "list", "create"]
   - apiGroups: ["admissionregistration.k8s.io"]
     resources:
       - mutatingwebhookconfigurations
