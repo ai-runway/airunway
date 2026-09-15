@@ -8,7 +8,7 @@ export function storageVolumeWithSize(volume: StorageVolume, size: string): Stor
     ...volume,
     size: normalizedSize,
     claimName: normalizedSize ? undefined : volume.claimName,
-    accessMode: normalizedSize ? volume.accessMode ?? 'ReadWriteOnce' : volume.accessMode,
+    accessMode: normalizedSize ? volume.accessMode ?? 'ReadWriteMany' : volume.accessMode,
   };
 }
 

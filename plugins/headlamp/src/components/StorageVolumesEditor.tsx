@@ -42,7 +42,7 @@ function createDefaultVolume(): StorageVolume {
     name: `volume-${volumeCounter}`,
     purpose: 'custom',
     size: '100Gi',
-    accessMode: 'ReadWriteOnce',
+    accessMode: 'ReadWriteMany',
   };
 }
 
@@ -263,7 +263,7 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                   <div>
                     <label style={labelStyle}>Access Mode</label>
                     <select
-                      value={volume.accessMode || 'ReadWriteOnce'}
+                      value={volume.accessMode || 'ReadWriteMany'}
                       onChange={(e) =>
                         handleUpdate(index, {
                           accessMode: e.target.value as PersistentVolumeAccessMode,

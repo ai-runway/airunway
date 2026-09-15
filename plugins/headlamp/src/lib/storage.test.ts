@@ -61,7 +61,7 @@ describe('storage volume source normalization', () => {
       ...existingClaimVolume,
       claimName: undefined,
       size: '200Gi',
-      accessMode: 'ReadWriteOnce',
+      accessMode: 'ReadWriteMany',
     });
   });
 
@@ -80,7 +80,14 @@ describe('storage volume source normalization', () => {
       claimName: undefined,
       size: '200Gi',
       storageClassName: undefined,
-      accessMode: 'ReadWriteOnce',
+      accessMode: 'ReadWriteMany',
     });
+  });
+
+  it('preserves an explicitly selected access mode when changing managed size', () => {
+    expect(storageVolumeWithSize({
+      ...managedVolume,
+      accessMode: 'ReadWriteOnce',
+    }, '200Gi').accessMode).toBe('ReadWriteOnce');
   });
 });
