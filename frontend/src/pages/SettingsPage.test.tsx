@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PINNED_GAIE_VERSION } from '@airunway/shared'
+import type { InstallationState } from '@airunway/shared'
 import { SettingsPage } from './SettingsPage'
 
 const mutateAsync = vi.fn()
@@ -43,12 +44,17 @@ let mockGatewayStatus = {
 type MockRuntimeStatus = {
   id: string
   name: string
+  installationState?: InstallationState
   installed: boolean
   healthy: boolean
   crdFound?: boolean
   operatorRunning?: boolean
   requiresCRD?: boolean
+  installable?: boolean
   version?: string
+  shimRegistered?: boolean
+  shimConnected?: boolean
+  shimLastHeartbeat?: string
 }
 
 const defaultMockRuntimes = (): MockRuntimeStatus[] => [
@@ -140,6 +146,9 @@ const getMockInstallationStatus = (providerId: string) => {
         crdFound: true,
         operatorRunning: false,
         installationSteps: [],
+        shimRegistered: mockRuntimes.find(runtime => runtime.id === 'kuberay')?.shimRegistered,
+        shimConnected: mockRuntimes.find(runtime => runtime.id === 'kuberay')?.shimConnected,
+        shimLastHeartbeat: mockRuntimes.find(runtime => runtime.id === 'kuberay')?.shimLastHeartbeat,
       }
     case 'llmd':
       return {
@@ -150,6 +159,9 @@ const getMockInstallationStatus = (providerId: string) => {
         operatorRunning: false,
         requiresCRD: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.requiresCRD ?? false,
         installationSteps: llmdSetupSteps,
+        shimRegistered: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.shimRegistered,
+        shimConnected: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.shimConnected,
+        shimLastHeartbeat: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'llmd')?.shimLastHeartbeat,
       }
     case 'custom-llmd-registration':
       return {
@@ -169,6 +181,9 @@ const getMockInstallationStatus = (providerId: string) => {
         operatorRunning: false,
         requiresCRD: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.requiresCRD ?? false,
         installationSteps: vllmSetupSteps,
+        shimRegistered: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.shimRegistered,
+        shimConnected: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.shimConnected,
+        shimLastHeartbeat: mockRuntimes.find(runtime => runtime.id.toLowerCase() === 'vllm')?.shimLastHeartbeat,
       }
     case 'custom-vllm-registration':
       return {
@@ -188,6 +203,46 @@ const getMockInstallationStatus = (providerId: string) => {
         operatorRunning: false,
         requiresCRD: false,
         installationSteps: [],
+      }
+    case 'custom-runtime':
+      return {
+        installed: false,
+        providerName: 'Custom Runtime',
+        message: 'Custom Runtime has not provided installation metadata.',
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: false,
+        installationSteps: [],
+      }
+    case 'precedence-runtime': {
+      const runtime = mockRuntimes.find(runtime => runtime.id === providerId)
+      if (!runtime) throw new Error('Missing precedence-runtime fixture')
+      return {
+        installationState: runtime.installationState,
+        installed: runtime.installed,
+        providerName: runtime.name,
+        crdFound: runtime.crdFound,
+        operatorRunning: runtime.operatorRunning,
+        requiresCRD: runtime.requiresCRD,
+        installationSteps: [],
+      }
+    }
+    case 'unverified-runtime':
+      return {
+        installationState: 'unknown' as const,
+        installed: mockRuntimes.find(runtime => runtime.id === providerId)?.installed ?? false,
+        providerName: 'Unverified Runtime',
+        message: 'Unverified Runtime has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.',
+        requiresCRD: true,
+        installable: true,
+        installationSteps: [
+          {
+            title: 'Install Unverified Runtime',
+            description: 'Install the runtime.',
+            command: 'helm upgrade --install unverified-runtime example/unverified-runtime',
+          },
+        ],
       }
     default:
       return {
@@ -380,6 +435,275 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('button', { name: /install kuberay/i })).toBeInTheDocument()
   })
 
+  it('issue #244: distinguishes connected AI Runway integration from missing underlying runtime', () => {
+    // Simulate the user's reported scenario: KAITO shim is registered and
+    // heartbeating, but the underlying KAITO operator + CRDs are not
+    // installed. The card should still report "Not Installed", the detail
+    // panel should still show red X icons and an Install button, AND the
+    // integration status should be clearly shown as Connected so users
+    // understand which side is which.
+    const heartbeat = new Date().toISOString()
+    mockRuntimes = [
+      {
+        id: 'kuberay',
+        name: 'Kuberay',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        shimRegistered: true,
+        shimConnected: true,
+        shimLastHeartbeat: heartbeat,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    // Card: still says "Not Installed" because the underlying operator is missing
+    const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
+    expect(within(card).getByText('Not Installed')).toBeInTheDocument()
+    // Card: integration status visible and labeled "Connected"
+    const integrationRow = within(card).getByTestId('integration-status-kuberay')
+    expect(integrationRow).toHaveTextContent('AI Runway integration')
+    expect(integrationRow).toHaveTextContent('Connected')
+    expect(within(integrationRow).getByText(/checking in normally \(last reported \d+[smhd] ago\)\./)).toBeVisible()
+
+    // Detail panel: install button still visible, runtime row icons are red
+    fireEvent.click(screen.getByText('Kuberay'))
+    const installationPanel = screen.getByText('Kuberay Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).getByText('CRD Installed')).toBeInTheDocument()
+    expect(within(installationPanel).getByText('Operator Running')).toBeInTheDocument()
+    expect(within(installationPanel).getByRole('button', { name: /install kuberay/i })).toBeInTheDocument()
+
+    // Detail panel: integration status row shown with a "Connected" label
+    const detailIntegration = within(installationPanel).getByTestId('integration-status-detail')
+    expect(detailIntegration).toHaveTextContent('AI Runway integration')
+    expect(detailIntegration).toHaveTextContent('Connected')
+    expect(detailIntegration).toHaveTextContent(/checking in normally \(last reported \d+[smhd] ago\)\./)
+  })
+
+  it.each([0, 30 * 60 * 1000])('describes a disconnected integration without assuming its heartbeat is stale (age %s ms)', (heartbeatAge) => {
+    mockRuntimes = [
+      {
+        id: 'kuberay',
+        name: 'Kuberay',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        shimRegistered: true,
+        shimConnected: false,
+        shimLastHeartbeat: new Date(Date.now() - heartbeatAge).toISOString(),
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const card = screen.getByText('Kuberay').closest('.rounded-2xl') as HTMLElement
+    const integrationRow = within(card).getByTestId('integration-status-kuberay')
+    expect(integrationRow).toHaveTextContent('Not responding')
+    expect(within(integrationRow).getByText(/integration is disconnected \(last reported \d+[smhd] ago\)\./)).toBeVisible()
+    expect(integrationRow).not.toHaveTextContent('has not checked in recently')
+
+    const detailIntegration = screen.getByTestId('integration-status-detail')
+    expect(detailIntegration).toHaveTextContent(/integration is disconnected \(last reported \d+[smhd] ago\)\./)
+    expect(detailIntegration).not.toHaveTextContent('has not checked in recently')
+  })
+
+  it('hides integration status when older backend responses omit its fields', () => {
+    mockRuntimes = [
+      {
+        id: 'kuberay',
+        name: 'Kuberay',
+        installed: false,
+        healthy: false,
+        requiresCRD: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('Kuberay Installation')).toBeInTheDocument()
+    expect(screen.queryByText('AI Runway integration')).not.toBeInTheDocument()
+  })
+
+  it('does not offer installation when a provider has no installation metadata', () => {
+    mockRuntimes = [
+      {
+        id: 'custom-runtime',
+        name: 'Custom Runtime',
+        installed: false,
+        healthy: false,
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: false,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const installationPanel = screen.getByText('Custom Runtime Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).queryByRole('button', { name: /install custom runtime/i })).not.toBeInTheDocument()
+    expect(installationPanel).not.toHaveTextContent('Use the install button below')
+  })
+
+  it.each([
+    { healthy: true, installed: true },
+    { healthy: true, installed: false },
+    { healthy: false, installed: true },
+    { healthy: false, installed: false },
+  ])('keeps unverified installation neutral (ready=$healthy, legacy installed=$installed)', ({ healthy, installed }) => {
+    mockRuntimes = [
+      {
+        id: 'unverified-runtime',
+        name: 'Unverified Runtime',
+        installationState: 'unknown',
+        installed,
+        healthy,
+        requiresCRD: true,
+        installable: true,
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const card = screen.getByText('Unverified Runtime').closest('.rounded-2xl') as HTMLElement
+    expect(within(card).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(card).queryByText('Not Installed')).not.toBeInTheDocument()
+    expect(within(card).getAllByText('Not checked')).toHaveLength(2)
+
+    const installationPanel = screen.getByText('Unverified Runtime Installation').closest('.rounded-2xl') as HTMLElement
+    expect(within(installationPanel).getByText('Status unknown')).toBeInTheDocument()
+    expect(within(installationPanel).getAllByText('Not checked')).toHaveLength(2)
+    expect(installationPanel).toHaveTextContent('status cannot be confirmed')
+    expect(within(installationPanel).queryByRole('button', { name: /install unverified runtime/i })).not.toBeInTheDocument()
+    expect(within(installationPanel).queryByRole('button', { name: /uninstall/i })).not.toBeInTheDocument()
+    expect(screen.queryByText('Manual Installation Steps')).not.toBeInTheDocument()
+    expect(screen.queryByText('Helm CLI not available')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByText(`${healthy ? 1 : 0} of 1`)).toBeInTheDocument()
+  })
+
+  it.each([
+    { installationState: 'installed', requiresCRD: true, label: 'Installed', count: '1 of 1' },
+    { installationState: 'not-installed', requiresCRD: true, label: 'Not Installed', count: '0 of 1' },
+    { installationState: 'installed', requiresCRD: false, label: 'Ready', count: '1 of 1' },
+    { installationState: 'not-installed', requiresCRD: false, label: 'Registered', count: '0 of 1' },
+  ] as const)('honors explicit $installationState across Settings (requiresCRD=$requiresCRD)', ({ installationState, requiresCRD, label, count }) => {
+    const installed = installationState === 'installed'
+    mockRuntimes = [{
+      id: 'precedence-runtime',
+      name: 'Precedence Runtime',
+      installationState,
+      installed: !installed,
+      healthy: !installed,
+      requiresCRD,
+      crdFound: installed,
+      operatorRunning: installed,
+    }]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getAllByText(label)).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByText(count)).toBeInTheDocument()
+  })
+
+  it('uses the explicit verdict when selecting the default Settings runtime', () => {
+    mockRuntimes = [
+      { id: 'precedence-runtime', name: 'Precedence Runtime', installationState: 'not-installed', installed: true, healthy: true },
+      { id: 'installed-runtime', name: 'Installed Runtime', installationState: 'installed', installed: false, healthy: true },
+    ]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('Installed Runtime').closest('.rounded-2xl')).toHaveClass('ring-2')
+  })
+
+  it.each([true, false])('uses reported readiness for an unknown CRD-less runtime (%s)', (healthy) => {
+    mockRuntimes = [{
+      id: 'precedence-runtime',
+      name: 'Precedence Runtime',
+      installationState: 'unknown',
+      installed: !healthy,
+      healthy,
+      requiresCRD: false,
+    }]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getAllByText(healthy ? 'Ready' : 'Registered')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByText(`${healthy ? 1 : 0} of 1`)).toBeInTheDocument()
+  })
+
+  it.each([true, false])('uses reported readiness when defaulting an unknown Settings runtime (%s)', (healthy) => {
+    mockRuntimes = [
+      { id: 'unverified-runtime', name: 'Unverified Runtime', installationState: 'unknown', installed: !healthy, healthy },
+      { id: 'installed-runtime', name: 'Installed Runtime', installed: true, healthy: true },
+    ]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText(healthy ? 'Unverified Runtime' : 'Installed Runtime').closest('.rounded-2xl'))
+      .toHaveClass('ring-2')
+  })
+
+  it.each([
+    { installed: true, healthy: false, count: '1 of 1' },
+    { installed: false, healthy: true, count: '1 of 1' },
+    { installed: false, healthy: false, count: '0 of 1' },
+  ])('retains legacy CRD-less readiness fallback (installed=$installed, healthy=$healthy)', ({ count, ...status }) => {
+    mockRuntimes = [{
+      id: 'precedence-runtime',
+      name: 'Precedence Runtime',
+      requiresCRD: false,
+      ...status,
+    }]
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText(count)).toBeInTheDocument()
+  })
+
   it('shows providers that do not require runtime operators without CRD controls', () => {
     render(
       <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
@@ -446,6 +770,39 @@ describe('SettingsPage', () => {
     expect(screen.queryByText('Install NVIDIA GPU Device Plugin')).not.toBeInTheDocument()
     expect(screen.queryByText('Install vLLM CRD')).not.toBeInTheDocument()
     expect(screen.queryByText('Start vLLM operator')).not.toBeInTheDocument()
+  })
+
+  it('shows a stale AI Runway integration for a CRD-less runtime without adding CRD controls', () => {
+    mockRuntimes = [
+      {
+        id: 'vllm',
+        name: 'vLLM',
+        installed: true,
+        healthy: true,
+        requiresCRD: false,
+        shimRegistered: true,
+        shimConnected: false,
+        shimLastHeartbeat: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      },
+    ]
+
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+
+    const vllmCard = screen.getByText('vLLM').closest('.rounded-2xl') as HTMLElement
+    expect(within(vllmCard).getByText('Ready')).toBeInTheDocument()
+    expect(within(vllmCard).getByTestId('integration-status-vllm')).toHaveTextContent('Not responding')
+    expect(vllmCard).not.toHaveTextContent(/CRD|operator/i)
+
+    const vllmStatusPanel = screen.getByText('vLLM Status').closest('.rounded-2xl') as HTMLElement
+    const detailIntegration = within(vllmStatusPanel).getByTestId('integration-status-detail')
+    expect(detailIntegration).toHaveTextContent('Not responding')
+    expect(detailIntegration).toHaveTextContent('The AI Runway integration is disconnected')
+    expect(vllmStatusPanel).not.toHaveTextContent(/CRD|operator/i)
+    expect(within(vllmStatusPanel).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('uses display names to hide CRD controls for CRD-less providers with custom ids', async () => {

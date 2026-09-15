@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/providers/pkg/shim"
 )
 
 func TestGetProviderConfigSpec(t *testing.T) {
@@ -249,7 +250,7 @@ func TestMarkUnregistered(t *testing.T) {
 		t.Error("expected Ready=false")
 	}
 	cond := findCondition(got.Status.Conditions, "UpstreamReady")
-	if cond == nil || cond.Reason != ReasonUnregistered {
+	if cond == nil || cond.Reason != ReasonUnregistered || cond.Message != shim.MessageUnregistered {
 		t.Errorf("unexpected UpstreamReady condition: %+v", cond)
 	}
 }

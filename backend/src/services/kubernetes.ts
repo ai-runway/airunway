@@ -1,7 +1,6 @@
 import * as k8s from '@kubernetes/client-node';
-import type * as https from 'node:https';
 import { configService } from './config';
-import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig } from '@airunway/shared';
+import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig, InstallationState } from '@airunway/shared';
 import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient, kubeConfigToBunTls, type BunTlsOptions } from '../lib/kubeconfig';
@@ -140,12 +139,17 @@ export function extractCRDVersionFromAnnotations(crdOrResponse: unknown, annotat
  * Installation status for CRDs
  */
 export interface InstallationStatus {
+  installationState?: InstallationState;
   installed: boolean;
   crdFound?: boolean;
   operatorRunning?: boolean;
   requiresCRD?: boolean;
   version?: string;
   message?: string;
+}
+
+function resolveInstallationState(status: InstallationStatus): InstallationState {
+  return status.installationState ?? (status.installed ? 'installed' : 'not-installed');
 }
 
 /**
@@ -378,7 +382,8 @@ type ProxyServiceGetOptions = ProxyServiceOptions & {
   accept?: string;
 };
 
-type ProxyServiceRequestInit = RequestInit & {
+type ProxyServiceRequestInit = Omit<RequestInit, 'method'> & {
+  method: 'GET' | 'POST';
   userToken?: string;
 };
 
@@ -958,6 +963,11 @@ class KubernetesService {
             providerInfo.health,
             requiresCRD,
           );
+          const runtimeRequiresExternalInstallation = runtimeStatus.requiresCRD ?? requiresCRD;
+          const installationState = runtimeRequiresExternalInstallation
+            ? resolveInstallationState(runtimeStatus)
+            : undefined;
+          const installationUnknown = installationState === 'unknown';
 
           // Layer the shim's heartbeat-aware view over the live installation
           // check: prefer the shim's message when it carries an actionable
@@ -967,7 +977,8 @@ class KubernetesService {
           // check — they reflect what's actually in the cluster.
           const { getProviderHealth } = await import('./providerHealth');
           const health = getProviderHealth(providerInfo.id, item);
-          const useShimMessage = health.stale || (!health.healthy && health.hasShimSignal);
+          const useShimMessage = !installationUnknown
+            && (health.stale || (!health.healthy && health.hasShimSignal));
           const message = useShimMessage ? health.message : runtimeStatus.message;
 
           return {
@@ -978,17 +989,32 @@ class KubernetesService {
             documentationUrl: providerInfo.documentationUrl,
             icon: providerInfo.icon,
             warnings: providerInfo.warnings,
-            installable: providerInfo.installable,
+            installable: installationUnknown ? false : providerInfo.installable,
             capabilities: providerInfo.capabilities,
             deploymentDefaults: providerInfo.deploymentDefaults,
             health: providerInfo.health,
+            installationState,
             installed: runtimeStatus.installed,
-            healthy: runtimeStatus.operatorRunning ?? false,
-            crdFound: runtimeStatus.crdFound ?? runtimeStatus.installed,
-            operatorRunning: runtimeStatus.operatorRunning ?? false,
+            healthy: installationUnknown
+              ? getProviderStatusReady(status, providerInfo.health)
+              : runtimeStatus.operatorRunning ?? false,
+            crdFound: installationUnknown
+              ? undefined
+              : runtimeStatus.crdFound ?? runtimeStatus.installed,
+            operatorRunning: installationUnknown
+              ? undefined
+              : runtimeStatus.operatorRunning ?? false,
             requiresCRD: runtimeStatus.requiresCRD ?? requiresCRD,
             version: status.version,
             message,
+            // AI Runway's own integration, reported alongside — never folded
+            // into — the install fields above, so the UI can never imply the
+            // runtime is installed just because the integration is alive
+            // (issue #244). Connectivity comes only from a valid, fresh
+            // heartbeat, independently of upstream readiness.
+            shimRegistered: true,
+            shimConnected: health.connected,
+            shimLastHeartbeat: health.lastHeartbeat,
           };
         }),
       );
@@ -1205,22 +1231,13 @@ class KubernetesService {
         break;
     }
 
-    if (statusReady) {
-      return {
-        installed: true,
-        crdFound: true,
-        operatorRunning: true,
-        requiresCRD: true,
-        message: `${displayName} is installed and running`,
-      };
-    }
-
+    // Preserve the readiness fallback for legacy clients. Modern clients use
+    // the explicit unknown verdict rather than treating it as installation proof.
     return {
-      installed: false,
-      crdFound: false,
-      operatorRunning: false,
+      installationState: 'unknown',
+      installed: statusReady,
       requiresCRD: true,
-      message: `${displayName} is registered but not ready`,
+      message: `${displayName} has not told AI Runway how to check whether it is installed, so its status cannot be confirmed.`,
     };
   }
 
@@ -1285,6 +1302,7 @@ class KubernetesService {
     }
 
     return {
+      installationState: installed ? 'installed' : 'not-installed',
       installed,
       crdFound,
       operatorRunning,
@@ -1324,6 +1342,7 @@ class KubernetesService {
     }
 
     return {
+      installationState: installed ? 'installed' : 'not-installed',
       installed,
       crdFound,
       operatorRunning,
@@ -2506,15 +2525,19 @@ class KubernetesService {
     // Build proxy URL: /api/v1/namespaces/{ns}/services/{name}:{port}/proxy/{path}
     const proxyUrl = `${cluster.server}/api/v1/namespaces/${encodeURIComponent(namespace)}/services/${encodeURIComponent(serviceName)}:${port}/proxy/${path}`;
 
-    // Extract auth headers from KubeConfig
-    const authOpts = await kubeConfig.applyToFetchOptions({ headers: {} } as https.RequestOptions);
+    // Apply kubeconfig authentication to the SDK's request context, then copy
+    // the resulting headers into Bun's native fetch request. client-node v2
+    // removed applyToFetchOptions in favour of this public authentication API.
+    const method = requestInit.method === 'POST' ? k8s.HttpMethod.POST : k8s.HttpMethod.GET;
+    const authContext = new k8s.RequestContext(proxyUrl, method);
+    await kubeConfig.applySecurityAuthentication(authContext);
 
     // Extract TLS material (CA, client cert/key, SNI, verification mode) via the
     // shared kubeconfig→Bun mapping, so this raw-`fetch` path and the typed-API
     // path (`BunTlsHttpLibrary`) stay in lockstep and cannot drift.
     const tlsOpts = await kubeConfigToBunTls(kubeConfig);
 
-    const headers = new Headers((authOpts.headers as HeadersInit) || {});
+    const headers = new Headers(authContext.getHeaders());
     if (requestInit.headers) {
       new Headers(requestInit.headers).forEach((value, key) => headers.set(key, value));
     }

@@ -120,6 +120,14 @@ function RecipeCodePanel({ title, value }: RecipeCodePanelProps) {
   )
 }
 
+function canDeployWithRuntime(runtime?: RuntimeStatus): boolean {
+  const installationState = runtime?.installationState
+    ?? (runtime?.installed ? 'installed' : 'not-installed')
+  return installationState === 'unknown'
+    ? runtime?.healthy ?? false
+    : installationState === 'installed'
+}
+
 interface DeploymentFormProps {
   model: Model
   detailedCapacity?: DetailedClusterCapacity
@@ -440,31 +448,31 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
     runtime.description || FALLBACK_RUNTIME_INFO[runtime.id]?.description || 'No description available'
   )
 
-  // Determine default runtime from provider discovery: prefer compatible and installed runtime.
+  // Prefer a compatible runtime that is available for deployment.
   const getDefaultRuntime = (): string => {
     if (!runtimes || runtimes.length === 0) {
       return model.supportedEngines.includes('llamacpp') ? 'kaito' : 'dynamo'
     }
 
     const prioritizedRuntimes = getPrioritizedRuntimes(runtimes)
-    const compatibleInstalled = prioritizedRuntimes.find(
-      (runtime) => runtime.installed && isRuntimeCompatible(runtime, model.supportedEngines)
+    const compatibleReady = prioritizedRuntimes.find(
+      (runtime) => canDeployWithRuntime(runtime) && isRuntimeCompatible(runtime, model.supportedEngines)
     )
-    if (compatibleInstalled) return compatibleInstalled.id
+    if (compatibleReady) return compatibleReady.id
 
     const compatible = prioritizedRuntimes.find((runtime) =>
       isRuntimeCompatible(runtime, model.supportedEngines)
     )
     if (compatible) return compatible.id
 
-    return prioritizedRuntimes.find((runtime) => runtime.installed)?.id || prioritizedRuntimes[0]?.id || 'dynamo'
+    return prioritizedRuntimes.find(canDeployWithRuntime)?.id || prioritizedRuntimes[0]?.id || 'dynamo'
   }
   const [selectedRuntime, setSelectedRuntime] = useState<string>(getDefaultRuntime)
   const runtimeManuallySelectedRef = useRef(false)
   const selectedRuntimeStatus = runtimes?.find(r => r.id === selectedRuntime)
   const isSelectedCrdLessRuntime = selectedRuntimeStatus?.requiresCRD === false
-  const isSelectedCrdLessRuntimeNotReady = isSelectedCrdLessRuntime && !selectedRuntimeStatus?.installed
-  const isRuntimeInstalled = selectedRuntimeStatus?.installed ?? false
+  const isRuntimeReady = canDeployWithRuntime(selectedRuntimeStatus)
+  const isSelectedCrdLessRuntimeNotReady = isSelectedCrdLessRuntime && !isRuntimeReady
 
   // AI Configurator state - tracks supported backends and recommended mode
   const [aiConfigSupportedBackends, setAiConfigSupportedBackends] = useState<string[] | null>(null)
@@ -1293,8 +1301,10 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
       return 'FP8 Not Supported on This GPU'
     }
 
-    if (!isRuntimeInstalled) {
-      return isSelectedCrdLessRuntimeNotReady ? 'Runtime Not Ready' : 'Runtime Not Installed'
+    if (!isRuntimeReady) {
+      return isSelectedCrdLessRuntimeNotReady || selectedRuntimeStatus?.installationState === 'unknown'
+        ? 'Runtime Not Ready'
+        : 'Runtime Not Installed'
     }
 
     if (selectedRuntime === 'kaito' && !isHuggingFaceGgufModel && !isVllmModel && !selectedPremadeModel) {
@@ -1378,7 +1388,9 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
               const displayName = getRuntimeDisplayName(runtimeId)
               const description = getRuntimeDescription(runtime)
               const isCrdLessRuntime = runtime.requiresCRD === false
-              const isCrdLessRuntimeNotReady = isCrdLessRuntime && !runtime.installed
+              const installationUnknown = runtime.installationState === 'unknown'
+              const isReady = canDeployWithRuntime(runtime)
+              const isCrdLessRuntimeNotReady = isCrdLessRuntime && !isReady
 
               return (
                 <div
@@ -1405,7 +1417,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                       ? "border-cyan-400/50 bg-cyan-500/5 shadow-[0_0_15px_rgba(0,217,255,0.15)]"
                       : "border-white/5",
                     isCompatible && !isSelected && "hover:border-white/10 hover:bg-white/[0.03]",
-                    isCompatible && !runtime.installed && "opacity-75"
+                    isCompatible && !isReady && "opacity-75"
                   )}
                 >
                   {/* Custom radio indicator */}
@@ -1434,7 +1446,11 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                         <Badge variant="outline" className="text-muted-foreground border-muted text-xs">
                           Not Compatible
                         </Badge>
-                      ) : runtime.installed ? (
+                      ) : installationUnknown ? (
+                        <Badge variant="outline" className="text-muted-foreground border-muted text-xs">
+                          Status unknown
+                        </Badge>
+                      ) : isReady ? (
                         <Badge variant="outline" className="text-green-400 border-green-500/50 bg-green-500/10 text-xs">
                           <CheckCircle2 className="h-3 w-3 mr-1" />
                           {isCrdLessRuntime ? 'Registered' : 'Installed'}
@@ -1459,9 +1475,13 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
                         This model requires {model.supportedEngines.includes('llamacpp') ? 'llama.cpp' : model.supportedEngines.join('/')} which is not supported by this deployment method.
                       </p>
                     )}
-                    {isCompatible && !runtime.installed && isSelected && (
+                    {isCompatible && isSelected && (installationUnknown || !isReady) && (
                       <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-2">
-                        {isCrdLessRuntime ? (
+                        {installationUnknown ? (
+                          isReady
+                            ? 'Installation cannot be confirmed, but this runtime reports it is ready for deployment.'
+                            : 'Installation cannot be confirmed, and this runtime is not ready for deployment.'
+                        ) : isCrdLessRuntime ? (
                           'Provider is registered but not ready yet.'
                         ) : (
                           <>
@@ -2671,7 +2691,7 @@ export function DeploymentForm({ model, detailedCapacity, autoscaler, runtimes, 
         </Button>
         <Button
           type="submit"
-          disabled={createDeployment.isProcessing || needsHfAuth || !isRuntimeInstalled || !isKaitoConfigValid || fp8Blocked}
+          disabled={createDeployment.isProcessing || needsHfAuth || !isRuntimeReady || !isKaitoConfigValid || fp8Blocked}
           loading={createDeployment.isProcessing}
           className={cn(
             "flex-1 h-14 rounded-2xl bg-primary text-primary-foreground font-bold shadow-glow-button gap-2",
