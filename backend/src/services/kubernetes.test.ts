@@ -365,14 +365,8 @@ describe('KubernetesService - service proxy', () => {
 
     const fakeKubeConfig = (authHeader: string) => ({
       getCurrentCluster: () => ({ server: 'https://cluster.example', skipTLSVerify: false }),
-      applyToFetchOptions: async (requestOptions: { headers?: Record<string, string> }) => {
-        return {
-          ...requestOptions,
-          headers: {
-            ...(requestOptions?.headers ?? {}),
-            Authorization: authHeader,
-          },
-        };
+      applySecurityAuthentication: async (context: { setHeaderParam: (key: string, value: string) => void }) => {
+        context.setHeaderParam('Authorization', authHeader);
       },
       applyToHTTPSOptions: async () => undefined,
     });

@@ -16,19 +16,25 @@ import {
   StatusLabelProps,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import { useApiClient } from '../lib/api-client';
-import type { RuntimesStatusResponse, RuntimeStatus } from '@airunway/shared';
+import type { InstallationState, RuntimesStatusResponse, RuntimeStatus } from '@airunway/shared';
 import { ConnectionError } from '../components/ConnectionBanner';
 
+function getInstallationState(runtime: RuntimeStatus): InstallationState {
+  return runtime.installationState ?? (runtime.installed ? 'installed' : 'not-installed');
+}
+
 function getStatusColor(runtime: RuntimeStatus): StatusLabelProps['status'] {
-  if (runtime.healthy) return 'success';
-  if (runtime.installed) return 'warning'; // CRD exists but operator not running
-  return 'error';
+  const installationState = getInstallationState(runtime);
+  if (installationState === 'unknown') return '';
+  if (installationState === 'not-installed') return 'error';
+  return runtime.healthy ? 'success' : 'warning';
 }
 
 function getStatusText(runtime: RuntimeStatus): string {
-  if (runtime.healthy) return 'Healthy';
-  if (runtime.installed) return 'Unhealthy'; // CRD exists but operator not running
-  return 'Not Installed';
+  const installationState = getInstallationState(runtime);
+  if (installationState === 'unknown') return 'Status unknown';
+  if (installationState === 'not-installed') return 'Not Installed';
+  return runtime.healthy ? 'Healthy' : 'Unhealthy';
 }
 
 export function RuntimesStatus() {
@@ -159,14 +165,14 @@ export function RuntimesStatus() {
             <div style={{ fontSize: '14px', marginBottom: '16px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                 <span style={{ opacity: 0.7 }}>CRD</span>
-                <StatusLabel status={runtime.installed ? 'success' : 'error'}>
-                  {runtime.installed ? 'Installed' : 'Not Installed'}
+                <StatusLabel status={runtime.installationState === 'unknown' ? '' : (runtime.crdFound ?? runtime.installed) ? 'success' : 'error'}>
+                  {runtime.installationState === 'unknown' ? 'Not checked' : (runtime.crdFound ?? runtime.installed) ? 'Installed' : 'Not Installed'}
                 </StatusLabel>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                 <span style={{ opacity: 0.7 }}>Operator</span>
-                <StatusLabel status={runtime.healthy ? 'success' : 'error'}>
-                  {runtime.healthy ? 'Running' : 'Not Running'}
+                <StatusLabel status={runtime.installationState === 'unknown' ? '' : runtime.healthy ? 'success' : 'error'}>
+                  {runtime.installationState === 'unknown' ? 'Not checked' : runtime.healthy ? 'Running' : 'Not Running'}
                 </StatusLabel>
               </div>
               {runtime.version && (
@@ -179,8 +185,7 @@ export function RuntimesStatus() {
 
             {/* Actions */}
             <div style={{ display: 'flex', gap: '8px' }}>
-              {/* Show Install button if not fully installed (CRD missing or operator not running) */}
-              {!runtime.healthy && (
+              {getInstallationState(runtime) === 'not-installed' && runtime.installable !== false && (
                 <Button
                   variant="contained"
                   color="primary"
@@ -192,8 +197,7 @@ export function RuntimesStatus() {
                   {installing === runtime.id ? 'Deploying...' : 'Deploy'}
                 </Button>
               )}
-              {/* Show Upgrade and Uninstall only when fully healthy */}
-              {runtime.healthy && (
+              {getInstallationState(runtime) === 'installed' && runtime.installable !== false && (
                 <>
                   <Button
                     variant="contained"

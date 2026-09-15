@@ -3,4 +3,6 @@ resources:
 - airunway_v1alpha1_modeldeployment.yaml
 - airunway_v1alpha1_modeldeployment_llmd.yaml
 - airunway_v1alpha1_inferenceproviderconfig.yaml
+- airunway_v1alpha1_agentdeployment.yaml
+- airunway_v1alpha1_agentproviderconfig.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

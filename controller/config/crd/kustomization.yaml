@@ -4,6 +4,8 @@
 resources:
 - bases/airunway.ai_modeldeployments.yaml
 - bases/airunway.ai_inferenceproviderconfigs.yaml
+- bases/airunway.ai_agentdeployments.yaml
+- bases/airunway.ai_agentproviderconfigs.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

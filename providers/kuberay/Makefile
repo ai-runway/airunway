@@ -28,8 +28,9 @@ SHIM_VERSION ?= dev-$(GIT_SHA)$(GIT_DIRTY)
 LDFLAGS := -X $(MODULE).shimVersion=$(SHIM_VERSION)
 
 GOLANGCI_LINT ?= ../../bin/golangci-lint
+GOVULNCHECK ?= ../../bin/govulncheck
 
-.PHONY: build vet test cover lint lint-fix lint-config golangci-lint docker-build deploy generate-deploy-manifests
+.PHONY: build vet test cover lint lint-fix lint-config golangci-lint govulncheck govulncheck-tool docker-build deploy generate-deploy-manifests
 
 ## Run go vet against code
 vet:
@@ -56,6 +57,18 @@ lint-config: golangci-lint
 ## Ensure golangci-lint is installed via the controller toolchain pin
 golangci-lint:
 	@$(MAKE) -C ../../controller golangci-lint
+
+## Run govulncheck against code
+govulncheck: govulncheck-tool
+	"$(GOVULNCHECK)" ./...
+
+## Ensure govulncheck is installed via the controller toolchain pin
+govulncheck-tool:
+ifneq ($(origin GOVULNCHECK), file)
+	@echo "Using supplied GOVULNCHECK binary: $(GOVULNCHECK)"
+else
+	@$(MAKE) -C ../../controller govulncheck-tool
+endif
 
 ## Run unit tests with coverage profile output
 cover: vet
