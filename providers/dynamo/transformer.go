@@ -148,8 +148,8 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 		return nil, err
 	}
 	if deploymentMode == DeploymentModeIntent {
-		// DGDR is the default for new deployments so Dynamo can profile the cluster
-		// and choose the serving topology instead of Airunway fixing one up front.
+		// Intent mode lets Dynamo profile the cluster and choose the serving
+		// topology instead of Airunway fixing one up front.
 		return t.transformDGDR(md, overrides)
 	}
 
@@ -209,8 +209,7 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 	return []*unstructured.Unstructured{dgd}, nil
 }
 
-// resolveDeploymentMode keeps existing DGD-backed objects on their current path
-// during upgrades while making DGDR the default for newly created deployments.
+// resolveDeploymentMode uses direct DGD rendering unless intent mode is explicit.
 func (t *Transformer) resolveDeploymentMode(md *airunwayv1alpha1.ModelDeployment, overrides *DynamoOverrides) (string, error) {
 	// Mocker is a test-only module in the planner image and cannot use DGDR's real
 	// profiling flow, so it must continue through the direct DGD renderer.
@@ -222,12 +221,7 @@ func (t *Transformer) resolveDeploymentMode(md *airunwayv1alpha1.ModelDeployment
 	case DeploymentModeIntent, DeploymentModeManual:
 		return overrides.DeploymentMode, nil
 	case "":
-		// Do not migrate a serving direct DGD implicitly: a generated same-name DGD
-		// would collide with it and could disrupt an upgrade.
-		if md.Status.Provider != nil && md.Status.Provider.ResourceKind == DynamoGraphDeploymentKind {
-			return DeploymentModeManual, nil
-		}
-		return DeploymentModeIntent, nil
+		return DeploymentModeManual, nil
 	default:
 		return "", fmt.Errorf("unsupported Dynamo deploymentMode %q: must be %q or %q", overrides.DeploymentMode, DeploymentModeIntent, DeploymentModeManual)
 	}

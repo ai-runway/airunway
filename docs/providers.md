@@ -79,7 +79,7 @@ The Web UI backend reads provider information (capabilities, installation steps,
 
 | Provider      | Upstream CRD          | Status      | Shim YAML | Description                                                                    |
 | ------------- | --------------------- | ----------- | --------- | ------------------------------------------------------------------------------ |
-| NVIDIA Dynamo | DynamoGraphDeploymentRequest | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | Intent-based GPU inference with automatic profiling and topology selection |
+| NVIDIA Dynamo | DynamoGraphDeployment / Request | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | Direct GPU inference deployment with optional intent-based profiling and topology selection |
 | KubeRay       | RayService            | ✅ Available | [kuberay.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kuberay/deploy/kuberay.yaml) | Ray-based distributed inference with autoscaling                               |
 | KAITO         | Workspace             | ✅ Available | [kaito.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kaito/deploy/kaito.yaml) | Flexible inference with vLLM (GPU) or llama.cpp (CPU/GPU)                      |
 | llm-d         | none                  | ✅ Available | [llmd.yaml](https://github.com/ai-runway/airunway/blob/main/providers/llmd/deploy/llmd.yaml) | Flexible inference with vLLM (GPU) with KV-cache routing and disaggregated serving |
@@ -87,24 +87,23 @@ The Web UI backend reads provider information (capabilities, installation steps,
 
 ### Dynamo Deployment Modes
 
-Dynamo deployments use `DynamoGraphDeploymentRequest` by default. Dynamo profiles the available
-hardware, selects a serving layout, and creates the `DynamoGraphDeployment` automatically. New
-requests use rapid profiling and apply the selected deployment immediately.
+Dynamo deployments use direct `DynamoGraphDeployment` rendering by default. Use intent mode when
+you want Dynamo to profile the available hardware, select a serving layout, and create the
+`DynamoGraphDeployment` automatically:
 
-Use direct deployment only when you need to maintain a hand-tuned or compatibility configuration:
+Enable intent mode explicitly:
 
 ```yaml
 spec:
     provider:
         name: dynamo
         overrides:
-            deploymentMode: manual
+            deploymentMode: intent
 ```
 
-Direct-DGD settings such as `routerMode`, `frontend`, `epp`, and raw `spec` overrides require
-manual mode. DGDR intent cannot be changed after profiling starts; delete and recreate the
-`ModelDeployment` to apply a different intent. Existing DGD-backed deployments remain on the
-manual path during provider upgrades so a serving deployment is not replaced implicitly.
+Direct-DGD settings such as `routerMode`, `frontend`, `epp`, and raw `spec` overrides use the
+default manual mode. DGDR intent cannot be changed after profiling starts; delete and recreate the
+`ModelDeployment` to apply a different intent.
 
 Dynamo DGDR uses the namespace-level Secret `hf-token-secret` with key `HF_TOKEN` for both
 profiling and serving. For public models, AI Runway creates an empty placeholder when that Secret

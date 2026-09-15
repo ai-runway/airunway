@@ -36,22 +36,16 @@ func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
 			},
 		},
 	}
-	// Most existing transformer tests exercise direct DGD details; opt those
-	// fixtures into manual mode while individual default-mode tests clear it.
 	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
 		Name: "dynamo",
-		Overrides: &runtime.RawExtension{
-			Raw: []byte(`{"deploymentMode":"manual"}`),
-		},
 	}
 	return md
 }
 
-func TestTransformAggregated(t *testing.T) {
+func TestTransformIntentAggregated(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
-	// No deploymentMode exercises the new DGDR default for a fresh deployment.
-	md.Spec.Provider.Overrides = nil
+	md.Spec.Provider.Overrides = &runtime.RawExtension{Raw: []byte(`{"deploymentMode":"intent"}`)}
 
 	resources, err := tr.Transform(context.Background(), md)
 	if err != nil {
@@ -128,7 +122,7 @@ func TestTransformAggregated(t *testing.T) {
 func TestTransformDGDRRejectsCustomHuggingFaceSecret(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
-	md.Spec.Provider.Overrides = nil
+	md.Spec.Provider.Overrides = &runtime.RawExtension{Raw: []byte(`{"deploymentMode":"intent"}`)}
 	md.Spec.Secrets = &airunwayv1alpha1.SecretsSpec{HuggingFaceToken: "model-specific-token"}
 
 	_, err := tr.Transform(context.Background(), md)

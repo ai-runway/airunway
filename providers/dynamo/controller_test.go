@@ -46,8 +46,7 @@ func newMDForController(name, ns string) *airunwayv1alpha1.ModelDeployment {
 			Resources: &airunwayv1alpha1.ResourceSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
 		},
 		Status: airunwayv1alpha1.ModelDeploymentStatus{
-			// Existing controller tests exercise direct DGD behavior unless they
-			// explicitly clear ResourceKind to test the new-deployment default.
+			// Controller fixtures default to the direct DGD path.
 			Provider: &airunwayv1alpha1.ProviderStatus{Name: ProviderName, ResourceKind: DynamoGraphDeploymentKind},
 		},
 	}
@@ -383,7 +382,7 @@ func TestReconcileNilProvider(t *testing.T) {
 func TestReconcileSuccessfulCreate(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	// A fresh deployment with no recorded upstream kind defaults to DGDR.
+	// A fresh deployment with no recorded upstream kind defaults to direct DGD.
 	md.Status.Provider.ResourceKind = ""
 	controllerutil.AddFinalizer(md, FinalizerName)
 
@@ -400,11 +399,44 @@ func TestReconcileSuccessfulCreate(t *testing.T) {
 		t.Errorf("expected requeue after %v, got %v", RequeueInterval, result.RequeueAfter)
 	}
 
+	dgd := &unstructured.Unstructured{}
+	setDGDGVK(dgd)
+	err = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, dgd)
+	if err != nil {
+		t.Fatalf("expected DynamoGraphDeployment to be created: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: HuggingFaceTokenSecretName, Namespace: "default"}, secret); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected direct DGD mode not to create the intent Secret, got: %v", err)
+	}
+}
+
+func TestReconcileIntentCreatesDGDRAndHuggingFaceSecret(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.Status.Provider.ResourceKind = ""
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: ProviderName,
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{"deploymentMode":"intent"}`),
+		},
+	}
+	controllerutil.AddFinalizer(md, FinalizerName)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
 	dgdr := &unstructured.Unstructured{}
 	dgdr.SetAPIVersion(fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion))
 	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
-	err = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, dgdr)
-	if err != nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, dgdr); err != nil {
 		t.Fatalf("expected DynamoGraphDeploymentRequest to be created: %v", err)
 	}
 

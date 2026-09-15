@@ -238,7 +238,7 @@ func TestCheckBackendCRDInstalledUsesDiscoveryFreshResults(t *testing.T) {
 			},
 		},
 		{
-			// Provider readiness requires the DGDR API used by the new default path.
+			// Provider readiness includes the DGDR API used by intent mode.
 			GroupVersion: DynamoAPIGroup + "/" + DynamoGraphDeploymentRequestAPIVersion,
 			APIResources: []metav1.APIResource{
 				{Name: dynamoGraphDeploymentRequestResource},
@@ -429,7 +429,7 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
 		t.Fatalf("failed to decode health annotation: %v", err)
 	}
-	// The default DGDR flow requires both the request and generated-deployment APIs.
+	// The provider advertises both direct DGD and DGDR intent modes.
 	expectedCRDs := map[string]bool{
 		"dynamographdeployments.nvidia.com":        false,
 		"dynamographdeploymentrequests.nvidia.com": false,

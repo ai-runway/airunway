@@ -232,7 +232,7 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	return m.UpdateStatus(ctx, ready)
 }
 
-// checkBackendCRDInstalled checks both APIs required by the default DGDR flow.
+// checkBackendCRDInstalled checks both APIs exposed by this provider.
 func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
 	dgdInstalled := shim.IsAPIResourceInstalled(
 		m.client,
