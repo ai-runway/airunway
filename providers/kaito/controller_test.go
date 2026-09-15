@@ -933,20 +933,7 @@ func TestCreateOrUpdateResourceCreatesAtomicallyWithStableFieldManager(t *testin
 		t.Fatal("expected initial Apply not to force ownership")
 	}
 
-	created := getWorkspaceForTest(t, c)
-	if err := verifyOwnerReference(created, newSSADeploymentForTest().UID); err != nil {
-		t.Fatalf("expected created Workspace ownership: %v", err)
-	}
-	if !hasApplyManagedFields(created) {
-		t.Fatalf("expected %q managedFields entry, got %v", FieldManager, created.GetManagedFields())
-	}
-	migrationManagers, err := updateManagersOwningLastApplied(created)
-	if err != nil {
-		t.Fatalf("inspect migrated managedFields: %v", err)
-	}
-	if len(migrationManagers) != 0 {
-		t.Fatalf("expected Create Update ownership to be removed, got %v", migrationManagers)
-	}
+	assertCreatedWorkspaceOwnership(t, c)
 }
 
 func TestCreateOrUpdateResourceStripsUntrustedMigrationAnnotations(t *testing.T) {
@@ -1891,46 +1878,7 @@ func TestCreateOrUpdateResourceAdoptsLegacyWorkspaceAndClearsStaleFields(t *test
 		t.Fatalf("expected migration and final desired applies after legacy cleanup, got %d", controllerApplyCalls)
 	}
 
-	adopted := getWorkspaceForTest(t, c)
-	if !hasApplyManagedFields(adopted) {
-		t.Fatalf("expected stable apply manager after adoption, got %v", adopted.GetManagedFields())
-	}
-	migrationManagers, err := updateManagersOwningLastApplied(adopted)
-	if err != nil {
-		t.Fatalf("inspect adopted managedFields: %v", err)
-	}
-	if len(migrationManagers) != 0 {
-		t.Fatalf("expected legacy Update ownership to be removed, got %v", migrationManagers)
-	}
-	if _, found, _ := unstructured.NestedString(adopted.Object, "inference", "preset", "accessMode"); found {
-		t.Fatalf("expected legacy owned accessMode to be removed, got %v", adopted.Object["inference"])
-	}
-	if adopted.GetLabels()["airunway.example.com/stale"] != "" ||
-		adopted.GetAnnotations()["airunway.example.com/stale"] != "" {
-		t.Fatalf(
-			"expected legacy owned metadata to be removed, labels=%v annotations=%v",
-			adopted.GetLabels(),
-			adopted.GetAnnotations(),
-		)
-	}
-	if adopted.GetLabels()["operator.example.com/defaulted"] != "true" ||
-		adopted.GetAnnotations()["operator.example.com/defaulted"] != "true" {
-		t.Fatalf(
-			"expected non-owned metadata to survive adoption, labels=%v annotations=%v",
-			adopted.GetLabels(),
-			adopted.GetAnnotations(),
-		)
-	}
-	assertKaitoDefaultsForTest(t, adopted)
-	if _, found, err := unstructured.NestedString(
-		adopted.Object,
-		"resource",
-		"labelSelector",
-		"matchLabels",
-		"topology.example.com/pool",
-	); err != nil || found {
-		t.Fatalf("expected stale key in atomic selector to be removed, found=%v err=%v", found, err)
-	}
+	assertLegacyWorkspaceAdoption(t, c)
 
 	changed := desired.DeepCopy()
 	changedResource, _, _ := unstructured.NestedMap(changed.Object, "resource")
@@ -2039,35 +1987,7 @@ func TestCreateOrUpdateResourceAdoptsPreAnnotationWorkspace(t *testing.T) {
 	if err := r.createOrUpdateResource(context.Background(), desired, newSSADeploymentForTest()); err != nil {
 		t.Fatalf("adopt pre-annotation Workspace: %v", err)
 	}
-	adopted := getWorkspaceForTest(t, c)
-	if !hasApplyManagedFields(adopted) {
-		t.Fatalf("expected stable apply ownership after adoption, got %v", adopted.GetManagedFields())
-	}
-	migrationManagers, err := legacyUpdateManagers(adopted, newSSADeploymentForTest().UID)
-	if err != nil {
-		t.Fatalf("inspect adopted managedFields: %v", err)
-	}
-	if len(migrationManagers) != 0 {
-		t.Fatalf("expected pre-annotation controller ownership to be handed off, got %v", migrationManagers)
-	}
-	count, found, err := unstructured.NestedInt64(adopted.Object, "resource", "count")
-	if err != nil || !found || count != 1 {
-		t.Fatalf("expected desired count to replace pre-annotation value, got %d found=%v err=%v", count, found, err)
-	}
-	accessMode, found, err := unstructured.NestedString(adopted.Object, "inference", "preset", "accessMode")
-	if err != nil || !found || accessMode != testPrivateAccessMode {
-		t.Fatalf(
-			"expected desired accessMode to replace pre-annotation value, got %q found=%v err=%v",
-			accessMode,
-			found,
-			err,
-		)
-	}
-	matchLabels, found, err := unstructured.NestedStringMap(adopted.Object, "resource", "labelSelector", "matchLabels")
-	if err != nil || !found || len(matchLabels) != 1 || matchLabels["kubernetes.io/os"] != testLinuxOS {
-		t.Fatalf("expected stale pre-annotation selector to be removed, got %v found=%v err=%v", matchLabels, found, err)
-	}
-	assertKaitoDefaultsForTest(t, adopted)
+	assertPreAnnotationWorkspaceAdoption(t, c)
 
 	desiredWithoutAccessMode := desired.DeepCopy()
 	unstructured.RemoveNestedField(desiredWithoutAccessMode.Object, "inference", "preset", "accessMode")
@@ -2310,16 +2230,8 @@ func TestCreateOrUpdateResourceRecoversWhenOperatorReownsMigrationMarker(t *test
 	); err != nil {
 		t.Fatalf("resume operator-owned migration marker: %v", err)
 	}
-	recovered := getWorkspaceForTest(t, c)
-	if _, found := recovered.GetAnnotations()[migrationManagersAnnotation]; found {
-		t.Fatalf("expected migration marker to be cleared, got %v", recovered.GetAnnotations())
-	}
-	if recovered.GetAnnotations()["external.example.com/value"] != testPreservedAnnotationValue {
-		t.Fatalf("expected unrelated annotation to survive, got %v", recovered.GetAnnotations())
-	}
-	if recovered.GetAnnotations()[lastAppliedWorkspaceAnnotation] == "" {
-		t.Fatalf("expected stable applied fingerprint, got %v", recovered.GetAnnotations())
-	}
+	assertOperatorMigrationRecovered(t, c)
+
 	applyCallsAfterRecovery := controllerApplyCalls
 	if err := r.createOrUpdateResource(
 		context.Background(),
@@ -2443,27 +2355,11 @@ func TestCreateOrUpdateResourceRetainsMigrationStateUntilStaleCleanupSucceeds(t 
 				opts ...client.PatchOption,
 			) error {
 				if patch.Type() == types.ApplyPatchType {
-					options := &client.PatchOptions{}
-					for _, opt := range opts {
-						opt.ApplyToPatch(options)
-					}
-					if options.FieldManager != preservedFieldsManager {
-						return c.Patch(ctx, obj, patch, opts...)
-					}
-					content := obj.(*unstructured.Unstructured).UnstructuredContent()
-					annotations, _, err := unstructured.NestedStringMap(content, "metadata", "annotations")
+					isRelease, err := isPreservedMigrationRelease(obj, opts)
 					if err != nil {
 						return err
 					}
-					_, hasManagers := annotations[migrationManagersAnnotation]
-					_, hasPrevious := annotations[migrationPreviousFieldsAnnotation]
-					_, hasStaleField, err := unstructured.NestedString(content, "inference", "preset", "accessMode")
-					if err != nil {
-						return err
-					}
-					if hasManagers && hasPrevious && !hasStaleField {
-						releaseApplied = true
-					}
+					releaseApplied = releaseApplied || isRelease
 				}
 				if patch.Type() == types.MergePatchType && releaseApplied && failCleanup {
 					failCleanup = false
@@ -2480,32 +2376,12 @@ func TestCreateOrUpdateResourceRetainsMigrationStateUntilStaleCleanupSucceeds(t 
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected interrupted stale cleanup, got %v", err)
 	}
-	interrupted := getWorkspaceForTest(t, c)
-	if _, found := interrupted.GetAnnotations()[migrationManagersAnnotation]; !found {
-		t.Fatalf("expected migration marker to survive failed cleanup, got %v", interrupted.GetAnnotations())
-	}
-	if _, found := interrupted.GetAnnotations()[migrationPreviousFieldsAnnotation]; !found {
-		t.Fatalf("expected migration fingerprint to survive failed cleanup, got %v", interrupted.GetAnnotations())
-	}
+	assertPendingCleanupMarkers(t, c)
 
 	if err := r.createOrUpdateResource(context.Background(), desired.DeepCopy(), newSSADeploymentForTest()); err != nil {
 		t.Fatalf("retry stale cleanup: %v", err)
 	}
-	updated := getWorkspaceForTest(t, c)
-	if _, found, err := unstructured.NestedString(
-		updated.Object,
-		"inference",
-		"preset",
-		"accessMode",
-	); err != nil || found {
-		t.Fatalf("expected retry to remove stale field, found=%v err=%v", found, err)
-	}
-	if _, found := updated.GetAnnotations()[migrationManagersAnnotation]; found {
-		t.Fatalf("expected migration marker to clear after cleanup, got %v", updated.GetAnnotations())
-	}
-	if _, found := updated.GetAnnotations()[migrationPreviousFieldsAnnotation]; found {
-		t.Fatalf("expected migration fingerprint to clear after cleanup, got %v", updated.GetAnnotations())
-	}
+	assertStaleMigrationCleanup(t, c)
 }
 
 func TestCreateOrUpdateResourceHandsOffNewlyRenderedPreservedFieldBeforeRelease(t *testing.T) {
@@ -2529,25 +2405,8 @@ func TestCreateOrUpdateResourceHandsOffNewlyRenderedPreservedFieldBeforeRelease(
 				options := (&client.ApplyOptions{}).ApplyOptions(opts)
 				if enforceHandoff {
 					applyManagers = append(applyManagers, options.FieldManager)
-					workspace := obj.(interface{ UnstructuredContent() map[string]any })
-					accessMode, found, err := unstructured.NestedString(
-						workspace.UnstructuredContent(),
-						"inference",
-						"preset",
-						"accessMode",
-					)
-					if err != nil {
+					if err := checkAccessModeHandoff(obj, options.FieldManager, &stableClaimed, wantAdmissionErr); err != nil {
 						return err
-					}
-					switch options.FieldManager {
-					case FieldManager:
-						if found && accessMode == testPrivateAccessMode {
-							stableClaimed = true
-						}
-					case preservedFieldsManager:
-						if !found && !stableClaimed {
-							return wantAdmissionErr
-						}
 					}
 				}
 				return c.Apply(ctx, obj, opts...)
@@ -2772,6 +2631,32 @@ func TestCreateOrUpdateResourceSurfacesLegacyMigrationError(t *testing.T) {
 	}
 }
 
+func TestCreateOrUpdateResourceRejectsMalformedPendingMigrationBeforeStableApply(t *testing.T) {
+	for _, marker := range []string{"{", `[""]`, `"not-a-list"`} {
+		t.Run(marker, func(t *testing.T) {
+			existing := newSSAWorkspaceForTest(testPrivateAccessMode)
+			existing.SetAnnotations(map[string]string{migrationManagersAnnotation: marker})
+			patchCalls := 0
+			c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object,
+						patch client.Patch, opts ...client.PatchOption) error {
+						patchCalls++
+						return cl.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			r := &KaitoProviderReconciler{Client: c}
+			err := r.createOrUpdateResource(t.Context(), newSSAWorkspaceForTest(""), newSSADeploymentForTest())
+			if err == nil || !strings.Contains(err.Error(), "migration managers annotation") {
+				t.Fatalf("expected invalid persisted state to fail closed, got %v", err)
+			}
+			if patchCalls != 0 {
+				t.Fatalf("invalid persisted state triggered %d writes", patchCalls)
+			}
+		})
+	}
+}
+
 func TestCreateOrUpdateResourceRejectsMalformedLegacyAnnotation(t *testing.T) {
 	scheme := newScheme()
 	existing := newSSAWorkspaceForTest("")
@@ -2890,17 +2775,7 @@ func TestReconcileSSAConflictWritesStatusOnceAndRetriesSlowly(t *testing.T) {
 	if statusUpdates != 1 {
 		t.Fatalf("expected the conflict transition to write status once, got %d updates", statusUpdates)
 	}
-	var got airunwayv1alpha1.ModelDeployment
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(md), &got); err != nil {
-		t.Fatalf("get ModelDeployment: %v", err)
-	}
-	if got.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
-		t.Fatalf("expected failed phase, got %q", got.Status.Phase)
-	}
-	condition := apimeta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
-	if condition == nil || condition.Reason != testResourceConflictReason || condition.Status != metav1.ConditionFalse {
-		t.Fatalf("expected ResourceConflict condition, got %#v", condition)
-	}
+	assertWorkspaceSSAConflictStatus(t, c, md)
 
 	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(md)})
 	if err != nil {
@@ -3581,4 +3456,200 @@ func setLastAppliedForTestWithMetadata(t *testing.T, obj *unstructured.Unstructu
 func setWorkspaceGVK(u *unstructured.Unstructured) {
 	u.SetAPIVersion("kaito.sh/v1beta1")
 	u.SetKind("Workspace")
+}
+
+func assertCreatedWorkspaceOwnership(t *testing.T, c client.Client) {
+	t.Helper()
+	created := getWorkspaceForTest(t, c)
+	if err := verifyOwnerReference(created, newSSADeploymentForTest().UID); err != nil {
+		t.Fatalf("expected created Workspace ownership: %v", err)
+	}
+	if !hasApplyManagedFields(created) {
+		t.Fatalf("expected %q managedFields entry, got %v", FieldManager, created.GetManagedFields())
+	}
+	migrationManagers, err := updateManagersOwningLastApplied(created)
+	if err != nil {
+		t.Fatalf("inspect migrated managedFields: %v", err)
+	}
+	if len(migrationManagers) != 0 {
+		t.Fatalf("expected Create Update ownership to be removed, got %v", migrationManagers)
+	}
+}
+
+func assertLegacyWorkspaceAdoption(t *testing.T, c client.Client) {
+	t.Helper()
+	adopted := getWorkspaceForTest(t, c)
+	if !hasApplyManagedFields(adopted) {
+		t.Fatalf("expected stable apply manager after adoption, got %v", adopted.GetManagedFields())
+	}
+	migrationManagers, err := updateManagersOwningLastApplied(adopted)
+	if err != nil {
+		t.Fatalf("inspect adopted managedFields: %v", err)
+	}
+	if len(migrationManagers) != 0 {
+		t.Fatalf("expected legacy Update ownership to be removed, got %v", migrationManagers)
+	}
+	if _, found, _ := unstructured.NestedString(adopted.Object, "inference", "preset", "accessMode"); found {
+		t.Fatalf("expected legacy owned accessMode to be removed, got %v", adopted.Object["inference"])
+	}
+	if adopted.GetLabels()["airunway.example.com/stale"] != "" ||
+		adopted.GetAnnotations()["airunway.example.com/stale"] != "" {
+		t.Fatalf(
+			"expected legacy owned metadata to be removed, labels=%v annotations=%v",
+			adopted.GetLabels(),
+			adopted.GetAnnotations(),
+		)
+	}
+	if adopted.GetLabels()["operator.example.com/defaulted"] != "true" ||
+		adopted.GetAnnotations()["operator.example.com/defaulted"] != "true" {
+		t.Fatalf(
+			"expected non-owned metadata to survive adoption, labels=%v annotations=%v",
+			adopted.GetLabels(),
+			adopted.GetAnnotations(),
+		)
+	}
+	assertKaitoDefaultsForTest(t, adopted)
+	if _, found, err := unstructured.NestedString(
+		adopted.Object,
+		"resource",
+		"labelSelector",
+		"matchLabels",
+		"topology.example.com/pool",
+	); err != nil || found {
+		t.Fatalf("expected stale key in atomic selector to be removed, found=%v err=%v", found, err)
+	}
+}
+
+func assertPreAnnotationWorkspaceAdoption(t *testing.T, c client.Client) {
+	t.Helper()
+	adopted := getWorkspaceForTest(t, c)
+	if !hasApplyManagedFields(adopted) {
+		t.Fatalf("expected stable apply ownership after adoption, got %v", adopted.GetManagedFields())
+	}
+	migrationManagers, err := legacyUpdateManagers(adopted, newSSADeploymentForTest().UID)
+	if err != nil {
+		t.Fatalf("inspect adopted managedFields: %v", err)
+	}
+	if len(migrationManagers) != 0 {
+		t.Fatalf("expected pre-annotation controller ownership to be handed off, got %v", migrationManagers)
+	}
+	count, found, err := unstructured.NestedInt64(adopted.Object, "resource", "count")
+	if err != nil || !found || count != 1 {
+		t.Fatalf("expected desired count to replace pre-annotation value, got %d found=%v err=%v", count, found, err)
+	}
+	accessMode, found, err := unstructured.NestedString(adopted.Object, "inference", "preset", "accessMode")
+	if err != nil || !found || accessMode != testPrivateAccessMode {
+		t.Fatalf(
+			"expected desired accessMode to replace pre-annotation value, got %q found=%v err=%v",
+			accessMode,
+			found,
+			err,
+		)
+	}
+	matchLabels, found, err := unstructured.NestedStringMap(adopted.Object, "resource", "labelSelector", "matchLabels")
+	if err != nil || !found || len(matchLabels) != 1 || matchLabels["kubernetes.io/os"] != testLinuxOS {
+		t.Fatalf("expected stale pre-annotation selector to be removed, got %v found=%v err=%v", matchLabels, found, err)
+	}
+	assertKaitoDefaultsForTest(t, adopted)
+}
+
+func assertOperatorMigrationRecovered(t *testing.T, c client.Client) {
+	t.Helper()
+	recovered := getWorkspaceForTest(t, c)
+	if _, found := recovered.GetAnnotations()[migrationManagersAnnotation]; found {
+		t.Fatalf("expected migration marker to be cleared, got %v", recovered.GetAnnotations())
+	}
+	if recovered.GetAnnotations()["external.example.com/value"] != testPreservedAnnotationValue {
+		t.Fatalf("expected unrelated annotation to survive, got %v", recovered.GetAnnotations())
+	}
+	if recovered.GetAnnotations()[lastAppliedWorkspaceAnnotation] == "" {
+		t.Fatalf("expected stable applied fingerprint, got %v", recovered.GetAnnotations())
+	}
+}
+
+func assertWorkspaceSSAConflictStatus(t *testing.T, c client.Client, md *airunwayv1alpha1.ModelDeployment) {
+	t.Helper()
+	var got airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(md), &got); err != nil {
+		t.Fatalf("get ModelDeployment: %v", err)
+	}
+	if got.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+		t.Fatalf("expected failed phase, got %q", got.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeResourceCreated)
+	if condition == nil || condition.Reason != testResourceConflictReason || condition.Status != metav1.ConditionFalse {
+		t.Fatalf("expected ResourceConflict condition, got %#v", condition)
+	}
+}
+
+func isPreservedMigrationRelease(obj client.Object, opts []client.PatchOption) (bool, error) {
+	options := (&client.PatchOptions{}).ApplyOptions(opts)
+	if options.FieldManager != preservedFieldsManager {
+		return false, nil
+	}
+	content := obj.(*unstructured.Unstructured).UnstructuredContent()
+	annotations, _, err := unstructured.NestedStringMap(content, "metadata", "annotations")
+	if err != nil {
+		return false, err
+	}
+	_, hasManagers := annotations[migrationManagersAnnotation]
+	_, hasPrevious := annotations[migrationPreviousFieldsAnnotation]
+	_, hasStaleField, err := unstructured.NestedString(content, "inference", "preset", "accessMode")
+	return hasManagers && hasPrevious && !hasStaleField, err
+}
+
+func checkAccessModeHandoff(
+	obj runtime.ApplyConfiguration, manager string, stableClaimed *bool, wantAdmissionErr error,
+) error {
+	workspace := obj.(interface{ UnstructuredContent() map[string]any })
+	accessMode, found, err := unstructured.NestedString(
+		workspace.UnstructuredContent(),
+		"inference",
+		"preset",
+		"accessMode",
+	)
+	if err != nil {
+		return err
+	}
+	switch manager {
+	case FieldManager:
+		if found && accessMode == testPrivateAccessMode {
+			*stableClaimed = true
+		}
+	case preservedFieldsManager:
+		if !found && !*stableClaimed {
+			return wantAdmissionErr
+		}
+	}
+	return nil
+}
+
+func assertStaleMigrationCleanup(t *testing.T, c client.Client) {
+	t.Helper()
+	updated := getWorkspaceForTest(t, c)
+	if _, found, err := unstructured.NestedString(
+		updated.Object,
+		"inference",
+		"preset",
+		"accessMode",
+	); err != nil || found {
+		t.Fatalf("expected retry to remove stale field, found=%v err=%v", found, err)
+	}
+	if _, found := updated.GetAnnotations()[migrationManagersAnnotation]; found {
+		t.Fatalf("expected migration marker to clear after cleanup, got %v", updated.GetAnnotations())
+	}
+	if _, found := updated.GetAnnotations()[migrationPreviousFieldsAnnotation]; found {
+		t.Fatalf("expected migration fingerprint to clear after cleanup, got %v", updated.GetAnnotations())
+	}
+}
+
+func assertPendingCleanupMarkers(t *testing.T, c client.Client) {
+	t.Helper()
+	interrupted := getWorkspaceForTest(t, c)
+	if _, found := interrupted.GetAnnotations()[migrationManagersAnnotation]; !found {
+		t.Fatalf("expected migration marker to survive failed cleanup, got %v", interrupted.GetAnnotations())
+	}
+	if _, found := interrupted.GetAnnotations()[migrationPreviousFieldsAnnotation]; !found {
+		t.Fatalf("expected migration fingerprint to survive failed cleanup, got %v", interrupted.GetAnnotations())
+	}
 }

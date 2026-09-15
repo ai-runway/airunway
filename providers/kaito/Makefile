@@ -52,6 +52,11 @@ test: vet
 	go test ./...
 	@echo "✅ KAITO provider unit tests passed"
 
+## Run real API-server SSA migration tests (requires KUBEBUILDER_ASSETS).
+.PHONY: test-integration
+test-integration:
+	go test -tags=integration -run TestEnvtest -count=1 -timeout=3m -v ./...
+
 ## Run golangci-lint against code
 lint: golangci-lint
 	"$(GOLANGCI_LINT)" run --config=../../.golangci.yml
