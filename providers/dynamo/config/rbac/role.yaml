@@ -93,6 +93,13 @@ rules:
   - create
   - delete
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - create
+- apiGroups:
   - batch
   resources:
   - jobs

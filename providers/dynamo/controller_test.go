@@ -451,6 +451,42 @@ func TestReconcileIntentCreatesDGDRAndHuggingFaceSecret(t *testing.T) {
 	}
 }
 
+func TestReconcileIntentPreservesPlanReadyMessage(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.Status.Provider.ResourceKind = ""
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: ProviderName,
+		Overrides: &runtime.RawExtension{
+			Raw: []byte(`{"deploymentMode":"intent","autoApply":false}`),
+		},
+	}
+	controllerutil.AddFinalizer(md, FinalizerName)
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetAPIVersion(fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion))
+	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
+	dgdr.SetName(md.Name)
+	dgdr.SetNamespace(md.Namespace)
+	dgdr.SetOwnerReferences([]metav1.OwnerReference{{UID: md.UID}})
+	dgdr.SetAnnotations(map[string]string{"airunway.ai/model-deployment-generation": "0"})
+	dgdr.Object["spec"] = map[string]any{"autoApply": false}
+	dgdr.Object["status"] = map[string]any{"phase": "Ready"}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, dgdr).WithStatusSubresource(md).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(md)}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.ModelDeployment{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(md), updated); err != nil {
+		t.Fatalf("get reconciled ModelDeployment: %v", err)
+	}
+	if updated.Status.Message != "DGDR plan is ready; autoApply is false" {
+		t.Fatalf("expected translated plan message, got %q", updated.Status.Message)
+	}
+}
+
 func TestEnsureDGDRHuggingFaceSecretPreservesExistingToken(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
@@ -580,7 +616,7 @@ func TestReconcileDeletionRemovesDGDRAndGeneratedDGD(t *testing.T) {
 		Name:       md.Name,
 		UID:        md.UID,
 	}})
-	dgdr.Object["status"] = map[string]interface{}{"dgdName": "generated-dgd"}
+	dgdr.Object["status"] = map[string]any{"dgdName": "generated-dgd"}
 
 	dgd := &unstructured.Unstructured{}
 	setDGDGVK(dgd)
@@ -602,12 +638,12 @@ func TestReconcileDeletionRemovesDGDRAndGeneratedDGD(t *testing.T) {
 	if result.RequeueAfter != 5*time.Second {
 		t.Fatalf("expected upstream deletion requeue, got %#v", result)
 	}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(dgdr), &unstructured.Unstructured{Object: map[string]interface{}{
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(dgdr), &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": dgdr.GetAPIVersion(), "kind": dgdr.GetKind(),
 	}}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected DGDR deletion, got %v", err)
 	}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(dgd), &unstructured.Unstructured{Object: map[string]interface{}{
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(dgd), &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": dgd.GetAPIVersion(), "kind": dgd.GetKind(),
 	}}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected generated DGD deletion, got %v", err)

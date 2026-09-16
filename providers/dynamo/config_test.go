@@ -237,20 +237,13 @@ func TestCheckBackendCRDInstalledUsesDiscoveryFreshResults(t *testing.T) {
 				{Name: dynamoGraphDeploymentResource},
 			},
 		},
-		{
-			// Provider readiness includes the DGDR API used by intent mode.
-			GroupVersion: DynamoAPIGroup + "/" + DynamoGraphDeploymentRequestAPIVersion,
-			APIResources: []metav1.APIResource{
-				{Name: dynamoGraphDeploymentRequestResource},
-			},
-		},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	mgr := NewProviderConfigManager(c, discoveryClient)
 
 	if !mgr.checkBackendCRDInstalled() {
-		t.Fatal("expected backend CRD to be detected")
+		t.Fatal("expected DGD-only installation to be ready")
 	}
 
 	discoveryClient.Resources = []*metav1.APIResourceList{}

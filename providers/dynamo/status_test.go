@@ -23,11 +23,11 @@ func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured 
 	return &unstructured.Unstructured{Object: obj}
 }
 
-func newDGDRWithStatus(spec, status map[string]interface{}) *unstructured.Unstructured {
-	obj := map[string]interface{}{
+func newDGDRWithStatus(spec, status map[string]any) *unstructured.Unstructured {
+	obj := map[string]any{
 		"apiVersion": "nvidia.com/v1beta1",
 		"kind":       DynamoGraphDeploymentRequestKind,
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      "test-dgdr",
 			"namespace": "default",
 		},
@@ -171,8 +171,8 @@ func TestTranslateStatusUnknownState(t *testing.T) {
 
 func TestTranslateDGDRStatusReadyWithoutAutoApply(t *testing.T) {
 	result, err := NewStatusTranslator().TranslateStatus(newDGDRWithStatus(
-		map[string]interface{}{"autoApply": false},
-		map[string]interface{}{"phase": "Ready"},
+		map[string]any{"autoApply": false},
+		map[string]any{"phase": "Ready"},
 	))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -186,7 +186,7 @@ func TestTranslateDGDRStatusReadyWithoutAutoApply(t *testing.T) {
 }
 
 func TestTranslateDGDRStatusUsesGeneratedDGDName(t *testing.T) {
-	result, err := NewStatusTranslator().TranslateStatus(newDGDRWithStatus(nil, map[string]interface{}{
+	result, err := NewStatusTranslator().TranslateStatus(newDGDRWithStatus(nil, map[string]any{
 		"phase":   "Deployed",
 		"dgdName": "generated-dgd",
 	}))

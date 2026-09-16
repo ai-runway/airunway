@@ -179,7 +179,12 @@ type dgdrIntentImmutableError struct {
 }
 
 func (e *dgdrIntentImmutableError) Error() string {
-	return fmt.Sprintf("DynamoGraphDeploymentRequest intent is immutable after creation (existing ModelDeployment generation %s, desired generation %s); delete and recreate the ModelDeployment to apply the new intent", e.existingGeneration, e.desiredGeneration)
+	return fmt.Sprintf(
+		"DynamoGraphDeploymentRequest intent is immutable after creation "+
+			"(existing ModelDeployment generation %s, desired generation %s); "+
+			"delete and recreate the ModelDeployment to apply the new intent",
+		e.existingGeneration, e.desiredGeneration,
+	)
 }
 
 func isDGDRIntentImmutable(err error) bool {
@@ -213,7 +218,12 @@ type DynamoProviderReconciler struct {
 }
 
 // NewDynamoProviderReconciler creates a new Dynamo provider reconciler
-func NewDynamoProviderReconciler(kubeClient client.Client, scheme *runtime.Scheme, downloadJobImage string, apiReaders ...client.Reader) *DynamoProviderReconciler {
+func NewDynamoProviderReconciler(
+	kubeClient client.Client,
+	scheme *runtime.Scheme,
+	downloadJobImage string,
+	apiReaders ...client.Reader,
+) *DynamoProviderReconciler {
 	if downloadJobImage == "" {
 		downloadJobImage = storage.DefaultDownloadJobImage
 	}
@@ -233,7 +243,10 @@ func NewDynamoProviderReconciler(kubeClient client.Client, scheme *runtime.Schem
 
 // ensureDGDRHuggingFaceSecret creates Dynamo's required empty placeholder for
 // public models, but never creates or changes a Secret declared by the user.
-func (r *DynamoProviderReconciler) ensureDGDRHuggingFaceSecret(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+func (r *DynamoProviderReconciler) ensureDGDRHuggingFaceSecret(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) error {
 	key := types.NamespacedName{Name: HuggingFaceTokenSecretName, Namespace: md.Namespace}
 	secret := &corev1.Secret{}
 	// Bypass the shared cache so this exact-name read does not start a
@@ -245,7 +258,10 @@ func (r *DynamoProviderReconciler) ensureDGDRHuggingFaceSecret(ctx context.Conte
 	}
 
 	if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
-		return fmt.Errorf("Secret %s/%s declared by spec.secrets.huggingFaceToken does not exist", md.Namespace, HuggingFaceTokenSecretName)
+		return fmt.Errorf(
+			"secret %s/%s declared by spec.secrets.huggingFaceToken does not exist",
+			md.Namespace, HuggingFaceTokenSecretName,
+		)
 	}
 
 	// The empty token is valid for public models and avoids mutating a token that
@@ -276,6 +292,7 @@ func (r *DynamoProviderReconciler) ensureDGDRHuggingFaceSecret(ctx context.Conte
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
+//nolint:lll // Kubebuilder RBAC markers cannot be split across lines.
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
@@ -406,7 +423,10 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if isDGDRIntentImmutable(err) {
 				// Preserve the serving upstream object but fail the desired generation
 				// explicitly so users are not told an unapplied intent is healthy.
-				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "ImmutableIntent", err.Error())
+				r.setCondition(
+					&md, airunwayv1alpha1.ConditionTypeResourceCreated,
+					metav1.ConditionFalse, "ImmutableIntent", err.Error(),
+				)
 				r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ImmutableIntent", err.Error())
 				md.Status.Endpoint = nil
 				md.Status.Replicas = nil
@@ -495,7 +515,11 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	primaryResource := resources[0]
-	r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionTrue, "ResourceCreated", fmt.Sprintf("%s created successfully", primaryResource.GetKind()))
+	r.setCondition(
+		&md, airunwayv1alpha1.ConditionTypeResourceCreated,
+		metav1.ConditionTrue, "ResourceCreated",
+		fmt.Sprintf("%s created successfully", primaryResource.GetKind()),
+	)
 
 	// Update provider status
 	// Report the primary object Airunway owns; in intent mode the generated DGD
@@ -505,6 +529,9 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Sync status from upstream resource
 	if len(resources) > 0 {
+		// Discard text from a prior upstream state. syncStatus supplies current
+		// upstream detail when available; the fallback below handles no status.
+		md.Status.Message = ""
 		if err := r.syncStatus(ctx, &md, resources[0]); err != nil {
 			logger.Error(err, "Failed to sync status", "name", md.Name)
 			// Don't fail the reconciliation, just log the error
@@ -515,7 +542,9 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning &&
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
-		md.Status.Message = fmt.Sprintf("%s created, waiting for deployment to be ready", primaryResource.GetKind())
+		if md.Status.Message == "" {
+			md.Status.Message = fmt.Sprintf("%s created, waiting for deployment to be ready", primaryResource.GetKind())
+		}
 	}
 
 	if err := r.Status().Update(ctx, &md); err != nil {
@@ -848,7 +877,10 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 	})
 	if err := r.Get(ctx, types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, dgdr); err == nil {
 		if ownershipErr := verifyDynamoOwnership(dgdr, md.UID); ownershipErr != nil {
-			logger.Info("DynamoGraphDeploymentRequest is not managed by this ModelDeployment, skipping deletion", "name", dgdr.GetName())
+			logger.Info(
+				"DynamoGraphDeploymentRequest is not managed by this ModelDeployment, skipping deletion",
+				"name", dgdr.GetName(),
+			)
 		} else {
 			// Capture status.dgdName before deleting the DGDR because Dynamo does not
 			// retain an owner reference from the generated DGD back to the request.
@@ -944,7 +976,10 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 
 // findLinkedDGDNames locates generated DGDs by Dynamo's stable DGDR label; the
 // pinned same-name DGD is handled separately by the deletion caller.
-func (r *DynamoProviderReconciler) findLinkedDGDNames(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) ([]string, error) {
+func (r *DynamoProviderReconciler) findLinkedDGDNames(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) ([]string, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   DynamoAPIGroup,
@@ -1117,11 +1152,14 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Without this check, the manager crashes at startup when
 	// the backend CRDs are not present (see #178).
 	mapper := mgr.GetRESTMapper()
-	if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentRequestKind}, DynamoGraphDeploymentRequestAPIVersion); err == nil {
+	if _, err := mapper.RESTMapping(
+		schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentRequestKind},
+		DynamoGraphDeploymentRequestAPIVersion,
+	); err == nil {
 		logger := mgr.GetLogger()
 		logger.Info("DynamoGraphDeploymentRequest CRD detected, enabling event-driven watch")
 		builder = builder.Watches(
-			&unstructured.Unstructured{Object: map[string]interface{}{
+			&unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion),
 				"kind":       DynamoGraphDeploymentRequestKind,
 			}},

@@ -43,8 +43,6 @@ const (
 
 	dynamoPlatformValuesJSON      = `{"global.grove.install":true}`
 	dynamoGraphDeploymentResource = "dynamographdeployments"
-	// The default intent path requires the request CRD in addition to the DGD it generates.
-	dynamoGraphDeploymentRequestResource = "dynamographdeploymentrequests"
 )
 
 // shimVersion is this shim's reported version tag, injected at build time via:
@@ -224,7 +222,7 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 		return err
 	}
 
-	// Update status — check if backend CRD is installed
+	// Update status — check if the default backend CRD is installed
 	ready := m.checkBackendCRDInstalled()
 	if !ready {
 		logger.Info("Backend CRD not installed, provider registered as not ready", "group", DynamoAPIGroup, "kind", DynamoGraphDeploymentKind)
@@ -232,9 +230,10 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 	return m.UpdateStatus(ctx, ready)
 }
 
-// checkBackendCRDInstalled checks both APIs exposed by this provider.
+// checkBackendCRDInstalled checks the DGD API required by the default manual mode.
+// The optional DGDR API is validated when intent mode is requested.
 func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
-	dgdInstalled := shim.IsAPIResourceInstalled(
+	return shim.IsAPIResourceInstalled(
 		m.client,
 		m.discoveryClient,
 		DynamoAPIGroup,
@@ -242,15 +241,6 @@ func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
 		DynamoGraphDeploymentKind,
 		dynamoGraphDeploymentResource,
 	)
-	dgdrInstalled := shim.IsAPIResourceInstalled(
-		m.client,
-		m.discoveryClient,
-		DynamoAPIGroup,
-		DynamoGraphDeploymentRequestAPIVersion,
-		DynamoGraphDeploymentRequestKind,
-		dynamoGraphDeploymentRequestResource,
-	)
-	return dgdInstalled && dgdrInstalled
 }
 
 // UpdateStatus updates the status of the InferenceProviderConfig

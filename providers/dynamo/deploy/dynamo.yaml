@@ -14,30 +14,6 @@ metadata:
   namespace: airunway-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  labels:
-    app.kubernetes.io/name: airunway
-  name: airunway-hf-secret
-  namespace: dynamo-system
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-- apiGroups:
-  - ""
-  resourceNames:
-  - hf-token-secret
-  resources:
-  - secrets
-  verbs:
-  - get
-  - delete
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: airunway-dynamo-provider-role
@@ -132,6 +108,13 @@ rules:
   - create
   - delete
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - create
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -160,22 +143,6 @@ rules:
   - update
   - patch
   - delete
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  labels:
-    app.kubernetes.io/name: airunway
-  name: airunway-hf-secret
-  namespace: dynamo-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: airunway-hf-secret
-subjects:
-- kind: ServiceAccount
-  name: airunway-dynamo-provider
-  namespace: airunway-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -60,6 +60,8 @@ const (
 	DynamoGraphDeploymentRequestPhaseDeploying DynamoGraphDeploymentRequestPhase = "Deploying"
 	DynamoGraphDeploymentRequestPhaseDeployed  DynamoGraphDeploymentRequestPhase = "Deployed"
 	DynamoGraphDeploymentRequestPhaseFailed    DynamoGraphDeploymentRequestPhase = "Failed"
+	dgdrPlanReadyMessage                                                         = "DGDR plan is ready; autoApply is false"
+	conditionStatusFalse                                                         = "False"
 )
 
 // StatusTranslator handles translating DynamoGraphDeployment status to ModelDeployment status
@@ -126,7 +128,11 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 
 // translateDGDRStatus maps the installed v1beta1 request lifecycle to the
 // provider-neutral ModelDeployment status consumed by AI Runway.
-func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructured) (*ProviderStatusResult, error) {
+//
+//nolint:gocognit,gocyclo // DGDR status combines phase, conditions, deployment data, and endpoint data.
+func (t *StatusTranslator) translateDGDRStatus(
+	upstream *unstructured.Unstructured,
+) (*ProviderStatusResult, error) {
 	result := &ProviderStatusResult{
 		ResourceName: upstream.GetName(),
 		ResourceKind: DynamoGraphDeploymentRequestKind,
@@ -150,7 +156,7 @@ func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructur
 	}
 	if phase == string(DynamoGraphDeploymentRequestPhaseReady) {
 		if autoApply, found, _ := unstructured.NestedBool(upstream.Object, "spec", "autoApply"); found && !autoApply {
-			result.Message = "DGDR plan is ready; autoApply is false"
+			result.Message = dgdrPlanReadyMessage
 		}
 	}
 
@@ -158,13 +164,13 @@ func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructur
 	// status.message field, so surface the first non-empty condition message.
 	if conditions, found, _ := unstructured.NestedSlice(status, "conditions"); found {
 		for _, item := range conditions {
-			condition, ok := item.(map[string]interface{})
+			condition, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
 			if message, ok := condition["message"].(string); ok && message != "" {
 				result.Message = message
-				if conditionStatus, _ := condition["status"].(string); conditionStatus == "False" {
+				if conditionStatus, _ := condition["status"].(string); conditionStatus == conditionStatusFalse {
 					break
 				}
 			}
@@ -199,7 +205,9 @@ func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructur
 
 // mapDGDRPhaseToPhase collapses profiling-specific states into AI Runway's
 // existing deployment phase vocabulary.
-func (t *StatusTranslator) mapDGDRPhaseToPhase(phase DynamoGraphDeploymentRequestPhase) airunwayv1alpha1.DeploymentPhase {
+func (t *StatusTranslator) mapDGDRPhaseToPhase(
+	phase DynamoGraphDeploymentRequestPhase,
+) airunwayv1alpha1.DeploymentPhase {
 	switch phase {
 	case DynamoGraphDeploymentRequestPhaseDeployed:
 		return airunwayv1alpha1.DeploymentPhaseRunning

@@ -42,6 +42,7 @@ func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
 	return md
 }
 
+//nolint:gocognit,gocyclo // This test exhaustively verifies the generated unstructured DGDR contract.
 func TestTransformIntentAggregated(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
@@ -131,6 +132,45 @@ func TestTransformDGDRRejectsCustomHuggingFaceSecret(t *testing.T) {
 	}
 }
 
+func TestTransformRejectsDeploymentModeChanges(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceKind string
+		overrides    string
+		desiredKind  string
+	}{
+		{
+			name:         "manual to intent",
+			resourceKind: DynamoGraphDeploymentKind,
+			overrides:    `{"deploymentMode":"intent"}`,
+			desiredKind:  DynamoGraphDeploymentRequestKind,
+		},
+		{
+			name:         "intent to manual",
+			resourceKind: DynamoGraphDeploymentRequestKind,
+			overrides:    `{"deploymentMode":"manual"}`,
+			desiredKind:  DynamoGraphDeploymentKind,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			md := newTestMD("test-model", "default")
+			md.Status.Provider = &airunwayv1alpha1.ProviderStatus{
+				Name:         ProviderName,
+				ResourceKind: test.resourceKind,
+			}
+			md.Spec.Provider.Overrides = &runtime.RawExtension{Raw: []byte(test.overrides)}
+
+			_, err := NewTransformer().Transform(context.Background(), md)
+			if err == nil || !strings.Contains(err.Error(), test.desiredKind) ||
+				!strings.Contains(err.Error(), "delete and recreate") {
+				t.Fatalf("expected mode transition guidance, got %v", err)
+			}
+		})
+	}
+}
+
 func TestTransformDGDRMapsIntentAndOverrides(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
@@ -168,7 +208,7 @@ func TestTransformDGDRMapsIntentAndOverrides(t *testing.T) {
 	}
 	dgdr := resources[0]
 
-	assertNestedValue := func(want interface{}, fields ...string) {
+	assertNestedValue := func(want any, fields ...string) {
 		t.Helper()
 		got, found, err := unstructured.NestedFieldNoCopy(dgdr.Object, fields...)
 		if err != nil || !found || got != want {
