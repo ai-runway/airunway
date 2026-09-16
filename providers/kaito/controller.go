@@ -532,9 +532,6 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 		// objects before recording the stable Apply ownership.
 		logger.Info("Creating resource", "kind", resource.GetKind(), "name", resource.GetName())
 		created := resource.DeepCopy()
-		if err := setPendingMigrationManagers(created, map[string]struct{}{createFieldsManager: {}}); err != nil {
-			return err
-		}
 		if err := r.Create(ctx, created, client.FieldOwner(createFieldsManager), strictFieldValidation); err != nil {
 			if !errors.IsAlreadyExists(err) {
 				return wrapResourceWriteError(
@@ -562,11 +559,16 @@ func (r *KaitoProviderReconciler) createOrUpdateResource(ctx context.Context, re
 				)
 			}
 		} else {
+			managers := map[string]struct{}{createFieldsManager: {}, FieldManager: {}}
+			created, err = r.markLegacyWorkspaceMigration(ctx, created, md.UID, managers)
+			if err != nil {
+				return wrapResourceWriteError(err, false)
+			}
 			applied, err := r.applyWorkspace(ctx, withoutLastAppliedWorkspaceAnnotation(resource), created.GetResourceVersion())
 			if err != nil {
 				return wrapResourceWriteError(err, false)
 			}
-			_, err = r.completeOwnershipMigration(ctx, applied, resource, map[string]struct{}{createFieldsManager: {}})
+			_, err = r.completeOwnershipMigration(ctx, applied, resource, managers)
 			return wrapResourceWriteError(err, false)
 		}
 	} else if err != nil {
@@ -598,6 +600,12 @@ func (r *KaitoProviderReconciler) reconcileExistingWorkspace(
 	migrationManagers, migrationPending, err := pendingMigrationManagers(existing)
 	if err != nil {
 		return err
+	}
+	if migrationPending {
+		existing, err = r.moveWorkspaceMigrationFingerprint(ctx, existing)
+		if err != nil {
+			return err
+		}
 	}
 	// Marking can succeed before the preservation seed, managedFields transfer,
 	// or first stable Apply. Resume the captured managers before rediscovery:
@@ -631,7 +639,7 @@ func (r *KaitoProviderReconciler) reconcileExistingWorkspace(
 			return err
 		}
 		migrationManagers[FieldManager] = struct{}{}
-		migrated, err := r.markLegacyWorkspaceMigration(ctx, existing, migrationManagers)
+		migrated, err := r.markLegacyWorkspaceMigration(ctx, existing, md.UID, migrationManagers)
 		if err != nil {
 			return err
 		}
@@ -725,40 +733,6 @@ func updateManagersOwningMigrationState(resource *unstructured.Unstructured) (ma
 		{"f:metadata", "f:annotations", "f:" + lastAppliedWorkspaceAnnotation},
 		{"f:metadata", "f:annotations", "f:" + migrationManagersAnnotation},
 	})
-}
-
-func pendingMigrationManagers(resource *unstructured.Unstructured) (map[string]struct{}, bool, error) {
-	annotations := resource.GetAnnotations()
-	_, hasLastApplied := annotations[lastAppliedWorkspaceAnnotation]
-	annotation, found := annotations[migrationManagersAnnotation]
-	// Legacy rendering copied user annotations, including these now-reserved
-	// keys. A genuine mark removes last-applied before any migration Apply.
-	// On an unadopted object that still has it, discover managers normally and
-	// overwrite the colliding markers when recording the migration.
-	if !found || (hasLastApplied && !hasApplyManagedFields(resource)) {
-		return map[string]struct{}{}, false, nil
-	}
-	var managerNames []string
-	if err := json.Unmarshal([]byte(annotation), &managerNames); err != nil {
-		return nil, true, fmt.Errorf(
-			"failed to decode Workspace %s/%s migration managers annotation: %w",
-			resource.GetNamespace(),
-			resource.GetName(),
-			err,
-		)
-	}
-	managers := make(map[string]struct{}, len(managerNames))
-	for _, manager := range managerNames {
-		if manager == "" {
-			return nil, true, fmt.Errorf(
-				"failed to decode Workspace %s/%s migration managers annotation: manager name is empty",
-				resource.GetNamespace(),
-				resource.GetName(),
-			)
-		}
-		managers[manager] = struct{}{}
-	}
-	return managers, true, nil
 }
 
 // legacyUpdateManagers identifies the pre-SSA manager before any migration
@@ -941,7 +915,7 @@ func (r *KaitoProviderReconciler) completeOwnershipMigration(
 		// new fingerprint alongside it can exceed Kubernetes' annotation-size
 		// limit. The full desired configuration is applied after cleanup removes
 		// the old fingerprint.
-		migrationDesired = withoutLastAppliedWorkspaceAnnotation(desired)
+		migrationDesired = workspaceConfigurationDuringMigration(desired, live)
 	}
 	live, err = r.migrateCapturedUpdateManagers(ctx, live, desired, capturedManagers)
 	if err != nil {
@@ -1074,27 +1048,24 @@ func (r *KaitoProviderReconciler) releasePreservedWorkspaceFields(
 			return nil, err
 		}
 	}
-	annotations := cleaned.GetAnnotations()
-	_, hasManagerMarker := annotations[migrationManagersAnnotation]
-	_, hasPreviousFields := annotations[migrationPreviousFieldsAnnotation]
-	if hasManagerMarker || hasPreviousFields {
+	_, migrationPending := cleaned.GetAnnotations()[migrationManagersAnnotation]
+	cleaned, err = r.clearWorkspaceMigrationState(ctx, cleaned)
+	if err != nil {
+		return nil, err
+	}
+	if migrationPending {
+		remaining, err := managedFieldsForManager(cleaned, preservedFieldsManager, metav1.ManagedFieldsOperationApply)
+		if err != nil || remaining == nil {
+			return cleaned, err
+		}
+		// Only after durable stale-field cleanup and atomic record removal may
+		// preservation relinquish its temporary metadata ownership. A failure
+		// here needs no discarded fingerprint to resume safely.
 		finalPreserved, err := preservedFieldsConfiguration(cleaned, migrationDesired, previouslyRendered, false)
 		if err != nil {
 			return nil, err
 		}
-		cleaned, err = r.applyWorkspaceAs(ctx, finalPreserved, preservedFieldsManager, cleaned.GetResourceVersion())
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to finish Workspace %s/%s ownership migration: %w",
-				live.GetNamespace(),
-				live.GetName(),
-				err,
-			)
-		}
-	}
-	cleaned, err = r.clearWorkspaceMigrationState(ctx, cleaned)
-	if err != nil {
-		return nil, err
+		return r.applyWorkspaceAs(ctx, finalPreserved, preservedFieldsManager, cleaned.GetResourceVersion())
 	}
 	return cleaned, nil
 }
@@ -1139,7 +1110,20 @@ func (r *KaitoProviderReconciler) clearWorkspaceMigrationState(
 	annotations := copyStringMap(updated.GetAnnotations())
 	delete(annotations, migrationManagersAnnotation)
 	delete(annotations, migrationPreviousFieldsAnnotation)
+	delete(annotations, migrationStateAnnotation)
 	updated.SetAnnotations(annotations)
+	// Retire the dedicated capture ownership in the same optimistic write as
+	// its record; otherwise an empty annotations ownership entry can remain.
+	entries := updated.GetManagedFields()
+	retained := entries[:0]
+	for _, entry := range entries {
+		if entry.Manager == migrationStateManager &&
+			entry.Operation == metav1.ManagedFieldsOperationApply && entry.Subresource == "" {
+			continue
+		}
+		retained = append(retained, entry)
+	}
+	updated.SetManagedFields(retained)
 	if equality.Semantic.DeepEqual(base.Object, updated.Object) {
 		return live, nil
 	}
@@ -1511,6 +1495,7 @@ func preservedFieldsConfiguration(
 	delete(object, "status")
 	if !keepMigrationState {
 		unstructured.RemoveNestedField(object, "metadata", "annotations", migrationManagersAnnotation)
+		unstructured.RemoveNestedField(object, "metadata", "annotations", migrationStateAnnotation)
 		unstructured.RemoveNestedField(object, "metadata", "annotations", migrationPreviousFieldsAnnotation)
 	}
 
@@ -1524,6 +1509,17 @@ func preservedFieldsConfiguration(
 		preservedObject, ok = preserved.(map[string]any)
 		if !ok {
 			preservedObject = map[string]any{}
+		}
+	}
+	if keepMigrationState {
+		// The old fingerprint must outlive every preservation write. Its atomic
+		// removal with the capture record is the final cleanup boundary.
+		if previous, found := live.GetAnnotations()[migrationPreviousFieldsAnnotation]; found {
+			if err := unstructured.SetNestedField(
+				preservedObject, previous, "metadata", "annotations", migrationPreviousFieldsAnnotation,
+			); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return workspaceConfigurationWithIdentity(preservedObject, live), nil
@@ -1929,40 +1925,6 @@ func pathMatches(path []string, segments ...string) bool {
 	return true
 }
 
-// markLegacyWorkspaceMigration persists only the exact Update manager names
-// selected for the SSA handoff. Rendered fields are deliberately untouched so
-// a conflicting Apply owner is surfaced by the subsequent stable Apply.
-func (r *KaitoProviderReconciler) markLegacyWorkspaceMigration(
-	ctx context.Context,
-	existing *unstructured.Unstructured,
-	migrationManagers map[string]struct{},
-) (*unstructured.Unstructured, error) {
-	base := existing.DeepCopy()
-	updated := existing.DeepCopy()
-	if err := setPendingMigrationManagers(updated, migrationManagers); err != nil {
-		return nil, err
-	}
-
-	if equality.Semantic.DeepEqual(base.Object, updated.Object) {
-		return existing, nil
-	}
-	if err := r.Patch(
-		ctx,
-		updated,
-		client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
-		client.FieldOwner(FieldManager),
-		strictFieldValidation,
-	); err != nil {
-		return nil, fmt.Errorf(
-			"failed to mark legacy Workspace %s/%s migration: %w",
-			existing.GetNamespace(),
-			existing.GetName(),
-			err,
-		)
-	}
-	return updated, nil
-}
-
 func migrateLegacyJSONMap(existing, desired, legacy map[string]any, path []string) map[string]any {
 	merged := runtime.DeepCopyJSON(existing)
 	if merged == nil {
@@ -2033,6 +1995,7 @@ func sanitizedDesiredAnnotations(annotations map[string]string) map[string]strin
 	for key, value := range annotations {
 		if key == lastAppliedWorkspaceAnnotation ||
 			key == migrationManagersAnnotation ||
+			key == migrationStateAnnotation ||
 			key == migrationPreviousFieldsAnnotation {
 			continue
 		}
@@ -2042,27 +2005,6 @@ func sanitizedDesiredAnnotations(annotations map[string]string) map[string]strin
 		return nil
 	}
 	return managed
-}
-
-func setPendingMigrationManagers(resource *unstructured.Unstructured, managers map[string]struct{}) error {
-	managerSet := sets.New[string]()
-	for manager := range managers {
-		managerSet.Insert(manager)
-	}
-	data, err := json.Marshal(sets.List(managerSet))
-	if err != nil {
-		return fmt.Errorf("failed to marshal Workspace migration managers: %w", err)
-	}
-	annotations := copyStringMap(resource.GetAnnotations())
-	if previous, found := annotations[lastAppliedWorkspaceAnnotation]; found {
-		// Before adoption, a user-provided previous-fields annotation is not
-		// protocol state. Always capture the actual legacy fingerprint.
-		annotations[migrationPreviousFieldsAnnotation] = previous
-		delete(annotations, lastAppliedWorkspaceAnnotation)
-	}
-	annotations[migrationManagersAnnotation] = string(data)
-	resource.SetAnnotations(annotations)
-	return nil
 }
 
 func withoutLastAppliedWorkspaceAnnotation(resource *unstructured.Unstructured) *unstructured.Unstructured {
@@ -2129,9 +2071,16 @@ func lastAppliedManagedFields(
 }
 
 func lastAppliedWorkspaceConfiguration(existing *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	annotation := existing.GetAnnotations()[migrationPreviousFieldsAnnotation]
-	if annotation == "" {
-		annotation = existing.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+	annotation := existing.GetAnnotations()[lastAppliedWorkspaceAnnotation]
+	state, err := readWorkspaceMigrationState(existing)
+	if err != nil {
+		return nil, err
+	}
+	if state != nil {
+		annotation, err = state.fingerprint(existing)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if annotation == "" {
 		return nil, nil

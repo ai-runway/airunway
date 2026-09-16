@@ -21,13 +21,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
-const migrationTestLegacyManager = "legacy-kaito-provider"
+const (
+	migrationTestFinalFingerprint = "final-fingerprint"
+	migrationTestPreparation      = "preparation"
+	migrationTestLegacyManager    = "legacy-kaito-provider"
+	migrationTestSeed             = "seed"
+	migrationTestStableApply      = "stable-apply"
+	migrationTestInstanceType     = "preserved-instance-type"
+	migrationTestUntouched        = "untouched"
+	migrationTestMove             = "move"
+	migrationTestFinish           = "preservation-finish"
+)
 
 // TestEnvtestMigrationRetry exercises real SSA managedFields. Only the selected
 // failed request is intercepted; successful writes and all reads use the API server.
 func TestEnvtestMigrationRetry(t *testing.T) {
 	c := newMigrationEnvtestClient(t)
-	for _, boundary := range []string{"seed", "managed-fields", "stable-apply"} {
+	for _, boundary := range []string{migrationTestSeed, "managed-fields", migrationTestStableApply} {
 		t.Run(boundary, func(t *testing.T) {
 			testMigrationRetryAtBoundary(t, c, boundary, nil)
 		})
@@ -57,7 +67,7 @@ func TestEnvtestLegacyMigrationAnnotationCollisions(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, boundary := range []string{"seed", "managed-fields", "stable-apply"} {
+			for _, boundary := range []string{migrationTestSeed, "managed-fields", migrationTestStableApply} {
 				t.Run(boundary, func(t *testing.T) {
 					testMigrationRetryAtBoundary(t, c, boundary, tt.annotations)
 				})
@@ -88,8 +98,7 @@ func testCorruptPendingMigration(t *testing.T, c client.WithWatch, key string) {
 		}
 	})
 	r := &KaitoProviderReconciler{Client: c}
-	marked, err := r.markLegacyWorkspaceMigration(t.Context(), existing,
-		map[string]struct{}{FieldManager: {}, migrationTestLegacyManager: {}})
+	marked, err := r.markLegacyWorkspaceMigration(t.Context(), existing, newSSADeploymentForTest().UID, map[string]struct{}{FieldManager: {}, migrationTestLegacyManager: {}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,10 +199,10 @@ func testMigrationRetryAtBoundary(t *testing.T, c client.WithWatch, boundary str
 
 func migrationRequestMatchesBoundary(boundary string, patch client.Patch, opts []client.PatchOption) bool {
 	options := (&client.PatchOptions{}).ApplyOptions(opts)
-	fail := boundary == "seed" && patch.Type() == types.ApplyPatchType &&
+	fail := boundary == migrationTestSeed && patch.Type() == types.ApplyPatchType &&
 		options.FieldManager == preservedFieldsManager
 	fail = fail || boundary == "managed-fields" && patch.Type() == types.JSONPatchType
-	fail = fail || boundary == "stable-apply" && patch.Type() == types.ApplyPatchType &&
+	fail = fail || boundary == migrationTestStableApply && patch.Type() == types.ApplyPatchType &&
 		options.FieldManager == FieldManager
 	return fail
 }
@@ -231,7 +240,7 @@ func assertMigrationBoundary(t *testing.T, live *unstructured.Unstructured, boun
 	if err != nil {
 		t.Fatal(err)
 	}
-	if (preserved != nil) != (boundary != "seed") {
+	if (preserved != nil) != (boundary != migrationTestSeed) {
 		t.Fatalf("unexpected preservation ownership at %s: %v", boundary, preserved)
 	}
 	legacyPresent := false
@@ -240,7 +249,7 @@ func assertMigrationBoundary(t *testing.T, live *unstructured.Unstructured, boun
 			legacyPresent = true
 		}
 	}
-	if legacyPresent != (boundary != "stable-apply") {
+	if legacyPresent != (boundary != migrationTestStableApply) {
 		t.Fatalf("unexpected legacy Update ownership at %s: present=%v", boundary, legacyPresent)
 	}
 }
@@ -259,10 +268,10 @@ func assertCompletedMigration(t *testing.T, live *unstructured.Unstructured) {
 		t.Fatal("migration did not establish stable Apply and its fingerprint")
 	}
 	instanceType, _, err := unstructured.NestedString(live.Object, "resource", "instanceType")
-	if err != nil || instanceType != "preserved-instance-type" {
+	if err != nil || instanceType != migrationTestInstanceType {
 		t.Fatalf("non-rendered legacy value lost: %q err=%v", instanceType, err)
 	}
-	if live.GetAnnotations()["external.example/keep"] != "untouched" {
+	if live.GetAnnotations()["external.example/keep"] != migrationTestUntouched {
 		t.Fatal("external annotation changed")
 	}
 	owners, err := updateManagersOwningAnyField(live, [][]string{
@@ -301,7 +310,7 @@ func createSplitOwnershipWorkspace(
 	existing.SetAnnotations(annotations)
 	// Model a non-rendered field included in Create ownership, as an admission
 	// default would be. This test asserts preservation, not webhook execution.
-	if err := unstructured.SetNestedField(existing.Object, "preserved-instance-type", "resource", "instanceType"); err != nil {
+	if err := unstructured.SetNestedField(existing.Object, migrationTestInstanceType, "resource", "instanceType"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Create(t.Context(), existing, client.FieldOwner(migrationTestLegacyManager)); err != nil {
@@ -312,7 +321,7 @@ func createSplitOwnershipWorkspace(
 	labels["airunway.ai/managed-by"] = "external"
 	existing.SetLabels(labels)
 	annotations = existing.GetAnnotations()
-	annotations["external.example/keep"] = "untouched"
+	annotations["external.example/keep"] = migrationTestUntouched
 	existing.SetAnnotations(annotations)
 	if err := c.Patch(t.Context(), existing, client.MergeFrom(base), client.FieldOwner("external-actor")); err != nil {
 		t.Fatalf("split identity ownership: %v", err)

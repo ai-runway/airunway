@@ -496,7 +496,7 @@ func TestReconcileAlreadyRunning(t *testing.T) {
 	var updated airunwayv1alpha1.ModelDeployment
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated)
 	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
-		t.Errorf("expected Running phase, got %s", updated.Status.Phase)
+		t.Errorf("expected Running phase, got %s: %s", updated.Status.Phase, updated.Status.Message)
 	}
 }
 
@@ -560,7 +560,7 @@ func TestReconcileRunningUpdatesMessage(t *testing.T) {
 	var updated airunwayv1alpha1.ModelDeployment
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "default"}, &updated)
 	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning {
-		t.Fatalf("expected Running phase, got %s", updated.Status.Phase)
+		t.Fatalf("expected Running phase, got %s: %s", updated.Status.Phase, updated.Status.Message)
 	}
 	if strings.Contains(updated.Status.Message, "waiting for pods") {
 		t.Errorf("status message still claims waiting for pods while Running: %q", updated.Status.Message)
@@ -872,11 +872,11 @@ func TestCreateOrUpdateResourceCreatesAtomicallyWithStableFieldManager(t *testin
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				createCalls++
 				annotations := obj.GetAnnotations()
-				if _, hasCurrent := annotations[lastAppliedWorkspaceAnnotation]; hasCurrent {
-					t.Fatalf("expected Create not to duplicate the current and previous applied configurations, got %v", annotations)
+				if _, hasCurrent := annotations[lastAppliedWorkspaceAnnotation]; !hasCurrent {
+					t.Fatalf("expected Create to retain the original fingerprint until capture, got %v", annotations)
 				}
-				if _, hasPrevious := annotations[migrationPreviousFieldsAnnotation]; !hasPrevious {
-					t.Fatalf("expected Create to retain the pending applied configuration, got %v", annotations)
+				if _, hasPrevious := annotations[migrationPreviousFieldsAnnotation]; hasPrevious {
+					t.Fatalf("Create must not move the fingerprint before capture, got %v", annotations)
 				}
 				return c.Create(ctx, obj, opts...)
 			},
@@ -2132,7 +2132,7 @@ func TestCreateOrUpdateResourceRecoversUnchangedAnnotatedMigration(t *testing.T)
 	}
 }
 
-func TestCreateOrUpdateResourceRecoversWhenOperatorReownsMigrationMarker(t *testing.T) {
+func TestCreateOrUpdateResourceRecoversWhenOperatorUpdatesMigrationMetadata(t *testing.T) {
 	scheme := newScheme()
 	controllerApplyCalls := 0
 	failClear := false
@@ -2186,10 +2186,11 @@ func TestCreateOrUpdateResourceRecoversWhenOperatorReownsMigrationMarker(t *test
 		t.Fatalf("seed stable applied Workspace: %v", err)
 	}
 	live := getWorkspaceForTest(t, c)
+	live = markWorkspaceMigrationForTest(t, c, live)
 	base := live.DeepCopy()
 	annotations := copyStringMap(live.GetAnnotations())
 	delete(annotations, lastAppliedWorkspaceAnnotation)
-	annotations[migrationManagersAnnotation] = `["kaito-provider"]`
+	// A same-value full update must not invalidate the durable capture.
 	annotations["external.example.com/value"] = testPreservedAnnotationValue
 	live.SetAnnotations(annotations)
 	if err := c.Patch(
@@ -2637,7 +2638,7 @@ func TestCreateOrUpdateResourceRejectsMalformedPendingMigrationBeforeStableApply
 			existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 			existing.SetAnnotations(map[string]string{migrationManagersAnnotation: marker})
 			patchCalls := 0
-			c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(existing).
+			c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(existing).WithReturnManagedFields().
 				WithInterceptorFuncs(interceptor.Funcs{
 					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object,
 						patch client.Patch, opts ...client.PatchOption) error {
@@ -2646,7 +2647,19 @@ func TestCreateOrUpdateResourceRejectsMalformedPendingMigrationBeforeStableApply
 					},
 				}).Build()
 			r := &KaitoProviderReconciler{Client: c}
-			err := r.createOrUpdateResource(t.Context(), newSSAWorkspaceForTest(""), newSSADeploymentForTest())
+			marked, err := r.markLegacyWorkspaceMigration(t.Context(), getWorkspaceForTest(t, c), newSSADeploymentForTest().UID, map[string]struct{}{FieldManager: {}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := marked.DeepCopy()
+			annotations := marked.GetAnnotations()
+			annotations[migrationManagersAnnotation] = marker
+			marked.SetAnnotations(annotations)
+			if err := c.Patch(t.Context(), marked, client.MergeFrom(base)); err != nil {
+				t.Fatal(err)
+			}
+			patchCalls = 0
+			err = r.createOrUpdateResource(t.Context(), newSSAWorkspaceForTest(""), newSSADeploymentForTest())
 			if err == nil || !strings.Contains(err.Error(), "migration managers annotation") {
 				t.Fatalf("expected invalid persisted state to fail closed, got %v", err)
 			}
@@ -3592,10 +3605,9 @@ func isPreservedMigrationRelease(obj client.Object, opts []client.PatchOption) (
 	if err != nil {
 		return false, err
 	}
-	_, hasManagers := annotations[migrationManagersAnnotation]
 	_, hasPrevious := annotations[migrationPreviousFieldsAnnotation]
 	_, hasStaleField, err := unstructured.NestedString(content, "inference", "preset", "accessMode")
-	return hasManagers && hasPrevious && !hasStaleField, err
+	return hasPrevious && !hasStaleField, err
 }
 
 func checkAccessModeHandoff(
@@ -3652,4 +3664,14 @@ func assertPendingCleanupMarkers(t *testing.T, c client.Client) {
 	if _, found := interrupted.GetAnnotations()[migrationPreviousFieldsAnnotation]; !found {
 		t.Fatalf("expected migration fingerprint to survive failed cleanup, got %v", interrupted.GetAnnotations())
 	}
+}
+
+func markWorkspaceMigrationForTest(t *testing.T, c client.Client, live *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
+	r := &KaitoProviderReconciler{Client: c}
+	marked, err := r.markLegacyWorkspaceMigration(t.Context(), live, newSSADeploymentForTest().UID, map[string]struct{}{FieldManager: {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return marked
 }
