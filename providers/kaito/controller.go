@@ -728,8 +728,14 @@ func updateManagersOwningMigrationState(resource *unstructured.Unstructured) (ma
 }
 
 func pendingMigrationManagers(resource *unstructured.Unstructured) (map[string]struct{}, bool, error) {
-	annotation, found := resource.GetAnnotations()[migrationManagersAnnotation]
-	if !found {
+	annotations := resource.GetAnnotations()
+	_, hasLastApplied := annotations[lastAppliedWorkspaceAnnotation]
+	annotation, found := annotations[migrationManagersAnnotation]
+	// Legacy rendering copied user annotations, including these now-reserved
+	// keys. A genuine mark removes last-applied before any migration Apply.
+	// On an unadopted object that still has it, discover managers normally and
+	// overwrite the colliding markers when recording the migration.
+	if !found || (hasLastApplied && !hasApplyManagedFields(resource)) {
 		return map[string]struct{}{}, false, nil
 	}
 	var managerNames []string
@@ -2048,11 +2054,11 @@ func setPendingMigrationManagers(resource *unstructured.Unstructured, managers m
 		return fmt.Errorf("failed to marshal Workspace migration managers: %w", err)
 	}
 	annotations := copyStringMap(resource.GetAnnotations())
-	if _, alreadyRecorded := annotations[migrationPreviousFieldsAnnotation]; !alreadyRecorded {
-		if previous, found := annotations[lastAppliedWorkspaceAnnotation]; found {
-			annotations[migrationPreviousFieldsAnnotation] = previous
-			delete(annotations, lastAppliedWorkspaceAnnotation)
-		}
+	if previous, found := annotations[lastAppliedWorkspaceAnnotation]; found {
+		// Before adoption, a user-provided previous-fields annotation is not
+		// protocol state. Always capture the actual legacy fingerprint.
+		annotations[migrationPreviousFieldsAnnotation] = previous
+		delete(annotations, lastAppliedWorkspaceAnnotation)
 	}
 	annotations[migrationManagersAnnotation] = string(data)
 	resource.SetAnnotations(annotations)

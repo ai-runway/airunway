@@ -4,9 +4,11 @@ package kaito
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,14 +29,102 @@ func TestEnvtestMigrationRetry(t *testing.T) {
 	c := newMigrationEnvtestClient(t)
 	for _, boundary := range []string{"seed", "managed-fields", "stable-apply"} {
 		t.Run(boundary, func(t *testing.T) {
-			testMigrationRetryAtBoundary(t, c, boundary)
+			testMigrationRetryAtBoundary(t, c, boundary, nil)
 		})
 	}
 }
 
-func testMigrationRetryAtBoundary(t *testing.T, c client.WithWatch, boundary string) {
+// Legacy podTemplate annotations must never become trusted migration state,
+// even when their contents look like legitimate manager names or field history.
+func TestEnvtestLegacyMigrationAnnotationCollisions(t *testing.T) {
+	c := newMigrationEnvtestClient(t)
+	for _, tt := range []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{"malformed-managers", map[string]string{migrationManagersAnnotation: "foo"}},
+		{"malformed-fields", map[string]string{migrationPreviousFieldsAnnotation: "foo"}},
+		{"both-malformed", map[string]string{
+			migrationManagersAnnotation: "foo", migrationPreviousFieldsAnnotation: "foo",
+		}},
+		{"forged-managers", map[string]string{migrationManagersAnnotation: `["external-actor"]`}},
+		{"forged-fields", map[string]string{
+			migrationPreviousFieldsAnnotation: `{"resource":{"instanceType":"preserved-instance-type"}}`,
+		}},
+		{"both-forged", map[string]string{
+			migrationManagersAnnotation:       `["external-actor"]`,
+			migrationPreviousFieldsAnnotation: `{"annotations":{"external.example/keep":"untouched"}}`,
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, boundary := range []string{"seed", "managed-fields", "stable-apply"} {
+				t.Run(boundary, func(t *testing.T) {
+					testMigrationRetryAtBoundary(t, c, boundary, tt.annotations)
+				})
+			}
+		})
+	}
+}
+
+// Once marking removes last-applied, corrupt protocol state must still fail
+// closed. It cannot be treated as a legacy user annotation and rediscovered.
+func TestEnvtestCorruptPendingMigration(t *testing.T) {
+	c := newMigrationEnvtestClient(t)
+	for _, key := range []string{migrationManagersAnnotation, migrationPreviousFieldsAnnotation} {
+		t.Run(key, func(t *testing.T) {
+			testCorruptPendingMigration(t, c, key)
+		})
+	}
+}
+
+func testCorruptPendingMigration(t *testing.T, c client.WithWatch, key string) {
 	t.Helper()
-	existing := createSplitOwnershipWorkspace(t, c)
+	existing := createSplitOwnershipWorkspace(t, c, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := c.Delete(ctx, existing); err != nil {
+			t.Errorf("delete test Workspace: %v", err)
+		}
+	})
+	r := &KaitoProviderReconciler{Client: c}
+	marked, err := r.markLegacyWorkspaceMigration(t.Context(), existing,
+		map[string]struct{}{FieldManager: {}, migrationTestLegacyManager: {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPendingMigration(t, marked)
+	base := marked.DeepCopy()
+	annotations := marked.GetAnnotations()
+	annotations[key] = "foo"
+	marked.SetAnnotations(annotations)
+	if err := c.Patch(t.Context(), marked, client.MergeFrom(base)); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	observed := interceptor.NewClient(c, interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object,
+			patch client.Patch, opts ...client.PatchOption) error {
+			writes++
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	for range 2 {
+		r = &KaitoProviderReconciler{Client: observed}
+		err := r.createOrUpdateResource(t.Context(), newSSAWorkspaceForTest(""), newSSADeploymentForTest())
+		if err == nil || !strings.Contains(err.Error(), "annotation") {
+			t.Fatalf("corrupt pending state did not fail closed: %v", err)
+		}
+	}
+	if writes != 0 || !reflect.DeepEqual(getWorkspaceForTest(t, c).Object, marked.Object) {
+		t.Fatal("corrupt pending state triggered mutation")
+	}
+}
+
+func testMigrationRetryAtBoundary(t *testing.T, c client.WithWatch, boundary string, annotations map[string]string) {
+	t.Helper()
+	existing := createSplitOwnershipWorkspace(t, c, annotations)
+	originalFingerprint := existing.GetAnnotations()[lastAppliedWorkspaceAnnotation]
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -67,6 +157,9 @@ func testMigrationRetryAtBoundary(t *testing.T, c client.WithWatch, boundary str
 		}
 		live := getWorkspaceForTest(t, c)
 		annotations := assertPendingMigration(t, live)
+		if annotations[migrationPreviousFieldsAnnotation] != originalFingerprint {
+			t.Fatal("mark did not preserve the original legacy fingerprint")
+		}
 		if attempt == 0 {
 			recordedManagers = annotations[migrationManagersAnnotation]
 			recordedFields = annotations[migrationPreviousFieldsAnnotation]
@@ -185,15 +278,27 @@ func assertCompletedMigration(t *testing.T, live *unstructured.Unstructured) {
 	}
 }
 
-func createSplitOwnershipWorkspace(t *testing.T, c client.Client) *unstructured.Unstructured {
+func createSplitOwnershipWorkspace(
+	t *testing.T, c client.Client, annotations map[string]string,
+) *unstructured.Unstructured {
 	t.Helper()
 	existing := newSSAWorkspaceForTest(testPrivateAccessMode)
 	existing.SetLabels(map[string]string{
 		"airunway.ai/managed-by": "airunway", "airunway.ai/model-deployment": "test",
 	})
-	if err := setLastAppliedManagedFields(existing); err != nil {
+	// Reproduce the legacy renderer/controller: both future reserved keys were
+	// copied from podTemplate and included in its last-applied fingerprint.
+	existing.SetAnnotations(copyStringMap(annotations))
+	fingerprint, err := json.Marshal(map[string]any{
+		"resource": existing.Object["resource"], "inference": existing.Object["inference"],
+		"labels": existing.GetLabels(), "annotations": copyStringMap(annotations),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	annotations = copyStringMap(annotations)
+	annotations[lastAppliedWorkspaceAnnotation] = string(fingerprint)
+	existing.SetAnnotations(annotations)
 	// Model a non-rendered field included in Create ownership, as an admission
 	// default would be. This test asserts preservation, not webhook execution.
 	if err := unstructured.SetNestedField(existing.Object, "preserved-instance-type", "resource", "instanceType"); err != nil {
@@ -206,7 +311,7 @@ func createSplitOwnershipWorkspace(t *testing.T, c client.Client) *unstructured.
 	labels := existing.GetLabels()
 	labels["airunway.ai/managed-by"] = "external"
 	existing.SetLabels(labels)
-	annotations := existing.GetAnnotations()
+	annotations = existing.GetAnnotations()
 	annotations["external.example/keep"] = "untouched"
 	existing.SetAnnotations(annotations)
 	if err := c.Patch(t.Context(), existing, client.MergeFrom(base), client.FieldOwner("external-actor")); err != nil {
