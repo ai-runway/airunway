@@ -335,11 +335,16 @@ func createSplitOwnershipWorkspace(
 
 func newMigrationEnvtestClient(t *testing.T) client.WithWatch {
 	t.Helper()
+	return newMigrationEnvtestClientForCRD(t, migrationWorkspaceCRD())
+}
+
+func newMigrationEnvtestClientForCRD(t *testing.T, crd *apiextensionsv1.CustomResourceDefinition) client.WithWatch {
+	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Fatal("integration tests require KUBEBUILDER_ASSETS pointing to envtest binaries")
 	}
 	testEnv := &envtest.Environment{
-		CRDs:                     []*apiextensionsv1.CustomResourceDefinition{migrationWorkspaceCRD()},
+		CRDs:                     []*apiextensionsv1.CustomResourceDefinition{crd},
 		ControlPlaneStartTimeout: 30 * time.Second,
 		ControlPlaneStopTimeout:  30 * time.Second,
 	}
@@ -360,7 +365,7 @@ func newMigrationEnvtestClient(t *testing.T) client.WithWatch {
 }
 
 // Only the Workspace fields used by the migration scenarios are declared here.
-// Granular objects and Kubernetes metadata use real structural-schema SSA rules;
+// Granular objects, the atomic selector and metadata use real SSA rules;
 // no KAITO webhook or inference/data-plane behavior is claimed by this fixture.
 func migrationWorkspaceCRD() *apiextensionsv1.CustomResourceDefinition {
 	return &apiextensionsv1.CustomResourceDefinition{
@@ -380,6 +385,7 @@ func migrationWorkspaceCRD() *apiextensionsv1.CustomResourceDefinition {
 							"apiVersion": {Type: "string"}, "kind": {Type: "string"}, "metadata": {Type: "object"},
 							"resource": {Type: "object", Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"count": {Type: "integer", Format: "int64"}, "instanceType": {Type: "string"},
+								"labelSelector": migrationSelectorSchema(),
 							}},
 							"inference": {Type: "object", Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"preset": {Type: "object", Properties: map[string]apiextensionsv1.JSONSchemaProps{
