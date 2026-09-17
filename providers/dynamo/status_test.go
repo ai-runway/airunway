@@ -23,6 +23,197 @@ func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured 
 	return &unstructured.Unstructured{Object: obj}
 }
 
+func newDGDRWithStatus(status map[string]any) *unstructured.Unstructured {
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetAPIVersion("nvidia.com/v1beta1")
+	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
+	dgdr.SetName("test-dgdr")
+	dgdr.SetNamespace("default")
+	if status != nil {
+		dgdr.Object["status"] = status
+	}
+	return dgdr
+}
+
+func TestTranslateDGDRPhases(t *testing.T) {
+	translator := NewStatusTranslator()
+	tests := []struct {
+		name      string
+		status    map[string]any
+		autoApply *bool
+		phase     airunwayv1alpha1.DeploymentPhase
+		message   string
+	}{
+		{
+			name:    "no status",
+			phase:   airunwayv1alpha1.DeploymentPhasePending,
+			message: "Dynamo deployment request is pending",
+		},
+		{
+			name:    "pending",
+			status:  map[string]any{"phase": "Pending"},
+			phase:   airunwayv1alpha1.DeploymentPhasePending,
+			message: "Dynamo deployment request is pending",
+		},
+		{
+			name:    "profiling",
+			status:  map[string]any{"phase": "Profiling", "profilingPhase": "benchmarking"},
+			phase:   airunwayv1alpha1.DeploymentPhaseDeploying,
+			message: "Dynamo is profiling the deployment (benchmarking)",
+		},
+		{
+			name:    "profiling without detail",
+			status:  map[string]any{"phase": "Profiling"},
+			phase:   airunwayv1alpha1.DeploymentPhaseDeploying,
+			message: "Dynamo is profiling the deployment",
+		},
+		{
+			name:      "ready without auto apply",
+			status:    map[string]any{"phase": "Ready"},
+			autoApply: boolTestPtr(false),
+			phase:     airunwayv1alpha1.DeploymentPhaseDeploying,
+			message:   "Dynamo deployment plan is ready; autoApply is false",
+		},
+		{
+			name:    "ready",
+			status:  map[string]any{"phase": "Ready"},
+			phase:   airunwayv1alpha1.DeploymentPhaseDeploying,
+			message: "Dynamo deployment plan is ready and waiting to be applied",
+		},
+		{
+			name:    "deploying",
+			status:  map[string]any{"phase": "Deploying"},
+			phase:   airunwayv1alpha1.DeploymentPhaseDeploying,
+			message: "Dynamo is creating the generated deployment",
+		},
+		{
+			name:    "deployed",
+			status:  map[string]any{"phase": "Deployed"},
+			phase:   airunwayv1alpha1.DeploymentPhaseRunning,
+			message: "Dynamo deployment is running",
+		},
+		{
+			name:    "unknown",
+			status:  map[string]any{"phase": "Surprising"},
+			phase:   airunwayv1alpha1.DeploymentPhasePending,
+			message: `Dynamo deployment request has unknown phase "Surprising"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dgdr := newDGDRWithStatus(test.status)
+			if test.autoApply != nil {
+				dgdr.Object["spec"] = map[string]any{"autoApply": *test.autoApply}
+			}
+			result, err := translator.TranslateStatus(dgdr)
+			if err != nil {
+				t.Fatalf("TranslateStatus() error = %v", err)
+			}
+			if result.Phase != test.phase || result.Message != test.message {
+				t.Errorf(
+					"TranslateStatus() = (%s, %q), want (%s, %q)",
+					result.Phase,
+					result.Message,
+					test.phase,
+					test.message,
+				)
+			}
+		})
+	}
+}
+
+func TestTranslateDGDRDetails(t *testing.T) {
+	translator := NewStatusTranslator()
+	dgdr := newDGDRWithStatus(map[string]any{
+		"phase":   "Deployed",
+		"dgdName": "generated-dgd",
+		"deploymentInfo": map[string]any{
+			"replicas":          int64(4),
+			"availableReplicas": int64(3),
+		},
+	})
+
+	result, err := translator.TranslateStatus(dgdr)
+	if err != nil {
+		t.Fatalf("TranslateStatus() error = %v", err)
+	}
+	if result.ResourceKind != DynamoGraphDeploymentRequestKind {
+		t.Errorf("ResourceKind = %q", result.ResourceKind)
+	}
+	if result.Replicas == nil || result.Replicas.Desired != 4 ||
+		result.Replicas.Ready != 3 || result.Replicas.Available != 3 {
+		t.Errorf("Replicas = %#v", result.Replicas)
+	}
+	if result.Endpoint == nil || result.Endpoint.Service != "generated-dgd-frontend" ||
+		result.Endpoint.Port != 8000 {
+		t.Errorf("Endpoint = %#v", result.Endpoint)
+	}
+	if !translator.IsReady(dgdr) {
+		t.Error("expected deployed DGDR to be ready")
+	}
+
+	dgdr.Object["status"] = map[string]any{"phase": "Deploying"}
+	if translator.IsReady(dgdr) {
+		t.Error("expected deploying DGDR not to be ready")
+	}
+	result, err = translator.TranslateStatus(dgdr)
+	if err != nil {
+		t.Fatalf("TranslateStatus() error = %v", err)
+	}
+	if result.Endpoint != nil || result.Replicas != nil {
+		t.Errorf("unexpected incomplete details: %#v", result)
+	}
+}
+
+func TestTranslateDGDRFailures(t *testing.T) {
+	translator := NewStatusTranslator()
+	tests := []struct {
+		name    string
+		status  map[string]any
+		message string
+	}{
+		{
+			name:    "top-level message",
+			status:  map[string]any{"phase": "Failed", "message": "profiling failed"},
+			message: "profiling failed",
+		},
+		{
+			name: "latest condition",
+			status: map[string]any{
+				"phase": "Failed",
+				"conditions": []any{
+					map[string]any{"message": "old failure"},
+					map[string]any{"message": "latest failure"},
+				},
+			},
+			message: "latest failure",
+		},
+		{
+			name:    "fallback",
+			status:  map[string]any{"phase": "Failed"},
+			message: "Dynamo deployment request failed",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := translator.TranslateStatus(newDGDRWithStatus(test.status))
+			if err != nil {
+				t.Fatalf("TranslateStatus() error = %v", err)
+			}
+			if result.Phase != airunwayv1alpha1.DeploymentPhaseFailed ||
+				result.Message != test.message {
+				t.Errorf("TranslateStatus() = %#v, want message %q", result, test.message)
+			}
+		})
+	}
+}
+
+func boolTestPtr(value bool) *bool {
+	return &value
+}
+
 func TestNewStatusTranslator(t *testing.T) {
 	st := NewStatusTranslator()
 	if st == nil {

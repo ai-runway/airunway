@@ -64,6 +64,10 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	if upstream == nil {
 		return nil, fmt.Errorf("upstream resource is nil")
 	}
+	// DGDR has a distinct uppercase phase model and status shape from direct DGD resources.
+	if upstream.GetKind() == DynamoGraphDeploymentRequestKind {
+		return t.translateDGDRStatus(upstream)
+	}
 
 	result := &ProviderStatusResult{
 		ResourceName: upstream.GetName(),
@@ -102,6 +106,123 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	result.Endpoint = t.extractEndpoint(upstream, status)
 
 	return result, nil
+}
+
+// translateDGDRStatus maps Dynamo's profiling lifecycle onto ModelDeployment status.
+func (t *StatusTranslator) translateDGDRStatus(upstream *unstructured.Unstructured) (*ProviderStatusResult, error) {
+	result := &ProviderStatusResult{
+		ResourceName: upstream.GetName(),
+		ResourceKind: DynamoGraphDeploymentRequestKind,
+		Phase:        airunwayv1alpha1.DeploymentPhasePending,
+	}
+
+	status, found, err := unstructured.NestedMap(upstream.Object, "status")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get DGDR status: %w", err)
+	}
+	if !found {
+		result.Message = "Dynamo deployment request is pending"
+		return result, nil
+	}
+
+	phase, _, _ := unstructured.NestedString(status, "phase")
+	result.Phase, result.Message = t.mapDGDRPhase(upstream, status, phase)
+	result.Replicas = extractDGDRReplicas(status)
+	result.Endpoint = extractDGDREndpoint(upstream, status, result.Phase)
+
+	return result, nil
+}
+
+// mapDGDRPhase keeps lifecycle translation separate from status detail extraction.
+func (t *StatusTranslator) mapDGDRPhase(
+	upstream *unstructured.Unstructured,
+	status map[string]any,
+	phase string,
+) (airunwayv1alpha1.DeploymentPhase, string) {
+	switch phase {
+	case "Pending", "":
+		return airunwayv1alpha1.DeploymentPhasePending, "Dynamo deployment request is pending"
+	case "Profiling":
+		profilingPhase, _, _ := unstructured.NestedString(status, "profilingPhase")
+		if profilingPhase != "" {
+			return airunwayv1alpha1.DeploymentPhaseDeploying,
+				fmt.Sprintf("Dynamo is profiling the deployment (%s)", profilingPhase)
+		}
+		return airunwayv1alpha1.DeploymentPhaseDeploying, "Dynamo is profiling the deployment"
+	case "Ready":
+		autoApply, found, _ := unstructured.NestedBool(upstream.Object, "spec", "autoApply")
+		if found && !autoApply {
+			return airunwayv1alpha1.DeploymentPhaseDeploying,
+				"Dynamo deployment plan is ready; autoApply is false"
+		}
+		return airunwayv1alpha1.DeploymentPhaseDeploying,
+			"Dynamo deployment plan is ready and waiting to be applied"
+	case "Deploying":
+		return airunwayv1alpha1.DeploymentPhaseDeploying,
+			"Dynamo is creating the generated deployment"
+	case "Deployed":
+		return airunwayv1alpha1.DeploymentPhaseRunning, "Dynamo deployment is running"
+	case "Failed":
+		return airunwayv1alpha1.DeploymentPhaseFailed, dgdrFailureMessage(status)
+	default:
+		return airunwayv1alpha1.DeploymentPhasePending,
+			fmt.Sprintf("Dynamo deployment request has unknown phase %q", phase)
+	}
+}
+
+// extractDGDRReplicas reads Dynamo's generated-deployment readiness summary.
+func extractDGDRReplicas(status map[string]any) *airunwayv1alpha1.ReplicaStatus {
+	if deploymentInfo, found, _ := unstructured.NestedMap(status, "deploymentInfo"); found {
+		replicas := &airunwayv1alpha1.ReplicaStatus{}
+		if desired, ok := deploymentInfo["replicas"].(int64); ok {
+			replicas.Desired = int32(desired)
+		}
+		if available, ok := deploymentInfo["availableReplicas"].(int64); ok {
+			replicas.Ready = int32(available)
+			replicas.Available = int32(available)
+		}
+		return replicas
+	}
+	return nil
+}
+
+// extractDGDREndpoint exposes the standalone frontend only after deployment succeeds.
+func extractDGDREndpoint(
+	upstream *unstructured.Unstructured,
+	status map[string]any,
+	phase airunwayv1alpha1.DeploymentPhase,
+) *airunwayv1alpha1.EndpointStatus {
+	if phase != airunwayv1alpha1.DeploymentPhaseRunning {
+		return nil
+	}
+	dgdName, found, _ := unstructured.NestedString(status, "dgdName")
+	if !found || dgdName == "" {
+		dgdName = upstream.GetName()
+	}
+	return &airunwayv1alpha1.EndpointStatus{
+		Service: fmt.Sprintf("%s-frontend", dgdName),
+		Port:    8000,
+	}
+}
+
+// dgdrFailureMessage extracts the most useful condition message without assuming a version-specific top-level field.
+func dgdrFailureMessage(status map[string]any) string {
+	if message, found, _ := unstructured.NestedString(status, "message"); found && message != "" {
+		return message
+	}
+	conditions, found, _ := unstructured.NestedSlice(status, "conditions")
+	if found {
+		for i := len(conditions) - 1; i >= 0; i-- {
+			condition, ok := conditions[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			if message, ok := condition["message"].(string); ok && message != "" {
+				return message
+			}
+		}
+	}
+	return "Dynamo deployment request failed"
 }
 
 // mapStateToPhase converts Dynamo state to ModelDeployment phase
@@ -214,6 +335,11 @@ func hasFrontendService(upstream *unstructured.Unstructured) bool {
 func (t *StatusTranslator) IsReady(upstream *unstructured.Unstructured) bool {
 	if upstream == nil {
 		return false
+	}
+	// Reuse the kind-aware translation so callers do not need separate DGDR readiness logic.
+	if upstream.GetKind() == DynamoGraphDeploymentRequestKind {
+		result, err := t.TranslateStatus(upstream)
+		return err == nil && result.Phase == airunwayv1alpha1.DeploymentPhaseRunning
 	}
 
 	state, found, err := unstructured.NestedString(upstream.Object, "status", "state")

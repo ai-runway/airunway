@@ -97,6 +97,24 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests/status
+  verbs:
+  - get
+- apiGroups:
   - ""
   resources:
   - persistentvolumeclaims

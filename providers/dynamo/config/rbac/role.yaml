@@ -64,6 +64,25 @@ rules:
   - dynamographdeployments/status
   verbs:
   - get
+# DGDR permissions let the provider create intent requests while retaining direct DGD support.
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests/status
+  verbs:
+  - get
 - apiGroups:
   - ""
   resources:

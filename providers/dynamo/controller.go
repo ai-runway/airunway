@@ -209,6 +209,9 @@ func NewDynamoProviderReconciler(client client.Client, scheme *runtime.Scheme, d
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
+// DGDR access is split across markers to keep generated intent permissions reviewable.
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
@@ -247,6 +250,36 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// deploymentMode is provider control data, so resolve it before choosing an upstream resource path.
+	intentMode, err := r.Transformer.IsIntentMode(&md)
+	if err != nil {
+		// Early mode parsing must retain the direct transformer's established failure contract.
+		r.setCondition(
+			&md,
+			airunwayv1alpha1.ConditionTypeResourceCreated,
+			metav1.ConditionFalse,
+			"TransformFailed",
+			err.Error(),
+		)
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "TransformFailed", err.Error())
+		md.Status.Endpoint = nil
+		md.Status.Replicas = nil
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = fmt.Sprintf("Failed to generate Dynamo resources: %s", err.Error())
+		return ctrl.Result{}, r.Status().Update(ctx, &md)
+	}
+	if intentMode {
+		// Persist gateway=false for objects created before or without the
+		// mutating webhook.
+		updated, err := r.ensureIntentGatewayDisabled(ctx, &md)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if updated {
+			return ctrl.Result{Requeue: true}, nil
+		}
 	}
 
 	// Validate provider compatibility
@@ -301,6 +334,26 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 		r.setCondition(&md, airunwayv1alpha1.ConditionTypeModelDownloaded, metav1.ConditionTrue, "DownloadComplete", "Model download completed")
+	}
+
+	// Intent mode has immutable profiling semantics and therefore reconciles
+	// separately from update-in-place DGD resources.
+	if intentMode {
+		return r.reconcileIntent(ctx, &md)
+	}
+	if md.Status.Provider.ResourceKind == DynamoGraphDeploymentRequestKind {
+		pending, err := r.deleteIntentResources(ctx, &md)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pending {
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+			md.Status.Message = "Switching from intent mode to direct Dynamo deployment"
+			if err := r.Status().Update(ctx, &md); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 	}
 
 	// --- Phase 3: Create/update DGD ---
@@ -729,6 +782,18 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		logger.Error(err, "Failed to update status to Terminating")
 	}
 
+	// Dynamo leaves generated DGDs behind, so intent cleanup must remove both resources before storage cleanup.
+	intentCleanupPending, intentCleanupErr := r.deleteIntentResources(ctx, md)
+	if intentCleanupErr != nil {
+		logger.Error(intentCleanupErr, "Failed to delete Dynamo intent resources")
+		if time.Since(md.DeletionTimestamp.Time) <= FinalizerTimeout {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
+	if intentCleanupPending {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	// Delete the DGD first so its Pods terminate before we remove PVCs/Jobs
 	dgd := &unstructured.Unstructured{}
 	dgd.SetGroupVersionKind(schema.GroupVersionKind{
@@ -927,48 +992,42 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch DynamoGraphDeployment resources if the CRD is installed.
 	// Without this check, the manager crashes at startup when
 	// the backend CRDs are not present (see #178).
-	mapper := mgr.GetRESTMapper()
-	if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind}, DynamoAPIVersion); err == nil {
-		logger := mgr.GetLogger()
-		logger.Info("DynamoGraphDeployment CRD detected, enabling event-driven watch")
-		builder = builder.Watches(
-			&unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
-				"kind":       DynamoGraphDeploymentKind,
-			}},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				for _, ref := range obj.GetOwnerReferences() {
-					if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
-						ref.Kind == "ModelDeployment" {
-						return []reconcile.Request{
-							{
-								NamespacedName: types.NamespacedName{
-									Name:      ref.Name,
-									Namespace: obj.GetNamespace(),
-								},
-							},
-						}
-					}
-				}
-				labels := obj.GetLabels()
-				if labels[airunwayv1alpha1.LabelManagedBy] == "airunway" {
-					if deployment := labels[airunwayv1alpha1.LabelModelDeployment]; deployment != "" {
-						return []reconcile.Request{
-							{
-								NamespacedName: types.NamespacedName{
-									Name:      deployment,
-									Namespace: obj.GetNamespace(),
-								},
-							},
-						}
-					}
-				}
-				return nil
-			}),
-		)
-	}
+	// Both upstream watches are optional so either API can be installed independently.
+	builder = addOptionalDynamoWatch(builder, mgr, DynamoAPIVersion, DynamoGraphDeploymentKind)
+	builder = addOptionalDynamoWatch(
+		builder,
+		mgr,
+		DynamoGraphDeploymentRequestAPIVersion,
+		DynamoGraphDeploymentRequestKind,
+	)
 
 	return builder.
 		Named("dynamo-provider").
 		Complete(r)
+}
+
+// addOptionalDynamoWatch avoids manager startup failures when an upstream CRD is absent.
+func addOptionalDynamoWatch(
+	builder *ctrlbuilder.Builder,
+	mgr ctrl.Manager,
+	version string,
+	kind string,
+) *ctrlbuilder.Builder {
+	mapper := mgr.GetRESTMapper()
+	if _, err := mapper.RESTMapping(
+		schema.GroupKind{Group: DynamoAPIGroup, Kind: kind},
+		version,
+	); err != nil {
+		return builder
+	}
+
+	mgr.GetLogger().Info(kind + " CRD detected, enabling event-driven watch")
+	return builder.Watches(
+		&unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, version),
+			"kind":       kind,
+		}},
+		// Generated DGDs lack DGDR owners, so the mapper also follows linking labels.
+		handler.EnqueueRequestsFromMapFunc(mapDynamoResourceToModelDeployment),
+	)
 }

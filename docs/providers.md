@@ -125,6 +125,66 @@ For HuggingFace GGUF models, KAITO uses in-cluster image building:
 
 ---
 
+## Dynamo Deployment Modes
+
+Dynamo uses direct `DynamoGraphDeployment` (DGD) resources by default. This path is best for
+existing deployments and configurations where AI Runway should render the serving layout.
+
+Intent mode is opt-in. Set `deploymentMode: intent` to create a
+`DynamoGraphDeploymentRequest` (DGDR), which profiles the requested model and GPU budget before
+generating the serving DGD:
+
+```yaml
+spec:
+    provider:
+        name: dynamo
+        overrides:
+            deploymentMode: intent
+            spec:
+                searchStrategy: rapid
+                autoApply: true
+    gateway:
+        enabled: false
+```
+
+In intent mode, AI Runway maps the model ID, resolved engine, total GPU budget, and a single
+`modelCache` volume into the request. Fields under `provider.overrides.spec` are merged into the
+DGDR spec, so advanced settings such as `workload`, `sla`, `hardware`, `features`,
+`overrides.profilingJob`, and `overrides.dgd` remain available. The provider-owned
+`deploymentMode` key is not sent to Dynamo. Direct mode keeps the existing behavior where
+`provider.overrides.spec` customizes the DGD.
+
+`rapid` profiling is the default and normally completes in about 30 seconds without running a
+full benchmark. `thorough` profiling uses real GPUs, requires an explicit backend, supports only
+disaggregated deployments, and can take several hours. `autoApply` defaults to `true`; setting it
+to `false` leaves the generated plan ready for review instead of starting the model.
+
+DGDR `spec.image` is the planner/profiler image, not the model runtime image. When omitted, the
+Dynamo operator selects a planner image matching its release. Customize generated runtime images
+through `provider.overrides.spec.overrides.dgd` rather than reusing `ModelDeployment.spec.image`
+or `engine.image`.
+
+A `modelCache` volume maps to DGDR `modelCache.pvcName` and `pvcMountPath`. Set
+`pvcModelPath` through the DGDR override when the cache uses a Hugging Face snapshot subdirectory.
+The cache must be readable by both profiling and serving workloads. Private or rate-limited models
+require Dynamo's `hf-token-secret` in the deployment namespace.
+
+Large multi-node models require the Dynamo platform's supported workload orchestrator, such as
+Grove, and enough GPUs across compatible nodes. Hardware hints such as `gpuSku`, `numGpusPerNode`,
+and `rdma` can be supplied under `provider.overrides.spec.hardware`; these describe available
+hardware and do not install or enable RDMA.
+
+Gateway integration is disabled for intent mode in this first implementation. The generated DGD
+uses its standalone frontend service.
+
+After profiling starts, Dynamo treats request intent as immutable. If a mapped ModelDeployment
+field or DGDR override changes, AI Runway deletes the old DGDR and its generated DGD, then creates
+a new request. **This restarts profiling and temporarily interrupts serving.** Deleting the
+ModelDeployment also removes both resources because Dynamo intentionally leaves a generated DGD
+running when only its DGDR is deleted.
+
+---
+
 ## Upstream Compatibility
 
 A provider shim renders manifests it does not own the schema for. For `dynamo`, `kaito` and
@@ -198,7 +258,7 @@ apart:
    workload-sizing fields that could bypass the unified resource and replica limits.
 2. **Providers that consume overrides check the root keys** before rendering. Dynamo, KAITO,
    llm-d and Direct vLLM accept only the roots they know how to apply — `spec` plus Dynamo's
-   transformer-specific keys, or `resource` and `inference` for KAITO, which places them at the
+    transformer-specific keys (including Dynamo's `deploymentMode`), or `resource` and `inference` for KAITO, which places them at the
    object root. Anything else is rejected with an error naming the offending key, rather than
    being merged and silently pruned. KubeRay does not consume overrides that pass the global
    admission rules, so they do not change the rendered `RayService`.

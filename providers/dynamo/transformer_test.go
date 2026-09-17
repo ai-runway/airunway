@@ -38,6 +38,150 @@ func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
 	}
 }
 
+func TestTransformIntent(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("intent-model", "default")
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{Replicas: 3}
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{
+			{
+				Name:      "models",
+				ClaimName: "shared-models",
+				MountPath: "/models",
+				Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+			},
+		},
+	}
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: ProviderName,
+		Overrides: &runtime.RawExtension{Raw: []byte(`{
+			"deploymentMode":"intent",
+			"spec":{
+				"searchStrategy":"thorough",
+				"autoApply":false,
+				"overrides":{"dgd":{"metadata":{"name":"ignored"}}}
+			}
+		}`)},
+	}
+
+	intentMode, err := tr.IsIntentMode(md)
+	if err != nil || !intentMode {
+		t.Fatalf("IsIntentMode() = %v, %v; want true, nil", intentMode, err)
+	}
+	resources, err := tr.TransformIntent(context.Background(), md)
+	if err != nil {
+		t.Fatalf("TransformIntent() error = %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("TransformIntent() returned %d resources, want 1", len(resources))
+	}
+	assertIntentMetadata(t, resources[0], md)
+	assertIntentSpec(t, resources[0], md)
+}
+
+func assertIntentMetadata(
+	t *testing.T,
+	dgdr *unstructured.Unstructured,
+	md *airunwayv1alpha1.ModelDeployment,
+) {
+	t.Helper()
+	if dgdr.GetAPIVersion() != "nvidia.com/v1beta1" ||
+		dgdr.GetKind() != DynamoGraphDeploymentRequestKind {
+		t.Fatalf("unexpected DGDR GVK: %s %s", dgdr.GetAPIVersion(), dgdr.GetKind())
+	}
+	if dgdr.GetName() != md.Name || dgdr.GetNamespace() != md.Namespace {
+		t.Fatalf("unexpected DGDR identity: %s/%s", dgdr.GetNamespace(), dgdr.GetName())
+	}
+	if len(dgdr.GetOwnerReferences()) != 1 {
+		t.Fatalf("DGDR owner references = %v, want one", dgdr.GetOwnerReferences())
+	}
+	if dgdr.GetAnnotations()[IntentHashAnnotation] == "" {
+		t.Fatal("expected intent hash annotation")
+	}
+}
+
+func assertIntentSpec(
+	t *testing.T,
+	dgdr *unstructured.Unstructured,
+	md *airunwayv1alpha1.ModelDeployment,
+) {
+	t.Helper()
+	spec, found, err := unstructured.NestedMap(dgdr.Object, "spec")
+	if err != nil || !found {
+		t.Fatalf("DGDR spec not found: %v", err)
+	}
+	if spec["model"] != md.Spec.Model.ID ||
+		spec["backend"] != string(md.ResolvedEngineType()) {
+		t.Fatalf("unexpected model/backend: %v/%v", spec["model"], spec["backend"])
+	}
+	if spec["searchStrategy"] != "thorough" || spec["autoApply"] != false {
+		t.Fatalf("intent overrides were not applied: %#v", spec)
+	}
+	if totalGPUs, _, _ := unstructured.NestedInt64(spec, "hardware", "totalGpus"); totalGPUs != 3 {
+		t.Errorf("hardware.totalGpus = %d, want 3", totalGPUs)
+	}
+	if pvcName, _, _ := unstructured.NestedString(spec, "modelCache", "pvcName"); pvcName != "shared-models" {
+		t.Errorf("modelCache.pvcName = %q, want shared-models", pvcName)
+	}
+	generatedName, _, _ := unstructured.NestedString(spec, "overrides", "dgd", "metadata", "name")
+	if generatedName != md.Name {
+		t.Errorf("generated DGD name = %q, want %q", generatedName, md.Name)
+	}
+	generatedLabels, _, _ := unstructured.NestedStringMap(
+		spec,
+		"overrides",
+		"dgd",
+		"metadata",
+		"labels",
+	)
+	if generatedLabels[airunwayv1alpha1.LabelModelDeployment] != md.Name {
+		t.Errorf("generated DGD labels = %v", generatedLabels)
+	}
+}
+
+func TestTransformIntentValidationAndGPUCalculation(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("intent-model", "default")
+
+	if _, err := tr.TransformIntent(context.Background(), md); err == nil {
+		t.Fatal("expected direct mode to be rejected by TransformIntent")
+	}
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name:      ProviderName,
+		Overrides: &runtime.RawExtension{Raw: []byte(`{"deploymentMode":"invalid"}`)},
+	}
+	if _, err := tr.IsIntentMode(md); err == nil {
+		t.Fatal("expected invalid deployment mode error")
+	}
+
+	md.Spec.Provider.Overrides.Raw = []byte(`{"deploymentMode":"intent"}`)
+	md.Spec.Engine.Type = airunwayv1alpha1.EngineType("unknown")
+	md.Spec.Serving = &airunwayv1alpha1.ServingSpec{
+		Mode: airunwayv1alpha1.ServingModeDisaggregated,
+	}
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 2,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 2},
+		},
+		Decode: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 3,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 1},
+		},
+	}
+	resources, err := tr.TransformIntent(context.Background(), md)
+	if err != nil {
+		t.Fatalf("TransformIntent() error = %v", err)
+	}
+	spec, _, _ := unstructured.NestedMap(resources[0].Object, "spec")
+	if spec["backend"] != "auto" {
+		t.Errorf("backend = %v, want auto", spec["backend"])
+	}
+	if totalGPUs, _, _ := unstructured.NestedInt64(spec, "hardware", "totalGpus"); totalGPUs != 7 {
+		t.Errorf("hardware.totalGpus = %d, want 7", totalGPUs)
+	}
+}
+
 func TestTransformAggregated(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")

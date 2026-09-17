@@ -19,8 +19,10 @@ package dynamo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -36,6 +38,20 @@ const (
 	DynamoAPIVersion = "v1alpha1"
 	// DynamoGraphDeploymentKind is the kind for DynamoGraphDeployment
 	DynamoGraphDeploymentKind = "DynamoGraphDeployment"
+	// DynamoGraphDeploymentRequestAPIVersion keeps intent requests on v1beta1
+	// while direct DGDs remain v1alpha1.
+	DynamoGraphDeploymentRequestAPIVersion = "v1beta1"
+	// DynamoGraphDeploymentRequestKind identifies Dynamo's intent-based deployment API.
+	DynamoGraphDeploymentRequestKind = "DynamoGraphDeploymentRequest"
+	// DeploymentModeIntent opts a ModelDeployment into the new profiling-based path.
+	DeploymentModeIntent = "intent"
+	// DeploymentModeManual explicitly retains the existing direct DGD path.
+	DeploymentModeManual = "manual"
+	// DeploymentModeDirect is accepted as an alias for the existing direct DGD path.
+	DeploymentModeDirect = "direct"
+	// IntentHashAnnotation detects immutable DGDR changes without comparing
+	// server defaults.
+	IntentHashAnnotation = "airunway.ai/dgdr-intent-hash"
 
 	// Default component settings
 	DefaultEppReplicas = 1
@@ -71,6 +87,9 @@ var (
 
 // DynamoOverrides contains Dynamo-specific override configuration
 type DynamoOverrides struct {
+	// DeploymentMode selects intent-based DGDR rendering without changing the default direct path.
+	DeploymentMode string `json:"deploymentMode,omitempty"`
+
 	// RouterMode is the request routing strategy: kv, round-robin, none
 	RouterMode string `json:"routerMode,omitempty"`
 
@@ -103,10 +122,11 @@ type ResourceOverrides struct {
 // consumes itself. Spec remains opaque because it is passed through to the
 // upstream DynamoGraphDeployment and validated against the installed CRD.
 type dynamoOverridesWire struct {
-	RouterMode string             `json:"routerMode,omitempty"`
-	Frontend   *FrontendOverrides `json:"frontend,omitempty"`
-	Epp        *EPPOverrides      `json:"epp,omitempty"`
-	Spec       json.RawMessage    `json:"spec,omitempty"`
+	DeploymentMode string             `json:"deploymentMode,omitempty"`
+	RouterMode     string             `json:"routerMode,omitempty"`
+	Frontend       *FrontendOverrides `json:"frontend,omitempty"`
+	Epp            *EPPOverrides      `json:"epp,omitempty"`
+	Spec           json.RawMessage    `json:"spec,omitempty"`
 }
 
 // Transformer handles transformation of ModelDeployment to DynamoGraphDeployment
@@ -115,6 +135,15 @@ type Transformer struct{}
 // NewTransformer creates a new Dynamo transformer
 func NewTransformer() *Transformer {
 	return &Transformer{}
+}
+
+// IsIntentMode reports whether this deployment explicitly opts into DGDR rendering.
+func (t *Transformer) IsIntentMode(md *airunwayv1alpha1.ModelDeployment) (bool, error) {
+	overrides, err := t.parseOverrides(md)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse provider overrides: %w", err)
+	}
+	return overrides.DeploymentMode == DeploymentModeIntent, nil
 }
 
 // Transform converts a ModelDeployment to a DynamoGraphDeployment
@@ -154,7 +183,7 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 	dgd.SetLabels(labels)
 
 	// Build the spec
-	spec := map[string]interface{}{
+	spec := map[string]any{
 		"backendFramework": t.mapEngineType(md.ResolvedEngineType()),
 	}
 
@@ -181,6 +210,199 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 	return []*unstructured.Unstructured{dgd}, nil
 }
 
+// TransformIntent converts a ModelDeployment into a profiling-based DGDR.
+func (t *Transformer) TransformIntent(
+	_ context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+) ([]*unstructured.Unstructured, error) {
+	overrides, err := t.parseOverrides(md)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse provider overrides: %w", err)
+	}
+	if overrides.DeploymentMode != DeploymentModeIntent {
+		return nil, fmt.Errorf("deploymentMode must be %q for DGDR transformation", DeploymentModeIntent)
+	}
+
+	// DGDR is served as v1beta1 independently of the existing v1alpha1 DGD API.
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetAPIVersion(fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion))
+	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
+	dgdr.SetName(md.Name)
+	dgdr.SetNamespace(md.Namespace)
+	dgdr.SetOwnerReferences([]metav1.OwnerReference{
+		{
+			APIVersion:         airunwayv1alpha1.GroupVersion.String(),
+			Kind:               "ModelDeployment",
+			Name:               md.Name,
+			UID:                md.UID,
+			Controller:         boolPtr(true),
+			BlockOwnerDeletion: boolPtr(true),
+		},
+	})
+
+	// Shared labels link resources without relying on Dynamo owner references.
+	labels := map[string]string{
+		airunwayv1alpha1.LabelManagedBy:       "airunway",
+		airunwayv1alpha1.LabelModelDeployment: md.Name,
+		"airunway.ai/model-id":                sanitizeLabelValue(md.Spec.Model.ID),
+		"airunway.ai/engine-type":             string(md.ResolvedEngineType()),
+	}
+	dgdr.SetLabels(labels)
+
+	// Rapid profiling with automatic application is the smallest usable intent request.
+	spec := map[string]any{
+		"model":          md.Spec.Model.ID,
+		"backend":        t.mapDGDRBackend(md.ResolvedEngineType()),
+		"searchStrategy": "rapid",
+		"autoApply":      true,
+		"overrides": map[string]any{
+			"dgd": map[string]any{
+				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
+				"kind":       DynamoGraphDeploymentKind,
+				"metadata": map[string]any{
+					"name":   md.Name,
+					"labels": stringMapToInterfaceMap(labels),
+				},
+			},
+		},
+	}
+
+	// DGDR hardware.totalGpus is a total deployment budget, including replicas.
+	if totalGPUs := totalDGDRGPUs(md); totalGPUs > 0 {
+		spec["hardware"] = map[string]any{"totalGpus": totalGPUs}
+	}
+
+	// Snapshot-relative model-cache paths remain explicit overrides.
+	if modelCache := buildDGDRModelCache(md); modelCache != nil {
+		spec["modelCache"] = modelCache
+	}
+
+	if err := unstructured.SetNestedField(dgdr.Object, spec, "spec"); err != nil {
+		return nil, fmt.Errorf("failed to set DGDR spec: %w", err)
+	}
+
+	// Intent overrides customize the DGDR while deploymentMode stays provider-local.
+	if err := applyOverrides(dgdr, md); err != nil {
+		return nil, fmt.Errorf("failed to apply DGDR provider overrides: %w", err)
+	}
+
+	// Provider-owned identity keeps generated service names and linking stable.
+	if err := enforceGeneratedDGDIdentity(dgdr, md.Name, labels); err != nil {
+		return nil, err
+	}
+
+	// Hash only the final desired spec so metadata/status changes never restart profiling.
+	finalSpec, _, err := unstructured.NestedMap(dgdr.Object, "spec")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read final DGDR spec: %w", err)
+	}
+	encodedSpec, err := json.Marshal(finalSpec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash final DGDR spec: %w", err)
+	}
+	dgdr.SetAnnotations(map[string]string{IntentHashAnnotation: fmt.Sprintf("%x", sha256.Sum256(encodedSpec))})
+
+	return []*unstructured.Unstructured{dgdr}, nil
+}
+
+// mapDGDRBackend falls back to automatic selection for unresolved engines.
+func (t *Transformer) mapDGDRBackend(engineType airunwayv1alpha1.EngineType) string {
+	switch engineType {
+	case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang, airunwayv1alpha1.EngineTypeTRTLLM:
+		return t.mapEngineType(engineType)
+	default:
+		return "auto"
+	}
+}
+
+// totalDGDRGPUs converts per-replica Airunway GPU requests into DGDR's total profiling budget.
+func totalDGDRGPUs(md *airunwayv1alpha1.ModelDeployment) int64 {
+	if md.Spec.Serving != nil && md.Spec.Serving.Mode == airunwayv1alpha1.ServingModeDisaggregated {
+		if md.Spec.Scaling == nil {
+			return 0
+		}
+		var total int64
+		components := []*airunwayv1alpha1.ComponentScalingSpec{
+			md.Spec.Scaling.Prefill,
+			md.Spec.Scaling.Decode,
+		}
+		for _, component := range components {
+			if component != nil && component.GPU != nil {
+				total += int64(component.GPU.Count) * int64(component.Replicas)
+			}
+		}
+		return total
+	}
+
+	if md.Spec.Resources == nil || md.Spec.Resources.GPU == nil {
+		return 0
+	}
+	replicas := int32(1)
+	if md.Spec.Scaling != nil && md.Spec.Scaling.Replicas > 0 {
+		replicas = md.Spec.Scaling.Replicas
+	}
+	return int64(md.Spec.Resources.GPU.Count) * int64(replicas)
+}
+
+// buildDGDRModelCache returns the single model-cache PVC shape supported by the DGDR API.
+func buildDGDRModelCache(md *airunwayv1alpha1.ModelDeployment) map[string]any {
+	if md.Spec.Model.Storage == nil {
+		return nil
+	}
+	for i := range md.Spec.Model.Storage.Volumes {
+		volume := &md.Spec.Model.Storage.Volumes[i]
+		if volume.Purpose == airunwayv1alpha1.VolumePurposeModelCache {
+			return map[string]any{
+				"pvcName":      volume.ResolvedClaimName(md.Name),
+				"pvcMountPath": volume.MountPath,
+			}
+		}
+	}
+	return nil
+}
+
+// enforceGeneratedDGDIdentity keeps the generated DGD addressable and attributable.
+func enforceGeneratedDGDIdentity(dgdr *unstructured.Unstructured, name string, labels map[string]string) error {
+	apiVersion := fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion)
+	if err := unstructured.SetNestedField(
+		dgdr.Object, apiVersion, "spec", "overrides", "dgd", "apiVersion",
+	); err != nil {
+		return fmt.Errorf("failed to set generated DGD apiVersion: %w", err)
+	}
+	if err := unstructured.SetNestedField(
+		dgdr.Object, DynamoGraphDeploymentKind, "spec", "overrides", "dgd", "kind",
+	); err != nil {
+		return fmt.Errorf("failed to set generated DGD kind: %w", err)
+	}
+	if err := unstructured.SetNestedField(
+		dgdr.Object, name, "spec", "overrides", "dgd", "metadata", "name",
+	); err != nil {
+		return fmt.Errorf("failed to set generated DGD name: %w", err)
+	}
+	existingLabels, _, _ := unstructured.NestedStringMap(
+		dgdr.Object, "spec", "overrides", "dgd", "metadata", "labels",
+	)
+	if existingLabels == nil {
+		existingLabels = map[string]string{}
+	}
+	maps.Copy(existingLabels, labels)
+	if err := unstructured.SetNestedStringMap(
+		dgdr.Object, existingLabels, "spec", "overrides", "dgd", "metadata", "labels",
+	); err != nil {
+		return fmt.Errorf("failed to set generated DGD labels: %w", err)
+	}
+	return nil
+}
+
+// stringMapToInterfaceMap creates an unstructured copy without shared label state.
+func stringMapToInterfaceMap(values map[string]string) map[string]any {
+	result := make(map[string]any, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
 // parseOverrides parses the provider.overrides field into DynamoOverrides
 func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*DynamoOverrides, error) {
 	if md.Spec.Provider == nil || md.Spec.Provider.Overrides == nil {
@@ -204,11 +426,24 @@ func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*Dyn
 	if err := decoder.Decode(&wire); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
+	// Reject misspelled modes before they can silently fall back to direct DGD rendering.
+	switch wire.DeploymentMode {
+	case "", DeploymentModeIntent, DeploymentModeManual, DeploymentModeDirect:
+	default:
+		return nil, fmt.Errorf(
+			"unsupported deploymentMode %q: use %q, %q, or %q",
+			wire.DeploymentMode,
+			DeploymentModeIntent,
+			DeploymentModeManual,
+			DeploymentModeDirect,
+		)
+	}
 
 	return &DynamoOverrides{
-		RouterMode: wire.RouterMode,
-		Frontend:   wire.Frontend,
-		Epp:        wire.Epp,
+		DeploymentMode: wire.DeploymentMode,
+		RouterMode:     wire.RouterMode,
+		Frontend:       wire.Frontend,
+		Epp:            wire.Epp,
 	}, nil
 }
 
@@ -1203,7 +1438,7 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 
 // consumedOverrideKeys are the provider.overrides root keys parseOverrides decodes into
 // DynamoOverrides. Lowercased, because encoding/json matches field names case-insensitively.
-var consumedOverrideKeys = map[string]bool{"routermode": true, "frontend": true, "epp": true}
+var consumedOverrideKeys = map[string]bool{"deploymentmode": true, "routermode": true, "frontend": true, "epp": true}
 
 func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 	// Block dangerous top-level keys to prevent privilege escalation.
@@ -1227,7 +1462,7 @@ func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 
 	sort.Strings(unsupported)
 	return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
-		"Dynamo-specific keys routerMode, frontend and epp are supported (note the webhook "+
+		"Dynamo-specific keys deploymentMode, routerMode, frontend and epp are supported (note the webhook "+
 		"rejects replicas/resources anywhere inside overrides, so only epp.image and "+
 		"routerMode are settable in practice)", unsupported)
 }
