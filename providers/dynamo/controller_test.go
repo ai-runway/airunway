@@ -499,6 +499,38 @@ func TestIntentGenerationChangeReplacesDGDThenDGDR(t *testing.T) {
 	}
 }
 
+func TestDeleteGeneratedDGDsDoesNotTrustRelationshipLabels(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	dgdr := newDynamoResource(
+		DynamoGraphDeploymentRequestAPIVersion,
+		DynamoGraphDeploymentRequestKind,
+		md.Name,
+		md.Namespace,
+	)
+	dgdr.Object["status"] = map[string]any{"dgdName": "confirmed-dgd"}
+	confirmedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "confirmed-dgd", md.Namespace)
+	unrelatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "unrelated-dgd", md.Namespace)
+	unrelatedDGD.SetLabels(map[string]string{
+		dynamoDGDRNameLabel:      md.Name,
+		dynamoDGDRNamespaceLabel: md.Namespace,
+	})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(confirmedDGD, unrelatedDGD).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	pending, err := r.deleteGeneratedDGDs(context.Background(), md, dgdr)
+	if err != nil || !pending {
+		t.Fatalf("expected confirmed generated DGD deletion, pending=%v err=%v", pending, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(confirmedDGD), confirmedDGD); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected status-confirmed DGD to be deleted, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(unrelatedDGD), unrelatedDGD); err != nil {
+		t.Fatalf("expected label-only DGD to remain, got %v", err)
+	}
+}
+
 func TestDeploymentModeTransitionToIntent(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")

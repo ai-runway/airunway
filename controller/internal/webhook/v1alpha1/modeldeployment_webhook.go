@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 
@@ -1032,7 +1033,7 @@ func checkBlockedKeys(m map[string]interface{}, fldPath *field.Path) field.Error
 // checkSizingOverrideKeys recursively walks provider overrides and rejects fields
 // that would let raw provider overrides bypass resource/replica ceilings. Dynamo
 // intent mode may customize its embedded DGD after those values are validated.
-func checkSizingOverrideKeys(m map[string]interface{}, fldPath *field.Path, allowIntentDGD bool) field.ErrorList {
+func checkSizingOverrideKeys(m map[string]any, fldPath *field.Path, allowIntentDGD bool) field.ErrorList {
 	checkedOverrides := m
 	var allErrs field.ErrorList
 	if allowIntentDGD {
@@ -1064,28 +1065,28 @@ func checkSizingOverrideKeys(m map[string]interface{}, fldPath *field.Path, allo
 	return allErrs
 }
 
-func intentDGDOverrideSpec(overrides map[string]interface{}) (map[string]interface{}, bool) {
-	spec, ok := overrides["spec"].(map[string]interface{})
+func intentDGDOverrideSpec(overrides map[string]any) (map[string]any, bool) {
+	spec, ok := overrides["spec"].(map[string]any)
 	if !ok {
 		return nil, false
 	}
-	dgdrOverrides, ok := spec["overrides"].(map[string]interface{})
+	dgdrOverrides, ok := spec["overrides"].(map[string]any)
 	if !ok {
 		return nil, false
 	}
-	dgd, ok := dgdrOverrides["dgd"].(map[string]interface{})
+	dgd, ok := dgdrOverrides["dgd"].(map[string]any)
 	if !ok {
 		return nil, false
 	}
-	dgdSpec, ok := dgd["spec"].(map[string]interface{})
+	dgdSpec, ok := dgd["spec"].(map[string]any)
 	return dgdSpec, ok
 }
 
-func withoutIntentDGDOverrideSpec(overrides map[string]interface{}) map[string]interface{} {
+func withoutIntentDGDOverrideSpec(overrides map[string]any) map[string]any {
 	result := cloneOverrideMap(overrides)
-	spec := cloneOverrideMap(result["spec"].(map[string]interface{}))
-	dgdrOverrides := cloneOverrideMap(spec["overrides"].(map[string]interface{}))
-	dgd := cloneOverrideMap(dgdrOverrides["dgd"].(map[string]interface{}))
+	spec := cloneOverrideMap(result["spec"].(map[string]any))
+	dgdrOverrides := cloneOverrideMap(spec["overrides"].(map[string]any))
+	dgd := cloneOverrideMap(dgdrOverrides["dgd"].(map[string]any))
 	delete(dgd, "spec")
 	dgdrOverrides["dgd"] = dgd
 	spec["overrides"] = dgdrOverrides
@@ -1093,15 +1094,13 @@ func withoutIntentDGDOverrideSpec(overrides map[string]interface{}) map[string]i
 	return result
 }
 
-func cloneOverrideMap(source map[string]interface{}) map[string]interface{} {
-	clone := make(map[string]interface{}, len(source))
-	for key, value := range source {
-		clone[key] = value
-	}
+func cloneOverrideMap(source map[string]any) map[string]any {
+	clone := make(map[string]any, len(source))
+	maps.Copy(clone, source)
 	return clone
 }
 
-func validateIntentDGDOverrideSizing(dgdSpec map[string]interface{}, fldPath *field.Path) field.ErrorList {
+func validateIntentDGDOverrideSizing(dgdSpec map[string]any, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	for key, value := range dgdSpec {
 		valuePath := fldPath.Child(key)
@@ -1117,11 +1116,11 @@ func validateIntentDGDOverrideSizing(dgdSpec map[string]interface{}, fldPath *fi
 	return allErrs
 }
 
-func validateIntentDGDOverrideSizingValue(value interface{}, fldPath *field.Path) field.ErrorList {
+func validateIntentDGDOverrideSizingValue(value any, fldPath *field.Path) field.ErrorList {
 	switch typedValue := value.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		return validateIntentDGDOverrideSizing(typedValue, fldPath)
-	case []interface{}:
+	case []any:
 		var allErrs field.ErrorList
 		for index, item := range typedValue {
 			allErrs = append(allErrs, validateIntentDGDOverrideSizingValue(item, fldPath.Index(index))...)
@@ -1132,7 +1131,7 @@ func validateIntentDGDOverrideSizingValue(value interface{}, fldPath *field.Path
 	}
 }
 
-func validateIntentDGDReplicas(value interface{}, fldPath *field.Path) field.ErrorList {
+func validateIntentDGDReplicas(value any, fldPath *field.Path) field.ErrorList {
 	replicas, ok := value.(float64)
 	if !ok || math.Trunc(replicas) != replicas {
 		return field.ErrorList{field.Invalid(fldPath, value, "must be an integer")}
@@ -1147,22 +1146,22 @@ func validateIntentDGDReplicas(value interface{}, fldPath *field.Path) field.Err
 	return nil
 }
 
-func validateIntentDGDResources(value interface{}, fldPath *field.Path) field.ErrorList {
-	resources, ok := value.(map[string]interface{})
+func validateIntentDGDResources(value any, fldPath *field.Path) field.ErrorList {
+	resources, ok := value.(map[string]any)
 	if !ok {
 		return field.ErrorList{field.Invalid(fldPath, value, "must be an object")}
 	}
 
 	allErrs := validateIntentDGDResourceList(resources, fldPath)
 	for _, listName := range []string{"limits", "requests"} {
-		if resourceList, found := resources[listName].(map[string]interface{}); found {
+		if resourceList, found := resources[listName].(map[string]any); found {
 			allErrs = append(allErrs, validateIntentDGDResourceList(resourceList, fldPath.Child(listName))...)
 		}
 	}
 	return allErrs
 }
 
-func validateIntentDGDResourceList(resources map[string]interface{}, fldPath *field.Path) field.ErrorList {
+func validateIntentDGDResourceList(resources map[string]any, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	for resourceName, value := range resources {
 		valueString := fmt.Sprint(value)

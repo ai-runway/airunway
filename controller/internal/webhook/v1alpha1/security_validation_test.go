@@ -179,17 +179,17 @@ func TestValidateOverrides_BlocksNestedResources(t *testing.T) {
 
 func TestValidateOverrides_AllowsBoundedIntentDGDSizing(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
-	overrides := map[string]interface{}{
+	overrides := map[string]any{
 		"deploymentMode": "intent",
-		"spec": map[string]interface{}{
-			"overrides": map[string]interface{}{
-				"dgd": map[string]interface{}{
-					"spec": map[string]interface{}{
-						"services": map[string]interface{}{
-							"worker": map[string]interface{}{
+		"spec": map[string]any{
+			"overrides": map[string]any{
+				"dgd": map[string]any{
+					"spec": map[string]any{
+						"services": map[string]any{
+							"worker": map[string]any{
 								"replicas": MaxReplicas,
-								"resources": map[string]interface{}{
-									"limits": map[string]interface{}{
+								"resources": map[string]any{
+									"limits": map[string]any{
 										"cpu":            MaxCPU,
 										"memory":         MaxMemory,
 										"nvidia.com/gpu": MaxGPUCount,
@@ -216,17 +216,17 @@ func TestValidateOverrides_AllowsBoundedIntentDGDSizing(t *testing.T) {
 
 func TestValidateOverrides_RejectsOversizedIntentDGDSizing(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
-	overrides := map[string]interface{}{
+	overrides := map[string]any{
 		"deploymentMode": "intent",
-		"spec": map[string]interface{}{
-			"overrides": map[string]interface{}{
-				"dgd": map[string]interface{}{
-					"spec": map[string]interface{}{
-						"services": map[string]interface{}{
-							"worker": map[string]interface{}{
+		"spec": map[string]any{
+			"overrides": map[string]any{
+				"dgd": map[string]any{
+					"spec": map[string]any{
+						"services": map[string]any{
+							"worker": map[string]any{
 								"replicas": MaxReplicas + 1,
-								"resources": map[string]interface{}{
-									"limits": map[string]interface{}{
+								"resources": map[string]any{
+									"limits": map[string]any{
 										"cpu":            "513",
 										"memory":         "5Ti",
 										"nvidia.com/gpu": MaxGPUCount + 1,
@@ -256,12 +256,12 @@ func TestValidateOverrides_RejectsOversizedIntentDGDSizing(t *testing.T) {
 
 func TestValidateOverrides_BlocksDGDSizingOutsideDynamoIntent(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
-	overrides := map[string]interface{}{
+	overrides := map[string]any{
 		"deploymentMode": "manual",
-		"spec": map[string]interface{}{
-			"overrides": map[string]interface{}{
-				"dgd": map[string]interface{}{
-					"spec": map[string]interface{}{
+		"spec": map[string]any{
+			"overrides": map[string]any{
+				"dgd": map[string]any{
+					"spec": map[string]any{
 						"replicas": 1,
 					},
 				},

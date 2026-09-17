@@ -685,25 +685,6 @@ func (r *DynamoProviderReconciler) deleteGeneratedDGDs(
 		}
 	}
 
-	dgdList := &unstructured.UnstructuredList{}
-	dgdList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   DynamoAPIGroup,
-		Version: DynamoAPIVersion,
-		Kind:    DynamoGraphDeploymentKind + "List",
-	})
-	listErr := r.List(ctx, dgdList,
-		client.InNamespace(md.Namespace),
-		client.MatchingLabels{
-			dynamoDGDRNameLabel:      md.Name,
-			dynamoDGDRNamespaceLabel: md.Namespace,
-		})
-	if listErr != nil && !upstreamResourceUnavailable(listErr) {
-		return false, listErr
-	}
-	for i := range dgdList.Items {
-		names[dgdList.Items[i].GetName()] = struct{}{}
-	}
-
 	pending := false
 	for name := range names {
 		dgd := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, name, md.Namespace)
