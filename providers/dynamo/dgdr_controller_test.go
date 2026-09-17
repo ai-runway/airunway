@@ -210,8 +210,24 @@ func TestDeleteDirectDGDForIntent(t *testing.T) {
 	client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(linked).Build()
 	reconciler = NewDynamoProviderReconciler(client, scheme, "")
 	pending, err = reconciler.deleteDirectDGDForIntent(ctx, md)
-	if err != nil || pending {
-		t.Fatalf("linked DGD deletion = %v, %v; want false, nil", pending, err)
+	if err != nil || !pending {
+		t.Fatalf("linked DGD deletion = %v, %v; want true, nil", pending, err)
+	}
+	if err := client.Get(ctx, key, linked); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale linked DGD still exists: %v", err)
+	}
+
+	foreign := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind)
+	foreign.SetName(md.Name)
+	foreign.SetNamespace(md.Namespace)
+	foreign.SetLabels(map[string]string{dgdrNameLabel: "another-request"})
+	client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
+	reconciler = NewDynamoProviderReconciler(client, scheme, "")
+	if _, err := reconciler.deleteDirectDGDForIntent(ctx, md); err == nil {
+		t.Fatal("expected a conflict for a foreign linked DGD")
+	}
+	if err := client.Get(ctx, key, foreign); err != nil {
+		t.Fatalf("foreign linked DGD should be retained: %v", err)
 	}
 }
 

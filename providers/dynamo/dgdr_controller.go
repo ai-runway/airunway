@@ -200,7 +200,7 @@ func (r *DynamoProviderReconciler) failIntent(
 	return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, nil
 }
 
-// deleteDirectDGDForIntent avoids deleting a DGD already linked to a DGDR.
+// deleteDirectDGDForIntent removes a same-named DGD before creating a DGDR.
 func (r *DynamoProviderReconciler) deleteDirectDGDForIntent(
 	ctx context.Context,
 	md *airunwayv1alpha1.ModelDeployment,
@@ -213,13 +213,11 @@ func (r *DynamoProviderReconciler) deleteDirectDGDForIntent(
 	if err != nil {
 		return false, err
 	}
-if dgd.GetLabels()[dgdrNameLabel] != "" {
+	if dgd.GetLabels()[dgdrNameLabel] != "" {
 		if !isDGDLinkedToModelDeployment(dgd, md) {
 			return false, &resourceConflictError{namespace: dgd.GetNamespace(), name: dgd.GetName()}
 		}
-		return false, nil
-	}
-	if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
+	} else if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
 		return false, err
 	}
 	if dgd.GetDeletionTimestamp() == nil {
