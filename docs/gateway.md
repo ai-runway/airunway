@@ -301,7 +301,7 @@ spec:
 | `spec.gateway.enabled` | `true` (when Gateway detected) | Set to `false` to skip InferencePool/HTTPRoute creation |
 | `spec.gateway.modelName` | Auto-discovered or `spec.model.id` | Model name used for routing and in API requests |
 | `spec.gateway.poolRef` | — | Existing InferencePool in the ModelDeployment namespace. The controller uses it as the HTTPRoute backend and does not create, update, label pods for, or delete the pool or its EPP. |
-| `spec.gateway.httpRouteRef` | — | Existing HTTPRoute in the ModelDeployment namespace. The controller does not create or delete that route. |
+| `spec.gateway.httpRouteRef` | — | Existing user-managed HTTPRoute in the ModelDeployment namespace. The controller skips route creation and does not modify or delete a user-owned route. |
 
 ### Using an Existing InferencePool
 
@@ -325,6 +325,8 @@ spec:
 AI Runway creates an HTTPRoute whose backend is that pool unless `httpRouteRef` is also set. The referenced InferencePool and its EPP remain user-owned: the controller does not create, update, or delete them, and it does not add the controller's pool-selection label to model pods. Creating, deleting, or changing the status of the referenced pool automatically triggers reconciliation so the gateway condition recovers or fails promptly.
 
 When an existing deployment switches to `poolRef`, AI Runway retires its controller-owned pool/EPP resources and the pod selector labels it recorded as its own. Labels already present on a pod, including labels written by older versions without ownership tracking, are preserved. Disabling the gateway in the same update also performs this ownership-aware cleanup; it does not delete user-owned pools, EPPs, or routes.
+
+When `poolRef` and `httpRouteRef` are both set, route cleanup retires a previous generated HTTPRoute that the ModelDeployment still controls, even if its name matches `httpRouteRef`. Setting a reference does not transfer ownership. To retain an existing generated route as user-managed, remove its ModelDeployment controller owner reference before making the switch and configure its backend yourself. A user-owned route with the same name is preserved.
 
 A user-set `poolRef` takes precedence over provider gateway capabilities such as `managesInferencePool`. This lets a deployment opt into a user-managed pool even when its provider can create one.
 

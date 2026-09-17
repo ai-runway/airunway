@@ -64,7 +64,7 @@ spec:
 | `enabled` | bool | no | Enables or disables gateway integration. Defaults to enabled when the required Gateway resources are detected. |
 | `modelName` | string | no | Overrides the model name used for gateway routing. |
 | `poolRef` | string | no | Name of an existing InferencePool in the same namespace. The controller verifies its existence and surfaces rejected or unresolved status, uses it as the HTTPRoute backend, and does not create, update, or delete the pool or its EPP. A user-set value takes precedence over provider-managed pool capabilities. |
-| `httpRouteRef` | string | no | Name of an existing HTTPRoute in the same namespace. The controller does not create or delete the referenced route. |
+| `httpRouteRef` | string | no | Name of an existing user-managed HTTPRoute in the same namespace. The controller skips route creation and preserves user-owned routes. With `poolRef`, cleanup still retires a previous generated route owned by the ModelDeployment, even if its name matches this reference. |
 
 ### spec.engine
 

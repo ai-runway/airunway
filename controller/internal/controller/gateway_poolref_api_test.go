@@ -68,6 +68,19 @@ func TestGatewayPoolRefAPI(t *testing.T) {
 	for _, mode := range []string{"controller managed", gatewayFinalLabelAttempt, "provider managed"} {
 		t.Run("managed pod conflict/"+mode, func(t *testing.T) { environment.testManagedPodConflict(t, mode) })
 	}
+	for _, mode := range []string{"enabled", "missing pool", "disabled", gatewayRouteDeleting} {
+		t.Run("same-name managed route reference/"+mode, func(t *testing.T) { environment.testManagedRouteReference(t, mode) })
+	}
+	for _, ownership := range []string{"unowned", "other controller"} {
+		for _, mode := range []string{"enabled", "missing pool", "disabled"} {
+			t.Run("same-name foreign route reference/"+ownership+"/"+mode, func(t *testing.T) {
+				environment.testForeignRouteReference(t, ownership, mode)
+			})
+		}
+	}
+	for _, failure := range []string{"delete unavailable", "owner change"} {
+		t.Run("same-name route retirement retry/"+failure, func(t *testing.T) { environment.testRouteReferenceRetry(t, failure) })
+	}
 	t.Run("pool watch propagates creation status and deletion", environment.testWatch)
 }
 

@@ -121,7 +121,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 			return nil
 		}
 		// If the user also supplies an HTTPRoute, retire any previous managed
-		// route without touching the referenced route itself.
+		// route. A reference name does not transfer ownership of that route.
 		if md.Spec.Gateway.HTTPRouteRef != "" {
 			if err := r.retireControllerManagedHTTPRoute(ctx, md); err != nil {
 				return fmt.Errorf("retiring controller-managed HTTPRoute: %w", err)
@@ -1214,10 +1214,10 @@ func (r *ModelDeploymentReconciler) removeControllerManagedPodLabels(
 	return nil
 }
 
-// retireControllerManagedHTTPRoute removes the route previously created for
-// this ModelDeployment while preserving a currently referenced HTTPRoute. The
-// creation annotation is cleared so reconciliation can recreate the managed
-// route after the referenced InferencePool becomes available.
+// retireControllerManagedHTTPRoute removes the generated route only while
+// this ModelDeployment controls it. A matching httpRouteRef does not transfer
+// ownership; user-owned referenced routes are preserved. Clearing the creation
+// marker allows recreation if managed routing resumes.
 func (r *ModelDeploymentReconciler) retireControllerManagedHTTPRoute(
 	ctx context.Context,
 	md *airunwayv1alpha1.ModelDeployment,
@@ -1228,19 +1228,10 @@ func (r *ModelDeploymentReconciler) retireControllerManagedHTTPRoute(
 		return err
 	}
 
-	referencedRoute := ""
-	if md.Spec.Gateway != nil {
-		referencedRoute = md.Spec.Gateway.HTTPRouteRef
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
 	}
-	if referencedRoute != md.Name {
-		route := &gatewayv1.HTTPRoute{
-			ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace},
-		}
-		if err := r.deleteIfControlledByModelDeployment(ctx, md, route); err != nil {
-			return err
-		}
-	}
-	return nil
+	return r.deleteIfControlledByModelDeployment(ctx, md, route)
 }
 
 func (r *ModelDeploymentReconciler) clearHTTPRouteCreatedAnnotation(
@@ -1556,7 +1547,7 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 	}
 
 	// A pool reference does not establish ownership of a generated-name route.
-	// Retire only a route we control, preserving referenced and foreign routes.
+	// Retire only a route we control, preserving user- and provider-owned routes.
 	if userProvidedPool {
 		if err := r.retireControllerManagedHTTPRoute(ctx, md); err != nil {
 			return fmt.Errorf("retiring controller-managed HTTPRoute: %w", err)
