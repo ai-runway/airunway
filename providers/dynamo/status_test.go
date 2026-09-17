@@ -23,6 +23,81 @@ func newDGDWithStatus(status map[string]interface{}) *unstructured.Unstructured 
 	return &unstructured.Unstructured{Object: obj}
 }
 
+func newDGDRWithStatus(status map[string]any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "nvidia.com/v1beta1",
+		"kind":       DynamoGraphDeploymentRequestKind,
+		"metadata": map[string]any{
+			"name":      "test-request",
+			"namespace": "default",
+		},
+		"status": status,
+	}}
+}
+
+func TestTranslateDGDRStatus(t *testing.T) {
+	st := NewStatusTranslator()
+	tests := []struct {
+		phase string
+		want  airunwayv1alpha1.DeploymentPhase
+	}{
+		{phase: "Pending", want: airunwayv1alpha1.DeploymentPhasePending},
+		{phase: "Profiling", want: airunwayv1alpha1.DeploymentPhaseDeploying},
+		{phase: "Ready", want: airunwayv1alpha1.DeploymentPhaseDeploying},
+		{phase: "Deploying", want: airunwayv1alpha1.DeploymentPhaseDeploying},
+		{phase: "Deployed", want: airunwayv1alpha1.DeploymentPhaseRunning},
+		{phase: "Failed", want: airunwayv1alpha1.DeploymentPhaseFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.phase, func(t *testing.T) {
+			result, err := st.TranslateStatus(newDGDRWithStatus(map[string]any{
+				"phase": tt.phase,
+				"deploymentInfo": map[string]any{
+					"replicas":          int64(3),
+					"availableReplicas": int64(2),
+				},
+			}))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Phase != tt.want {
+				t.Errorf("expected %s, got %s", tt.want, result.Phase)
+			}
+			if result.ResourceKind != DynamoGraphDeploymentRequestKind {
+				t.Errorf("unexpected resource kind %q", result.ResourceKind)
+			}
+			if result.Replicas == nil || result.Replicas.Desired != 3 || result.Replicas.Ready != 2 {
+				t.Errorf("unexpected replicas %#v", result.Replicas)
+			}
+			if result.Endpoint != nil {
+				t.Errorf("expected no inferred DGDR endpoint, got %#v", result.Endpoint)
+			}
+		})
+	}
+}
+
+func TestTranslateDGDRStatusMessage(t *testing.T) {
+	result, err := NewStatusTranslator().TranslateStatus(newDGDRWithStatus(map[string]any{
+		"phase":          "Profiling",
+		"profilingPhase": "SweepingPrefill",
+		"conditions": []any{
+			map[string]any{
+				"type":    "Succeeded",
+				"message": "Profiling the selected GPU configurations",
+			},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Message != "Profiling the selected GPU configurations" {
+		t.Fatalf("unexpected DGDR message %q", result.Message)
+	}
+	if result.Replicas != nil {
+		t.Fatalf("expected replicas to remain unset, got %#v", result.Replicas)
+	}
+}
+
 func TestNewStatusTranslator(t *testing.T) {
 	st := NewStatusTranslator()
 	if st == nil {

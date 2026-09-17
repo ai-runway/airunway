@@ -34,8 +34,17 @@ const (
 	DynamoAPIGroup = "nvidia.com"
 	// DynamoAPIVersion is the current API version for Dynamo CRDs
 	DynamoAPIVersion = "v1alpha1"
+	// DynamoGraphDeploymentRequestAPIVersion is the served DGDR API version.
+	DynamoGraphDeploymentRequestAPIVersion = "v1beta1"
 	// DynamoGraphDeploymentKind is the kind for DynamoGraphDeployment
 	DynamoGraphDeploymentKind = "DynamoGraphDeployment"
+	// DynamoGraphDeploymentRequestKind is the kind for intent-based deployments.
+	DynamoGraphDeploymentRequestKind = "DynamoGraphDeploymentRequest"
+
+	DeploymentModeManual = "manual"
+	DeploymentModeIntent = "intent"
+
+	modelDeploymentGenerationAnnotation = "airunway.ai/model-deployment-generation"
 
 	// Default component settings
 	DefaultEppReplicas = 1
@@ -71,6 +80,9 @@ var (
 
 // DynamoOverrides contains Dynamo-specific override configuration
 type DynamoOverrides struct {
+	// DeploymentMode selects direct DGD rendering or Dynamo's DGDR intent path.
+	DeploymentMode string `json:"deploymentMode,omitempty"`
+
 	// RouterMode is the request routing strategy: kv, round-robin, none
 	RouterMode string `json:"routerMode,omitempty"`
 
@@ -103,10 +115,11 @@ type ResourceOverrides struct {
 // consumes itself. Spec remains opaque because it is passed through to the
 // upstream DynamoGraphDeployment and validated against the installed CRD.
 type dynamoOverridesWire struct {
-	RouterMode string             `json:"routerMode,omitempty"`
-	Frontend   *FrontendOverrides `json:"frontend,omitempty"`
-	Epp        *EPPOverrides      `json:"epp,omitempty"`
-	Spec       json.RawMessage    `json:"spec,omitempty"`
+	DeploymentMode string             `json:"deploymentMode,omitempty"`
+	RouterMode     string             `json:"routerMode,omitempty"`
+	Frontend       *FrontendOverrides `json:"frontend,omitempty"`
+	Epp            *EPPOverrides      `json:"epp,omitempty"`
+	Spec           json.RawMessage    `json:"spec,omitempty"`
 }
 
 // Transformer handles transformation of ModelDeployment to DynamoGraphDeployment
@@ -123,6 +136,13 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 	overrides, err := t.parseOverrides(md)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse provider overrides: %w", err)
+	}
+	switch overrides.DeploymentMode {
+	case "", DeploymentModeManual:
+	case DeploymentModeIntent:
+		return t.transformIntent(md, overrides)
+	default:
+		return nil, fmt.Errorf("deploymentMode must be %q or %q", DeploymentModeManual, DeploymentModeIntent)
 	}
 
 	// Create the DynamoGraphDeployment
@@ -181,6 +201,125 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 	return []*unstructured.Unstructured{dgd}, nil
 }
 
+func (t *Transformer) transformIntent(
+	md *airunwayv1alpha1.ModelDeployment,
+	overrides *DynamoOverrides,
+) ([]*unstructured.Unstructured, error) {
+	if overrides.RouterMode != "" || overrides.Frontend != nil || overrides.Epp != nil {
+		return nil, fmt.Errorf(
+			"routerMode, frontend and epp overrides are supported only when deploymentMode is %q",
+			DeploymentModeManual,
+		)
+	}
+
+	dgdr := &unstructured.Unstructured{}
+	dgdr.SetAPIVersion(fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoGraphDeploymentRequestAPIVersion))
+	dgdr.SetKind(DynamoGraphDeploymentRequestKind)
+	dgdr.SetName(md.Name)
+	dgdr.SetNamespace(md.Namespace)
+	dgdr.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion:         airunwayv1alpha1.GroupVersion.String(),
+		Kind:               "ModelDeployment",
+		Name:               md.Name,
+		UID:                md.UID,
+		Controller:         boolPtr(true),
+		BlockOwnerDeletion: boolPtr(true),
+	}})
+	dgdr.SetLabels(map[string]string{
+		airunwayv1alpha1.LabelManagedBy:       "airunway",
+		airunwayv1alpha1.LabelModelDeployment: md.Name,
+		"airunway.ai/model-id":                sanitizeLabelValue(md.Spec.Model.ID),
+		"airunway.ai/engine-type":             string(md.ResolvedEngineType()),
+	})
+	dgdr.SetAnnotations(map[string]string{
+		modelDeploymentGenerationAnnotation: fmt.Sprintf("%d", md.Generation),
+	})
+
+	spec := map[string]any{
+		"model":     md.Spec.Model.ID,
+		"backend":   t.intentBackend(md.ResolvedEngineType()),
+		"autoApply": true,
+	}
+	if totalGPUs := intentTotalGPUs(md); totalGPUs > 0 {
+		spec["hardware"] = map[string]any{"totalGpus": int64(totalGPUs)}
+	}
+	if modelCache := intentModelCache(md); modelCache != nil {
+		spec["modelCache"] = modelCache
+	}
+
+	var rawOverrides map[string]any
+	if md.Spec.Provider != nil && md.Spec.Provider.Overrides != nil {
+		if err := json.Unmarshal(md.Spec.Provider.Overrides.Raw, &rawOverrides); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal overrides: %w", err)
+		}
+		if rawSpec, exists := rawOverrides["spec"]; exists {
+			specOverrides, ok := rawSpec.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("provider.overrides.spec must be an object in intent mode")
+			}
+			spec = deepMerge(spec, specOverrides)
+		}
+	}
+
+	// Model and backend remain authoritative ModelDeployment fields. Other mapped
+	// defaults may be refined through provider.overrides.spec.
+	spec["model"] = md.Spec.Model.ID
+	spec["backend"] = t.intentBackend(md.ResolvedEngineType())
+	if err := unstructured.SetNestedField(dgdr.Object, spec, "spec"); err != nil {
+		return nil, fmt.Errorf("failed to set DGDR spec: %w", err)
+	}
+	return []*unstructured.Unstructured{dgdr}, nil
+}
+
+func (t *Transformer) intentBackend(engineType airunwayv1alpha1.EngineType) string {
+	switch engineType {
+	case airunwayv1alpha1.EngineTypeVLLM, airunwayv1alpha1.EngineTypeSGLang, airunwayv1alpha1.EngineTypeTRTLLM:
+		return string(engineType)
+	default:
+		return "auto"
+	}
+}
+
+func intentTotalGPUs(md *airunwayv1alpha1.ModelDeployment) int32 {
+	if md.ResolvedServingMode() == airunwayv1alpha1.ServingModeDisaggregated && md.Spec.Scaling != nil {
+		return intentComponentGPUs(md.Spec.Scaling.Prefill) + intentComponentGPUs(md.Spec.Scaling.Decode)
+	}
+	if md.Spec.Resources == nil || md.Spec.Resources.GPU == nil {
+		return 0
+	}
+	replicas := int32(1)
+	if md.Spec.Scaling != nil && md.Spec.Scaling.Replicas > 0 {
+		replicas = md.Spec.Scaling.Replicas
+	}
+	return replicas * md.Spec.Resources.GPU.Count
+}
+
+func intentComponentGPUs(component *airunwayv1alpha1.ComponentScalingSpec) int32 {
+	if component == nil || component.GPU == nil {
+		return 0
+	}
+	replicas := component.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	return replicas * component.GPU.Count
+}
+
+func intentModelCache(md *airunwayv1alpha1.ModelDeployment) map[string]any {
+	if md.Spec.Model.Storage == nil {
+		return nil
+	}
+	for _, volume := range md.Spec.Model.Storage.Volumes {
+		if volume.Purpose == airunwayv1alpha1.VolumePurposeModelCache {
+			return map[string]any{
+				"pvcName":      volume.ResolvedClaimName(md.Name),
+				"pvcMountPath": volume.MountPath,
+			}
+		}
+	}
+	return nil
+}
+
 // parseOverrides parses the provider.overrides field into DynamoOverrides
 func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*DynamoOverrides, error) {
 	if md.Spec.Provider == nil || md.Spec.Provider.Overrides == nil {
@@ -206,9 +345,10 @@ func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*Dyn
 	}
 
 	return &DynamoOverrides{
-		RouterMode: wire.RouterMode,
-		Frontend:   wire.Frontend,
-		Epp:        wire.Epp,
+		DeploymentMode: wire.DeploymentMode,
+		RouterMode:     wire.RouterMode,
+		Frontend:       wire.Frontend,
+		Epp:            wire.Epp,
 	}, nil
 }
 
@@ -1164,7 +1304,7 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 	}
 
 	// Only "spec" may be merged into the object, plus the keys parseOverrides has already
-	// consumed into DynamoOverrides (routerMode, frontend, epp), which are inputs to this
+	// consumed into DynamoOverrides (deploymentMode, routerMode, frontend, epp), which are inputs to this
 	// transformer rather than DynamoGraphDeployment fields. A DGD root declares
 	// apiVersion/kind/metadata/spec/status, so anything else is a field no API server will
 	// store.
@@ -1203,7 +1343,7 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 
 // consumedOverrideKeys are the provider.overrides root keys parseOverrides decodes into
 // DynamoOverrides. Lowercased, because encoding/json matches field names case-insensitively.
-var consumedOverrideKeys = map[string]bool{"routermode": true, "frontend": true, "epp": true}
+var consumedOverrideKeys = map[string]bool{"deploymentmode": true, "routermode": true, "frontend": true, "epp": true}
 
 func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 	// Block dangerous top-level keys to prevent privilege escalation.
@@ -1227,9 +1367,7 @@ func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 
 	sort.Strings(unsupported)
 	return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
-		"Dynamo-specific keys routerMode, frontend and epp are supported (note the webhook "+
-		"rejects replicas/resources anywhere inside overrides, so only epp.image and "+
-		"routerMode are settable in practice)", unsupported)
+		"Dynamo-specific keys deploymentMode, routerMode, frontend and epp are supported", unsupported)
 }
 
 // deepMerge recursively merges src into dst. dst is modified in place and also

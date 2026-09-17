@@ -67,8 +67,11 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 
 	result := &ProviderStatusResult{
 		ResourceName: upstream.GetName(),
-		ResourceKind: DynamoGraphDeploymentKind,
+		ResourceKind: upstream.GetKind(),
 		Phase:        airunwayv1alpha1.DeploymentPhasePending,
+	}
+	if result.ResourceKind == "" {
+		result.ResourceKind = DynamoGraphDeploymentKind
 	}
 
 	// Get status object
@@ -78,6 +81,9 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	}
 	if !found {
 		return result, nil
+	}
+	if upstream.GetKind() == DynamoGraphDeploymentRequestKind {
+		return t.translateDGDRStatus(result, status), nil
 	}
 
 	// Extract state field
@@ -102,6 +108,50 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	result.Endpoint = t.extractEndpoint(upstream, status)
 
 	return result, nil
+}
+
+func (t *StatusTranslator) translateDGDRStatus(
+	result *ProviderStatusResult,
+	status map[string]any,
+) *ProviderStatusResult {
+	phase, _, _ := unstructured.NestedString(status, "phase")
+	switch phase {
+	case "Deployed":
+		result.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+	case "Profiling", "Ready", "Deploying":
+		result.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+	case "Failed":
+		result.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+	default:
+		result.Phase = airunwayv1alpha1.DeploymentPhasePending
+	}
+
+	if profilingPhase, found, _ := unstructured.NestedString(status, "profilingPhase"); found && profilingPhase != "" {
+		result.Message = fmt.Sprintf("Dynamo profiling: %s", profilingPhase)
+	}
+	if conditions, found, _ := unstructured.NestedSlice(status, "conditions"); found {
+		for _, rawCondition := range conditions {
+			condition, ok := rawCondition.(map[string]any)
+			if !ok || condition["type"] != "Succeeded" {
+				continue
+			}
+			if message, ok := condition["message"].(string); ok && message != "" {
+				result.Message = message
+			}
+			break
+		}
+	}
+
+	desired, desiredFound, _ := unstructured.NestedInt64(status, "deploymentInfo", "replicas")
+	available, availableFound, _ := unstructured.NestedInt64(status, "deploymentInfo", "availableReplicas")
+	if desiredFound || availableFound {
+		result.Replicas = &airunwayv1alpha1.ReplicaStatus{
+			Desired:   int32(desired),
+			Ready:     int32(available),
+			Available: int32(available),
+		}
+	}
+	return result
 }
 
 // mapStateToPhase converts Dynamo state to ModelDeployment phase

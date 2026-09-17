@@ -79,11 +79,60 @@ The Web UI backend reads provider information (capabilities, installation steps,
 
 | Provider      | Upstream CRD          | Status      | Shim YAML | Description                                                                    |
 | ------------- | --------------------- | ----------- | --------- | ------------------------------------------------------------------------------ |
-| NVIDIA Dynamo | DynamoGraphDeployment | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | High-performance GPU inference with KV-cache routing and disaggregated serving |
+| NVIDIA Dynamo | DynamoGraphDeployment / DynamoGraphDeploymentRequest | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | High-performance GPU inference with KV-cache routing and intent-based profiling |
 | KubeRay       | RayService            | ✅ Available | [kuberay.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kuberay/deploy/kuberay.yaml) | Ray-based distributed inference with autoscaling                               |
 | KAITO         | Workspace             | ✅ Available | [kaito.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kaito/deploy/kaito.yaml) | Flexible inference with vLLM (GPU) or llama.cpp (CPU/GPU)                      |
 | llm-d         | none                  | ✅ Available | [llmd.yaml](https://github.com/ai-runway/airunway/blob/main/providers/llmd/deploy/llmd.yaml) | Flexible inference with vLLM (GPU) with KV-cache routing and disaggregated serving |
 | Direct vLLM   | Deployment            | ✅ Available | [vllm.yaml](https://github.com/ai-runway/airunway/blob/main/providers/vllm/deploy/vllm.yaml) | Direct vLLM OpenAI-compatible server deployments using `spec.engine.image`; see [Direct vLLM guide](providers/vllm.md) |
+
+### Dynamo Deployment Modes
+
+Dynamo uses direct `DynamoGraphDeployment` rendering by default. Set
+`spec.provider.overrides.deploymentMode: intent` to create a
+`nvidia.com/v1beta1` `DynamoGraphDeploymentRequest` (DGDR) instead:
+
+```yaml
+spec:
+    provider:
+        name: dynamo
+        overrides:
+            deploymentMode: intent
+            spec:
+                searchStrategy: rapid
+                sla:
+                    ttft: 500
+```
+
+The optional `overrides.spec` object is a partial DGDR spec. AI Runway supplies these values:
+
+| ModelDeployment field | DGDR field | Behavior |
+| --- | --- | --- |
+| `spec.model.id` | `spec.model` | Authoritative; an override cannot replace it |
+| resolved `spec.engine.type` | `spec.backend` | `vllm`, `sglang`, or `trtllm`; otherwise `auto` |
+| GPU counts and requested replicas | `spec.hardware.totalGpus` | Aggregate GPU budget; Dynamo chooses the final topology and replica layout |
+| first `modelCache` volume | `spec.modelCache.pvcName` and `pvcMountPath` | References the existing or AI Runway-managed PVC |
+| `overrides.spec` | remaining DGDR spec | Deep-merged over generated defaults; `autoApply` defaults to `true` but may be set to `false` |
+
+Intent mode deliberately does not map `spec.serving.mode` to a topology because Dynamo 1.1.1
+does not expose an initial topology selector. The requested serving mode and replica layout are
+therefore advisory inputs to the GPU budget; Dynamo profiling chooses aggregated or
+disaggregated serving. Use the default manual mode when the exact topology must be preserved.
+
+`spec.image` and `spec.engine.image` are also ignored in intent mode. DGDR's top-level `image`
+is the profiling image, not a topology-independent runtime image. Set the DGDR profiling image
+through `overrides.spec.image`; customize generated runtime components through the embedded
+resource at `overrides.spec.overrides.dgd`.
+
+Gateway integration is always disabled for intent deployments and the mutating webhook persists
+`spec.gateway.enabled: false`. Generated-DGD `replicas` and `resources` overrides are accepted
+only below `overrides.spec.overrides.dgd` and remain subject to AI Runway's replica, CPU, memory,
+and GPU ceilings. Security-sensitive override fields remain prohibited at every depth.
+
+DGDR specs become immutable after profiling begins. When a `ModelDeployment` generation changes,
+the provider deletes the generated DGD first, deletes the old DGDR, and creates a new request.
+Deleting the `ModelDeployment` performs the same explicit cleanup because Dynamo intentionally
+does not garbage-collect a generated DGD when its DGDR is deleted. The provider discovers that
+DGD from `status.dgdName` and Dynamo's DGDR relationship labels.
 
 ### KAITO Provider
 
