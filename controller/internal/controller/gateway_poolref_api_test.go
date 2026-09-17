@@ -62,6 +62,12 @@ func TestGatewayPoolRefAPI(t *testing.T) {
 		t.Run("partial cleanup retries/"+failure, func(t *testing.T) { environment.testCleanupRetry(t, failure) })
 	}
 	t.Run("disabled user mode preserves foreign generated names", environment.testForeignNames)
+	for _, ownership := range []string{"unowned", "other controller"} {
+		t.Run("enabled route collision/"+ownership, func(t *testing.T) { environment.testEnabledRouteCollision(t, ownership) })
+	}
+	for _, mode := range []string{"controller managed", gatewayFinalLabelAttempt, "provider managed"} {
+		t.Run("managed pod conflict/"+mode, func(t *testing.T) { environment.testManagedPodConflict(t, mode) })
+	}
 	t.Run("pool watch propagates creation status and deletion", environment.testWatch)
 }
 

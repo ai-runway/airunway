@@ -141,6 +141,9 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		// Preserve the existing controller/provider-managed behavior when poolRef
 		// is unset. Only a user-provided pool opts out of pod labeling.
 		if err := r.labelModelPods(ctx, md); err != nil {
+			if apierrors.IsConflict(err) {
+				return err
+			}
 			logger.V(1).Info("Could not label model pods", "error", err)
 			// Non-fatal: pods may not exist yet or provider may handle labels.
 		}
@@ -862,6 +865,9 @@ func (r *ModelDeploymentReconciler) reconcileHTTPRoute(ctx context.Context, md *
 	existing := &gatewayv1.HTTPRoute{}
 	err := r.Get(ctx, client.ObjectKey{Name: md.Name, Namespace: md.Namespace}, existing)
 	if err == nil {
+		if !metav1.IsControlledBy(existing, md) {
+			return fmt.Errorf("HTTPRoute %s/%s is not controlled by ModelDeployment %s", existing.Namespace, existing.Name, md.Name)
+		}
 		// HTTPRoute exists — update it in case model name or gateway changed.
 		existing.Spec = buildHTTPRouteSpec(gwConfig, modelName, backend)
 		if updateErr := r.Update(ctx, existing); updateErr != nil {
@@ -1086,6 +1092,10 @@ func (r *ModelDeploymentReconciler) labelModelPods(ctx context.Context, md *airu
 			pod.Labels[gatewayPodLabelOwner] = string(md.UID)
 		}
 		if err := r.Patch(ctx, pod, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "PodLabelConflict", err.Error())
+				return fmt.Errorf("labeling pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
 			log.FromContext(ctx).V(1).Info("Could not label pod", "pod", pod.Name, "error", err)
 			continue
 		}
@@ -1633,6 +1643,9 @@ func (r *ModelDeploymentReconciler) providerInferencePoolExistsOrCreateDefault(c
 
 	// Ensure model pods have the selector label for InferencePool
 	if err := r.labelModelPods(ctx, md); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, err
+		}
 		logger.V(1).Info("Could not label model pods", "error", err)
 		// Non-fatal: pods may not exist yet or provider may handle labels
 	}

@@ -369,9 +369,13 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 					logger.Info("Gateway CRDs may have been removed, refreshing detection cache")
 					r.GatewayDetector.Refresh()
 				}
-				if apierrors.IsNotFound(err) || userProvidedPool {
-					// Pool-reference transitions can fail after partial cleanup.
-					// Retry even when no remaining resource watch will enqueue us.
+				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) || userProvidedPool {
+					// Gateway mutations can fail after partial cleanup or a pod
+					// conflict. Persist their condition before retrying even when
+					// no remaining resource watch will enqueue us.
+					if patchErr := r.Status().Patch(ctx, &md, client.MergeFrom(base)); patchErr != nil {
+						return ctrl.Result{}, patchErr
+					}
 					return ctrl.Result{}, err
 				}
 				// Non-fatal: don't block overall reconciliation
