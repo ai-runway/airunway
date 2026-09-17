@@ -213,7 +213,10 @@ func (r *DynamoProviderReconciler) deleteDirectDGDForIntent(
 	if err != nil {
 		return false, err
 	}
-	if dgd.GetLabels()[dgdrNameLabel] != "" {
+if dgd.GetLabels()[dgdrNameLabel] != "" {
+		if !isDGDLinkedToModelDeployment(dgd, md) {
+			return false, &resourceConflictError{namespace: dgd.GetNamespace(), name: dgd.GetName()}
+		}
 		return false, nil
 	}
 	if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
