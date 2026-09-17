@@ -1,0 +1,394 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+)
+
+func makeMinimalAgentDeployment(framework string) *airunwayv1alpha1.AgentDeployment {
+	return &airunwayv1alpha1.AgentDeployment{
+		Spec: airunwayv1alpha1.AgentDeploymentSpec{
+			Framework: airunwayv1alpha1.AgentFrameworkRef{Name: framework},
+			Model: airunwayv1alpha1.ModelBinding{
+				ExternalAPI: &airunwayv1alpha1.ExternalAPIBinding{
+					Type:      airunwayv1alpha1.ExternalAPITypeOpenAI,
+					BaseURL:   "https://api.openai.com/v1",
+					ModelName: "gpt-4o-mini",
+				},
+			},
+		},
+	}
+}
+
+func makeAgentProviderSpecWithOverrides(t *testing.T, overrides map[string]any) *airunwayv1alpha1.AgentProviderSpec {
+	t.Helper()
+	raw, err := json.Marshal(overrides)
+	if err != nil {
+		t.Fatalf("marshal overrides: %v", err)
+	}
+	return &airunwayv1alpha1.AgentProviderSpec{
+		Overrides: &runtime.RawExtension{Raw: raw},
+	}
+}
+
+func TestValidateAgentProviderOverrides_AllowsSecurityContextOverrides(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
+				"runAsUser":    1000,
+				"runAsGroup":   1000,
+				"runAsNonRoot": true,
+				"fsGroup":      1000,
+				"seccompProfile": map[string]any{
+					"type": "RuntimeDefault",
+				},
+			},
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": false,
+				"readOnlyRootFilesystem":   true,
+				"capabilities": map[string]any{
+					"drop": []any{"ALL"},
+				},
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateAgentProviderOverrides_RejectsUnsupportedRootKey(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"random": map[string]any{},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.random")
+}
+
+func TestValidateAgentProviderOverrides_RejectsUnsupportedSecurityContextKey(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"privileged": true,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.securityContext.privileged")
+}
+
+func TestValidateAgentProviderOverrides_RejectsCapabilitiesAdd(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"capabilities": map[string]any{
+					"add": []any{"SYS_ADMIN"},
+				},
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.securityContext.capabilities.add")
+}
+
+func TestValidateAgentProviderOverrides_RejectsInvalidJSON(t *testing.T) {
+	provider := &airunwayv1alpha1.AgentProviderSpec{
+		Overrides: &runtime.RawExtension{Raw: []byte(`{invalid`)},
+	}
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	if len(errs) == 0 {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestValidateAgentProviderOverrides_RejectsNonObjectJSON(t *testing.T) {
+	provider := &airunwayv1alpha1.AgentProviderSpec{
+		Overrides: &runtime.RawExtension{Raw: []byte(`["x"]`)},
+	}
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorDetail(t, errs, "overrides must be a JSON object")
+}
+
+func TestValidateAgentProviderOverrides_RejectsAllowPrivilegeEscalationTrue(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": true,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.securityContext.allowPrivilegeEscalation")
+}
+
+func TestValidateAgentProviderOverrides_RejectsRunAsNonRootFalse(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
+				"runAsNonRoot": false,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.podSecurityContext.runAsNonRoot")
+}
+
+func TestValidateAgentProviderOverrides_RejectsCapabilitiesDropWithoutALL(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"capabilities": map[string]any{
+					"drop": []any{"NET_RAW"},
+				},
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.securityContext.capabilities.drop")
+}
+
+func TestValidateAgentProviderOverrides_RejectsLocalhostSeccompWithoutProfile(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
+				"seccompProfile": map[string]any{
+					"type": "Localhost",
+				},
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.podSecurityContext.seccompProfile.localhostProfile")
+}
+
+func TestAgentDeploymentCustomValidator_RejectsFrameworkChangeOnUpdate(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	oldObj := makeMinimalAgentDeployment("kagent")
+	newObj := makeMinimalAgentDeployment("orka")
+
+	_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
+	if err == nil {
+		t.Fatal("expected framework immutability validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "spec.framework.name") {
+		t.Fatalf("expected error to reference spec.framework.name, got: %v", err)
+	}
+}
+
+func TestAgentDeploymentCustomValidator_AllowsUpdateWhenFrameworkUnchanged(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	oldObj := makeMinimalAgentDeployment("kagent")
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.Provider = makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": false,
+				"capabilities": map[string]any{
+					"drop": []any{"ALL"},
+				},
+			},
+		},
+	})
+
+	_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
+	if err != nil {
+		t.Fatalf("expected update with unchanged framework to pass, got: %v", err)
+	}
+}
+
+func TestValidateAgentProviderOverrides_RejectsRunAsUserZero(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
+				"runAsUser": 0,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.workload.podSecurityContext.runAsUser")
+}
+
+func TestValidateAgentProviderOverrides_AllowsRunAsGroupZero(t *testing.T) {
+	provider := makeAgentProviderSpecWithOverrides(t, map[string]any{
+		"workload": map[string]any{
+			"podSecurityContext": map[string]any{
+				"runAsUser":  1000,
+				"runAsGroup": 0,
+				"fsGroup":    0,
+			},
+		},
+	})
+	errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+	if len(errs) != 0 {
+		t.Fatalf("expected group IDs of 0 to be allowed, got %v", errs)
+	}
+}
+
+func TestValidateAgentProviderOverrides_RequiresExactInt64SecurityIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantField string
+	}{
+		{
+			name:      "fractional UID",
+			raw:       `{"workload":{"podSecurityContext":{"runAsUser":1000.5}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.runAsUser",
+		},
+		{
+			name:      "negative group",
+			raw:       `{"workload":{"podSecurityContext":{"runAsGroup":-1}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.runAsGroup",
+		},
+		{
+			name:      "int64 overflow",
+			raw:       `{"workload":{"podSecurityContext":{"fsGroup":9223372036854775808}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.fsGroup",
+		},
+		{
+			name:      "fractional supplemental group",
+			raw:       `{"workload":{"podSecurityContext":{"supplementalGroups":[1000,1001.25]}}}`,
+			wantField: "spec.provider.overrides.workload.podSecurityContext.supplementalGroups[1]",
+		},
+		{
+			name:      "negative zero UID remains root",
+			raw:       `{"workload":{"securityContext":{"runAsUser":-0}}}`,
+			wantField: "spec.provider.overrides.workload.securityContext.runAsUser",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &airunwayv1alpha1.AgentProviderSpec{
+				Overrides: &runtime.RawExtension{Raw: []byte(tc.raw)},
+			}
+			errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+			requireValidationErrorField(t, errs, tc.wantField)
+		})
+	}
+}
+
+func TestValidateAgentProviderOverrides_PreservesLargeExactInt64Values(t *testing.T) {
+	for _, value := range []string{
+		"9007199254740993", // first integer float64 cannot represent exactly
+		"9223372036854775807",
+	} {
+		t.Run(value, func(t *testing.T) {
+			provider := &airunwayv1alpha1.AgentProviderSpec{
+				Overrides: &runtime.RawExtension{Raw: []byte(
+					`{"workload":{"podSecurityContext":{"runAsUser":` + value + `}}}`,
+				)},
+			}
+			errs := validateAgentProviderOverrides(provider, field.NewPath("spec", "provider", "overrides"))
+			if len(errs) != 0 {
+				t.Fatalf("exact int64 value %s should be accepted, got %v", value, errs)
+			}
+		})
+	}
+}
+
+func TestAgentDeploymentCustomValidator_RejectsOverLongName(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	obj := makeMinimalAgentDeployment("kagent")
+	obj.Name = strings.Repeat("a", agentDeploymentMaxNameLength+1)
+
+	_, err := validator.ValidateCreate(context.Background(), obj)
+	if err == nil {
+		t.Fatal("expected name-length validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "metadata.name") {
+		t.Fatalf("expected error to reference metadata.name, got: %v", err)
+	}
+}
+
+func TestAgentDeploymentCustomValidator_AllowsMaxLengthName(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+	obj := makeMinimalAgentDeployment("kagent")
+	obj.Name = strings.Repeat("a", agentDeploymentMaxNameLength)
+
+	if _, err := validator.ValidateCreate(context.Background(), obj); err != nil {
+		t.Fatalf("expected a %d-character name to be allowed, got: %v", agentDeploymentMaxNameLength, err)
+	}
+}
+
+func TestAgentDeploymentCustomValidator_ValidatesExternalAPIBaseURLOnCreateAndUpdate(t *testing.T) {
+	validator := &AgentDeploymentCustomValidator{}
+
+	for _, valid := range []string{
+		"https://api.openai.com/v1",
+		"http://localhost:8080/v1",
+		"https://[2001:db8::1]:8443/v1",
+		"https://api.example.com:65535/v1",
+		"https://api.example.com:0443/v1",
+		"https://api.example.com:000443/v1",
+	} {
+		t.Run("create accepts "+valid, func(t *testing.T) {
+			obj := makeMinimalAgentDeployment("kagent")
+			obj.Name = "valid-agent"
+			obj.Spec.Model.ExternalAPI.BaseURL = valid
+			if _, err := validator.ValidateCreate(context.Background(), obj); err != nil {
+				t.Fatalf("expected %q to be accepted: %v", valid, err)
+			}
+		})
+	}
+
+	for _, invalid := range []string{
+		"/v1",
+		"api.example.com/v1",
+		"ftp://api.example.com/v1",
+		"https:///v1",
+		" https://api.example.com/v1",
+		"http://:8080/v1",
+		"https://api.example.com:/v1",
+		"https://api.example.com:0/v1",
+		"https://api.example.com:65536/v1",
+		"https://user@api.example.com/v1",
+		"https://[not-an-ip]/v1",
+		"https://[127.0.0.1]/v1",
+		"https://2001:db8::1/v1",
+	} {
+		t.Run("create rejects "+invalid, func(t *testing.T) {
+			obj := makeMinimalAgentDeployment("kagent")
+			obj.Name = "invalid-agent"
+			obj.Spec.Model.ExternalAPI.BaseURL = invalid
+			_, err := validator.ValidateCreate(context.Background(), obj)
+			if err == nil || !strings.Contains(err.Error(), "spec.model.externalAPI.baseURL") {
+				t.Fatalf("expected %q to be rejected at baseURL, got %v", invalid, err)
+			}
+		})
+	}
+
+	t.Run("update rejects an invalid replacement", func(t *testing.T) {
+		oldObj := makeMinimalAgentDeployment("kagent")
+		oldObj.Name = "updated-agent"
+		newObj := oldObj.DeepCopy()
+		newObj.Spec.Model.ExternalAPI.BaseURL = "relative/v1"
+		_, err := validator.ValidateUpdate(context.Background(), oldObj, newObj)
+		if err == nil || !strings.Contains(err.Error(), "spec.model.externalAPI.baseURL") {
+			t.Fatalf("expected invalid update baseURL to be rejected, got %v", err)
+		}
+	})
+}

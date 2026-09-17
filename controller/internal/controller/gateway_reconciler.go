@@ -45,6 +45,10 @@ import (
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
+// gatewayPodLabelOwner records which ModelDeployment UID wrote a pod's pool
+// selector label. An existing matching selector label is never claimed.
+const gatewayPodLabelOwner = "airunway.ai/gateway-pod-label-owner"
+
 // reconcileGateway creates or updates InferencePool and HTTPRoute resources
 // for a ModelDeployment that has gateway integration enabled.
 func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
@@ -235,6 +239,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 	endpoint := r.resolveGatewayEndpoint(ctx, gwConfig)
 	md.Status.Gateway = &airunwayv1alpha1.GatewayStatus{
 		Endpoint:         endpoint,
+		GatewayName:      gwConfig.GatewayName,
 		ModelName:        modelName,
 		GatewayNamespace: gwConfig.GatewayNamespace,
 	}
@@ -286,17 +291,7 @@ func (r *ModelDeploymentReconciler) getUserProvidedInferencePool(
 // a stale route can still converge to the referenced pool.
 func userProvidedInferencePoolStatusProblem(pool *inferencev1.InferencePool, gwConfig *gateway.GatewayConfig) string {
 	for _, parent := range pool.Status.Parents {
-		if parent.ParentRef.Group != nil && string(*parent.ParentRef.Group) != "gateway.networking.k8s.io" {
-			continue
-		}
-		if parent.ParentRef.Kind != "" && string(parent.ParentRef.Kind) != "Gateway" {
-			continue
-		}
-		parentNamespace := string(parent.ParentRef.Namespace)
-		if parentNamespace == "" {
-			parentNamespace = pool.Namespace
-		}
-		if string(parent.ParentRef.Name) != gwConfig.GatewayName || parentNamespace != gwConfig.GatewayNamespace {
+		if !inferencePoolParentMatchesGateway(parent.ParentRef, pool.Namespace, gwConfig) {
 			continue
 		}
 		for _, condition := range parent.Conditions {
@@ -304,7 +299,7 @@ func userProvidedInferencePoolStatusProblem(pool *inferencev1.InferencePool, gwC
 				condition.Type != string(inferencev1.InferencePoolConditionResolvedRefs) {
 				continue
 			}
-			if condition.ObservedGeneration > 0 && condition.ObservedGeneration != pool.Generation {
+			if condition.ObservedGeneration != pool.Generation {
 				continue
 			}
 			if condition.Status != metav1.ConditionFalse {
@@ -320,6 +315,20 @@ func userProvidedInferencePoolStatusProblem(pool *inferencev1.InferencePool, gwC
 	}
 
 	return ""
+}
+
+func inferencePoolParentMatchesGateway(parent inferencev1.ParentReference, poolNamespace string, gwConfig *gateway.GatewayConfig) bool {
+	if parent.Group != nil && string(*parent.Group) != "gateway.networking.k8s.io" {
+		return false
+	}
+	if parent.Kind != "" && string(parent.Kind) != "Gateway" {
+		return false
+	}
+	parentNamespace := string(parent.Namespace)
+	if parentNamespace == "" {
+		parentNamespace = poolNamespace
+	}
+	return string(parent.Name) == gwConfig.GatewayName && parentNamespace == gwConfig.GatewayNamespace
 }
 
 // resolveGatewayConfig determines which Gateway to use as the HTTPRoute parent.
@@ -1068,11 +1077,14 @@ func (r *ModelDeploymentReconciler) labelModelPods(ctx context.Context, md *airu
 		if pod.Labels[labelKey] == md.Name {
 			continue // already labeled
 		}
-		patch := client.MergeFrom(pod.DeepCopy())
+		patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
 		}
 		pod.Labels[labelKey] = md.Name
+		if md.UID != "" {
+			pod.Labels[gatewayPodLabelOwner] = string(md.UID)
+		}
 		if err := r.Patch(ctx, pod, patch); err != nil {
 			log.FromContext(ctx).V(1).Info("Could not label pod", "pod", pod.Name, "error", err)
 			continue
@@ -1145,36 +1157,45 @@ func (r *ModelDeploymentReconciler) deleteIfControlledByModelDeployment(
 	if !metav1.IsControlledBy(obj, md) {
 		return nil
 	}
-	if err := r.Delete(ctx, obj); err != nil {
+	// Ownership was checked on this exact object version. Do not delete a
+	// same-name replacement or an object whose owner changed after the read.
+	uid, resourceVersion := obj.GetUID(), obj.GetResourceVersion()
+	if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	return nil
 }
 
-// removeControllerManagedPodLabels removes only the exact label value used by
-// this ModelDeployment. Other values and all unrelated pod labels are kept.
+// removeControllerManagedPodLabels retires labels actually written by this
+// ModelDeployment. Pre-existing or legacy labels without provenance are kept.
 func (r *ModelDeploymentReconciler) removeControllerManagedPodLabels(
 	ctx context.Context,
 	md *airunwayv1alpha1.ModelDeployment,
 ) error {
+	if md.UID == "" {
+		return nil
+	}
 	labelKey := airunwayv1alpha1.LabelModelDeployment
 	var pods corev1.PodList
 	if err := r.List(
 		ctx,
 		&pods,
 		client.InNamespace(md.Namespace),
-		client.MatchingLabels{labelKey: md.Name},
+		client.MatchingLabels{gatewayPodLabelOwner: string(md.UID)},
 	); err != nil {
 		return fmt.Errorf("listing model pods for label cleanup: %w", err)
 	}
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Labels[labelKey] != md.Name {
+		if pod.Labels[gatewayPodLabelOwner] != string(md.UID) {
 			continue
 		}
-		patch := client.MergeFrom(pod.DeepCopy())
-		delete(pod.Labels, labelKey)
+		patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		if pod.Labels[labelKey] == md.Name {
+			delete(pod.Labels, labelKey)
+		}
+		delete(pod.Labels, gatewayPodLabelOwner)
 		if err := r.Patch(ctx, pod, patch); err != nil {
 			return fmt.Errorf("removing model-deployment label from pod %s: %w", pod.Name, err)
 		}
@@ -1524,8 +1545,13 @@ func (r *ModelDeploymentReconciler) cleanupGatewayResources(ctx context.Context,
 		logger.V(1).Info("Skipping InferencePool cleanup because provider manages the pool")
 	}
 
-	// Delete auto-created HTTPRoute (skip if user-provided)
-	if md.Spec.Gateway == nil || md.Spec.Gateway.HTTPRouteRef == "" {
+	// A pool reference does not establish ownership of a generated-name route.
+	// Retire only a route we control, preserving referenced and foreign routes.
+	if userProvidedPool {
+		if err := r.retireControllerManagedHTTPRoute(ctx, md); err != nil {
+			return fmt.Errorf("retiring controller-managed HTTPRoute: %w", err)
+		}
+	} else if md.Spec.Gateway == nil || md.Spec.Gateway.HTTPRouteRef == "" {
 		route := &gatewayv1.HTTPRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      md.Name,

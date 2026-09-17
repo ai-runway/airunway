@@ -169,6 +169,8 @@ The `ModelDeployment` status will show gateway information once ready:
 kubectl get modeldeployment qwen3 -o jsonpath='{.status.gateway}'
 ```
 
+The gateway status now includes the selected Gateway identity (`gatewayName`, `gatewayNamespace`) in addition to `endpoint` and `modelName`.
+
 ## Configuration
 
 ### Auto-detection
@@ -318,9 +320,11 @@ spec:
     poolRef: "shared-pool"
 ```
 
-`poolRef` is a resource name, so the referenced InferencePool must be in the same namespace as the `ModelDeployment`. AI Runway verifies that the pool exists before creating the HTTPRoute; a missing pool is reported as `GatewayReady=False` with reason `InferencePoolNotFound`. If the pool later reports `Accepted=False` or `ResolvedRefs=False` for the selected Gateway, AI Runway surfaces that as `GatewayReady=False` with reason `InferencePoolNotReady`.
+`poolRef` is a resource name, so the referenced InferencePool must be in the same namespace as the `ModelDeployment`. AI Runway verifies that the pool exists before creating the HTTPRoute; a missing pool is reported as `GatewayReady=False` with reason `InferencePoolNotFound`. If the pool later reports `Accepted=False` or `ResolvedRefs=False` for the selected Gateway and the pool's current generation, AI Runway surfaces that as `GatewayReady=False` with reason `InferencePoolNotReady`. Conditions with an omitted or stale `observedGeneration`, or with `Unknown` status, do not reject the current pool configuration.
 
 AI Runway creates an HTTPRoute whose backend is that pool unless `httpRouteRef` is also set. The referenced InferencePool and its EPP remain user-owned: the controller does not create, update, or delete them, and it does not add the controller's pool-selection label to model pods. Creating, deleting, or changing the status of the referenced pool automatically triggers reconciliation so the gateway condition recovers or fails promptly.
+
+When an existing deployment switches to `poolRef`, AI Runway retires its controller-owned pool/EPP resources and the pod selector labels it recorded as its own. Labels already present on a pod, including labels written by older versions without ownership tracking, are preserved. Disabling the gateway in the same update also performs this ownership-aware cleanup; it does not delete user-owned pools, EPPs, or routes.
 
 A user-set `poolRef` takes precedence over provider gateway capabilities such as `managesInferencePool`. This lets a deployment opt into a user-managed pool even when its provider can create one.
 
@@ -463,6 +467,20 @@ The controller resolves the gateway model name using this priority:
 4. **`spec.model.id`** — final fallback
 
 Auto-discovery runs only when the deployment reaches `Running` phase. If the probe fails (timeout, error, no models), it silently falls through to the next level.
+
+### AgentDeployment `deploymentRef` integration
+
+Agent deployments that bind with `spec.model.deploymentRef` reuse this gateway resolution path. When a target `ModelDeployment` records a Gateway identity in status, the agent binding reads that Gateway and combines a usable published address with its sole HTTPRoute-capable, ready HTTP(S) listener. This also handles the case where the Gateway publishes its first address later. The controller periodically rechecks Gateway-backed bindings because it does not watch Gateway status directly. If multiple compatible ready listeners exist, `deploymentRef` keeps the endpoint already published by the `ModelDeployment` because it has no listener selector. It rejects the binding when none of those listeners are ready. If no Gateway identity is recorded, resolution falls back to the model Service endpoint.
+
+For direct `spec.model.gatewayEndpoint` bindings, `gatewayRef.listenerName`
+selects a specific listener. It may be omitted only when exactly one compatible
+listener exists. The listener must allow HTTPRoute attachments and report current
+`Accepted`, `ResolvedRefs`, and `Programmed` conditions as true. A concrete
+listener hostname becomes the URL authority for HTTP Host matching and HTTPS
+SNI/certificate validation. A listener without a hostname uses the published
+Gateway IP or hostname; wildcard listener hostnames are rejected.
+
+`status.gateway.gatewayName` and `gatewayNamespace` record which Gateway was selected, for diagnostics. They are deliberately not used to build an in-cluster Service URL: Gateway API does not require the data-plane Service to be named after the Gateway resource, so `<gatewayName>.<gatewayNamespace>.svc.cluster.local` is not portable across implementations.
 
 ## Using the Gateway
 

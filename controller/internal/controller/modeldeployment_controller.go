@@ -180,6 +180,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Save a deep copy as the patch base so we only send changed status fields.
 	// This avoids clobbering status fields set by out-of-tree provider controllers.
 	base := md.DeepCopy()
+	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
 
 	logger.Info("Reconciling ModelDeployment", "name", md.Name, "namespace", md.Namespace)
 
@@ -189,6 +190,9 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.cleanupGatewayResources(ctx, &md); err != nil {
 			logger.Error(err, "Failed to clean up gateway resources on deletion")
 			r.recordReconcileError(&md, "gateway")
+			if userProvidedPool {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{}, nil
 	}
@@ -352,6 +356,9 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			if err := r.cleanupGatewayResources(ctx, &md); err != nil {
 				logger.Error(err, "Failed to clean up gateway resources")
 				r.recordReconcileError(&md, "gateway")
+				if userProvidedPool {
+					return ctrl.Result{}, err
+				}
 			}
 		} else {
 			if err := r.reconcileGateway(ctx, &md); err != nil {
@@ -361,8 +368,10 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				if isNoMatchError(err) && r.GatewayDetector != nil {
 					logger.Info("Gateway CRDs may have been removed, refreshing detection cache")
 					r.GatewayDetector.Refresh()
-				} else if apierrors.IsNotFound(err) {
-					// Return an error to trigger exponential backoff retries.
+				}
+				if apierrors.IsNotFound(err) || userProvidedPool {
+					// Pool-reference transitions can fail after partial cleanup.
+					// Retry even when no remaining resource watch will enqueue us.
 					return ctrl.Result{}, err
 				}
 				// Non-fatal: don't block overall reconciliation

@@ -78,19 +78,45 @@ Following the options to release and provide this solution to the users.
 make build-installer IMG=<some-registry>/controller:tag
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+**NOTE:** The target generates three staged manifests:
+
+- `dist/agentdeployment-webhook-guard.yaml` blocks AgentDeployment CREATE and
+  UPDATE during mutating admission before the rollout starts.
+- `dist/install.yaml` rolls out the controller without the AgentDeployment
+  validating or mutating routes.
+- `dist/agentdeployment-webhook.yaml` applies the complete validating and
+  mutating configurations after the rollout.
 
 2. Using the installer
 
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
+Apply the guard before changing the Deployment, wait for the controller
+rollout, apply the complete admission configuration, and only then remove the
+guard:
 
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/controller/<tag or branch>/dist/install.yaml
+```bash
+set -euo pipefail
+
+kubectl apply -f "https://raw.githubusercontent.com/<org>/controller/<tag-or-branch>/dist/agentdeployment-webhook-guard.yaml"
+kubectl apply -f "https://raw.githubusercontent.com/<org>/controller/<tag-or-branch>/dist/install.yaml"
+kubectl rollout restart deployment/airunway-controller-manager -n airunway-system
+kubectl rollout status deployment/airunway-controller-manager -n airunway-system --timeout=5m
+kubectl apply -f "https://raw.githubusercontent.com/<org>/controller/<tag-or-branch>/dist/agentdeployment-webhook.yaml"
+kubectl wait secret/airunway-webhook-server-cert -n airunway-system --for=jsonpath='{.data.ca\.crt}' --timeout=5m
+AIRUNWAY_WEBHOOK_CA_BUNDLE="$(kubectl get secret/airunway-webhook-server-cert -n airunway-system -o jsonpath='{.data.ca\.crt}')"
+test -n "${AIRUNWAY_WEBHOOK_CA_BUNDLE}"
+kubectl wait mutatingwebhookconfiguration/airunway-mutating-webhook-configuration --for="jsonpath={.webhooks[?(@.name==\"magentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=${AIRUNWAY_WEBHOOK_CA_BUNDLE}" --timeout=5m
+kubectl wait validatingwebhookconfiguration/airunway-validating-webhook-configuration --for="jsonpath={.webhooks[?(@.name==\"vagentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=${AIRUNWAY_WEBHOOK_CA_BUNDLE}" --timeout=5m
+kubectl delete --ignore-not-found=true -f "https://raw.githubusercontent.com/<org>/controller/<tag-or-branch>/dist/agentdeployment-webhook-guard.yaml"
 ```
+
+If rollout or activation fails, leave the guard installed, correct the failure,
+and resume from the failed command. The CA waits verify both activated routes
+trust the controller's current serving certificate. Deleting the guard earlier
+can send credential admission to incompatible or untrusted webhook endpoints.
+
+Build the installer with an immutable digest or a new image tag for upgrades.
+The explicit restart prevents an unchanged image string from short-circuiting
+the rollout check against old pods.
 
 ### By providing a Helm Chart
 
@@ -132,4 +158,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

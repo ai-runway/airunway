@@ -239,7 +239,7 @@ func (m *ProviderConfigManager) MarkUnregistered(ctx context.Context) error {
 		Type:    "UpstreamReady",
 		Status:  metav1.ConditionFalse,
 		Reason:  ReasonUnregistered,
-		Message: "Shim is shutting down.",
+		Message: shim.MessageUnregistered,
 	})
 
 	if err := m.client.Status().Update(ctx, config); err != nil {

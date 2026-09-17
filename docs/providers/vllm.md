@@ -30,7 +30,19 @@ make -C providers/vllm deploy
 Otherwise, apply the published manifests directly:
 
 ```bash
+set -euo pipefail
+
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/agentdeployment-webhook-guard.yaml
 kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/controller.yaml
+kubectl rollout restart deployment/airunway-controller-manager -n airunway-system
+kubectl rollout status deployment/airunway-controller-manager -n airunway-system --timeout=5m
+kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/agentdeployment-webhook.yaml
+kubectl wait secret/airunway-webhook-server-cert -n airunway-system --for=jsonpath='{.data.ca\.crt}' --timeout=5m
+AIRUNWAY_WEBHOOK_CA_BUNDLE="$(kubectl get secret/airunway-webhook-server-cert -n airunway-system -o jsonpath='{.data.ca\.crt}')"
+test -n "${AIRUNWAY_WEBHOOK_CA_BUNDLE}"
+kubectl wait mutatingwebhookconfiguration/airunway-mutating-webhook-configuration --for="jsonpath={.webhooks[?(@.name==\"magentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=${AIRUNWAY_WEBHOOK_CA_BUNDLE}" --timeout=5m
+kubectl wait validatingwebhookconfiguration/airunway-validating-webhook-configuration --for="jsonpath={.webhooks[?(@.name==\"vagentdeployment-v1alpha1.kb.io\")].clientConfig.caBundle}=${AIRUNWAY_WEBHOOK_CA_BUNDLE}" --timeout=5m
+kubectl delete --ignore-not-found=true -f https://raw.githubusercontent.com/ai-runway/airunway/main/deploy/agentdeployment-webhook-guard.yaml
 kubectl apply -f https://raw.githubusercontent.com/ai-runway/airunway/main/providers/vllm/deploy/vllm.yaml
 ```
 

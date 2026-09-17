@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -82,7 +83,7 @@ func newModelDeployment(name, ns string) *airunwayv1alpha1.ModelDeployment {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			UID:       types.UID(ns + "/" + name),
+			UID:       types.UID(ns + "-" + name),
 		},
 		Spec: airunwayv1alpha1.ModelDeploymentSpec{
 			Model: airunwayv1alpha1.ModelSpec{
@@ -208,8 +209,10 @@ func (f *poolRefCleanupFixture) assertOwnershipBoundary(t *testing.T, ctx contex
 	if err := r.Get(ctx, client.ObjectKeyFromObject(f.pod), &gotPod); err != nil {
 		t.Fatalf("get model pod: %v", err)
 	}
-	if _, found := gotPod.Labels[airunwayv1alpha1.LabelModelDeployment]; found {
-		t.Errorf("controller model label was not removed: %v", gotPod.Labels)
+	// This fixture supplies the label itself; no managed reconciliation wrote
+	// it. Resource ownership alone must not cause the pod label to be claimed.
+	if got := gotPod.Labels[airunwayv1alpha1.LabelModelDeployment]; got != f.managedPool.Name {
+		t.Errorf("pre-existing model label was changed: %v", gotPod.Labels)
 	}
 }
 
@@ -568,24 +571,7 @@ func TestGateway_UserProvidedPoolRefIsUsedWithoutMutation(t *testing.T) {
 		t.Errorf("expected backend namespace %q, got %v", "default", backend.Namespace)
 	}
 
-	var gotPool inferencev1.InferencePool
-	if err := r.Get(ctx, types.NamespacedName{Name: "shared-pool", Namespace: "default"}, &gotPool); err != nil {
-		t.Fatalf("user-provided InferencePool not found after reconcile: %v", err)
-	}
-	if gotPool.Spec.TargetPorts[0].Number != 9090 || gotPool.Spec.EndpointPickerRef.Name != "shared-epp" {
-		t.Errorf("user-provided InferencePool was mutated: %+v", gotPool.Spec)
-	}
-	if len(gotPool.OwnerReferences) != 0 {
-		t.Errorf("user-provided InferencePool gained owner references: %v", gotPool.OwnerReferences)
-	}
-
-	var gotEPP appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: "shared-epp", Namespace: "default"}, &gotEPP); err != nil {
-		t.Fatalf("user-provided EPP not found after reconcile: %v", err)
-	}
-	if gotEPP.Spec.Replicas == nil || *gotEPP.Spec.Replicas != 3 || gotEPP.Spec.Template.Spec.Containers[0].Image != "example.com/custom-epp:v1" {
-		t.Errorf("user-provided EPP was mutated: %+v", gotEPP.Spec)
-	}
+	assertReferencedGatewayResourcesUnchanged(t, ctx, r, pool, epp)
 
 	var gotPod corev1.Pod
 	if err := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &gotPod); err != nil {
@@ -732,20 +718,7 @@ func TestGateway_SwitchToUserProvidedPoolCleansControllerOwnedResources(t *testi
 		}
 	}
 
-	var gotPool inferencev1.InferencePool
-	if err := r.Get(ctx, client.ObjectKeyFromObject(referencedPool), &gotPool); err != nil {
-		t.Fatalf("referenced InferencePool was deleted: %v", err)
-	}
-	if gotPool.Spec.TargetPorts[0].Number != 9090 || gotPool.Spec.EndpointPickerRef.Name != "shared-epp" {
-		t.Errorf("referenced InferencePool was mutated: %+v", gotPool.Spec)
-	}
-	var gotEPP appsv1.Deployment
-	if err := r.Get(ctx, client.ObjectKeyFromObject(referencedEPP), &gotEPP); err != nil {
-		t.Fatalf("referenced EPP was deleted: %v", err)
-	}
-	if gotEPP.Spec.Replicas == nil || *gotEPP.Spec.Replicas != 3 || gotEPP.Spec.Template.Spec.Containers[0].Image != "example.com/custom-epp:v1" {
-		t.Errorf("referenced EPP was mutated: %+v", gotEPP.Spec)
-	}
+	assertReferencedGatewayResourcesUnchanged(t, ctx, r, referencedPool, referencedEPP)
 
 	var gotPod corev1.Pod
 	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &gotPod); err != nil {
@@ -1191,10 +1164,15 @@ func TestGateway_CleanupPreservesUserProvidedPoolAndEPP(t *testing.T) {
 	}
 	eppDeployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace}}
 	eppService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: md.Name + "-epp", Namespace: md.Namespace}}
-	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: md.Name, Namespace: md.Namespace}}
 	detector := fakeDetector(true, "my-gateway", "gateway-ns")
-	r := newTestReconciler(scheme, detector, md, pool, eppDeployment, eppService, route)
+	r := newTestReconciler(scheme, detector, md, pool, eppDeployment, eppService)
 	ctx := context.Background()
+
+	// Create the managed route through the controller; a bare fixture object
+	// at the generated name would be user-owned and must be preserved.
+	if err := r.reconcileGateway(ctx, md); err != nil {
+		t.Fatalf("create controller-managed route: %v", err)
+	}
 
 	if err := r.cleanupGatewayResources(ctx, md); err != nil {
 		t.Fatalf("cleanupGatewayResources failed: %v", err)
@@ -2594,4 +2572,28 @@ func TestGateway_EPP_OnlyImageOverride(t *testing.T) {
 			t.Errorf("expected EPP ConfigMap data to match provider override, got %q", got)
 		}
 	})
+}
+
+func assertReferencedGatewayResourcesUnchanged(
+	t *testing.T,
+	ctx context.Context,
+	r *ModelDeploymentReconciler,
+	pool *inferencev1.InferencePool,
+	epp *appsv1.Deployment,
+) {
+	t.Helper()
+	var gotPool inferencev1.InferencePool
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pool), &gotPool); err != nil {
+		t.Fatalf("referenced pool was deleted: %v", err)
+	}
+	if !reflect.DeepEqual(gotPool.Spec, pool.Spec) || !reflect.DeepEqual(gotPool.OwnerReferences, pool.OwnerReferences) {
+		t.Errorf("referenced pool spec or ownership changed: %#v", gotPool)
+	}
+	var gotEPP appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKeyFromObject(epp), &gotEPP); err != nil {
+		t.Fatalf("referenced EPP was deleted: %v", err)
+	}
+	if !reflect.DeepEqual(gotEPP.Spec, epp.Spec) || !reflect.DeepEqual(gotEPP.OwnerReferences, epp.OwnerReferences) {
+		t.Errorf("referenced EPP spec or ownership changed: %#v", gotEPP)
+	}
 }

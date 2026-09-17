@@ -868,6 +868,10 @@ func (t *Transformer) buildEngineArgs(md *airunwayv1alpha1.ModelDeployment) ([]s
 		}
 	}
 
+	// Preserve raw token order after deterministic structured args. Disaggregated
+	// workers append Dynamo-owned role and KV-transfer flags after this result.
+	args = append(args, md.Spec.Engine.ExtraArgs...)
+
 	return args, nil
 }
 

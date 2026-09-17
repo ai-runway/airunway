@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Apply only after the controller Deployment from ../default has completed its
+# rollout. This package renders the complete generated validating and mutating
+# configurations so every webhook Service endpoint uses the same credential
+# admission protocol before the separate upgrade guard is removed.
+namespace: airunway-system
+namePrefix: airunway-
+
+resources:
+- ../webhook
+
+patches:
+- path: delete_webhook_secret_patch.yaml
+  target:
+    version: v1
+    kind: Secret
+    name: webhook-server-cert
