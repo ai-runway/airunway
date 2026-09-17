@@ -240,9 +240,6 @@ func (t *Transformer) transformIntent(
 		"backend":   t.intentBackend(md.ResolvedEngineType()),
 		"autoApply": true,
 	}
-	if totalGPUs := intentTotalGPUs(md); totalGPUs > 0 {
-		spec["hardware"] = map[string]any{"totalGpus": int64(totalGPUs)}
-	}
 	if modelCache := intentModelCache(md); modelCache != nil {
 		spec["modelCache"] = modelCache
 	}
@@ -265,10 +262,28 @@ func (t *Transformer) transformIntent(
 	// defaults may be refined through provider.overrides.spec.
 	spec["model"] = md.Spec.Model.ID
 	spec["backend"] = t.intentBackend(md.ResolvedEngineType())
+	setIntentTotalGPUs(spec, intentTotalGPUs(md))
 	if err := unstructured.SetNestedField(dgdr.Object, spec, "spec"); err != nil {
 		return nil, fmt.Errorf("failed to set DGDR spec: %w", err)
 	}
 	return []*unstructured.Unstructured{dgdr}, nil
+}
+
+func setIntentTotalGPUs(spec map[string]any, totalGPUs int32) {
+	hardware, _ := spec["hardware"].(map[string]any)
+	if totalGPUs > 0 {
+		if hardware == nil {
+			hardware = map[string]any{}
+			spec["hardware"] = hardware
+		}
+		hardware["totalGpus"] = int64(totalGPUs)
+		return
+	}
+
+	delete(hardware, "totalGpus")
+	if len(hardware) == 0 {
+		delete(spec, "hardware")
+	}
 }
 
 func (t *Transformer) intentBackend(engineType airunwayv1alpha1.EngineType) string {

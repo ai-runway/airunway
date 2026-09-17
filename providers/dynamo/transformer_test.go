@@ -136,6 +136,7 @@ func TestTransformIntent(t *testing.T) {
 			"spec":{
 				"searchStrategy":"rapid",
 				"autoApply":false,
+				"hardware":{"totalGpus":2048},
 				"sla":{"ttft":500},
 				"overrides":{"dgd":{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{"services":{"worker":{"replicas":2}}}}}
 			}

@@ -570,6 +570,46 @@ func TestDeploymentModeTransitionToManual(t *testing.T) {
 	}
 }
 
+func TestManualModeTransitionWithoutDGDRCRD(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	interceptorFuncs := interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			c client.WithWatch,
+			key client.ObjectKey,
+			obj client.Object,
+			opts ...client.GetOption,
+		) error {
+			if resource, ok := obj.(*unstructured.Unstructured); ok &&
+				resource.GetKind() == DynamoGraphDeploymentRequestKind {
+				return &meta.NoKindMatchError{
+					GroupKind: schema.GroupKind{
+						Group: DynamoAPIGroup,
+						Kind:  DynamoGraphDeploymentRequestKind,
+					},
+					SearchedVersions: []string{DynamoGraphDeploymentRequestAPIVersion},
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptorFuncs).
+		Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+	desired := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, md.Name, md.Namespace)
+
+	transitioning, err := r.ensureDeploymentModeTransition(context.Background(), desired, md)
+	if err != nil {
+		t.Fatalf("expected missing DGDR CRD to be ignored in manual mode: %v", err)
+	}
+	if transitioning {
+		t.Fatal("expected no deployment-mode transition when the DGDR CRD is unavailable")
+	}
+}
+
 func TestReconcileIntentDeletionRemovesDGDAndDGDR(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")

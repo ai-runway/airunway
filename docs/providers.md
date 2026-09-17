@@ -79,7 +79,7 @@ The Web UI backend reads provider information (capabilities, installation steps,
 
 | Provider      | Upstream CRD          | Status      | Shim YAML | Description                                                                    |
 | ------------- | --------------------- | ----------- | --------- | ------------------------------------------------------------------------------ |
-| NVIDIA Dynamo | DynamoGraphDeployment / DynamoGraphDeploymentRequest | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | High-performance GPU inference with KV-cache routing and intent-based profiling |
+| NVIDIA Dynamo | DynamoGraphDeployment / DynamoGraphDeploymentRequest | ✅ Available | [dynamo.yaml](https://github.com/ai-runway/airunway/blob/main/providers/dynamo/deploy/dynamo.yaml) | High-performance GPU inference with KV-cache routing, intent-based profiling and disaggregated serving|
 | KubeRay       | RayService            | ✅ Available | [kuberay.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kuberay/deploy/kuberay.yaml) | Ray-based distributed inference with autoscaling                               |
 | KAITO         | Workspace             | ✅ Available | [kaito.yaml](https://github.com/ai-runway/airunway/blob/main/providers/kaito/deploy/kaito.yaml) | Flexible inference with vLLM (GPU) or llama.cpp (CPU/GPU)                      |
 | llm-d         | none                  | ✅ Available | [llmd.yaml](https://github.com/ai-runway/airunway/blob/main/providers/llmd/deploy/llmd.yaml) | Flexible inference with vLLM (GPU) with KV-cache routing and disaggregated serving |
@@ -122,11 +122,6 @@ disaggregated serving. Use the default manual mode when the exact topology must 
 is the profiling image, not a topology-independent runtime image. Set the DGDR profiling image
 through `overrides.spec.image`; customize generated runtime components through the embedded
 resource at `overrides.spec.overrides.dgd`.
-
-Gateway integration is always disabled for intent deployments and the mutating webhook persists
-`spec.gateway.enabled: false`. Generated-DGD `replicas` and `resources` overrides are accepted
-only below `overrides.spec.overrides.dgd` and remain subject to AI Runway's replica, CPU, memory,
-and GPU ceilings. Security-sensitive override fields remain prohibited at every depth.
 
 DGDR specs become immutable after profiling begins. When a `ModelDeployment` generation changes,
 the provider deletes the generated DGD first, deletes the old DGDR, and creates a new request.
