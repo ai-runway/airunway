@@ -937,7 +937,7 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 				return r.cleanupRetryResult(ctx, md)
 			}
 			if pending {
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				return r.cleanupRetryResult(ctx, md)
 			}
 		}
 	} else if !upstreamResourceUnavailable(dgdrErr) {
@@ -948,7 +948,7 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 			return r.cleanupRetryResult(ctx, md)
 		}
 		if pending {
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return r.cleanupRetryResult(ctx, md)
 		}
 	}
 
