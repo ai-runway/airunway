@@ -634,9 +634,9 @@ func (r *DynamoProviderReconciler) ensureDeploymentModeTransition(
 	)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(dgdr), dgdr); err != nil {
 		if upstreamResourceUnavailable(err) {
-			return false, nil
+			return r.deleteIntentResource(ctx, md, nil)
 		}
-		return false, client.IgnoreNotFound(err)
+		return false, err
 	}
 	if err := verifyDynamoOwnership(dgdr, md.UID); err != nil {
 		return false, nil

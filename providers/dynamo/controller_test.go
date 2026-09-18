@@ -669,9 +669,40 @@ func TestDeploymentModeTransitionToManual(t *testing.T) {
 	}
 }
 
+func TestDeploymentModeTransitionToManualCleansGeneratedDGDWithoutDGDR(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	generatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "generated-dgd", md.Namespace)
+	generatedDGD.SetLabels(map[string]string{
+		dynamoDGDRNameLabel:      md.Name,
+		dynamoDGDRNamespaceLabel: md.Namespace,
+	})
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(generatedDGD).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+	desired := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, md.Name, md.Namespace)
+
+	transitioning, err := r.ensureDeploymentModeTransition(context.Background(), desired, md)
+	if err != nil || !transitioning {
+		t.Fatalf("expected transition while deleting generated DGD, transitioning=%v err=%v", transitioning, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(generatedDGD), generatedDGD); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected generated DGD deletion, got %v", err)
+	}
+
+	transitioning, err = r.ensureDeploymentModeTransition(context.Background(), desired, md)
+	if err != nil || transitioning {
+		t.Fatalf("expected completed transition after generated DGD deletion, transitioning=%v err=%v", transitioning, err)
+	}
+}
+
 func TestManualModeTransitionWithoutDGDRCRD(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
+	generatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "generated-dgd", md.Namespace)
+	generatedDGD.SetLabels(map[string]string{
+		dynamoDGDRNameLabel:      md.Name,
+		dynamoDGDRNamespaceLabel: md.Namespace,
+	})
 	interceptorFuncs := interceptor.Funcs{
 		Get: func(
 			ctx context.Context,
@@ -695,6 +726,7 @@ func TestManualModeTransitionWithoutDGDRCRD(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithObjects(generatedDGD).
 		WithInterceptorFuncs(interceptorFuncs).
 		Build()
 	r := NewDynamoProviderReconciler(c, scheme, "")
@@ -704,8 +736,16 @@ func TestManualModeTransitionWithoutDGDRCRD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected missing DGDR CRD to be ignored in manual mode: %v", err)
 	}
-	if transitioning {
-		t.Fatal("expected no deployment-mode transition when the DGDR CRD is unavailable")
+	if !transitioning {
+		t.Fatal("expected transition while deleting generated DGD with unavailable DGDR CRD")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(generatedDGD), generatedDGD); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected generated DGD deletion, got %v", err)
+	}
+
+	transitioning, err = r.ensureDeploymentModeTransition(context.Background(), desired, md)
+	if err != nil || transitioning {
+		t.Fatalf("expected completed transition after generated DGD deletion, transitioning=%v err=%v", transitioning, err)
 	}
 }
 
