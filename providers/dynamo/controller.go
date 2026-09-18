@@ -678,11 +678,9 @@ func (r *DynamoProviderReconciler) deleteGeneratedDGDs(
 	md *airunwayv1alpha1.ModelDeployment,
 	dgdr *unstructured.Unstructured,
 ) (bool, error) {
-	names := map[string]struct{}{}
-	if dgdr != nil {
-		if dgdName, found, _ := unstructured.NestedString(dgdr.Object, "status", "dgdName"); found && dgdName != "" {
-			names[dgdName] = struct{}{}
-		}
+	names, err := r.generatedDGDNames(ctx, md, dgdr)
+	if err != nil {
+		return false, err
 	}
 
 	pending := false
@@ -694,14 +692,66 @@ func (r *DynamoProviderReconciler) deleteGeneratedDGDs(
 			}
 			return false, err
 		}
+		dgdLabels := dgd.GetLabels()
+		if dgdLabels[dynamoDGDRNameLabel] != md.Name ||
+			dgdLabels[dynamoDGDRNamespaceLabel] != md.Namespace {
+			continue
+		}
 		pending = true
 		if dgd.GetDeletionTimestamp() == nil {
-			if err := r.Delete(ctx, dgd); err != nil && !upstreamResourceUnavailable(err) {
+			if err := r.deleteWithIdentityPreconditions(ctx, dgd); err != nil && !upstreamResourceUnavailable(err) {
 				return false, err
 			}
 		}
 	}
 	return pending, nil
+}
+
+func (r *DynamoProviderReconciler) deleteWithIdentityPreconditions(
+	ctx context.Context,
+	resource client.Object,
+) error {
+	preconditions := &metav1.Preconditions{}
+	if uid := resource.GetUID(); uid != "" {
+		preconditions.UID = &uid
+	}
+	if resourceVersion := resource.GetResourceVersion(); resourceVersion != "" {
+		preconditions.ResourceVersion = &resourceVersion
+	}
+	return r.Delete(ctx, resource, &client.DeleteOptions{Preconditions: preconditions})
+}
+
+func (r *DynamoProviderReconciler) generatedDGDNames(
+	ctx context.Context,
+	md *airunwayv1alpha1.ModelDeployment,
+	dgdr *unstructured.Unstructured,
+) (map[string]struct{}, error) {
+	names := map[string]struct{}{}
+	if dgdr != nil {
+		if dgdName, found, _ := unstructured.NestedString(dgdr.Object, "status", "dgdName"); found && dgdName != "" {
+			names[dgdName] = struct{}{}
+		}
+	}
+	dgdList := &unstructured.UnstructuredList{}
+	dgdList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   DynamoAPIGroup,
+		Version: DynamoAPIVersion,
+		Kind:    DynamoGraphDeploymentKind + "List",
+	})
+	labels := client.MatchingLabels{
+		dynamoDGDRNameLabel:      md.Name,
+		dynamoDGDRNamespaceLabel: md.Namespace,
+	}
+	if err := r.List(ctx, dgdList, client.InNamespace(md.Namespace), labels); err != nil {
+		if !upstreamResourceUnavailable(err) {
+			return nil, err
+		}
+	} else {
+		for index := range dgdList.Items {
+			names[dgdList.Items[index].GetName()] = struct{}{}
+		}
+	}
+	return names, nil
 }
 
 // overrideSpecDiffers reports whether any path explicitly supplied through

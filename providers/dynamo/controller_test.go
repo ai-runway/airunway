@@ -499,7 +499,7 @@ func TestIntentGenerationChangeReplacesDGDThenDGDR(t *testing.T) {
 	}
 }
 
-func TestDeleteGeneratedDGDsDoesNotTrustRelationshipLabels(t *testing.T) {
+func TestDeleteGeneratedDGDsRequiresRelationshipLabels(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
 	dgdr := newDynamoResource(
@@ -509,25 +509,92 @@ func TestDeleteGeneratedDGDsDoesNotTrustRelationshipLabels(t *testing.T) {
 		md.Namespace,
 	)
 	dgdr.Object["status"] = map[string]any{"dgdName": "confirmed-dgd"}
-	confirmedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "confirmed-dgd", md.Namespace)
-	unrelatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "unrelated-dgd", md.Namespace)
-	unrelatedDGD.SetLabels(map[string]string{
+	collidingDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "confirmed-dgd", md.Namespace)
+	generatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "generated-dgd", md.Namespace)
+	generatedDGD.SetLabels(map[string]string{
 		dynamoDGDRNameLabel:      md.Name,
 		dynamoDGDRNamespaceLabel: md.Namespace,
 	})
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(confirmedDGD, unrelatedDGD).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(collidingDGD, generatedDGD).Build()
 	r := NewDynamoProviderReconciler(c, scheme, "")
 
 	pending, err := r.deleteGeneratedDGDs(context.Background(), md, dgdr)
 	if err != nil || !pending {
-		t.Fatalf("expected confirmed generated DGD deletion, pending=%v err=%v", pending, err)
+		t.Fatalf("expected generated DGD deletion, pending=%v err=%v", pending, err)
 	}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(confirmedDGD), confirmedDGD); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected status-confirmed DGD to be deleted, got %v", err)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(collidingDGD), collidingDGD); err != nil {
+		t.Fatalf("expected unlabeled status-named DGD to remain, got %v", err)
 	}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(unrelatedDGD), unrelatedDGD); err != nil {
-		t.Fatalf("expected label-only DGD to remain, got %v", err)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(generatedDGD), generatedDGD); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected label-discovered DGD to be deleted, got %v", err)
+	}
+}
+
+func TestDeleteGeneratedDGDsDiscoversDGDWithoutDGDR(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	generatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "generated-dgd", md.Namespace)
+	generatedDGD.SetLabels(map[string]string{
+		dynamoDGDRNameLabel:      md.Name,
+		dynamoDGDRNamespaceLabel: md.Namespace,
+	})
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(generatedDGD).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	pending, err := r.deleteGeneratedDGDs(context.Background(), md, nil)
+	if err != nil || !pending {
+		t.Fatalf("expected generated DGD deletion without DGDR, pending=%v err=%v", pending, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(generatedDGD), generatedDGD); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected label-discovered DGD to be deleted, got %v", err)
+	}
+}
+
+func TestDeleteGeneratedDGDsDoesNotDeleteReplacement(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	generatedDGD := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, "generated-dgd", md.Namespace)
+	generatedDGD.SetUID("old-uid")
+	generatedDGD.SetLabels(map[string]string{
+		dynamoDGDRNameLabel:      md.Name,
+		dynamoDGDRNamespaceLabel: md.Namespace,
+	})
+	replaced := false
+	interceptorFuncs := interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if obj.GetObjectKind().GroupVersionKind().Kind != DynamoGraphDeploymentKind || replaced {
+				return c.Delete(ctx, obj, opts...)
+			}
+			replaced = true
+			if err := c.Delete(ctx, obj); err != nil {
+				return err
+			}
+			replacement := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, obj.GetName(), obj.GetNamespace())
+			replacement.SetUID("new-uid")
+			if err := c.Create(ctx, replacement); err != nil {
+				return err
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(generatedDGD).
+		WithInterceptorFuncs(interceptorFuncs).
+		Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	pending, err := r.deleteGeneratedDGDs(context.Background(), md, nil)
+	if err == nil || pending {
+		t.Fatalf("expected replacement conflict, pending=%v err=%v", pending, err)
+	}
+	replacement := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, generatedDGD.GetName(), md.Namespace)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(replacement), replacement); err != nil {
+		t.Fatalf("expected replacement DGD to remain: %v", err)
+	}
+	if replacement.GetUID() != "new-uid" {
+		t.Fatalf("expected replacement UID, got %q", replacement.GetUID())
 	}
 }
 
