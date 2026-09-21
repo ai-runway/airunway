@@ -181,7 +181,9 @@ Handles all Kubernetes API interactions:
 - Get detailed GPU capacity with per-node and per-pool breakdown
 - Check GPU Operator installation status (CRDs, pods)
 - Get pod failure reasons from Kubernetes Events
-- Delete CRDs and namespaces for complete provider uninstallation
+- Regularly uninstall Helm releases while preserving namespaces, CRDs, and
+  custom resources; the explicit complete-removal API deletes declared CRDs
+  only after ownership and custom-resource safety checks pass
 
 ### MetricsService
 Fetches and processes Prometheus metrics from inference deployments:

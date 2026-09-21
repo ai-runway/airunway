@@ -168,6 +168,16 @@ describe('Provider Installation Flow', () => {
         'uninstall',
         (async () => mockProviderUninstallResult) as typeof helmService.uninstall,
       ),
+      mockServiceMethod(
+        kubernetesService,
+        'snapshotCRDsForUninstall',
+        async () => ({ success: true, snapshots: [] }),
+      ),
+      mockServiceMethod(
+        kubernetesService,
+        'restoreCRDsAfterUninstall',
+        async () => ({ success: true, results: [] }),
+      ),
     );
 
     const uninstallRes = await app.request('/api/installation/providers/kaito/uninstall', {
