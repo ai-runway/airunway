@@ -165,7 +165,7 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 				Command: "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 " +
 					"-n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true " +
 					"--set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false " +
-					"--set gpu-feature-discovery.gfd.enabled=false --wait",
+					"--set gpu-feature-discovery.nfd.enabled=false --set gpu-feature-discovery.gfd.enabled=false --wait",
 				Description: "Install the KAITO workspace operator v0.10.0 in BYO nodes mode. " +
 					"NVIDIA device plugin, local CSI, and both GPU Feature Discovery dependencies are disabled, " +
 					"so this profile does not add their cluster-wide resources.",
