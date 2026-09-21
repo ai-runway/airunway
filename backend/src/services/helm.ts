@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { loadAll, dump } from 'js-yaml';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -27,6 +27,7 @@ export interface HelmChart {
   fetchUrl?: string;
   preCrdUrls?: string[];
   preInstallMissingCrds?: boolean;
+  keepCrdResources?: boolean;
 }
 
 interface ChartCrdDocument {
@@ -50,6 +51,70 @@ function valuesToSetJsonArgs(values: Record<string, unknown>): string[] {
 // POSIX single-quote escaping: foo'bar -> 'foo'"'"'bar'.
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+const KEEP_CRD_POST_RENDERER_SOURCE = String.raw`const fs = require('fs');
+const input = fs.readFileSync(0, 'utf8');
+
+function keepCrdResource(document) {
+  const lines = document.split(/\r?\n/);
+  const kindIndex = lines.findIndex((line) => /^kind:\s*CustomResourceDefinition\s*$/.test(line));
+  if (kindIndex < 0) return document;
+
+  const metadataIndex = lines.findIndex((line, index) => index > kindIndex && /^metadata:\s*$/.test(line));
+  if (metadataIndex < 0) return document;
+
+  const metadataEnd = lines.findIndex((line, index) => index > metadataIndex && /^[^\s]/.test(line));
+  const end = metadataEnd < 0 ? lines.length : metadataEnd;
+  const policyIndex = lines.findIndex((line, index) => (
+    index > metadataIndex
+    && index < end
+    && /^\s+helm\.sh\/resource-policy\s*:/.test(line)
+  ));
+  if (policyIndex >= 0) return document;
+
+  const annotationsIndex = lines.findIndex((line, index) => (
+    index > metadataIndex && index < end && /^  annotations:\s*$/.test(line)
+  ));
+  if (annotationsIndex >= 0) {
+    lines.splice(annotationsIndex + 1, 0, '    helm.sh/resource-policy: keep');
+  } else {
+    lines.splice(metadataIndex + 1, 0, '  annotations:', '    helm.sh/resource-policy: keep');
+  }
+  return lines.join('\n');
+}
+
+process.stdout.write(input.split(/(?=^---\s*$)/m).map(keepCrdResource).join(''));
+`;
+
+export function addKeepResourcePolicyToCrdManifest(manifest: string): string {
+  return manifest.split(/(?=^---\s*$)/m).map((document) => {
+    const lines = document.split(/\r?\n/);
+    const kindIndex = lines.findIndex((line) => /^kind:\s*CustomResourceDefinition\s*$/.test(line));
+    if (kindIndex < 0) return document;
+
+    const metadataIndex = lines.findIndex((line, index) => index > kindIndex && /^metadata:\s*$/.test(line));
+    if (metadataIndex < 0) return document;
+
+    const metadataEnd = lines.findIndex((line, index) => index > metadataIndex && /^[^\s]/.test(line));
+    const end = metadataEnd < 0 ? lines.length : metadataEnd;
+    const policyIndex = lines.findIndex((line, index) => (
+      index > metadataIndex
+      && index < end
+      && /^\s+helm\.sh\/resource-policy\s*:/.test(line)
+    ));
+    if (policyIndex >= 0) return document;
+
+    const annotationsIndex = lines.findIndex((line, index) => (
+      index > metadataIndex && index < end && /^  annotations:\s*$/.test(line)
+    ));
+    if (annotationsIndex >= 0) {
+      lines.splice(annotationsIndex + 1, 0, '    helm.sh/resource-policy: keep');
+    } else {
+      lines.splice(metadataIndex + 1, 0, '  annotations:', '    helm.sh/resource-policy: keep');
+    }
+    return lines.join('\n');
+  }).join('');
 }
 
 function valuesToSetJsonCommandArgs(values: Record<string, unknown>): string[] {
@@ -450,6 +515,26 @@ class HelmService {
     };
   }
 
+  private createKeepCrdPostRenderer(tempDir: string): string {
+    const scriptPath = join(tempDir, 'keep-crd-resources.js');
+    writeFileSync(scriptPath, `#!/usr/bin/env node\n${KEEP_CRD_POST_RENDERER_SOURCE}`, 'utf8');
+
+    if (process.platform === 'win32') {
+      const wrapperPath = join(tempDir, 'keep-crd-resources.cmd');
+      writeFileSync(wrapperPath, `@echo off\r\n"${process.execPath}" "${scriptPath}"\r\n`, 'utf8');
+      return wrapperPath;
+    }
+
+    const wrapperPath = join(tempDir, 'keep-crd-resources.sh');
+    writeFileSync(
+      wrapperPath,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(scriptPath)}\n`,
+      'utf8',
+    );
+    chmodSync(wrapperPath, 0o755);
+    return wrapperPath;
+  }
+
   private async pullChartToTempDir(
     chart: HelmChart,
     onStream?: StreamCallback
@@ -625,6 +710,7 @@ class HelmService {
     onStream?: StreamCallback
   ): Promise<HelmResult> {
     let chartPath = chart.chart;
+    let postRendererDir: string | undefined;
 
     // If fetchUrl is provided, pull the chart first
     if (chart.fetchUrl) {
@@ -666,13 +752,24 @@ class HelmService {
       args.push('--skip-crds');
     }
 
+    if (chart.keepCrdResources) {
+      postRendererDir = mkdtempSync(join(tmpdir(), 'helm-crd-renderer-'));
+      args.push('--post-renderer', this.createKeepCrdPostRenderer(postRendererDir));
+    }
+
     // Don't use --wait - return immediately after submitting the install
     // The caller should poll for installation status updates
     // Timeout still applies to the install command itself
     
     logger.info({ chart: chart.name, namespace: chart.namespace, version: chart.version, values: chart.values, skipCrds: chart.skipCrds }, `Installing helm chart: ${chart.name}`);
 
-    return this.execute(args, onStream);
+    try {
+      return await this.execute(args, onStream);
+    } finally {
+      if (postRendererDir) {
+        rmSync(postRendererDir, { recursive: true, force: true });
+      }
+    }
   }
 
   /**

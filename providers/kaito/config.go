@@ -48,7 +48,9 @@ const (
 	// Dotted keys intentionally match the dependency value paths in the KAITO
 	// chart; using gpu-feature-discovery.nfd.master.deploy/worker.deploy does
 	// not disable the NFD dependency and leaves cluster-wide resources behind.
-	KaitoInstallationValues = `{"featureGates.disableNodeAutoProvisioning":true,"nvidiaDevicePlugin.enabled":false,"localCSIDriver.useLocalCSIDriver":false,"gpu-feature-discovery.nfd.enabled":false,"gpu-feature-discovery.gfd.enabled":false}`
+	KaitoInstallationValues = `{"featureGates.disableNodeAutoProvisioning":true,"nvidiaDevicePlugin.enabled":false,` +
+		`"localCSIDriver.useLocalCSIDriver":false,"gpu-feature-discovery.nfd.enabled":false,` +
+		`"gpu-feature-discovery.gfd.enabled":false}`
 )
 
 // shimVersion is this shim's reported version tag, injected at build time via:
@@ -160,9 +162,13 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 				Description: "Update local Helm repository cache.",
 			},
 			{
-				Title:       "Install KAITO Workspace Operator",
-				Command:     "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 -n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true --set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false --set gpu-feature-discovery.nfd.enabled=false --set gpu-feature-discovery.gfd.enabled=false --wait",
-				Description: "Install the KAITO workspace operator v0.10.0 in BYO nodes mode. NVIDIA device plugin, local CSI, and both GPU Feature Discovery dependencies are disabled, so this profile does not add their cluster-wide resources.",
+				Command: "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 " +
+					"-n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true " +
+					"--set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false " +
+					"--set gpu-feature-discovery.gfd.enabled=false --wait",
+				Description: "Install the KAITO workspace operator v0.10.0 in BYO nodes mode. " +
+					"NVIDIA device plugin, local CSI, and both GPU Feature Discovery dependencies are disabled, " +
+					"so this profile does not add their cluster-wide resources.",
 			},
 		},
 	}

@@ -156,7 +156,10 @@ function normalizeInstallCharts(providerId: string, charts: ProviderHelmChartDet
           // them. The chart's dependency conditions must be disabled in the
           // same profile used by the Go shim and the Makefile.
           ...(isKaitoWorkspaceChart(providerId, chart)
-            ? { values: { ...chart.values, ...KAITO_BYO_NODE_VALUES } }
+            ? {
+                values: { ...chart.values, ...KAITO_BYO_NODE_VALUES },
+                keepCrdResources: true,
+              }
             : {}),
         }
       : chart
@@ -569,8 +572,8 @@ const installation = new Hono()
       });
     }
 
-    const restoration = await kubernetesService.restoreCRDsAfterUninstall(preservation.snapshots);
-    results.push(...restoration.results.map((result) => ({
+    const verification = await kubernetesService.verifyCRDsAfterUninstall(preservation.snapshots);
+    results.push(...verification.results.map((result) => ({
       step: `preserve-${result.crdName}`,
       success: result.success,
       output: result.message,

@@ -138,79 +138,26 @@ describe('KubernetesService - CRD Version Annotation Extraction', () => {
 });
 
 describe('KubernetesService - safe provider CRD removal', () => {
-  test('snapshots and restores CRDs and custom resources around Helm uninstall', async () => {
+  test('snapshots and verifies CRDs and custom resources around Helm uninstall', async () => {
     const service = asMockable();
     const originalApiExtensionsApi = service.apiExtensionsApi;
     const originalCustomObjectsApi = service.customObjectsApi;
-    let crdReadCount = 0;
-    const createdCrdBodies: Record<string, unknown>[] = [];
-    const createdResourceBodies: Record<string, unknown>[] = [];
-
-    service.apiExtensionsApi = {
-      readCustomResourceDefinition: async () => {
-        crdReadCount += 1;
-        if (crdReadCount === 1) {
-          return {
-            metadata: {
-              name: 'workspaces.kaito.sh',
-              resourceVersion: '123',
-              uid: 'crd-uid',
-            },
-            spec: {
-              group: 'kaito.sh',
-              names: { plural: 'workspaces' },
-              versions: [{ name: 'v1beta1', served: true }],
-              scope: 'Cluster',
-            },
-            status: { acceptedNames: { plural: 'workspaces' } },
-          };
-        }
-        throw { statusCode: 404 };
-      },
-      createCustomResourceDefinition: async (arg: { body?: Record<string, unknown> }) => {
-        createdCrdBodies.push(arg.body || {});
-        return {};
-      },
-    };
-    service.customObjectsApi = {
-      listClusterCustomObject: async () => ({
-        items: [{
-          apiVersion: 'kaito.sh/v1beta1',
-          kind: 'Workspace',
-          metadata: { name: 'demo', uid: 'resource-uid', resourceVersion: '456' },
-          spec: { model: 'demo-model' },
-          status: { ready: true },
-        }],
-      }),
-      getClusterCustomObject: async () => {
-        throw { statusCode: 404 };
-      },
-      createClusterCustomObject: async (arg: { body?: Record<string, unknown> }) => {
-        createdResourceBodies.push(arg.body || {});
-        return {};
-      },
-    };
-
     try {
+      service.apiExtensionsApi = {
+        readCustomResourceDefinition: async () => ({ metadata: { name: 'workspaces.kaito.sh', uid: 'crd-uid' }, spec: { group: 'kaito.sh', names: { plural: 'workspaces' }, versions: [{ name: 'v1beta1', served: true }], scope: 'Cluster' } }),
+      };
+      service.customObjectsApi = { listClusterCustomObject: async () => ({ items: [{ metadata: { name: 'demo', uid: 'resource-uid' } }] }) };
       const snapshot = await kubernetesService.snapshotCRDsForUninstall(['workspaces.kaito.sh']);
       expect(snapshot.success).toBe(true);
-      expect(snapshot.snapshots).toHaveLength(1);
-
-      const restored = await kubernetesService.restoreCRDsAfterUninstall(snapshot.snapshots);
-      expect(restored.success).toBe(true);
-      expect(createdCrdBodies[0]).not.toHaveProperty('status');
-      expect(createdCrdBodies[0].metadata).not.toHaveProperty('resourceVersion');
-      expect(createdResourceBodies[0]).toMatchObject({
-        metadata: { name: 'demo' },
-        spec: { model: 'demo-model' },
-      });
-      expect(createdResourceBodies[0]).not.toHaveProperty('status');
-      expect(createdResourceBodies[0].metadata).not.toHaveProperty('uid');
+      const verified = await kubernetesService.verifyCRDsAfterUninstall(snapshot.snapshots);
+      expect(verified.success).toBe(true);
+      expect(verified.results[0].message).toContain('retained with original identities');
     } finally {
       service.apiExtensionsApi = originalApiExtensionsApi;
       service.customObjectsApi = originalCustomObjectsApi;
     }
   });
+
 
   test('preflights an empty CRD and deletes only after resource verification', async () => {
     const service = asMockable();

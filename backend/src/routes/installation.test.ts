@@ -923,7 +923,7 @@ describe('Installation Provider Routes', () => {
         mockServiceMethod(kubernetesService, 'snapshotCRDsForUninstall', async () => ({ success: true, snapshots: [] })),
         mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
         mockServiceMethod(helmService, 'uninstall', async () => ({ success: true, stdout: 'ok', stderr: '' })),
-        mockServiceMethod(kubernetesService, 'restoreCRDsAfterUninstall', async () => ({ success: true, results: [] })),
+        mockServiceMethod(kubernetesService, 'verifyCRDsAfterUninstall', async () => ({ success: true, results: [] })),
       );
 
       const res = await app.request('/api/installation/providers/kaito/uninstall', { method: 'POST' });

@@ -194,6 +194,7 @@ interface HealthCrdProbe {
 interface DeletableCrd {
   metadata?: {
     name?: string;
+    uid?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
   };
@@ -219,7 +220,7 @@ export interface HelmReleaseIdentity {
 
 interface PreservedCrdSnapshot {
   crdName: string;
-  manifest: Record<string, unknown>;
+  crdUid?: string;
   group: string;
   version: string;
   plural: string;
@@ -248,20 +249,39 @@ function getCrdApiDetails(crd: DeletableCrd): CrdApiDetails | undefined {
   };
 }
 
-function stripKubernetesServerMetadata(resource: Record<string, unknown>): Record<string, unknown> {
-  const copy = { ...resource };
-  delete copy.status;
-
+function getCustomResourceIdentity(resource: Record<string, unknown>): {
+  name: string;
+  namespace?: string;
+  uid?: string;
+} | undefined {
   const metadata = resource.metadata;
-  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
-    const cleanMetadata = { ...(metadata as Record<string, unknown>) };
-    for (const field of ['uid', 'resourceVersion', 'generation', 'creationTimestamp', 'managedFields']) {
-      delete cleanMetadata[field];
-    }
-    copy.metadata = cleanMetadata;
-  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
 
-  return copy;
+  const typedMetadata = metadata as { name?: unknown; namespace?: unknown; uid?: unknown };
+  if (typeof typedMetadata.name !== 'string' || typedMetadata.name.trim().length === 0) return undefined;
+
+  return {
+    name: typedMetadata.name,
+    namespace: typeof typedMetadata.namespace === 'string' ? typedMetadata.namespace : undefined,
+    uid: typeof typedMetadata.uid === 'string' ? typedMetadata.uid : undefined,
+  };
+}
+
+function customResourceIdentityKey(identity: { name: string; namespace?: string }): string {
+  return `${identity.namespace || ''}/${identity.name}`;
+}
+
+function getCustomResourceItems(response: unknown): Record<string, unknown>[] | undefined {
+  const wrapped = response as { body?: unknown } | undefined;
+  const value = wrapped?.body ?? response;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+
+  const items = (value as { items?: unknown }).items;
+  if (!Array.isArray(items)) return undefined;
+
+  return items.filter(
+    (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item),
+  );
 }
 
 
@@ -2271,9 +2291,9 @@ class KubernetesService {
   }
 
   /**
-   * Capture provider CRDs and their custom resources before a Helm uninstall.
-   * Some provider charts render CRDs as ordinary Helm resources, so Helm
-   * removes them during uninstall even though the UI promises preservation.
+   * Capture provider CRD and custom-resource identities before a Helm uninstall.
+   * The post-rendered Helm release keeps CRDs in place; this snapshot lets the
+   * uninstall route verify that Kubernetes preserved the original objects.
    */
   async snapshotCRDsForUninstall(
     crdNames: string[],
@@ -2316,9 +2336,8 @@ class KubernetesService {
           }),
           { operationName: `snapshotCRDResourcesForUninstall:${crdName}`, maxRetries: 1 },
         );
-        const resourceList = ((resourceResponse as { body?: { items?: unknown[] }; items?: unknown[] })?.body
-          || resourceResponse) as { items?: unknown[] };
-        if (!Array.isArray(resourceList.items)) {
+        const customResources = getCustomResourceItems(resourceResponse);
+        if (!customResources) {
           return {
             success: false,
             snapshots: [],
@@ -2326,13 +2345,7 @@ class KubernetesService {
           };
         }
 
-        const customResources = resourceList.items.filter(
-          (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item),
-        );
-        if (customResources.some((resource) => {
-          const metadata = resource.metadata;
-          return !metadata || typeof metadata !== 'object' || typeof (metadata as { name?: unknown }).name !== 'string';
-        })) {
+        if (customResources.some((resource) => !getCustomResourceIdentity(resource))) {
           return {
             success: false,
             snapshots: [],
@@ -2342,7 +2355,7 @@ class KubernetesService {
 
         snapshots.push({
           crdName,
-          manifest: stripKubernetesServerMetadata(crd as unknown as Record<string, unknown>),
+          crdUid: crd.metadata?.uid,
           ...api,
           customResources,
         });
@@ -2359,132 +2372,115 @@ class KubernetesService {
   }
 
   /**
-   * Restore CRDs and any custom resources captured before Helm uninstall.
-   * Existing objects are retained, so this is safe when a chart already keeps
-   * a CRD or custom resource instead of deleting it.
+   * Verify that Helm uninstall retained the exact CRDs and custom resources
+   * captured before the uninstall. This is intentionally read-only: deleting
+   * and recreating Kubernetes objects would change their UIDs and can trigger
+   * garbage collection of resources owned by those objects.
    */
-  async restoreCRDsAfterUninstall(
+  async verifyCRDsAfterUninstall(
     snapshots: PreservedCrdSnapshot[],
   ): Promise<{ success: boolean; results: Array<{ crdName: string; success: boolean; message: string }> }> {
     const results: Array<{ crdName: string; success: boolean; message: string }> = [];
 
     for (const snapshot of snapshots) {
-      let crdExists = false;
+      let response: unknown;
       try {
-        await withRetry(
+        response = await withRetry(
           () => this.apiExtensionsApi.readCustomResourceDefinition({ name: snapshot.crdName }),
-          { operationName: `checkRestoredCRD:${snapshot.crdName}`, maxRetries: 1 },
+          { operationName: `verifyPreservedCRD:${snapshot.crdName}`, maxRetries: 1 },
         );
-        crdExists = true;
       } catch (error) {
-        if (getK8sStatusCode(error) !== 404) {
-          results.push({
-            crdName: snapshot.crdName,
-            success: false,
-            message: `Failed to check preserved CRD ${snapshot.crdName}: ${getK8sErrorMessage(error)}`,
-          });
-          continue;
-        }
-      }
-
-      if (!crdExists) {
-        try {
-          await withRetry(
-            () => this.apiExtensionsApi.createCustomResourceDefinition({
-              body: snapshot.manifest as unknown as k8s.V1CustomResourceDefinition,
-            }),
-            { operationName: `restoreCRD:${snapshot.crdName}`, maxRetries: 1 },
-          );
-        } catch (error) {
-          results.push({
-            crdName: snapshot.crdName,
-            success: false,
-            message: `Failed to restore CRD ${snapshot.crdName}: ${getK8sErrorMessage(error)}`,
-          });
-          continue;
-        }
-      }
-
-      let success = true;
-      for (const resource of snapshot.customResources) {
-        const metadata = resource.metadata as { name: string; namespace?: string };
-        const name = metadata.name;
-        const namespace = metadata.namespace;
-        if (snapshot.scope === 'Namespaced' && !namespace) {
-          success = false;
-          results.push({
-            crdName: snapshot.crdName,
-            success: false,
-            message: `Cannot restore custom resource ${name}: CRD ${snapshot.crdName} is namespaced but the resource has no namespace.`,
-          });
-          continue;
-        }
-
-        try {
-          if (snapshot.scope === 'Namespaced') {
-            await this.customObjectsApi.getNamespacedCustomObject({
-              group: snapshot.group,
-              version: snapshot.version,
-              namespace: namespace as string,
-              plural: snapshot.plural,
-              name,
-            });
-          } else {
-            await this.customObjectsApi.getClusterCustomObject({
-              group: snapshot.group,
-              version: snapshot.version,
-              plural: snapshot.plural,
-              name,
-            });
-          }
-          continue;
-        } catch (error) {
-          if (getK8sStatusCode(error) !== 404) {
-            success = false;
-            results.push({
-              crdName: snapshot.crdName,
-              success: false,
-              message: `Failed to check preserved custom resource ${name}: ${getK8sErrorMessage(error)}`,
-            });
-            continue;
-          }
-        }
-
-        try {
-          const body = stripKubernetesServerMetadata(resource);
-          if (snapshot.scope === 'Namespaced') {
-            await this.customObjectsApi.createNamespacedCustomObject({
-              group: snapshot.group,
-              version: snapshot.version,
-              namespace: namespace as string,
-              plural: snapshot.plural,
-              body,
-            });
-          } else {
-            await this.customObjectsApi.createClusterCustomObject({
-              group: snapshot.group,
-              version: snapshot.version,
-              plural: snapshot.plural,
-              body,
-            });
-          }
-        } catch (error) {
-          success = false;
-          results.push({
-            crdName: snapshot.crdName,
-            success: false,
-            message: `Failed to restore custom resource ${name}: ${getK8sErrorMessage(error)}`,
-          });
-        }
-      }
-
-      if (success) {
         results.push({
           crdName: snapshot.crdName,
-          success: true,
-          message: `CRD ${snapshot.crdName} and ${snapshot.customResources.length} custom resource${snapshot.customResources.length === 1 ? '' : 's'} preserved`,
+          success: false,
+          message: getK8sStatusCode(error) === 404
+            ? `CRD ${snapshot.crdName} was removed during uninstall; no replacement was created.`
+            : `Failed to verify preserved CRD ${snapshot.crdName}: ${getK8sErrorMessage(error)}`,
         });
+        continue;
       }
+
+      const crd = ((response as { body?: DeletableCrd })?.body || response) as DeletableCrd;
+      if (snapshot.crdUid && crd.metadata?.uid !== snapshot.crdUid) {
+        results.push({
+          crdName: snapshot.crdName,
+          success: false,
+          message: `CRD ${snapshot.crdName} was replaced during uninstall; its UID changed from ${snapshot.crdUid} to ${crd.metadata?.uid || 'unknown'}.`,
+        });
+        continue;
+      }
+
+      let resourceResponse: unknown;
+      try {
+        resourceResponse = await withRetry(
+          () => this.customObjectsApi.listClusterCustomObject({
+            group: snapshot.group,
+            version: snapshot.version,
+            plural: snapshot.plural,
+          }),
+          { operationName: `verifyPreservedCRDResources:${snapshot.crdName}`, maxRetries: 1 },
+        );
+      } catch (error) {
+        results.push({
+          crdName: snapshot.crdName,
+          success: false,
+          message: `Failed to verify custom resources for CRD ${snapshot.crdName}: ${getK8sErrorMessage(error)}`,
+        });
+        continue;
+      }
+
+      const currentResources = getCustomResourceItems(resourceResponse);
+      if (!currentResources || currentResources.some((resource) => !getCustomResourceIdentity(resource))) {
+        results.push({
+          crdName: snapshot.crdName,
+          success: false,
+          message: `Failed to verify custom resources for CRD ${snapshot.crdName}: the Kubernetes API returned an invalid item list.`,
+        });
+        continue;
+      }
+
+      const expectedResources = new Map(
+        snapshot.customResources.map((resource) => {
+          const identity = getCustomResourceIdentity(resource) as { name: string; namespace?: string; uid?: string };
+          return [customResourceIdentityKey(identity), identity];
+        }),
+      );
+      const actualResources = new Map(
+        currentResources.map((resource) => {
+          const identity = getCustomResourceIdentity(resource) as { name: string; namespace?: string; uid?: string };
+          return [customResourceIdentityKey(identity), identity];
+        }),
+      );
+
+      if (expectedResources.size !== actualResources.size) {
+        results.push({
+          crdName: snapshot.crdName,
+          success: false,
+          message: `CRD ${snapshot.crdName} custom resources changed during uninstall (expected ${expectedResources.size}, found ${actualResources.size}).`,
+        });
+        continue;
+      }
+
+      const changedResource = Array.from(expectedResources.entries()).find(([key, expected]) => {
+        const actual = actualResources.get(key);
+        return !actual || (expected.uid && actual.uid !== expected.uid);
+      });
+      if (changedResource) {
+        const [key, expected] = changedResource;
+        const actual = actualResources.get(key);
+        results.push({
+          crdName: snapshot.crdName,
+          success: false,
+          message: `Custom resource ${key} for CRD ${snapshot.crdName} was removed or replaced during uninstall (expected UID ${expected.uid || 'unknown'}, found ${actual?.uid || 'missing'}).`,
+        });
+        continue;
+      }
+
+      results.push({
+        crdName: snapshot.crdName,
+        success: true,
+        message: `CRD ${snapshot.crdName} and ${snapshot.customResources.length} custom resource${snapshot.customResources.length === 1 ? '' : 's'} retained with original identities`,
+      });
     }
 
     return {
