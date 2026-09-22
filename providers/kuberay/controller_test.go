@@ -699,3 +699,45 @@ func TestSyncStatusDeploying(t *testing.T) {
 		t.Errorf("expected Deploying, got %s", md.Status.Phase)
 	}
 }
+
+func TestReconcileTerminatingPVCDeletesOwnedRayService(t *testing.T) {
+	md := newMDForController("terminating-ray", "ray-storage-recovery")
+	md.UID = types.UID("test-uid")
+	md.Generation = 2
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name: "cache", ClaimName: "shared-cache", MountPath: "/cache",
+	}}}
+	md.Status.Conditions = []metav1.Condition{{
+		Type:               airunwayv1alpha1.ConditionTypeStorageReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "PVCsTerminating",
+		ObservedGeneration: md.Generation,
+	}}
+
+	rayService := &unstructured.Unstructured{}
+	setRayServiceGVK(rayService)
+	rayService.SetName(md.Name)
+	rayService.SetNamespace(md.Namespace)
+	rayService.SetOwnerReferences([]metav1.OwnerReference{{UID: md.UID}})
+
+	scheme := newScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, rayService).WithStatusSubresource(md).Build()
+	r := NewKubeRayProviderReconciler(c, scheme)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("expected storage recovery requeue after 5s, got %v", result.RequeueAfter)
+	}
+	remaining := &unstructured.Unstructured{}
+	setRayServiceGVK(remaining)
+	err = c.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, remaining)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected owned RayService deletion, got %v", err)
+	}
+}

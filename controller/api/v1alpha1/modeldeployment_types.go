@@ -146,7 +146,10 @@ type StorageVolume struct {
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
 
-	// purpose defines the intended use of this volume, enabling engine-aware defaults
+	// purpose defines the intended use of this volume and its default mount path.
+	// modelCache also configures Hugging Face cache lookup. compilationCache uses
+	// native provider integration where available; otherwise engine-specific cache
+	// configuration must be supplied explicitly through engine arguments or env.
 	// +kubebuilder:default=custom
 	// +optional
 	Purpose VolumePurpose `json:"purpose,omitempty"`

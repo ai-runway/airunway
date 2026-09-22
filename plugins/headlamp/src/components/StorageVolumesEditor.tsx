@@ -8,9 +8,11 @@
 import { useRef, useState } from 'react';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import { Icon } from '@iconify/react';
 import type { StorageVolume, VolumePurpose, PersistentVolumeAccessMode } from '@airunway/shared';
 import { PURPOSE_LABELS } from '../lib/constants';
+import { storageVolumeWithExistingClaim, storageVolumeWithSize } from '../lib/storage';
 
 interface StorageVolumesEditorProps {
   volumes: StorageVolume[];
@@ -40,7 +42,7 @@ function createDefaultVolume(): StorageVolume {
     name: `volume-${volumeCounter}`,
     purpose: 'custom',
     size: '100Gi',
-    accessMode: 'ReadWriteOnce',
+    accessMode: 'ReadWriteMany',
   };
 }
 
@@ -65,6 +67,20 @@ const labelStyle: React.CSSProperties = {
   fontWeight: 500,
   fontSize: '13px',
 };
+
+function InfoHint({ text }: { text: string }) {
+  return (
+    <Tooltip title={text} arrow>
+      <span
+        tabIndex={0}
+        aria-label={text}
+        style={{ display: 'inline-flex', marginLeft: '6px', verticalAlign: 'middle', opacity: 0.7 }}
+      >
+        <Icon icon="mdi:information-outline" width={15} />
+      </span>
+    </Tooltip>
+  );
+}
 
 export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditorProps) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(
@@ -206,7 +222,10 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                   {/* Purpose + Size row */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                     <div>
-                      <label style={labelStyle}>Purpose</label>
+                      <label style={labelStyle}>
+                        Purpose
+                        <InfoHint text="Model Cache automatically downloads and reuses model weights. Compilation Cache provides a reusable folder for compiled engine files; Dynamo connects to it automatically, while other runtimes need an advanced engine setting. Custom storage is fully user-managed." />
+                      </label>
                       <select
                         value={purpose}
                         onChange={(e) =>
@@ -231,7 +250,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       <input
                         type="text"
                         value={volume.size || ''}
-                        onChange={(e) => handleUpdate(index, { size: e.target.value })}
+                        onChange={(e) =>
+                          handleUpdate(index, storageVolumeWithSize(volume, e.target.value))
+                        }
                         placeholder="e.g. 100Gi"
                         style={inputStyle}
                       />
@@ -242,12 +263,13 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                   <div>
                     <label style={labelStyle}>Access Mode</label>
                     <select
-                      value={volume.accessMode || 'ReadWriteOnce'}
+                      value={volume.accessMode || 'ReadWriteMany'}
                       onChange={(e) =>
                         handleUpdate(index, {
                           accessMode: e.target.value as PersistentVolumeAccessMode,
                         })
                       }
+                      disabled={Boolean(volume.claimName)}
                       style={selectStyle}
                     >
                       {(Object.keys(ACCESS_MODE_LABELS) as PersistentVolumeAccessMode[]).map(
@@ -267,7 +289,7 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       type="text"
                       value={volume.claimName || ''}
                       onChange={(e) =>
-                        handleUpdate(index, { claimName: e.target.value || undefined })
+                        handleUpdate(index, storageVolumeWithExistingClaim(volume, e.target.value))
                       }
                       placeholder="Leave blank to create a new volume"
                       style={inputStyle}
@@ -286,6 +308,7 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       onChange={(e) =>
                         handleUpdate(index, { storageClassName: e.target.value || undefined })
                       }
+                      disabled={Boolean(volume.claimName)}
                       placeholder="Leave blank for cluster default"
                       style={inputStyle}
                     />

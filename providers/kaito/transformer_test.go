@@ -123,6 +123,21 @@ func TestTransformVLLM(t *testing.T) {
 	}
 }
 
+func TestTransformRejectsStorageInsteadOfSilentlyDroppingIt(t *testing.T) {
+	md := newTestMD("test-model", "default")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+		{Name: "model-cache", ClaimName: "shared-cache", Purpose: airunwayv1alpha1.VolumePurposeModelCache},
+	}}
+
+	_, err := NewTransformer().Transform(context.Background(), md)
+	if err == nil {
+		t.Fatal("expected KAITO storage to be rejected")
+	}
+	if !strings.Contains(err.Error(), "persistent model storage is not supported") {
+		t.Fatalf("expected actionable storage error, got %v", err)
+	}
+}
+
 func TestTransformVLLMWithScaling(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")

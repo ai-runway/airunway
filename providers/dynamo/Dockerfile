@@ -13,6 +13,9 @@ ARG DYNAMO_VERSION
 # a real release tag. The Makefile and release workflow always pass it via
 # --build-arg.
 ARG SHIM_VERSION
+# Exact model downloader image used by provider-local storage preparation.
+# Release workflows pass a digest; local Make targets may pass a development tag.
+ARG MODEL_DOWNLOADER_IMAGE
 
 WORKDIR /workspace
 
@@ -47,12 +50,13 @@ RUN cd providers/dynamo && go mod tidy
 # Builds should pass both via --build-arg (the Makefile and release workflow do).
 RUN test -n "${DYNAMO_VERSION}" || (echo "ERROR: DYNAMO_VERSION build arg is required (see versions.env); pass --build-arg DYNAMO_VERSION=..." >&2; exit 1)
 RUN test -n "${SHIM_VERSION}" || (echo "ERROR: SHIM_VERSION build arg is required; pass --build-arg SHIM_VERSION=..." >&2; exit 1)
+RUN test -n "${MODEL_DOWNLOADER_IMAGE}" || (echo "ERROR: MODEL_DOWNLOADER_IMAGE build arg is required; pass --build-arg MODEL_DOWNLOADER_IMAGE=..." >&2; exit 1)
 # MODULE is resolved from go.mod (not hand-typed) so every -X target can never
 # drift from the package path.
 RUN cd providers/dynamo && MODULE=$(go list -m) && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a \
-      -ldflags="-X ${MODULE}.DynamoVersion=${DYNAMO_VERSION} -X ${MODULE}.shimVersion=${SHIM_VERSION}" \
+      -ldflags="-X ${MODULE}.DynamoVersion=${DYNAMO_VERSION} -X ${MODULE}.shimVersion=${SHIM_VERSION} -X github.com/ai-runway/airunway/controller/pkg/storage.DefaultDownloadJobImage=${MODEL_DOWNLOADER_IMAGE}" \
       -o provider cmd/main.go
 
 # Use distroless as minimal base image to package the provider binary

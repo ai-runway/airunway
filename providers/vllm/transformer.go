@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	storageutil "github.com/ai-runway/airunway/controller/pkg/storage"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -233,18 +234,20 @@ func (t *Transformer) buildDeployment(md *airunwayv1alpha1.ModelDeployment, name
 
 	image := t.getImage(md)
 
-	container, err := t.buildContainer(md, image, args, resources)
-	if err != nil {
-		return nil, err
+	sharedMemoryName := ""
+	if requiresSharedMemoryVolume(resources) {
+		sharedMemoryName = sharedMemoryVolumeName(md)
 	}
+
+	container := t.buildContainer(md, image, args, resources, sharedMemoryName)
 
 	podSpec := map[string]interface{}{
 		"containers": []interface{}{container},
 	}
 
 	var volumes []interface{}
-	if requiresSharedMemoryVolume(resources) {
-		volumes = append(volumes, buildSharedMemoryVolume())
+	if sharedMemoryName != "" {
+		volumes = append(volumes, buildSharedMemoryVolume(sharedMemoryName))
 	}
 	volumes = append(volumes, buildStorageVolumes(md)...)
 	if len(volumes) > 0 {
@@ -339,7 +342,13 @@ func (t *Transformer) buildService(md *airunwayv1alpha1.ModelDeployment, name, s
 }
 
 // buildContainer constructs the vLLM container map.
-func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image string, args []string, resources *airunwayv1alpha1.ResourceSpec) (map[string]interface{}, error) {
+func (t *Transformer) buildContainer(
+	md *airunwayv1alpha1.ModelDeployment,
+	image string,
+	args []string,
+	resources *airunwayv1alpha1.ResourceSpec,
+	sharedMemoryName string,
+) map[string]any {
 	argsList := make([]interface{}, len(args))
 	for i, a := range args {
 		argsList[i] = a
@@ -364,8 +373,8 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 	}
 
 	var volumeMounts []interface{}
-	if requiresSharedMemoryVolume(resources) {
-		volumeMounts = append(volumeMounts, buildSharedMemoryVolumeMount())
+	if sharedMemoryName != "" {
+		volumeMounts = append(volumeMounts, buildSharedMemoryVolumeMount(sharedMemoryName))
 	}
 	volumeMounts = append(volumeMounts, buildStorageVolumeMounts(md)...)
 	if len(volumeMounts) > 0 {
@@ -384,7 +393,7 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 		container["env"] = envVars
 	}
 
-	return container, nil
+	return container
 }
 
 // buildVLLMArgs constructs the vLLM command-line arguments.
@@ -584,16 +593,35 @@ func requiresSharedMemoryVolume(resources *airunwayv1alpha1.ResourceSpec) bool {
 	return resources != nil && resources.GPU != nil && resources.GPU.Count > 1
 }
 
-func buildSharedMemoryVolumeMount() map[string]interface{} {
-	return map[string]interface{}{
-		"name":      VLLMShmVolumeName,
+func sharedMemoryVolumeName(md *airunwayv1alpha1.ModelDeployment) string {
+	usedNames := map[string]struct{}{}
+	if md.Spec.Model.Storage != nil {
+		for _, volume := range md.Spec.Model.Storage.Volumes {
+			usedNames[volume.Name] = struct{}{}
+		}
+	}
+
+	for suffix := 0; ; suffix++ {
+		candidate := VLLMShmVolumeName
+		if suffix > 0 {
+			candidate = fmt.Sprintf("%s-%d", VLLMShmVolumeName, suffix)
+		}
+		if _, found := usedNames[candidate]; !found {
+			return candidate
+		}
+	}
+}
+
+func buildSharedMemoryVolumeMount(name string) map[string]any {
+	return map[string]any{
+		"name":      name,
 		"mountPath": "/dev/shm",
 	}
 }
 
-func buildSharedMemoryVolume() map[string]interface{} {
-	return map[string]interface{}{
-		"name": VLLMShmVolumeName,
+func buildSharedMemoryVolume(name string) map[string]any {
+	return map[string]any{
+		"name": name,
 		"emptyDir": map[string]interface{}{
 			"medium":    "Memory",
 			"sizeLimit": DefaultVLLMShmSize,
@@ -601,66 +629,18 @@ func buildSharedMemoryVolume() map[string]interface{} {
 	}
 }
 
-// storageVolumeMountPath returns the in-container mount path for a storage
-// volume, falling back to the purpose-based defaults the mutating webhook
-// normally applies. The fallback keeps PVC mounts working when admission is
-// bypassed (unit tests, direct API access without webhooks).
-func storageVolumeMountPath(vol airunwayv1alpha1.StorageVolume) string {
-	if vol.MountPath != "" {
-		return vol.MountPath
-	}
-	switch vol.Purpose {
-	case airunwayv1alpha1.VolumePurposeModelCache:
-		return "/model-cache"
-	case airunwayv1alpha1.VolumePurposeCompilationCache:
-		return "/compilation-cache"
-	default:
-		return ""
-	}
-}
-
 // buildStorageVolumes renders pod-level volumes for each PVC-backed entry in
 // spec.model.storage. Each volume references its (possibly auto-generated) PVC
 // claim name so the inference pod can mount HF/cache storage.
 func buildStorageVolumes(md *airunwayv1alpha1.ModelDeployment) []interface{} {
-	if md.Spec.Model.Storage == nil {
-		return nil
-	}
-	var volumes []interface{}
-	for _, vol := range md.Spec.Model.Storage.Volumes {
-		volumes = append(volumes, map[string]interface{}{
-			"name": vol.Name,
-			"persistentVolumeClaim": map[string]interface{}{
-				"claimName": vol.ResolvedClaimName(md.Name),
-			},
-		})
-	}
-	return volumes
+	return storageutil.PodVolumes(md)
 }
 
 // buildStorageVolumeMounts renders the container volumeMounts for each storage
 // volume. Volumes without a resolvable mount path are skipped (custom-purpose
 // volumes require an explicit mountPath, enforced by the webhook).
 func buildStorageVolumeMounts(md *airunwayv1alpha1.ModelDeployment) []interface{} {
-	if md.Spec.Model.Storage == nil {
-		return nil
-	}
-	var mounts []interface{}
-	for _, vol := range md.Spec.Model.Storage.Volumes {
-		mountPath := storageVolumeMountPath(vol)
-		if mountPath == "" {
-			continue
-		}
-		mount := map[string]interface{}{
-			"name":      vol.Name,
-			"mountPath": mountPath,
-		}
-		if vol.ReadOnly {
-			mount["readOnly"] = true
-		}
-		mounts = append(mounts, mount)
-	}
-	return mounts
+	return storageutil.ContainerVolumeMounts(md)
 }
 
 // buildResourceLimits creates resource limits and requests from ResourceSpec.
@@ -740,7 +720,7 @@ func (t *Transformer) buildEnvVars(md *airunwayv1alpha1.ModelDeployment) []inter
 		})
 	}
 
-	return envVars
+	return storageutil.AppendModelCacheEnv(md, envVars)
 }
 
 func envVarSourceToMap(source *corev1.EnvVarSource) map[string]interface{} {

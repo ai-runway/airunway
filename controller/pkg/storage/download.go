@@ -18,7 +18,11 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"maps"
+	"sort"
+	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -31,13 +35,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const (
-	// DefaultDownloadJobImage is the default container image for model download jobs.
-	// This image has huggingface_hub (with hf_xet) pre-installed.
-	DefaultDownloadJobImage = "ghcr.io/ai-runway/airunway/model-downloader:latest"
+// DefaultDownloadJobImage is the build-injected default container image for
+// model download Jobs. Release binaries embed an immutable digest. Source
+// builds intentionally leave it empty so they cannot silently launch a
+// mutable image; callers may provide an explicit runtime override instead.
+var DefaultDownloadJobImage = ""
 
+const (
 	// downloadJobSuffix is the suffix appended to the ModelDeployment name to form the Job name
 	downloadJobSuffix = "-model-download"
+	// downloadJobInputHashAnnotation ties Job completion to the exact model-cache PVC identity and inputs.
+	downloadJobInputHashAnnotation = "airunway.ai/download-input-hash"
+	// downloadJobSchedulingHashAnnotation replaces incomplete Jobs when immutable
+	// scheduling constraints change without invalidating completed downloads.
+	downloadJobSchedulingHashAnnotation = "airunway.ai/download-scheduling-hash"
 
 	// defaultBackoffLimit is the number of retries for the download Job
 	defaultBackoffLimit int32 = 6
@@ -56,7 +67,7 @@ const (
 // - A volume with purpose=modelCache exists
 // - The modelCache volume is not readOnly (readOnly implies pre-populated data)
 func NeedsDownloadJob(md *airunwayv1alpha1.ModelDeployment) bool {
-	if md.Spec.Model.Source != airunwayv1alpha1.ModelSourceHuggingFace {
+	if md.Spec.Model.Source != "" && md.Spec.Model.Source != airunwayv1alpha1.ModelSourceHuggingFace {
 		return false
 	}
 	vol := findModelCacheVolume(md)
@@ -83,96 +94,164 @@ func findModelCacheVolume(md *airunwayv1alpha1.ModelDeployment) *airunwayv1alpha
 	return nil
 }
 
-// deleteStaleJob deletes a Job that belongs to a previous (now-deleted) ModelDeployment.
-// Uses background propagation (matching DeleteManagedJobs) and tolerates NotFound
-// in case GC already removed it.
-func deleteStaleJob(ctx context.Context, c client.Client, job *batchv1.Job) error {
+// deleteDownloadJob removes a controller-owned Job and waits for its pods to terminate
+// before a replacement workload can proceed.
+func deleteDownloadJob(ctx context.Context, c client.Client, job *batchv1.Job, reason string) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Deleting stale download Job (owner UID mismatch)", "name", job.Name)
-	propagation := metav1.DeletePropagationBackground
+	logger.Info("Deleting model download Job", "name", job.Name, "reason", reason)
+	propagation := metav1.DeletePropagationForeground
+	uid, version := job.UID, job.ResourceVersion
 	if err := c.Delete(ctx, job, &client.DeleteOptions{
 		PropagationPolicy: &propagation,
+		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	}); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete stale download Job %s: %w", job.Name, err)
+		return fmt.Errorf("failed to delete download Job %s: %w", job.Name, err)
 	}
 	return nil
 }
 
+func downloadJobInputHash(
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	downloadJobImage string,
+	pvcUID types.UID,
+) string {
+	huggingFaceToken := ""
+	if md.Spec.Secrets != nil {
+		huggingFaceToken = md.Spec.Secrets.HuggingFaceToken
+	}
+	parts := []string{
+		md.Spec.Model.ID,
+		string(md.Spec.Model.Source),
+		vol.Name,
+		vol.ResolvedClaimName(md.Name),
+		VolumeMountPath(*vol),
+		downloadJobImage,
+		huggingFaceToken,
+		string(pvcUID),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return fmt.Sprintf("%x", sum)
+}
+
+func downloadJobSchedulingHash(md *airunwayv1alpha1.ModelDeployment) string {
+	selectorKeys := make([]string, 0, len(md.Spec.NodeSelector))
+	for key := range md.Spec.NodeSelector {
+		selectorKeys = append(selectorKeys, key)
+	}
+	sort.Strings(selectorKeys)
+
+	parts := make([]string, 1, 1+2*len(selectorKeys)+1+len(md.Spec.Tolerations))
+	parts[0] = "nodeSelector"
+	for _, key := range selectorKeys {
+		parts = append(parts, key, md.Spec.NodeSelector[key])
+	}
+
+	canonicalTolerations := make([]string, len(md.Spec.Tolerations))
+	for i := range md.Spec.Tolerations {
+		toleration := &md.Spec.Tolerations[i]
+		tolerationSeconds := "nil"
+		if toleration.TolerationSeconds != nil {
+			tolerationSeconds = fmt.Sprintf("%d", *toleration.TolerationSeconds)
+		}
+		canonicalTolerations[i] = strings.Join([]string{
+			toleration.Key,
+			string(toleration.Operator),
+			toleration.Value,
+			string(toleration.Effect),
+			tolerationSeconds,
+		}, "\x00")
+	}
+	sort.Strings(canonicalTolerations)
+	parts = append(parts, "tolerations")
+	parts = append(parts, canonicalTolerations...)
+
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return fmt.Sprintf("%x", sum)
+}
+
+func resolveDownloadJobInputHash(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	downloadJobImage string,
+) (string, error) {
+	claimName := vol.ResolvedClaimName(md.Name)
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, pvc)
+	if err != nil && !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get model-cache PVC %s for download Job identity: %w", claimName, err)
+	}
+
+	pvcUID := types.UID("")
+	if err == nil {
+		pvcUID = pvc.UID
+	}
+	return downloadJobInputHash(md, vol, downloadJobImage, pvcUID), nil
+}
+
 // EnsureDownloadJob ensures a model download Job exists and tracks its completion.
 // Returns completed=true when the Job has succeeded.
-func EnsureDownloadJob(ctx context.Context, c client.Client, md *airunwayv1alpha1.ModelDeployment, downloadJobImage string) (bool, error) {
+func EnsureDownloadJob(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	downloadJobImage string,
+) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	vol := findModelCacheVolume(md)
 	if vol == nil {
 		return true, nil // nothing to do
 	}
+	if downloadJobImage == "" {
+		return false, fmt.Errorf(
+			"model downloader image is not configured; set --model-downloader-image on the controller " +
+				"or --download-job-image on the Dynamo provider, or inject storage.DefaultDownloadJobImage at build time",
+		)
+	}
+
+	inputHash, err := resolveDownloadJobInputHash(ctx, c, md, vol, downloadJobImage)
+	if err != nil {
+		return false, err
+	}
 
 	jobName := downloadJobName(md.Name)
 
 	// Check if Job already exists
 	existing := &batchv1.Job{}
-	err := c.Get(ctx, types.NamespacedName{
+	err = c.Get(ctx, types.NamespacedName{
 		Name:      jobName,
 		Namespace: md.Namespace,
 	}, existing)
 
 	if errors.IsNotFound(err) {
-		// Create the download Job
-		job := buildDownloadJob(md, vol, downloadJobImage)
-		logger.Info("Creating model download Job", "name", jobName, "model", md.Spec.Model.ID)
-		if createErr := c.Create(ctx, job); createErr != nil {
-			if !errors.IsAlreadyExists(createErr) {
-				return false, fmt.Errorf("failed to create download Job %s: %w", jobName, createErr)
-			}
-			logger.Info("Download Job already exists (concurrent creation)", "name", jobName)
-		}
-		return false, nil
+		return false, createDownloadJob(ctx, c, md, vol, downloadJobImage, inputHash)
 	}
 	if err != nil {
 		return false, fmt.Errorf("failed to get download Job %s: %w", jobName, err)
 	}
 
-	// Verify the existing Job is owned by this ModelDeployment (same UID).
-	// If a ModelDeployment is deleted and recreated with the same name, there's a
-	// race window where the old Job still exists. Delete it and requeue so the
-	// next reconcile creates a fresh Job.
-	if !IsOwnedByMD(existing, md.UID) {
-		if err := deleteStaleJob(ctx, c, existing); err != nil {
-			return false, err
-		}
-		return false, nil // requeue → next reconcile creates fresh Job
+	current, err := ensureCurrentDownloadJob(ctx, c, md, existing, inputHash)
+	if err != nil || !current {
+		return false, err
 	}
 
-	// Job exists — check conditions (authoritative) then counters (fallback).
-	for _, cond := range existing.Status.Conditions {
-		if cond.Status != corev1.ConditionTrue {
-			continue
-		}
-		switch cond.Type {
-		case batchv1.JobComplete:
-			logger.Info("Model download Job completed", "name", jobName)
-			return true, nil
-		case batchv1.JobFailed:
-			return false, fmt.Errorf("model download Job %s failed permanently: %s",
-				jobName, cond.Message)
-		}
-	}
-
-	// Fallback: counter-based detection for older clusters or edge cases
-	// where conditions haven't been set yet.
-	if existing.Status.Succeeded >= 1 {
-		logger.Info("Model download Job completed (counter)", "name", jobName)
+	if downloadJobCompleted(existing) {
+		logger.Info("Model download Job completed", "name", jobName)
 		return true, nil
 	}
 
-	backoffLimit := defaultBackoffLimit
-	if existing.Spec.BackoffLimit != nil {
-		backoffLimit = *existing.Spec.BackoffLimit
+	if existing.Annotations[downloadJobSchedulingHashAnnotation] != downloadJobSchedulingHash(md) {
+		if err := deleteDownloadJob(ctx, c, existing, "scheduling constraints changed"); err != nil {
+			return false, err
+		}
+		return false, nil // requeue → next reconcile creates a schedulable replacement Job
 	}
-	if existing.Status.Failed >= backoffLimit {
-		return false, fmt.Errorf("model download Job %s failed permanently (failed=%d, backoffLimit=%d)",
-			jobName, existing.Status.Failed, backoffLimit)
+
+	if err := downloadJobFailure(existing); err != nil {
+		return false, err
 	}
 
 	logger.Info("Model download Job still running", "name", jobName,
@@ -180,17 +259,158 @@ func EnsureDownloadJob(ctx context.Context, c client.Client, md *airunwayv1alpha
 	return false, nil
 }
 
+func createDownloadJob(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	downloadJobImage string,
+	inputHash string,
+) error {
+	job := buildDownloadJob(md, vol, downloadJobImage, inputHash)
+	logger := log.FromContext(ctx)
+	logger.Info("Creating model download Job", "name", job.Name, "model", md.Spec.Model.ID)
+	if err := c.Create(ctx, job); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create download Job %s: %w", job.Name, err)
+		}
+		logger.Info("Download Job already exists (concurrent creation)", "name", job.Name)
+	}
+	return nil
+}
+
+func ensureCurrentDownloadJob(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	existing *batchv1.Job,
+	inputHash string,
+) (bool, error) {
+	// A name collision is only safe to delete when the owner reference proves
+	// that the Job belongs to an older ModelDeployment with this same name.
+	if !IsOwnedByMD(existing, md.UID) {
+		if !isOwnedByPriorMD(existing, md) {
+			return false, fmt.Errorf(
+				"download Job %s already exists but is not owned by this ModelDeployment "+
+					"or a prior ModelDeployment with the same name; refusing to delete it",
+				existing.Name,
+			)
+		}
+		if err := deleteDownloadJob(ctx, c, existing, "owner UID mismatch"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	if !existing.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	if existing.Annotations[downloadJobInputHashAnnotation] != inputHash {
+		if err := deleteDownloadJob(ctx, c, existing, "model-cache inputs changed"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func downloadJobCompleted(job *batchv1.Job) bool {
+	// Completed downloads remain valid when only scheduling constraints change:
+	// the immutable Job no longer needs to schedule, and the input hash still
+	// proves the model/PVC provenance.
+	for _, cond := range job.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobComplete {
+			return true
+		}
+	}
+
+	// Fallback: counter-based completion detection for older clusters or edge cases
+	// where conditions haven't been set yet.
+	return job.Status.Succeeded >= 1
+}
+
+func downloadJobFailure(job *batchv1.Job) error {
+	// Job is incomplete and still has current scheduling. Check terminal failure
+	// conditions before falling back to counters.
+	for _, cond := range job.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue && cond.Type == batchv1.JobFailed {
+			return fmt.Errorf("model download Job %s failed permanently: %s",
+				job.Name, cond.Message)
+		}
+	}
+
+	backoffLimit := defaultBackoffLimit
+	if job.Spec.BackoffLimit != nil {
+		backoffLimit = *job.Spec.BackoffLimit
+	}
+	if job.Status.Failed >= backoffLimit {
+		return fmt.Errorf("model download Job %s failed permanently (failed=%d, backoffLimit=%d)",
+			job.Name, job.Status.Failed, backoffLimit)
+	}
+
+	return nil
+}
+
+// EnsureDownloadJobAbsent removes a current or provably prior-owned download
+// Job when the desired storage configuration no longer requires one. Foreign
+// Jobs are preserved.
+func EnsureDownloadJobAbsent(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+) (bool, error) {
+	jobName := downloadJobName(md.Name)
+	existing := &batchv1.Job{}
+	err := c.Get(ctx, types.NamespacedName{Name: jobName, Namespace: md.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get download Job %s: %w", jobName, err)
+	}
+	if !IsOwnedByMD(existing, md.UID) &&
+		!isOwnedByPriorMD(existing, md) {
+		log.FromContext(ctx).Info("Preserving download Job not owned by this ModelDeployment", "name", jobName)
+		return true, nil
+	}
+	if !existing.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	if err := deleteDownloadJob(ctx, c, existing, "download no longer required"); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // buildDownloadJob creates a batch Job that downloads a HuggingFace model.
-func buildDownloadJob(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha1.StorageVolume, downloadJobImage string) *batchv1.Job {
+func buildDownloadJob(
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	downloadJobImage string,
+	inputHash string,
+) *batchv1.Job {
 	claimName := vol.ResolvedClaimName(md.Name)
+	mountPath := VolumeMountPath(*vol)
 	backoffLimit := defaultBackoffLimit
 	completions := int32(1)
 	parallelism := int32(1)
+	var nodeSelector map[string]string
+	if len(md.Spec.NodeSelector) > 0 {
+		nodeSelector = maps.Clone(md.Spec.NodeSelector)
+	}
+	var tolerations []corev1.Toleration
+	if len(md.Spec.Tolerations) > 0 {
+		tolerations = make([]corev1.Toleration, len(md.Spec.Tolerations))
+		for i := range md.Spec.Tolerations {
+			md.Spec.Tolerations[i].DeepCopyInto(&tolerations[i])
+		}
+	}
 
 	envVars := []corev1.EnvVar{
 		{
 			Name:  "HF_HOME",
-			Value: vol.MountPath,
+			Value: mountPath,
 		},
 	}
 
@@ -198,6 +418,10 @@ func buildDownloadJob(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      downloadJobName(md.Name),
 			Namespace: md.Namespace,
+			Annotations: map[string]string{
+				downloadJobInputHashAnnotation:      inputHash,
+				downloadJobSchedulingHashAnnotation: downloadJobSchedulingHash(md),
+			},
 			Labels: map[string]string{
 				airunwayv1alpha1.LabelManagedBy:       "airunway",
 				airunwayv1alpha1.LabelModelDeployment: md.Name,
@@ -221,6 +445,8 @@ func buildDownloadJob(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					NodeSelector:  nodeSelector,
+					Tolerations:   tolerations,
 					Containers: []corev1.Container{
 						{
 							Name:  "model-download",
@@ -239,7 +465,7 @@ func buildDownloadJob(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "model-cache",
-									MountPath: vol.MountPath,
+									MountPath: mountPath,
 								},
 							},
 						},

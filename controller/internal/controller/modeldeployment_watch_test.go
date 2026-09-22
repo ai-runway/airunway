@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -75,4 +77,67 @@ func TestMapProviderConfigToModelDeployments(t *testing.T) {
 		"default/selected-provider",
 		"default/pinned-provider",
 	)
+}
+
+func TestModelDeploymentPVCReferenceIndexValues(t *testing.T) {
+	managedSize := resource.MustParse("5Gi")
+	md := newModelDeploymentForProviderWatch("model", "default", "vllm", "")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{
+			{Name: "explicit", ClaimName: "shared-cache"},
+			{Name: "duplicate", ClaimName: "shared-cache"},
+			{Name: "generated"},
+			{Name: "managed", Size: &managedSize},
+		},
+	}
+
+	got := modelDeploymentPVCReferenceIndexValues(md)
+	if len(got) != 2 {
+		t.Fatalf("expected two unique pre-existing PVC references, got %#v", got)
+	}
+	references := map[string]bool{}
+	for _, claimName := range got {
+		references[claimName] = true
+	}
+	if !references["shared-cache"] || !references["model-generated"] {
+		t.Fatalf("unexpected indexed PVC references: %#v", got)
+	}
+}
+
+func TestMapPVCToModelDeployments(t *testing.T) {
+	referenced := newModelDeploymentForProviderWatch("referenced", "default", "vllm", "")
+	referenced.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{{Name: "cache", ClaimName: "shared-cache"}},
+	}
+	generated := newModelDeploymentForProviderWatch("generated", "default", "vllm", "")
+	generated.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{{Name: "cache"}},
+	}
+	unrelated := newModelDeploymentForProviderWatch("unrelated", "default", "vllm", "")
+	unrelated.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{{Name: "cache", ClaimName: "other-cache"}},
+	}
+	otherNamespace := newModelDeploymentForProviderWatch("other-namespace", "other", "vllm", "")
+	otherNamespace.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{{Name: "cache", ClaimName: "shared-cache"}},
+	}
+
+	reconciler := newTestReconciler(
+		newTestScheme(),
+		nil,
+		referenced,
+		generated,
+		unrelated,
+		otherNamespace,
+	)
+
+	requests := reconciler.mapPVCToModelDeployments(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-cache", Namespace: "default"},
+	})
+	assertRequestsMatch(t, requests, "default/referenced")
+
+	requests = reconciler.mapPVCToModelDeployments(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-cache", Namespace: "default"},
+	})
+	assertRequestsMatch(t, requests, "default/generated")
 }

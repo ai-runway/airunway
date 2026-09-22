@@ -4,7 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -102,6 +106,100 @@ func TestReconcileRejectsConflictingImageFieldsBeforeSelection(t *testing.T) {
 	validated := meta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeValidated)
 	if validated == nil || validated.Status != metav1.ConditionFalse {
 		t.Fatalf("expected Validated=False, got %#v", validated)
+	}
+}
+
+func TestReconcilePrioritizesTerminatingPVCBeforeValidation(t *testing.T) {
+	for _, desired := range []string{"shared-cache", "missing-b", ""} {
+		t.Run("desired-"+desired, func(t *testing.T) {
+			testTerminatingPVCBeforeValidation(t, desired)
+		})
+	}
+}
+
+func testTerminatingPVCBeforeValidation(t *testing.T, desired string) {
+	t.Helper()
+
+	scheme := newTestScheme()
+	now := metav1.Now()
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "terminating-before-validation",
+			Namespace:  "default",
+			UID:        types.UID("md-uid"),
+			Generation: 2,
+		},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{
+			Model: airunwayv1alpha1.ModelSpec{
+				ID:     "meta-llama/Llama-3-8B",
+				Source: airunwayv1alpha1.ModelSourceHuggingFace,
+				Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+					Name: "cache", ClaimName: "shared-cache", Purpose: airunwayv1alpha1.VolumePurposeModelCache,
+				}}},
+			},
+			Image:  "legacy:v1",
+			Engine: airunwayv1alpha1.EngineSpec{Image: "engine:v2"},
+		},
+		Status: airunwayv1alpha1.ModelDeploymentStatus{
+			Provider: &airunwayv1alpha1.ProviderStatus{Name: providerNameVLLM},
+			Phase:    airunwayv1alpha1.DeploymentPhaseRunning,
+			Endpoint: &airunwayv1alpha1.EndpointStatus{Service: "old-service", Port: 8000},
+			Replicas: &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1, Available: 1},
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:              "shared-cache",
+		Namespace:         md.Namespace,
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"kubernetes.io/pvc-protection"},
+	}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      md.Name + "-model-download",
+		Namespace: md.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       md.Name,
+			UID:        md.UID,
+		}},
+	}}
+	job.UID = "download-uid"
+	controlled := true
+	job.OwnerReferences[0].Controller = &controlled
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "old-consumer", Namespace: md.Namespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controlled}}}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "old", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}}}}}
+	if desired == "" {
+		md.Spec.Model.Storage = nil
+	} else {
+		md.Spec.Model.Storage.Volumes[0].ClaimName = desired
+	}
+	r := newTestReconciler(scheme, nil, md, pvc, job, pod)
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("expected teardown requeue after 5s, got %+v", result)
+	}
+
+	if err := r.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected downloader Job deletion, got %v", err)
+	}
+	got := &airunwayv1alpha1.ModelDeployment{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, got); err != nil {
+		t.Fatalf("getting reconciled ModelDeployment: %v", err)
+	}
+	storageReady := meta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeStorageReady)
+	if storageReady == nil || storageReady.Status != metav1.ConditionFalse || storageReady.Reason != "PVCsTerminating" {
+		t.Fatalf("unexpected StorageReady condition: %#v", storageReady)
+	}
+	if validated := meta.FindStatusCondition(got.Status.Conditions, airunwayv1alpha1.ConditionTypeValidated); validated != nil {
+		t.Fatalf("validation must wait until terminating PVC consumers are released, got %#v", validated)
+	}
+	if got.Status.Endpoint != nil || got.Status.Replicas != nil {
+		t.Fatalf("expected stale serving status to be cleared, got endpoint=%+v replicas=%+v", got.Status.Endpoint, got.Status.Replicas)
 	}
 }
 

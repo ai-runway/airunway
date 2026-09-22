@@ -165,13 +165,13 @@ clean:
 
 # Build the controller binary
 controller-build: verify-versions
-	cd controller && $(MAKE) VERIFIED_VERSIONS=1 build
+	cd controller && $(MAKE) VERIFIED_VERSIONS=1 MODEL_DOWNLOADER_IMG=$(MODEL_DOWNLOADER_IMG) build
 	@echo "✅ Controller binary built: controller/bin/manager"
 
 # Build controller Docker image
 controller-docker-build: verify-versions
 	@test -n "$(strip $(AGENT_PROVIDER_VERSION))" || { echo "❌ AGENT_PROVIDER_VERSION must not be empty"; exit 1; }
-	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg "GAIE_VERSION=$(GAIE_VERSION)" --build-arg "AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION)" -f controller/Dockerfile -t $(CONTROLLER_IMG) .
+	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) --build-arg "GAIE_VERSION=$(GAIE_VERSION)" --build-arg "MODEL_DOWNLOADER_IMAGE=$(MODEL_DOWNLOADER_IMG)" --build-arg "AGENT_PROVIDER_VERSION=$(AGENT_PROVIDER_VERSION)" -f controller/Dockerfile -t $(CONTROLLER_IMG) .
 	@echo "✅ Controller image built: $(CONTROLLER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
 # Generate CRD manifests and deep copy code

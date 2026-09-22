@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 const (
@@ -286,6 +287,21 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Releasing a terminating PVC takes precedence over validating the next
+	// desired workload. An invalid spec must not keep an older pod alive and
+	// deadlock Kubernetes PVC protection.
+	if storage.WorkloadTeardownRequired(&md) {
+		workloads := []storage.ConsumerWorkload{
+			{GroupVersionKind: deploymentGVK, Name: md.Name},
+			{GroupVersionKind: deploymentGVK, Name: md.Name + "-decode"},
+			{GroupVersionKind: deploymentGVK, Name: md.Name + "-prefill"},
+		}
+		if _, err := storage.EnsureConsumerWorkloadsAbsent(ctx, r.Client, &md, workloads...); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	// Validate provider compatibility
 	if err := r.validateCompatibility(&md); err != nil {
 		logger.Error(err, "Provider compatibility check failed", "name", md.Name)
@@ -295,6 +311,13 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, r.Status().Update(ctx, &md)
 	}
 	r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderCompatible, metav1.ConditionTrue, "CompatibilityVerified", "Configuration compatible with vLLM")
+
+	// The core controller owns portable PVC/download lifecycle. Do not create
+	// inference pods until conditions for this generation show the cache is ready.
+	if !storage.WorkloadReady(&md) {
+		logger.Info("Waiting for model storage preparation", "name", md.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 	if err := r.setImageResolutionStatus(ctx, &md); err != nil {
 		logger.Error(err, "Failed to resolve vLLM image", "name", md.Name)
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed

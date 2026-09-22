@@ -97,12 +97,13 @@ function validateMountPath(mountPath: string | undefined, purpose: VolumePurpose
   return null
 }
 
+function getStorageSourceMode(volume: StorageVolume): 'new' | 'existing' {
+  return volume.size?.trim() ? 'new' : 'existing'
+}
+
 export function StorageVolumesSection({ volumes, onChange, deploymentName, availablePVCs }: StorageVolumesSectionProps) {
   // Track which volume cards have been interacted with for showing validation
   const [touched, setTouched] = useState<Record<number, Set<string>>>({})
-  // Explicitly track storage source mode per volume index.
-  // Derived-from-data approach breaks because empty-string claimName is falsy.
-  const [sourceModes, setSourceModes] = useState<Record<number, 'new' | 'existing'>>({})
   const markTouched = (index: number, field: string) => {
     setTouched(prev => {
       const fields = new Set(prev[index] || [])
@@ -115,7 +116,6 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
 
   const addVolume = () => {
     if (volumes.length >= MAX_VOLUMES) return
-    const newIndex = volumes.length
     const newVolume: StorageVolume = {
       name: generateVolumeName(volumes),
       purpose: 'custom',
@@ -123,28 +123,17 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
       size: '100Gi',
       accessMode: 'ReadWriteMany',
     }
-    setSourceModes(prev => ({ ...prev, [newIndex]: 'new' }))
     onChange([...volumes, newVolume])
   }
 
   const removeVolume = (index: number) => {
     const updated = volumes.filter((_, i) => i !== index)
     onChange(updated)
-    // Clean up touched + sourceMode state and re-index
+    // Clean up touched state and re-index
     setTouched(prev => {
       const next = { ...prev }
       delete next[index]
       const reindexed: Record<number, Set<string>> = {}
-      for (const [key, value] of Object.entries(next)) {
-        const k = parseInt(key)
-        reindexed[k > index ? k - 1 : k] = value
-      }
-      return reindexed
-    })
-    setSourceModes(prev => {
-      const next = { ...prev }
-      delete next[index]
-      const reindexed: Record<number, 'new' | 'existing'> = {}
       for (const [key, value] of Object.entries(next)) {
         const k = parseInt(key)
         reindexed[k > index ? k - 1 : k] = value
@@ -165,11 +154,7 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
     const clearedIndices: number[] = []
 
     const updated = volumes.map((vol, index) => {
-      const sourceMode = sourceModes[index] ?? (
-        vol.size ? 'new' :
-        vol.claimName !== undefined ? 'existing' :
-        'new'
-      )
+      const sourceMode = getStorageSourceMode(vol)
 
       if (sourceMode !== 'existing' || !vol.claimName || validClaimNames.has(vol.claimName)) {
         return vol
@@ -191,7 +176,7 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
       }
       return next
     })
-  }, [availablePVCs, volumes, sourceModes, onChange])
+  }, [availablePVCs, volumes, onChange])
 
   const handlePurposeChange = (index: number, purpose: VolumePurpose) => {
     const updates: Partial<StorageVolume> = { purpose }
@@ -212,22 +197,12 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
       .filter((p): p is VolumePurpose => p === 'modelCache' || p === 'compilationCache')
   )
 
-  // Determine source mode: use explicit state if set, otherwise derive from data
-  // (for volumes loaded from existing config that didn't go through addVolume)
-  const getSourceMode = (vol: StorageVolume, index: number): 'new' | 'existing' => {
-    if (sourceModes[index] !== undefined) return sourceModes[index]
-    // Derive from data for pre-existing volumes
-    if (vol.size) return 'new'
-    if (vol.claimName !== undefined) return 'existing'
-    return 'new'
-  }
-
   return (
       <div className="space-y-4">
         {volumes.map((vol, index) => {
           const nameError = isTouched(index, 'name') ? validateVolumeName(vol.name, index, volumes) : null
           const mountPathError = isTouched(index, 'mountPath') ? validateMountPath(vol.mountPath, vol.purpose, index, volumes) : null
-          const sourceMode = getSourceMode(vol, index)
+          const sourceMode = getStorageSourceMode(vol)
           const isNewStorage = sourceMode === 'new'
 
           return (
@@ -281,7 +256,7 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2">
                     <Label htmlFor={`vol-purpose-${index}`}>Purpose</Label>
-                    <InfoHint text="Model Cache: automatically downloads and stores model weights for faster restarts. Compilation Cache: stores engine compilation output to skip recompilation. Custom: general-purpose storage you manage." />
+                    <InfoHint text="Model Cache automatically downloads and reuses model weights. Compilation Cache provides a reusable folder for compiled engine files; Dynamo connects to it automatically, while other runtimes need an advanced engine setting. Custom storage is fully user-managed." />
                   </div>
                   <Select
                     value={vol.purpose || 'custom'}
@@ -346,7 +321,6 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
                   value={sourceMode}
                   onValueChange={(value) => {
                     const mode = value as 'new' | 'existing'
-                    setSourceModes(prev => ({ ...prev, [index]: mode }))
                     if (mode === 'new') {
                       updateVolume(index, {
                         size: vol.size || '100Gi',
@@ -392,12 +366,10 @@ export function StorageVolumesSection({ volumes, onChange, deploymentName, avail
                           value={vol.size || ''}
                           onChange={(e) => {
                             const newSize = e.target.value || undefined
-                            updateVolume(index, { size: newSize })
-                            // If the user clears size entirely, switch to "existing" mode
-                            // so the disk name field becomes visible and the form stays valid.
-                            if (!newSize) {
-                              setSourceModes(prev => ({ ...prev, [index]: 'existing' }))
-                            }
+                            updateVolume(index, {
+                              size: newSize,
+                              claimName: newSize ? undefined : vol.claimName ?? '',
+                            })
                           }}
                           placeholder="e.g. 100Gi"
                         />
