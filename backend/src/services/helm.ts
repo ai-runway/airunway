@@ -476,6 +476,20 @@ class HelmService {
     return cmd;
   }
 
+  private buildKeepCrdPostRendererCommand(installCommand: string, rendererVar: string): string {
+    const rendererRef = `$${rendererVar}`;
+    return [
+      `(${rendererVar}=$(mktemp)`,
+      'set -e',
+      `trap 'rm -f -- "${rendererRef}"' EXIT`,
+      `cat > "${rendererRef}" <<'AIRUNWAY_KEEP_CRD_POST_RENDERER'`,
+      `#!/usr/bin/env node\n${KEEP_CRD_POST_RENDERER_SOURCE}`,
+      'AIRUNWAY_KEEP_CRD_POST_RENDERER',
+      `chmod +x "${rendererRef}"`,
+      `${installCommand} --post-renderer "${rendererRef}")`,
+    ].join('\n');
+  }
+
   private buildPullChartCommand(chart: HelmChart, untarDir: string): string {
     let cmd = `helm pull ${chart.fetchUrl || chart.chart} --untar --untardir ${untarDir}`;
     if (!chart.fetchUrl && chart.version) {
@@ -494,6 +508,14 @@ class HelmService {
     const splitDocuments = (renderedPath: string, documentsDir: string) =>
       `awk -v output_dir="${documentsDir}" 'BEGIN { count = 1; document = output_dir "/doc-1.yaml" } /^---[[:space:]]*$/ { close(document); document = output_dir "/doc-" ++count ".yaml"; next } { print > document }' "${renderedPath}"`;
 
+    const installCommand = this.buildInstallCommand(chart, `"${chartPathRef}"`, false);
+    const installWithPostRenderer = chart.keepCrdResources
+      ? this.buildKeepCrdPostRendererCommand(
+          installCommand,
+          `${varPrefix}_KEEP_CRD_POST_RENDERER`,
+        )
+      : installCommand;
+
     return [
       `(${chartDirVar}=$(mktemp -d)`,
       'set -e',
@@ -502,7 +524,7 @@ class HelmService {
       `${chartPathVar}=$(find "${chartDirRef}" -mindepth 1 -maxdepth 1 -type d -print -quit)`,
       `test -n "${chartPathRef}"`,
       `CRD_DOCUMENTS_DIR="${chartPathRef}/.airunway-crd-documents" && SKIP_CRD_DOCUMENTS_DIR="${chartPathRef}/.airunway-skip-crd-documents" && SKIP_CRD_NAMES="${chartPathRef}/.airunway-skip-crd-names" && mkdir -p "$CRD_DOCUMENTS_DIR" "$SKIP_CRD_DOCUMENTS_DIR" && : > "$SKIP_CRD_NAMES" && ${templateArgs} > "${chartPathRef}/.airunway-rendered.yaml" && ${templateArgs} --skip-crds > "${chartPathRef}/.airunway-rendered-skip-crds.yaml" && ${splitDocuments(`${chartPathRef}/.airunway-rendered.yaml`, '$CRD_DOCUMENTS_DIR')} && ${splitDocuments(`${chartPathRef}/.airunway-rendered-skip-crds.yaml`, '$SKIP_CRD_DOCUMENTS_DIR')} && find "$SKIP_CRD_DOCUMENTS_DIR" -maxdepth 1 -type f -name "*.yaml" -print | sort | while IFS= read -r crd; do if grep -Eq '^[[:space:]]*kind:[[:space:]]*CustomResourceDefinition[[:space:]]*$' "$crd"; then crd_names=$(kubectl create --dry-run=client -f "$crd" -o name) || exit $?; for crd_name in $crd_names; do printf '%s\\n' "$crd_name" >> "$SKIP_CRD_NAMES"; done; fi; done && find "$CRD_DOCUMENTS_DIR" -maxdepth 1 -type f -name "*.yaml" -print | sort | while IFS= read -r crd; do if grep -Eq '^[[:space:]]*kind:[[:space:]]*CustomResourceDefinition[[:space:]]*$' "$crd"; then missing=0; crd_names=$(kubectl create --dry-run=client -f "$crd" -o name) || exit $?; for crd_name in $crd_names; do if grep -Fqx "$crd_name" "$SKIP_CRD_NAMES"; then continue; fi; existing=$(kubectl get "$crd_name" --ignore-not-found -o name) || exit $?; if [ -z "$existing" ]; then missing=1; fi; done; if [ "$missing" = "1" ]; then kubectl apply --server-side --force-conflicts -f "$crd" || exit $?; fi; fi; done`,
-      `${this.buildInstallCommand(chart, `"${chartPathRef}"`, false)})`,
+      `${installWithPostRenderer})`,
     ].join(' && ');
   }
 
@@ -808,7 +830,7 @@ class HelmService {
     namespace: string,
     onStream?: StreamCallback
   ): Promise<HelmResult> {
-    return this.execute(['uninstall', releaseName, '--namespace', namespace], onStream);
+    return this.execute(['uninstall', releaseName, '--namespace', namespace, '--wait'], onStream);
   }
 
   /**
@@ -1035,12 +1057,20 @@ class HelmService {
         continue;
       }
 
+      const installCommand = this.buildInstallCommand(chart, chart.chart, !chart.fetchUrl);
+      const installWithPostRenderer = chart.keepCrdResources
+        ? this.buildKeepCrdPostRendererCommand(
+            installCommand,
+            `${this.getManagedChartVarPrefix(chart)}_KEEP_CRD_POST_RENDERER`,
+          )
+        : installCommand;
+
       if (chart.fetchUrl) {
         // Use fetch + install for charts with fetchUrl
-        const cmd = `helm fetch ${chart.fetchUrl} && ${this.buildInstallCommand(chart, chart.chart, false)}`;
+        const cmd = `helm fetch ${chart.fetchUrl} && ${installWithPostRenderer}`;
         commands.push(cmd);
       } else {
-        commands.push(this.buildInstallCommand(chart));
+        commands.push(installWithPostRenderer);
       }
     }
 

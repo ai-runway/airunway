@@ -58,7 +58,15 @@ rules:
     resources:
       - workspaces
       - inferencesets
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["nvidia.com"]
+    resources:
+      - dynamographdeployments
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["ray.io"]
+    resources:
+      - rayservices
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["admissionregistration.k8s.io"]
     resources:
       - mutatingwebhookconfigurations

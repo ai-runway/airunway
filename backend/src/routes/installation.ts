@@ -3,7 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { kubernetesService } from '../services/kubernetes';
-import { helmService } from '../services/helm';
+import { helmService, type HelmChart } from '../services/helm';
 import { getProviderHealth } from '../services/providerHealth';
 import { getKnownGpuInfo, normalizeKnownGpuModel, gpuSupportsFp8 } from '../services/costEstimation';
 import { huggingFaceService, isValidHfRepoId } from '../services/huggingface';
@@ -145,9 +145,15 @@ function shouldPreInstallMissingCrds(providerId: string, chart: ProviderHelmChar
   );
 }
 
-function normalizeInstallCharts(providerId: string, charts: ProviderHelmChartDetails[]): ProviderHelmChartDetails[] {
-  return charts.map((chart) => (
-    shouldPreInstallMissingCrds(providerId, chart)
+type ProviderInstallChart = ProviderHelmChartDetails & Pick<HelmChart, 'keepCrdResources'>;
+
+function normalizeInstallCharts(
+  providerId: string,
+  charts: ProviderHelmChartDetails[],
+  preserveCrdResources: boolean,
+): ProviderInstallChart[] {
+  return charts.map((chart) => {
+    const normalized: ProviderInstallChart = shouldPreInstallMissingCrds(providerId, chart)
       ? {
           ...chart,
           preInstallMissingCrds: true,
@@ -156,14 +162,17 @@ function normalizeInstallCharts(providerId: string, charts: ProviderHelmChartDet
           // them. The chart's dependency conditions must be disabled in the
           // same profile used by the Go shim and the Makefile.
           ...(isKaitoWorkspaceChart(providerId, chart)
-            ? {
-                values: { ...chart.values, ...KAITO_BYO_NODE_VALUES },
-                keepCrdResources: true,
-              }
+            ? { values: { ...chart.values, ...KAITO_BYO_NODE_VALUES } }
             : {}),
         }
-      : chart
-  ));
+      : { ...chart };
+
+    if (preserveCrdResources) {
+      normalized.keepCrdResources = true;
+    }
+
+    return normalized;
+  });
 }
 
 const INSTALLER_PERMISSION_GUIDANCE = 'Automatic installation requires elevated installer permissions. Ask an admin to apply the optional dashboard installer permissions manifest (deploy/dashboard-installer-rbac.yaml) or run the commands manually.';
@@ -411,7 +420,7 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
-    const charts = normalizeInstallCharts(providerId, provider.helmCharts);
+    const charts = normalizeInstallCharts(providerId, provider.helmCharts, provider.requiresCRD !== false);
     const hasInstallMetadata = charts.length > 0;
     const requiresCRD = provider.requiresCRD !== false;
     const installable = requiresCRD && hasInstallMetadata;
@@ -459,7 +468,7 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
-    const charts = normalizeInstallCharts(providerId, provider.helmCharts);
+    const charts = normalizeInstallCharts(providerId, provider.helmCharts, provider.requiresCRD !== false);
     const installable = provider.requiresCRD !== false && charts.length > 0;
 
     return c.json({
@@ -478,7 +487,7 @@ const installation = new Hono()
     }
 
     const provider = extractProviderDetails(config);
-    const charts = normalizeInstallCharts(providerId, provider.helmCharts);
+    const charts = normalizeInstallCharts(providerId, provider.helmCharts, provider.requiresCRD !== false);
 
     if (provider.requiresCRD === false) {
       throw new HTTPException(400, {
@@ -651,12 +660,17 @@ const installation = new Hono()
       output: result.message,
       error: result.success ? undefined : result.message,
     }));
+    const confirmedDeletions = removal.results.filter(
+      (result) => result.success && / deleted$/.test(result.message),
+    ).length;
 
     return c.json({
       success: removal.success,
       message: removal.success
         ? `${provider.name} CRDs removed successfully; custom resources were verified empty`
-        : `${provider.name} CRD removal failed; inspect the per-CRD results to determine what was removed`,
+        : confirmedDeletions > 0
+          ? `${provider.name} CRD removal was partial (${confirmedDeletions} CRD${confirmedDeletions === 1 ? '' : 's'} removed); inspect the per-CRD results`
+          : `${provider.name} CRD removal failed; inspect the per-CRD results to determine what was removed`,
       results,
     }, removal.success ? 200 : 409);
   })

@@ -175,7 +175,7 @@ describe('Provider Installation Flow', () => {
       ),
       mockServiceMethod(
         kubernetesService,
-        'restoreCRDsAfterUninstall',
+        'verifyCRDsAfterUninstall',
         async () => ({ success: true, results: [] }),
       ),
     );

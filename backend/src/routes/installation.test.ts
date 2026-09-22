@@ -507,6 +507,7 @@ describe('Installation Provider Routes', () => {
       expect(data.commands.some((command: string) => command.includes('helm pull kaito/workspace'))).toBe(true);
       expect(data.commands.some((command: string) => command.includes('kubectl apply --server-side --force-conflicts -f "$crd"'))).toBe(true);
       expect(data.commands.some((command: string) => command.includes('--skip-crds'))).toBe(true);
+      expect(data.commands.some((command: string) => command.includes('--post-renderer'))).toBe(true);
       expect(data.steps).toBeDefined();
     });
 
@@ -525,6 +526,7 @@ describe('Installation Provider Routes', () => {
       expect(data.commands[0]).toContain('helm pull https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.1.tgz');
       expect(data.commands[0]).toContain('kubectl apply --server-side --force-conflicts -f "$crd"');
       expect(data.commands[0]).toContain('--skip-crds');
+      expect(data.commands[0]).toContain('--post-renderer');
       expect(data.commands[0]).toContain('--force-conflicts');
       expect(data.commands[0]).toContain("--set-json 'dynamo-operator=");
       expect(data.commands[0]).toContain('"tag":"v0.15.0"');
@@ -722,6 +724,7 @@ describe('Installation Provider Routes', () => {
       expect(installCharts[0].chart).toBe('kaito/workspace');
       expect(installCharts[0].preInstallMissingCrds).toBe(true);
       expect(installCharts[0].skipCrds).toBe(true);
+      expect(installCharts[0].keepCrdResources).toBe(true);
       expect(installCharts[0].values).toMatchObject({
         'featureGates.disableNodeAutoProvisioning': true,
         'nvidiaDevicePlugin.enabled': false,
@@ -754,11 +757,12 @@ describe('Installation Provider Routes', () => {
       expect(installCharts[0].chart).toBe('https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.0.1.tgz');
       expect(installCharts[0].preInstallMissingCrds).toBe(true);
       expect(installCharts[0].skipCrds).toBe(true);
+      expect(installCharts[0].keepCrdResources).toBe(true);
       expect(installCharts[0]).not.toHaveProperty('forceConflicts');
       expect(installCharts[0].values?.['global.grove.install']).toBe(true);
     });
 
-    test('keeps standard chart install behavior for non-KAITO non-Dynamo providers', async () => {
+    test('preserves CRDs for standard provider chart installs', async () => {
       let installCharts: HelmChart[] = [];
       const kuberayConfig = createKubeRayProviderConfig();
 
@@ -781,6 +785,7 @@ describe('Installation Provider Routes', () => {
       expect(installCharts[0].chart).toBe('kuberay/kuberay-operator');
       expect(installCharts[0].preInstallMissingCrds).toBeUndefined();
       expect(installCharts[0].skipCrds).toBeUndefined();
+      expect(installCharts[0].keepCrdResources).toBe(true);
     });
 
     test('returns clear installer RBAC guidance when provider install is forbidden', async () => {
@@ -1058,6 +1063,45 @@ describe('Installation Provider Routes', () => {
       expect(data.success).toBe(false);
       expect(data.message).toContain('inspect the per-CRD results');
       expect(data.results[0].error).toContain('existing custom resource');
+    });
+
+    test('reports partial CRD removal when a later delete fails', async () => {
+      restores.push(
+        mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => ({
+          ...mockInferenceProviderConfig,
+          metadata: {
+            ...mockInferenceProviderConfig.metadata,
+            annotations: {
+              ...mockInferenceProviderConfig.metadata.annotations,
+              'airunway.ai/health': JSON.stringify({
+                crds: [
+                  { name: 'workspaces.kaito.sh', displayName: 'KAITO Workspace CRD' },
+                  { name: 'inferencesets.kaito.sh', displayName: 'KAITO InferenceSet CRD' },
+                ],
+              }),
+            },
+          },
+        })),
+        mockServiceMethod(helmService, 'checkHelmAvailable', async () => ({ available: true, version: '3.14.0' })),
+        mockServiceMethod(helmService, 'getReleaseInfo', async () => ({ exists: false })),
+        mockServiceMethod(kubernetesService, 'deleteCRDsSafely', async () => ({
+          success: false,
+          results: [
+            { crdName: 'workspaces.kaito.sh', success: true, message: 'CRD workspaces.kaito.sh deleted' },
+            { crdName: 'inferencesets.kaito.sh', success: false, message: 'Failed to delete CRD inferencesets.kaito.sh: conflict' },
+          ],
+        })),
+      );
+
+      const res = await app.request('/api/installation/providers/kaito/uninstall-crds', { method: 'POST' });
+      expect(res.status).toBe(409);
+
+      const data = await res.json();
+      expect(data.success).toBe(false);
+      expect(data.message).toContain('partial');
+      expect(data.message).toContain('1 CRD removed');
+      expect(data.message).not.toContain('no CRDs');
+      expect(data.results).toHaveLength(2);
     });
   });
 });
