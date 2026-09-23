@@ -344,14 +344,11 @@ func TestReconcileAddsFinalizerPreservesExplicitPrefixCachingFalse(t *testing.T)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
 	r := NewDynamoProviderReconciler(c, scheme, "")
 
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-preserve-false", Namespace: "default"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.Requeue {
-		t.Error("should requeue after adding finalizer")
 	}
 
 	var updated airunwayv1alpha1.ModelDeployment

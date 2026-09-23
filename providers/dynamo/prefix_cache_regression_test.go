@@ -108,6 +108,47 @@ func assertPrefixCacheFlags(t *testing.T, md *airunwayv1alpha1.ModelDeployment, 
 	}
 }
 
+func mustModelDeployment(t *testing.T, raw map[string]any) airunwayv1alpha1.ModelDeployment {
+	t.Helper()
+	var md airunwayv1alpha1.ModelDeployment
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &md); err != nil {
+		t.Fatal(err)
+	}
+	return md
+}
+
+func assertPrefixCachingValue(t *testing.T, md *airunwayv1alpha1.ModelDeployment, want bool, where string) {
+	t.Helper()
+	if md.Spec.Engine.EnablePrefixCaching == nil || *md.Spec.Engine.EnablePrefixCaching != want {
+		t.Fatalf("expected enablePrefixCaching=%v %s, got %#v", want, where, md.Spec.Engine.EnablePrefixCaching)
+	}
+}
+
+func typedFinalizerUpdatePayload(t *testing.T, md *airunwayv1alpha1.ModelDeployment) map[string]any {
+	t.Helper()
+	md.Finalizers = []string{FinalizerName}
+	wire, err := json.Marshal(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var update map[string]any
+	if err := json.Unmarshal(wire, &update); err != nil {
+		t.Fatal(err)
+	}
+	return update
+}
+
+func assertNestedPrefixCachingBool(t *testing.T, raw map[string]any, want bool, where string) {
+	t.Helper()
+	got, present, err := unstructured.NestedBool(raw, "spec", "engine", "enablePrefixCaching")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !present || got != want {
+		t.Fatalf("expected serialized enablePrefixCaching=%v %s, present=%v value=%v", want, where, present, got)
+	}
+}
+
 func TestPrefixCacheFalseSurvivesTypedUpdateAndDisablesAllWorkers(t *testing.T) {
 	schema := prefixCacheSchema(t)
 
@@ -121,50 +162,17 @@ func TestPrefixCacheFalseSurvivesTypedUpdateAndDisablesAllWorkers(t *testing.T) 
 	}
 	structuraldefaulting.Default(raw, schema)
 
-	var before airunwayv1alpha1.ModelDeployment
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &before); err != nil {
-		t.Fatal(err)
-	}
-	if before.Spec.Engine.EnablePrefixCaching == nil || *before.Spec.Engine.EnablePrefixCaching {
-		t.Fatalf("expected explicit false before update, got %#v", before.Spec.Engine.EnablePrefixCaching)
-	}
+	before := mustModelDeployment(t, raw)
+	assertPrefixCachingValue(t, &before, false, "before update")
 
-	before.Finalizers = []string{FinalizerName}
-	wire, err := json.Marshal(&before)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var update map[string]interface{}
-	if err := json.Unmarshal(wire, &update); err != nil {
-		t.Fatal(err)
-	}
-
-	beforeValue, beforePresent, err := unstructured.NestedBool(update, "spec", "engine", "enablePrefixCaching")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !beforePresent || beforeValue {
-		t.Fatalf("expected serialized explicit false in typed update, present=%v value=%v", beforePresent, beforeValue)
-	}
+	update := typedFinalizerUpdatePayload(t, &before)
+	assertNestedPrefixCachingBool(t, update, false, "before re-defaulting")
 
 	structuraldefaulting.Default(update, schema)
+	assertNestedPrefixCachingBool(t, update, false, "after re-defaulting")
 
-	afterValue, afterPresent, err := unstructured.NestedBool(update, "spec", "engine", "enablePrefixCaching")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !afterPresent || afterValue {
-		t.Fatalf("expected explicit false to survive re-defaulting, present=%v value=%v", afterPresent, afterValue)
-	}
-
-	var after airunwayv1alpha1.ModelDeployment
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(update, &after); err != nil {
-		t.Fatal(err)
-	}
-	if after.Spec.Engine.EnablePrefixCaching == nil || *after.Spec.Engine.EnablePrefixCaching {
-		t.Fatalf("expected explicit false after update, got %#v", after.Spec.Engine.EnablePrefixCaching)
-	}
+	after := mustModelDeployment(t, update)
+	assertPrefixCachingValue(t, &after, false, "after update")
 
 	assertPrefixCacheFlags(t, &before, false, true)
 	assertPrefixCacheFlags(t, &after, false, true)

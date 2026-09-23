@@ -457,7 +457,9 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	}
 
 	// Prefix caching
-	if md.Spec.Engine.EnablePrefixCaching != nil && *md.Spec.Engine.EnablePrefixCaching && !hasExplicitArg("enable-prefix-caching") {
+	if md.Spec.Engine.EnablePrefixCaching != nil &&
+		*md.Spec.Engine.EnablePrefixCaching &&
+		!hasExplicitArg("enable-prefix-caching") {
 		args = append(args, "--enable-prefix-caching")
 	}
 

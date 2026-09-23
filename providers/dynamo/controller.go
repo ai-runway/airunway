@@ -196,7 +196,7 @@ func (r *DynamoProviderReconciler) addFinalizer(ctx context.Context, md *airunwa
 	base := md.DeepCopy()
 	desired := md.DeepCopy()
 	controllerutil.AddFinalizer(desired, FinalizerName)
-	if err := r.Patch(ctx, desired, client.MergeFrom(base)); err != nil {
+	if err := r.Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 	md.Finalizers = desired.Finalizers
@@ -210,7 +210,7 @@ func (r *DynamoProviderReconciler) removeFinalizer(ctx context.Context, md *airu
 	base := md.DeepCopy()
 	desired := md.DeepCopy()
 	controllerutil.RemoveFinalizer(desired, FinalizerName)
-	if err := r.Patch(ctx, desired, client.MergeFrom(base)); err != nil {
+	if err := r.Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 	md.Finalizers = desired.Finalizers
