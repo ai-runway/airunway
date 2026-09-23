@@ -457,10 +457,15 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	}
 
 	// Prefix caching
-	if md.Spec.Engine.EnablePrefixCaching != nil &&
-		*md.Spec.Engine.EnablePrefixCaching &&
-		!hasExplicitArg("enable-prefix-caching") {
-		args = append(args, "--enable-prefix-caching")
+	if md.Spec.Engine.EnablePrefixCaching != nil {
+		hasPrefixCachingOverride := hasExplicitArg("enable-prefix-caching") || hasExplicitArg("no-enable-prefix-caching")
+		if !hasPrefixCachingOverride {
+			if *md.Spec.Engine.EnablePrefixCaching {
+				args = append(args, "--enable-prefix-caching")
+			} else {
+				args = append(args, "--no-enable-prefix-caching")
+			}
+		}
 	}
 
 	// Tensor parallelism from GPU count

@@ -1341,12 +1341,27 @@ func TestBuildVLLMArgsEnforceEagerAndPrefixCaching(t *testing.T) {
 
 	assertFlag(t, args, "--enforce-eager")
 	assertFlag(t, args, "--enable-prefix-caching")
+	assertNoArg(t, args, "--no-enable-prefix-caching")
+}
+
+func TestBuildVLLMArgsEmitsDisablePrefixCachingWhenExplicitFalse(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.EnablePrefixCaching = boolPtr(false)
+
+	args, err := tr.buildVLLMArgs(md, "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertFlag(t, args, "--no-enable-prefix-caching")
+	assertNoArg(t, args, "--enable-prefix-caching")
 }
 
 func TestBuildVLLMArgsOmitsEnforceEagerWhenDisabled(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
-	// EnforceEager / EnablePrefixCaching default to false
+	// EnforceEager defaults false and EnablePrefixCaching is omitted by default.
 
 	args, err := tr.buildVLLMArgs(md, "", 0)
 	if err != nil {
@@ -1355,6 +1370,7 @@ func TestBuildVLLMArgsOmitsEnforceEagerWhenDisabled(t *testing.T) {
 
 	assertNoArg(t, args, "--enforce-eager")
 	assertNoArg(t, args, "--enable-prefix-caching")
+	assertNoArg(t, args, "--no-enable-prefix-caching")
 }
 
 // A user must not be able to slip a reserved host/port override past the guard
