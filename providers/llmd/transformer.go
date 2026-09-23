@@ -395,7 +395,7 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	// when the llm-d Router routes requests to a pod that has previously seen
 	// a similar prompt. Defaults to true via the CRD; explicitly map both
 	// states so an override of false produces --no-enable-prefix-caching.
-	if md.Spec.Engine.EnablePrefixCaching {
+	if md.Spec.Engine.EnablePrefixCaching == nil || *md.Spec.Engine.EnablePrefixCaching {
 		args = append(args, "--enable-prefix-caching")
 	} else {
 		args = append(args, "--no-enable-prefix-caching")

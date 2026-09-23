@@ -1332,7 +1332,7 @@ func TestBuildVLLMArgsEnforceEagerAndPrefixCaching(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
 	md.Spec.Engine.EnforceEager = true
-	md.Spec.Engine.EnablePrefixCaching = true
+	md.Spec.Engine.EnablePrefixCaching = boolPtr(true)
 
 	args, err := tr.buildVLLMArgs(md, "", 0)
 	if err != nil {
