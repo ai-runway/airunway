@@ -382,7 +382,7 @@ func TestBuildEngineArgs(t *testing.T) {
 	// With enable prefix caching
 	md.Spec.Engine.TrustRemoteCode = false
 	md.Spec.Model.ServedName = ""
-	md.Spec.Engine.EnablePrefixCaching = true
+	md.Spec.Engine.EnablePrefixCaching = boolPtr(true)
 	args, err = tr.buildEngineArgs(md)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -392,7 +392,7 @@ func TestBuildEngineArgs(t *testing.T) {
 	}
 
 	// With enforce eager
-	md.Spec.Engine.EnablePrefixCaching = false
+	md.Spec.Engine.EnablePrefixCaching = boolPtr(false)
 	md.Spec.Engine.EnforceEager = true
 	args, err = tr.buildEngineArgs(md)
 	if err != nil {
@@ -404,7 +404,7 @@ func TestBuildEngineArgs(t *testing.T) {
 
 	// Prefix caching and enforce eager not added for TRT-LLM
 	md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeTRTLLM
-	md.Spec.Engine.EnablePrefixCaching = true
+	md.Spec.Engine.EnablePrefixCaching = boolPtr(true)
 	md.Spec.Engine.EnforceEager = true
 	args, err = tr.buildEngineArgs(md)
 	if err != nil {
