@@ -147,7 +147,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') && !contains(github.ref, '-dev') }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -214,7 +214,7 @@ jobs:
           echo "GAIE_VERSION=$GAIE_VERSION" >> "$GITHUB_ENV"
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: controller/Dockerfile
@@ -263,7 +263,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') && !contains(github.ref, '-dev') }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: images/model-downloader
           file: images/model-downloader/Dockerfile
@@ -362,7 +362,7 @@ jobs:
           printf 'build_arg=%s=%s\n' "$BASE_ARG" "${!BASE_ENV}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -436,7 +436,7 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') && !contains(github.ref, '-dev') }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
