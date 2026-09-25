@@ -100,9 +100,12 @@ func ensureBootstrapCerts(dir string) error {
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
 
-	// Skip if certs already exist
+	// Skip only when the complete certificate pair already exists. A lone
+	// certificate cannot start the webhook server without its private key.
 	if _, err := os.Stat(certPath); err == nil {
-		return nil
+		if _, err := os.Stat(keyPath); err == nil {
+			return nil
+		}
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
