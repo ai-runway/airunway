@@ -65,6 +65,16 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentrequests
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+- apiGroups:
   - ""
   resources:
   - persistentvolumeclaims

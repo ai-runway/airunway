@@ -177,6 +177,108 @@ func TestValidateOverrides_BlocksNestedResources(t *testing.T) {
 	requireValidationErrorField(t, errs, "spec.provider.overrides.frontend.resources")
 }
 
+func TestValidateOverrides_AllowsBoundedIntentDGDSizing(t *testing.T) {
+	v := &ModelDeploymentCustomValidator{}
+	overrides := map[string]any{
+		"deploymentMode": "intent",
+		"spec": map[string]any{
+			"overrides": map[string]any{
+				"dgd": map[string]any{
+					"spec": map[string]any{
+						"services": map[string]any{
+							"worker": map[string]any{
+								"replicas": MaxReplicas,
+								"resources": map[string]any{
+									"limits": map[string]any{
+										"cpu":            MaxCPU,
+										"memory":         MaxMemory,
+										"nvidia.com/gpu": MaxGPUCount,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(overrides)
+	spec := &airunwayv1alpha1.ModelDeploymentSpec{
+		Provider: &airunwayv1alpha1.ProviderSpec{
+			Name:      "dynamo",
+			Overrides: &runtime.RawExtension{Raw: raw},
+		},
+	}
+	if errs := v.validateOverrides(spec, field.NewPath("spec")); len(errs) != 0 {
+		t.Fatalf("expected bounded intent DGD sizing overrides to be allowed, got %v", errs)
+	}
+}
+
+func TestValidateOverrides_RejectsOversizedIntentDGDSizing(t *testing.T) {
+	v := &ModelDeploymentCustomValidator{}
+	overrides := map[string]any{
+		"deploymentMode": "intent",
+		"spec": map[string]any{
+			"overrides": map[string]any{
+				"dgd": map[string]any{
+					"spec": map[string]any{
+						"services": map[string]any{
+							"worker": map[string]any{
+								"replicas": MaxReplicas + 1,
+								"resources": map[string]any{
+									"limits": map[string]any{
+										"cpu":            "513",
+										"memory":         "5Ti",
+										"nvidia.com/gpu": MaxGPUCount + 1,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(overrides)
+	spec := &airunwayv1alpha1.ModelDeploymentSpec{
+		Provider: &airunwayv1alpha1.ProviderSpec{
+			Name:      "dynamo",
+			Overrides: &runtime.RawExtension{Raw: raw},
+		},
+	}
+	errs := v.validateOverrides(spec, field.NewPath("spec"))
+	basePath := "spec.provider.overrides.spec.overrides.dgd.spec.services.worker"
+	requireValidationErrorField(t, errs, basePath+".replicas")
+	requireValidationErrorField(t, errs, basePath+".resources.limits.cpu")
+	requireValidationErrorField(t, errs, basePath+".resources.limits.memory")
+	requireValidationErrorField(t, errs, basePath+".resources.limits.nvidia.com/gpu")
+}
+
+func TestValidateOverrides_BlocksDGDSizingOutsideDynamoIntent(t *testing.T) {
+	v := &ModelDeploymentCustomValidator{}
+	overrides := map[string]any{
+		"deploymentMode": "manual",
+		"spec": map[string]any{
+			"overrides": map[string]any{
+				"dgd": map[string]any{
+					"spec": map[string]any{
+						"replicas": 1,
+					},
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(overrides)
+	spec := &airunwayv1alpha1.ModelDeploymentSpec{
+		Provider: &airunwayv1alpha1.ProviderSpec{
+			Name:      "dynamo",
+			Overrides: &runtime.RawExtension{Raw: raw},
+		},
+	}
+	errs := v.validateOverrides(spec, field.NewPath("spec"))
+	requireValidationErrorField(t, errs, "spec.provider.overrides.spec.overrides.dgd.spec.replicas")
+}
+
 func TestValidateOverrides_BlocksSizingKeysInsideArray(t *testing.T) {
 	v := &ModelDeploymentCustomValidator{}
 	overrides := map[string]interface{}{
