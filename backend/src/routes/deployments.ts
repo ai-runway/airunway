@@ -996,8 +996,9 @@ function resolveDeploymentImages(config: DeploymentConfig): DeploymentConfig {
 
 const deployments = new Hono<AppEnv>()
   .get('/', zValidator('query', listDeploymentsQuerySchema), async (c) => {
+    const { namespace, limit, offset } = c.req.valid('query');
+
     try {
-      const { namespace, limit, offset } = c.req.valid('query');
       const userToken = c.get('token') as string | undefined;
 
       let deploymentsList: DeploymentStatus[] = await kubernetesService.listDeployments(namespace, userToken);
@@ -1021,10 +1022,13 @@ const deployments = new Hono<AppEnv>()
         },
       });
     } catch (error) {
-      logger.error({ error }, 'Error in GET /deployments');
-      return c.json({
-        deployments: [],
-        pagination: { total: 0, limit: 0, offset: 0, hasMore: false },
+      const { message, statusCode } = handleK8sError(error, {
+        operation: 'listDeployments',
+        namespace,
+      });
+
+      throw new HTTPException(statusCode as 400 | 401 | 403 | 404 | 409 | 422 | 500 | 502 | 503 | 504, {
+        message: `Failed to list deployments: ${message}`,
       });
     }
   })

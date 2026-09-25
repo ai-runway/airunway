@@ -6,10 +6,10 @@
  * and a refresh/retry action.
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { Icon } from '@iconify/react';
 import Button from '@mui/material/Button';
 import CircularProgress from '@mui/material/CircularProgress';
-import { Icon } from '@iconify/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { copyToClipboard } from '../lib/utils';
 
 interface ManifestPreviewProps {
@@ -22,7 +22,7 @@ interface ManifestPreviewProps {
 export function ManifestPreview({ manifest, loading, error, onRefresh }: ManifestPreviewProps) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     return () => clearTimeout(copyTimerRef.current);

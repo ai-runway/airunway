@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
 import { buildPortForwardCommand } from '@airunway/shared';
+import { describe, expect, it } from 'vitest';
 
 describe('buildPortForwardCommand', () => {
   it('builds the AIKit llama.cpp port-forward command with the service port', () => {

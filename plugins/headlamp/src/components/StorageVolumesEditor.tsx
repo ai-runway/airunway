@@ -5,11 +5,11 @@
  * (model cache, compilation cache, custom) for deployments.
  */
 
-import { useRef, useState } from 'react';
+import type { PersistentVolumeAccessMode, StorageVolume, VolumePurpose } from '@airunway/shared';
+import { Icon } from '@iconify/react';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
-import { Icon } from '@iconify/react';
-import type { StorageVolume, VolumePurpose, PersistentVolumeAccessMode } from '@airunway/shared';
+import { useRef, useState } from 'react';
 import { PURPOSE_LABELS } from '../lib/constants';
 
 interface StorageVolumesEditorProps {
@@ -145,17 +145,32 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
           >
             {/* Card Header */}
             <div
-              onClick={() => toggleExpanded(index)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '12px 16px',
-                cursor: 'pointer',
                 backgroundColor: 'rgba(128, 128, 128, 0.05)',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                type="button"
+                aria-expanded={isExpanded}
+                aria-label={`${isExpanded ? 'Hide' : 'Show'} ${volume.name || 'unnamed volume'} details`}
+                onClick={() => toggleExpanded(index)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  flex: 1,
+                  gap: '12px',
+                  padding: '12px 8px 12px 16px',
+                  border: 0,
+                  cursor: 'pointer',
+                  background: 'transparent',
+                  color: 'inherit',
+                  font: 'inherit',
+                  textAlign: 'left',
+                }}
+              >
                 <Icon
                   icon={isExpanded ? 'mdi:chevron-down' : 'mdi:chevron-right'}
                   width={20}
@@ -174,14 +189,12 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                 >
                   {PURPOSE_LABELS[purpose]}
                 </span>
-              </div>
+              </button>
               <IconButton
                 size="small"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleRemove(index);
-                }}
-                sx={{ color: 'inherit', opacity: 0.7 }}
+                aria-label={`Remove ${volume.name || 'unnamed volume'}`}
+                onClick={() => handleRemove(index)}
+                sx={{ color: 'inherit', opacity: 0.7, marginRight: '8px' }}
               >
                 <Icon icon="mdi:close" width={18} />
               </IconButton>
@@ -193,8 +206,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                 <div style={{ display: 'grid', gap: '16px', maxWidth: '500px' }}>
                   {/* Name */}
                   <div>
-                    <label style={labelStyle}>Name</label>
+                    <label htmlFor={`storage-volume-${index}-name`} style={labelStyle}>Name</label>
                     <input
+                      id={`storage-volume-${index}-name`}
                       type="text"
                       value={volume.name}
                       onChange={(e) => handleUpdate(index, { name: e.target.value })}
@@ -206,8 +220,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                   {/* Purpose + Size row */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                     <div>
-                      <label style={labelStyle}>Purpose</label>
+                      <label htmlFor={`storage-volume-${index}-purpose`} style={labelStyle}>Purpose</label>
                       <select
+                        id={`storage-volume-${index}-purpose`}
                         value={purpose}
                         onChange={(e) =>
                           handleUpdate(index, { purpose: e.target.value as VolumePurpose })
@@ -227,8 +242,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
                       </select>
                     </div>
                     <div>
-                      <label style={labelStyle}>Size</label>
+                      <label htmlFor={`storage-volume-${index}-size`} style={labelStyle}>Size</label>
                       <input
+                        id={`storage-volume-${index}-size`}
                         type="text"
                         value={volume.size || ''}
                         onChange={(e) => handleUpdate(index, { size: e.target.value })}
@@ -240,8 +256,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
 
                   {/* Access Mode */}
                   <div>
-                    <label style={labelStyle}>Access Mode</label>
+                    <label htmlFor={`storage-volume-${index}-access-mode`} style={labelStyle}>Access Mode</label>
                     <select
+                      id={`storage-volume-${index}-access-mode`}
                       value={volume.accessMode || 'ReadWriteOnce'}
                       onChange={(e) =>
                         handleUpdate(index, {
@@ -262,8 +279,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
 
                   {/* Existing PVC name */}
                   <div>
-                    <label style={labelStyle}>Existing PVC Name (optional)</label>
+                    <label htmlFor={`storage-volume-${index}-claim-name`} style={labelStyle}>Existing PVC Name (optional)</label>
                     <input
+                      id={`storage-volume-${index}-claim-name`}
                       type="text"
                       value={volume.claimName || ''}
                       onChange={(e) =>
@@ -279,8 +297,9 @@ export function StorageVolumesEditor({ volumes, onChange }: StorageVolumesEditor
 
                   {/* Storage Class */}
                   <div>
-                    <label style={labelStyle}>Storage Class (optional)</label>
+                    <label htmlFor={`storage-volume-${index}-storage-class`} style={labelStyle}>Storage Class (optional)</label>
                     <input
+                      id={`storage-volume-${index}-storage-class`}
                       type="text"
                       value={volume.storageClassName || ''}
                       onChange={(e) =>

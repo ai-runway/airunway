@@ -53,6 +53,7 @@ temp/
 
 # TypeScript cache
 *.tsbuildinfo
+.eslintcache
 
 # Generated files
 backend/src/embedded-assets.ts

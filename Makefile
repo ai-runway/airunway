@@ -1,4 +1,4 @@
-.PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend clean help providers-test gpu-e2e gpu-e2e-check verify-versions test-verify-versions
+.PHONY: install dev dev-frontend dev-backend build compile lint test test-coverage test-coverage-backend test-coverage-frontend test-coverage-headlamp headlamp-check clean help providers-test providers-test-coverage provider-test-coverage gpu-e2e gpu-e2e-check verify-versions test-verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
 .PHONY: model-downloader-docker-build agent-images-docker-build agent-images-test setup-gateway cleanup-gateway
 .PHONY: agent-crewai-docker-build agent-langgraph-docker-build agent-openclaw-docker-build agent-hermes-docker-build
@@ -53,7 +53,8 @@ help:
 	@echo "  compile-windows        Cross-compile for Windows (x64)"
 	@echo "  lint                   Run linters"
 	@echo "  test                   Run tests"
-	@echo "  test-coverage          Run tests with coverage (frontend + backend)"
+	@echo "  test-coverage          Run all TypeScript tests with coverage reports"
+	@echo "  headlamp-check         Run Headlamp typecheck, lint, build, tests, and coverage"
 	@echo "  clean                  Remove build artifacts and node_modules"
 	@echo ""
 	@echo "Controller Targets:"
@@ -73,6 +74,7 @@ help:
 	@echo ""
 	@echo "Provider Targets:"
 	@echo "  providers-test         Run all provider tests"
+	@echo "  providers-test-coverage Run all provider tests with coverage reports"
 	@echo "  gpu-e2e                Run GPU e2e suite on a GPU cluster (GPU_E2E_ARGS=...)"
 	@echo "  gpu-e2e-check          Cluster-free checks for the GPU e2e module (gofmt, vet, compile, unit tests)"
 	@echo ""
@@ -146,13 +148,23 @@ test: verify-versions
 # GitHub step-summary formatting lives in the workflow, not here.
 # Uses `cd <ws> && bun run test:coverage` (not `bun run --filter`) so output
 # stays unprefixed and the coverage tables render cleanly in the CI summary.
-test-coverage: verify-versions test-coverage-backend test-coverage-frontend
+test-coverage: verify-versions test-coverage-backend test-coverage-frontend test-coverage-headlamp
 
 test-coverage-backend:
 	cd backend && bun run test:coverage
 
 test-coverage-frontend:
 	cd frontend && bun run test:coverage
+
+test-coverage-headlamp:
+	cd plugins/headlamp && bun run test:coverage
+
+headlamp-check:
+	cd plugins/headlamp && bun run tsc
+	cd plugins/headlamp && bun run lint
+	cd plugins/headlamp && bun run build
+	cd plugins/headlamp && bun run test
+	cd plugins/headlamp && bun run test:coverage
 
 # Clean build artifacts
 clean:
@@ -219,6 +231,28 @@ providers-test: verify-versions
 	cd providers/agent-kagent && go test ./...
 	cd providers/agent-orka && go test ./...
 	@echo "✅ Provider tests completed"
+
+PROVIDERS := dynamo kaito kuberay llmd vllm agent-container agent-kagent agent-orka
+
+provider-test-coverage:
+	@test -n "$(PROVIDER)" || { echo "❌ PROVIDER is required"; exit 2; }
+	@test -n "$(filter $(PROVIDER),$(PROVIDERS))" || { echo "❌ unknown PROVIDER: $(PROVIDER)"; exit 2; }
+	@set -e; \
+	profile=$$(mktemp); \
+	trap 'rm -f "$$profile"' EXIT; \
+	cd providers/$(PROVIDER); \
+	go test ./... -coverprofile="$$profile"; \
+	go tool cover -func="$$profile"
+
+providers-test-coverage: verify-versions
+	@$(MAKE) provider-test-coverage PROVIDER=dynamo
+	@$(MAKE) provider-test-coverage PROVIDER=kaito
+	@$(MAKE) provider-test-coverage PROVIDER=kuberay
+	@$(MAKE) provider-test-coverage PROVIDER=llmd
+	@$(MAKE) provider-test-coverage PROVIDER=vllm
+	@$(MAKE) provider-test-coverage PROVIDER=agent-container
+	@$(MAKE) provider-test-coverage PROVIDER=agent-kagent
+	@$(MAKE) provider-test-coverage PROVIDER=agent-orka
 
 # Run the GPU end-to-end suite against a pre-existing GPU cluster.
 # All logic lives in scripts/gpu-e2e.sh; pass flags via GPU_E2E_ARGS.

@@ -4,8 +4,8 @@
  * Displays pod logs with pod selection and auto-scroll.
  */
 
-import { useRef, useEffect } from 'react';
 import type { PodLogsResponse, PodStatus } from '@airunway/shared';
+import { useEffect, useRef } from 'react';
 
 interface LogsViewerProps {
   logs: PodLogsResponse | null;
@@ -30,8 +30,9 @@ export function LogsViewer({ logs, pods, selectedPod, onSelectPod, onRefresh }: 
       {/* Controls */}
       <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>
         <div>
-          <label style={{ marginRight: '8px', fontSize: '14px' }}>Pod:</label>
+          <label htmlFor="logs-pod" style={{ marginRight: '8px', fontSize: '14px' }}>Pod:</label>
           <select
+            id="logs-pod"
             value={selectedPod || ''}
             onChange={(e) => onSelectPod(e.target.value)}
             style={{

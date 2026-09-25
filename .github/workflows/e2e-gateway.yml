@@ -24,8 +24,12 @@ jobs:
           set -a
           source versions.env
           set +a
-          echo "GAIE_VERSION=${GAIE_VERSION}" >> "$GITHUB_ENV"
-          echo "KAITO_VERSION=${KAITO_VERSION}" >> "$GITHUB_ENV"
+          {
+            echo "GAIE_VERSION=${GAIE_VERSION}"
+            echo "GATEWAY_API_VERSION=${GATEWAY_API_VERSION}"
+            echo "ISTIO_VERSION=${ISTIO_VERSION}"
+            echo "KAITO_VERSION=${KAITO_VERSION}"
+          } >> "$GITHUB_ENV"
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -36,11 +40,11 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: 1.3.11
 
       - name: Setup Kind
         run: |
-          go install sigs.k8s.io/kind@latest
+          go install sigs.k8s.io/kind@v0.30.0
           kind create cluster --name airunway-gw-e2e --wait 120s
           # Allow workloads on control plane node for LoadBalancer access
           kubectl label node airunway-gw-e2e-control-plane node.kubernetes.io/exclude-from-external-load-balancers- 2>/dev/null || true
@@ -58,7 +62,7 @@ jobs:
 
       - name: Install Gateway API CRDs
         run: |
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
       - name: Install Gateway API Inference Extension CRDs
         run: |
@@ -67,7 +71,7 @@ jobs:
       - name: Install Istio with Inference Extension support
         run: |
           curl -L https://istio.io/downloadIstio | sh -
-          cd istio-*/bin
+          cd "istio-${ISTIO_VERSION}/bin"
           ./istioctl install --set profile=minimal \
             --set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true -y
           kubectl wait --for=condition=Available deployment/istiod -n istio-system --timeout=120s

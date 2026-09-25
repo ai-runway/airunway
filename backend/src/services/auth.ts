@@ -32,19 +32,22 @@ export interface StoredCredentials {
   expiresAt?: string;
 }
 
-const CREDENTIALS_DIR = path.join(os.homedir(), '.airunway');
-const CREDENTIALS_FILE = path.join(CREDENTIALS_DIR, 'credentials.json');
+const DEFAULT_CREDENTIALS_DIR = path.join(os.homedir(), '.airunway');
 
 /**
  * Auth Service
  * Handles token validation via Kubernetes TokenReview API
  * and local credential management for CLI login
  */
-class AuthService {
+export class AuthService {
   private kc: k8s.KubeConfig;
   private authApi: k8s.AuthenticationV1Api;
+  private credentialsDir: string;
+  private credentialsFile: string;
 
-  constructor() {
+  constructor(credentialsDir = DEFAULT_CREDENTIALS_DIR) {
+    this.credentialsDir = credentialsDir;
+    this.credentialsFile = path.join(credentialsDir, 'credentials.json');
     this.kc = loadKubeConfig();
     this.authApi = makeApiClient(this.kc, k8s.AuthenticationV1Api);
   }
@@ -252,17 +255,17 @@ class AuthService {
    */
   saveCredentials(credentials: StoredCredentials): void {
     try {
-      if (!fs.existsSync(CREDENTIALS_DIR)) {
-        fs.mkdirSync(CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+      if (!fs.existsSync(this.credentialsDir)) {
+        fs.mkdirSync(this.credentialsDir, { recursive: true, mode: 0o700 });
       }
       
       fs.writeFileSync(
-        CREDENTIALS_FILE,
+        this.credentialsFile,
         JSON.stringify(credentials, null, 2),
         { mode: 0o600 }
       );
       
-      logger.debug({ path: CREDENTIALS_FILE }, 'Credentials saved');
+      logger.debug({ path: this.credentialsFile }, 'Credentials saved');
     } catch (error) {
       logger.error({ error }, 'Error saving credentials');
       throw new Error('Failed to save credentials');
@@ -274,11 +277,11 @@ class AuthService {
    */
   loadCredentials(): StoredCredentials | null {
     try {
-      if (!fs.existsSync(CREDENTIALS_FILE)) {
+      if (!fs.existsSync(this.credentialsFile)) {
         return null;
       }
       
-      const data = fs.readFileSync(CREDENTIALS_FILE, 'utf-8');
+      const data = fs.readFileSync(this.credentialsFile, 'utf-8');
       return JSON.parse(data) as StoredCredentials;
     } catch (error) {
       logger.error({ error }, 'Error loading credentials');
@@ -291,8 +294,8 @@ class AuthService {
    */
   clearCredentials(): void {
     try {
-      if (fs.existsSync(CREDENTIALS_FILE)) {
-        fs.unlinkSync(CREDENTIALS_FILE);
+      if (fs.existsSync(this.credentialsFile)) {
+        fs.unlinkSync(this.credentialsFile);
       }
     } catch (error) {
       logger.error({ error }, 'Error clearing credentials');

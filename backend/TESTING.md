@@ -3,14 +3,15 @@
 ## Quick Start
 
 ```bash
-# Run all tests
-cd backend && bun test
+# Run all deterministic unit and route tests
+cd backend
+bun run test
 
 # Watch mode (re-runs on file changes)
-bun test --watch
+bun run test:watch
 
 # With coverage report
-bun test --coverage
+bun run test:coverage
 
 # Run a single test file
 bun test src/routes/deployments.test.ts
@@ -67,26 +68,17 @@ test('accepts valid namespaces', () => {
 });
 ```
 
-#### 3. K8s-tolerant tests
+#### 3. Strict Kubernetes integration tests
 
-For tests that can optionally run against a real cluster. These use `withTimeout` to
-gracefully skip when no cluster is available:
+Real-cluster tests live only in `src/integration/kubernetes.integration.ts` and are excluded
+from the deterministic unit and coverage commands. They require explicit strict mode and fail
+on timeouts, HTTP 500 responses, missing Airunway resources, or unhealthy providers.
 
-```typescript
-import { withTimeout, K8S_TEST_TIMEOUT } from '../test/helpers';
+Run them only inside the dedicated disposable-cluster workflow:
 
-test('gets real cluster status', async () => {
-  try {
-    const res = await withTimeout(app.request('/api/health'), K8S_TEST_TIMEOUT);
-    expect(res.status).toBe(200);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('timed out')) {
-      console.log('Skipping: no cluster available');
-      return;
-    }
-    throw error;
-  }
-});
+```bash
+cd backend
+bun run test:integration
 ```
 
 ### Multi-step flow tests
@@ -166,8 +158,6 @@ Located in `src/test/helpers.ts`:
 | `mockServiceMethod(service, method, impl)` | Replace a method on a service singleton. Returns a restore function. |
 | `mockFetch(response, options?)` | Replace `globalThis.fetch` with a static response. Returns a restore function. |
 | `mockFetchByUrl(routes)` | Replace `globalThis.fetch` with URL-based routing. **First substring match wins** — list more-specific patterns before less-specific ones (e.g. `/api/whoami-v2` before `/api/whoami`). Returns a restore function. |
-| `withTimeout(promise, ms)` | Race a promise against a timeout. Used for K8s-tolerant tests. |
-| `K8S_TEST_TIMEOUT` | Default timeout (2000ms) for K8s-dependent tests. |
 
 ## Fixtures
 
@@ -192,16 +182,16 @@ Tests run in two CI workflows:
 
 ### `test.yml` — Unit + route tests (every PR)
 
-Runs `bun test --coverage` against the backend with no cluster. K8s-tolerant tests
-gracefully skip via the timeout pattern. Coverage summary is posted to the GitHub Actions
-step summary.
+Runs `bun run test:coverage` against the backend with no cluster. The package script excludes
+`src/integration`, so this lane is deterministic and never converts cluster failures into skips.
+Coverage summary is posted to the GitHub Actions step summary.
 
 ### `e2e-backend.yml` — Full integration (every PR)
 
 1. Creates a Kind cluster
 2. Installs KAITO operator via Helm
 3. Builds and deploys the AI Runway controller + KAITO provider into the cluster
-4. Runs the same `bun test` suite — K8s-tolerant tests now succeed against the real cluster
+4. Runs `cd backend && bun run test:integration` with explicit strict mode
 
-This means the same test files serve both local development (fast, mocked) and CI
-integration (full stack, real K8s).
+The local suite stays fast and mocked, while the integration suite fails closed when the
+disposable cluster does not execute the expected real Kubernetes behavior.

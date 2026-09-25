@@ -4,18 +4,18 @@
  * Configure external integrations like NVIDIA GPU Operator, Gateway API, and HuggingFace.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import type { GatewayCRDStatus, GPUOperatorStatus, HfSecretStatus } from '@airunway/shared';
+import { Icon } from '@iconify/react';
 import {
-  SectionBox,
   Loader,
+  SectionBox,
   StatusLabel,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
-import { Icon } from '@iconify/react';
-import { useApiClient } from '../lib/api-client';
-import type { GPUOperatorStatus, HfSecretStatus, GatewayCRDStatus } from '@airunway/shared';
+import { useCallback, useEffect, useState } from 'react';
 import { ConnectionError } from '../components/ConnectionBanner';
+import { useApiClient } from '../lib/api-client';
 import { copyToClipboard } from '../lib/utils';
 
 /**
