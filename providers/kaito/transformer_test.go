@@ -44,7 +44,7 @@ func newTestMD(name, namespace string) *airunwayv1alpha1.ModelDeployment {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			UID:       types.UID("test-uid"),
+			UID:       types.UID(testUID),
 		},
 		Spec: airunwayv1alpha1.ModelDeploymentSpec{
 			Model: airunwayv1alpha1.ModelSpec{
@@ -309,7 +309,7 @@ func TestTransformWithNodeSelector(t *testing.T) {
 	if ml["gpu-type"] != "a100" {
 		t.Errorf("expected nodeSelector in labelSelector matchLabels, got %v", ml)
 	}
-	if ml["kubernetes.io/os"] != "linux" {
+	if ml["kubernetes.io/os"] != testLinuxOS {
 		t.Error("expected default kubernetes.io/os=linux label")
 	}
 }
@@ -492,6 +492,59 @@ func TestTransformWithPodTemplateAnnotationsCopiesMap(t *testing.T) {
 	}
 }
 
+func TestTransformStripsReservedMigrationAnnotationsFromPodTemplate(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.PodTemplate = &airunwayv1alpha1.PodTemplateSpec{
+		Metadata: &airunwayv1alpha1.PodTemplateMetadata{
+			Annotations: map[string]string{
+				"custom-annotation":               "custom-value",
+				lastAppliedWorkspaceAnnotation:    "untrusted-fingerprint",
+				migrationManagersAnnotation:       "foo",
+				migrationPreviousFieldsAnnotation: `{"annotations":{"attacker":"true"}}`,
+			},
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+
+	annotations := resources[0].GetAnnotations()
+	if annotations["custom-annotation"] != "custom-value" {
+		t.Fatalf("expected ordinary annotation to survive, got %v", annotations)
+	}
+	for _, key := range []string{
+		lastAppliedWorkspaceAnnotation,
+		migrationManagersAnnotation,
+		migrationPreviousFieldsAnnotation,
+	} {
+		if _, found := annotations[key]; found {
+			t.Fatalf("expected reserved annotation %q to be stripped, got %v", key, annotations)
+		}
+	}
+}
+
+func TestTransformProviderOverridesCannotInjectReservedMigrationAnnotations(t *testing.T) {
+	md := newTestMD("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Overrides: &runtime.RawExtension{Raw: []byte(`{
+			"metadata": {
+				"annotations": {
+					"airunway.ai/kaito-migration-managers": "[\"attacker\"]",
+					"airunway.ai/kaito-migration-previous-fields": "{}"
+				}
+			}
+		}`)},
+	}
+
+	_, err := NewTransformer().Transform(context.Background(), md)
+	if err == nil || !strings.Contains(err.Error(), `overriding "metadata" is not allowed`) {
+		t.Fatalf("expected metadata override to be rejected, got %v", err)
+	}
+}
+
 func TestBuildResourceRequests(t *testing.T) {
 	tr := NewTransformer()
 
@@ -610,7 +663,7 @@ func TestApplyOverrides(t *testing.T) {
 
 	// Verify overrides were merged
 	accessMode, found, _ := unstructured.NestedString(ws.Object, "inference", "preset", "accessMode")
-	if !found || accessMode != "private" {
+	if !found || accessMode != testPrivateAccessMode {
 		t.Errorf("expected accessMode 'private', got %q (found=%v)", accessMode, found)
 	}
 
@@ -720,7 +773,7 @@ func TestTransformEmptyNodeSelector(t *testing.T) {
 	if !found {
 		t.Fatal("expected matchLabels")
 	}
-	if matchLabels["kubernetes.io/os"] != "linux" {
+	if matchLabels["kubernetes.io/os"] != testLinuxOS {
 		t.Error("expected kubernetes.io/os=linux in default matchLabels")
 	}
 	if len(matchLabels) != 1 {
@@ -966,7 +1019,7 @@ func TestTransformOverrideCanDeleteNvidiaGPULabel(t *testing.T) {
 	if matchLabels["accelerator.vendor"] != "example.com/custom" {
 		t.Fatalf("expected provider override to add replacement GPU selector, got %v", matchLabels)
 	}
-	if matchLabels["kubernetes.io/os"] != "linux" {
+	if matchLabels["kubernetes.io/os"] != testLinuxOS {
 		t.Fatalf("expected deep merge to preserve default OS selector, got %v", matchLabels)
 	}
 }
@@ -1091,8 +1144,8 @@ func TestBuildResourceRequestsGPUOnly(t *testing.T) {
 func TestTransformPreservesOwnerReference(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
-	md.APIVersion = "airunway.ai/v1alpha1"
-	md.Kind = "ModelDeployment"
+	md.APIVersion = testModelDeploymentAPIVersion
+	md.Kind = testModelDeploymentKind
 
 	resources, err := tr.Transform(context.Background(), md)
 	if err != nil {
