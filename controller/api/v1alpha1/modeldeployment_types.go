@@ -397,6 +397,15 @@ type GatewaySpec struct {
 	// The HTTPRoute must be in the same namespace as the ModelDeployment.
 	// +optional
 	HTTPRouteRef string `json:"httpRouteRef,omitempty"`
+	// poolRef references an existing InferencePool by name instead of auto-creating one.
+	// When set, the controller uses the referenced pool as the HTTPRoute backend and
+	// does not create, update, or delete that InferencePool or its EPP resources.
+	// The InferencePool must be in the same namespace as the ModelDeployment.
+	// Missing, rejected, or unresolved pools are reported through GatewayReady.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	PoolRef string `json:"poolRef,omitempty"`
 }
 
 // ModelDeploymentSpec defines the desired state of ModelDeployment
