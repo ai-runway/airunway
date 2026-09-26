@@ -209,6 +209,18 @@ workloads use the native Rust endpoint-picker contract, while the legacy contrac
 is preserved for existing deployments. Unsupported raw fields fail strict API
 validation instead of being pruned.
 
+Runtime pinning does not guarantee an uninterrupted **Dynamo platform upgrade**.
+The bundled 1.1.1-to-1.5.0 Grove upgrade changed pod-template hashes and replaced
+serving pods even with unchanged workload specs and runtime images. Plan a
+maintenance window and verify actual pod identities and live inference after
+upgrading. Retaining the DGD identity and image tag alone does not prove that the
+serving workload stayed up.
+
+Let the upstream installation manage CRD conversion and storage migration. Keep
+conversion webhooks enabled, verify both served API versions after the upgrade,
+and confirm storage migration completed. A Helm rollback does not by itself
+reverse a migration to beta storage.
+
 Compatibility checks include released CRD schemas for 1.1.1 and 1.5.0. Real
 profiling and end-to-end serving additionally require a GPU cluster and the
 corresponding operator/runtime installation. Schema tests alone do not establish
