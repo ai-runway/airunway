@@ -3,6 +3,7 @@ package dynamo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -461,7 +462,7 @@ func TestDirectManualStatusPublishesActualPool(t *testing.T) {
 func TestIntentRequestNameLeavesRoomForUpstreamNames(t *testing.T) {
 	md := newMDForController(strings.Repeat("long-model-name.", 15)+"tail", "default")
 	name := intentAttemptName(md)
-	if len(name) > 32 || strings.Contains(name, ".") {
+	if len(name) > 22 || strings.Contains(name, ".") {
 		t.Fatalf("unsafe request name %q", name)
 	}
 	for _, derived := range []string{"profile-" + name, name + "-dgd-frontend", name + "-dgd-prefillworker", name + "-dgd-decodeworker"} {
@@ -469,9 +470,48 @@ func TestIntentRequestNameLeavesRoomForUpstreamNames(t *testing.T) {
 			t.Fatalf("upstream name exceeds limit: %s", derived)
 		}
 	}
+	for _, component := range []string{"VllmPrefillWorker", "VllmDecodeWorker", "SglangPrefillWorker", "SglangDecodeWorker", "TrtllmPrefillWorker", "TrtllmDecodeWorker"} {
+		if len(name+"-dgd")+len(component) > 45 {
+			t.Fatalf("profiler would reject request %q with component %q", name, component)
+		}
+	}
 	old := name
 	md.Annotations = map[string]string{dynamointent.AttemptAnnotation: "next"}
 	if intentAttemptName(md) == old {
 		t.Fatal("attempts collide")
+	}
+}
+
+func TestPreviousLongAttemptIsRecoveredWithoutCreatingAnotherRequest(t *testing.T) {
+	for _, staleReference := range []bool{false, true} {
+		t.Run(fmt.Sprint(staleReference), func(t *testing.T) {
+			md := newMDForController("live11-auto", "default")
+			setIntentMode(md)
+			md.Annotations = map[string]string{dynamointent.AttemptAnnotation: "current-attempt"}
+			existing := requestFixture(t, md, "Profiling")
+			existing.SetName(previousIntentAttemptName(md))
+			annotations := existing.GetAnnotations()
+			annotations[dynamointent.AttemptAnnotation] = "current-attempt"
+			existing.SetAnnotations(annotations)
+			if staleReference {
+				md.Status.Provider.RequestRef = &api.ProviderResourceReference{APIVersion: "nvidia.com/v1beta1", Kind: DynamoGraphDeploymentRequestKind, Namespace: md.Namespace, Name: "removed-previous-request", UID: "removed-uid"}
+			}
+			creates := 0
+			c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(existing).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				creates++
+				return cl.Create(ctx, obj, opts...)
+			}}).Build()
+			r := NewDynamoProviderReconciler(c, newScheme(), "")
+			desired, err := r.Transformer.Transform(context.Background(), md)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.reconcileIntent(context.Background(), desired[0], md); err != nil {
+				t.Fatal(err)
+			}
+			if creates != 0 || md.Status.Provider.RequestRef.Name != existing.GetName() || md.Status.Provider.RequestRef.UID != string(existing.GetUID()) {
+				t.Fatalf("previous request was replaced: creates=%d ref=%+v", creates, md.Status.Provider.RequestRef)
+			}
+		})
 	}
 }

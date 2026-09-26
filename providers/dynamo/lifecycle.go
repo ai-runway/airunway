@@ -22,10 +22,20 @@ type intentLockedError struct{ message string }
 func (e *intentLockedError) Error() string { return e.message }
 
 func intentAttemptName(md *api.ModelDeployment) string {
+	// The profiler limits DGD name + component name to 45 characters. Reserve
+	// four for "-dgd" and nineteen for the longest stock prefill worker name.
+	return intentNameWithPrefix(md, 5) // at most 22 characters, including the hash
+}
+
+// Keep the previous generated name discoverable after an upgrade, including
+// recovery when creation succeeded but the ModelDeployment status write did not.
+func previousIntentAttemptName(md *api.ModelDeployment) string {
+	return intentNameWithPrefix(md, 15)
+}
+
+func intentNameWithPrefix(md *api.ModelDeployment, prefixLength int) string {
 	sum := sha256.Sum256([]byte(string(md.UID) + "\x00" + md.Annotations[dynamointent.AttemptAnnotation]))
-	// Keep the request at most 32 characters, leaving space for upstream
-	// profile- jobs and -dgd/component Service suffixes.
-	prefix := strings.TrimRight(strings.ReplaceAll(md.Name[:min(len(md.Name), 15)], ".", "-"), "-")
+	prefix := strings.TrimRight(strings.ReplaceAll(md.Name[:min(len(md.Name), prefixLength)], ".", "-"), "-")
 	return fmt.Sprintf("%s-%x", prefix, sum[:8])
 }
 
@@ -38,12 +48,12 @@ func ensureProviderStatus(md *api.ModelDeployment) *api.ProviderStatus {
 
 func (r *DynamoProviderReconciler) findRequest(ctx context.Context, md *api.ModelDeployment) (*unstructured.Unstructured, error) {
 	p := ensureProviderStatus(md)
-	names := []string{md.Name, intentAttemptName(md)}
+	names := []string{md.Name, previousIntentAttemptName(md), intentAttemptName(md)}
 	if p.RequestRef != nil {
 		if p.RequestRef.Namespace != md.Namespace || p.RequestRef.Kind != DynamoGraphDeploymentRequestKind || p.RequestRef.APIVersion != DynamoAPIGroup+"/"+DynamoGraphDeploymentRequestAPIVersion {
 			return nil, fmt.Errorf("invalid Dynamo request reference")
 		}
-		names = []string{p.RequestRef.Name, intentAttemptName(md)}
+		names = []string{p.RequestRef.Name, previousIntentAttemptName(md), intentAttemptName(md)}
 	}
 	seen := map[string]bool{}
 	for _, name := range names {
