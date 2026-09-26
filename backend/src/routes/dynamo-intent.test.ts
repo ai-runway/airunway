@@ -1,3 +1,4 @@
+import { ApiException } from '@kubernetes/client-node';
 import { afterEach, describe, expect, test } from 'bun:test';
 import app from '../hono-app';
 import { kubernetesService } from '../services/kubernetes';
@@ -59,6 +60,23 @@ describe('Dynamo automatic API', () => {
     restores.push(mockServiceMethod(kubernetesService, 'replaceDeployment', async () => { writes++; throw { statusCode: 409, message: 'Conflict' }; }));
     expect((await request('/default/qwen-auto/reconfigure', { resourceVersion: 'old' })).status).toBe(409);
     expect(writes).toBe(0);
+    expect((await request('/default/qwen-auto/reconfigure', { resourceVersion: '1' })).status).toBe(409);
+    expect(writes).toBe(1);
+  });
+
+  test('preserves real-client permission denials and resourceVersion conflicts', async () => {
+    restores.push(mockServiceMethod(kubernetesService, 'getInferenceProviderConfig', async () => { throw new Error('offline'); }));
+    restores.push(mockServiceMethod(kubernetesService, 'getClusterGpuCapacity', async () => { throw new Error('offline'); }));
+    restores.push(mockServiceMethod(kubernetesService, 'createDeployment', async () => {
+      throw new ApiException(403, 'Unknown API Status Code!', JSON.stringify({ code: 403, message: 'Namespace write denied' }), {});
+    }));
+    expect((await request('', body())).status).toBe(403);
+    let writes = 0;
+    restores.push(mockServiceMethod(kubernetesService, 'getDeploymentManifest', async () => current() as unknown as Record<string, unknown>));
+    restores.push(mockServiceMethod(kubernetesService, 'replaceDeployment', async () => {
+      writes++;
+      throw new ApiException(409, 'Unknown API Status Code!', JSON.stringify({ code: 409, message: 'Resource version conflict' }), {});
+    }));
     expect((await request('/default/qwen-auto/reconfigure', { resourceVersion: '1' })).status).toBe(409);
     expect(writes).toBe(1);
   });

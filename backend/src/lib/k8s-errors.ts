@@ -11,7 +11,7 @@ export interface K8sApiError {
   };
   body?: K8sErrorBody | string;
   message?: string;
-  code?: string;
+  code?: string | number;
 }
 
 /**
@@ -58,30 +58,11 @@ export function extractK8sErrorMessage(error: unknown): string {
     return 'Unknown error occurred';
   }
 
-  // Handle standard Error objects
-  if (error instanceof Error && !(error as K8sApiError).response) {
-    return error.message;
-  }
-
   const k8sError = error as K8sApiError;
   
-  // Try to get the body from various locations
-  const rawBody: K8sErrorBody | string | undefined =
-    k8sError.body ||
-    k8sError.response?.body;
-
-  // Parse JSON body if it's a string
-  let parsedBody: K8sErrorBody | undefined;
-  if (typeof rawBody === 'string') {
-    try {
-      parsedBody = JSON.parse(rawBody) as K8sErrorBody;
-    } catch {
-      // If it's not JSON, use the string as the error message
-      return rawBody;
-    }
-  } else if (rawBody && typeof rawBody === 'object') {
-    parsedBody = rawBody;
-  }
+  const body = parseK8sErrorBody(k8sError);
+  if (typeof body === 'string') return body;
+  const parsedBody = body;
 
   // If we have a K8s Status body, extract detailed information
   if (parsedBody) {
@@ -119,7 +100,7 @@ export function extractK8sErrorMessage(error: unknown): string {
   }
 
   // Get status code for more context
-  const statusCode = k8sError.statusCode || k8sError.response?.statusCode;
+  const statusCode = getK8sStatusCode(k8sError);
 
   // Fall back to the raw message with status code context
   if (k8sError.message) {
@@ -164,28 +145,32 @@ function getStatusCodeMessage(statusCode: number): string {
   }
 }
 
-/**
- * Get the HTTP status code from a Kubernetes error
- */
+/** Decode legacy and generated-client Kubernetes Status bodies. */
+function parseK8sErrorBody(error: K8sApiError): K8sErrorBody | string | undefined {
+  const raw = error.body ?? error.response?.body;
+  if (typeof raw !== 'string') return raw;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as K8sErrorBody : raw;
+  } catch {
+    return raw;
+  }
+}
+
+/** Preserve HTTP errors from both legacy clients and the generated ApiException. */
+export function getK8sStatusCode(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const apiError = error as K8sApiError;
+  const body = parseK8sErrorBody(apiError);
+  const candidates = [apiError.statusCode, apiError.response?.statusCode, apiError.code,
+    typeof body === 'object' ? body?.code : undefined];
+  return candidates.find((value): value is number => typeof value === 'number'
+    && Number.isInteger(value) && value >= 400 && value < 600);
+}
+
 export function getK8sErrorStatusCode(error: unknown): number {
-  if (!error || typeof error !== 'object') {
-    return 500;
-  }
-
-  const k8sError = error as K8sApiError;
-  const statusCode = k8sError.statusCode || k8sError.response?.statusCode;
-  
-  if (statusCode && statusCode >= 400 && statusCode < 600) {
-    return statusCode;
-  }
-
-  // Check if it's in the body
-  const body = k8sError.body || k8sError.response?.body;
-  if (body && typeof body === 'object' && 'code' in body && typeof body.code === 'number') {
-    return body.code;
-  }
-
-  return 500;
+  return getK8sStatusCode(error) ?? 500;
 }
 
 /**

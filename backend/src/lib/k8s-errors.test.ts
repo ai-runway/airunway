@@ -1,3 +1,4 @@
+import { ApiException } from '@kubernetes/client-node';
 import { describe, expect, it } from 'bun:test';
 import { extractK8sErrorMessage, getK8sErrorStatusCode, handleK8sError } from './k8s-errors';
 
@@ -153,5 +154,26 @@ describe('handleK8sError', () => {
     const result = handleK8sError(error, { operation: 'createDeployment' });
     expect(result.message).toContain('Forbidden');
     expect(result.statusCode).toBe(403);
+  });
+});
+
+describe('generated Kubernetes client errors', () => {
+  for (const code of [403, 404, 409, 422, 503]) {
+    it(`preserves ApiException HTTP ${code} and its structured message`, () => {
+      const body = { kind: 'Status', code, message: `Kubernetes rejected the request (${code})` };
+      for (const value of [body, JSON.stringify(body)]) {
+        const error = new ApiException(code, 'Unknown API Status Code!', value, {});
+        expect(getK8sErrorStatusCode(error)).toBe(code);
+        expect(extractK8sErrorMessage(error)).toBe(body.message);
+      }
+    });
+  }
+  it('does not mistake network codes or invalid status values for HTTP errors', () => {
+    for (const error of [{ code: 'ECONNRESET' }, { code: 200 }, { body: { code: 999 } }]) {
+      expect(getK8sErrorStatusCode(error)).toBe(500);
+    }
+  });
+  it('reads a legacy serialized Status body', () => {
+    expect(getK8sErrorStatusCode({ response: { body: JSON.stringify({ code: 403 }) } })).toBe(403);
   });
 });

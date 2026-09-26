@@ -4,7 +4,7 @@ import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentCo
 import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient, kubeConfigToBunTls, type BunTlsOptions } from '../lib/kubeconfig';
-import { type K8sApiError } from '../lib/k8s-errors';
+import { getK8sStatusCode } from '../lib/k8s-errors';
 import logger from '../lib/logger';
 import {
   extractProviderInfo,
@@ -294,11 +294,6 @@ function describeOperatorProbeNamespaces(operatorPods: NonNullable<ProviderHealt
   if (namespaces.length === 0) return 'matching configured labels';
   if (namespaces.length === 1) return namespaces[0];
   return namespaces.join(', ');
-}
-
-function getK8sStatusCode(error: unknown): number | undefined {
-  const e = error as K8sApiError | undefined;
-  return e?.statusCode || e?.response?.statusCode;
 }
 
 function getK8sErrorMessage(error: unknown): string {

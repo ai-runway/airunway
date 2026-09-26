@@ -1,3 +1,4 @@
+import { ApiException } from '@kubernetes/client-node';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { kubernetesService } from './kubernetes';
 import { type ModelDeployment, defaultDynamoIntent } from '@airunway/shared';
@@ -32,6 +33,18 @@ describe('Dynamo serving identity', () => {
     await kubernetesService.getDeploymentPods('original', 'models', { kind: 'RayService', name: 'other', namespace: 'elsewhere' });
     expect(calls.every(call => call.namespace === 'models')).toBe(true);
     expect(calls.some(call => call.labelSelector === 'app.kubernetes.io/instance=original')).toBe(true);
+  });
+
+  test('treats a generated-client 404 as a missing deployment', async () => {
+    const old = service.customObjectsApi;
+    restores.push(() => { service.customObjectsApi = old; });
+    let reads = 0;
+    service.customObjectsApi = { getNamespacedCustomObject: async () => {
+      reads++;
+      throw new ApiException(404, 'Unknown API Status Code!', JSON.stringify({ code: 404, message: 'Not found' }), {});
+    } };
+    expect(await kubernetesService.getDeploymentManifest('missing', 'models')).toBeNull();
+    expect(reads).toBe(1);
   });
 
   test('sends a single resourceVersion-guarded replacement, not a create or unguarded patch', async () => {
