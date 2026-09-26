@@ -45,7 +45,7 @@ func TestTranslateDGDRStatus(t *testing.T) {
 		{phase: "Profiling", want: airunwayv1alpha1.DeploymentPhaseDeploying},
 		{phase: "Ready", want: airunwayv1alpha1.DeploymentPhaseDeploying},
 		{phase: "Deploying", want: airunwayv1alpha1.DeploymentPhaseDeploying},
-		{phase: "Deployed", want: airunwayv1alpha1.DeploymentPhaseRunning},
+		{phase: "Deployed", want: airunwayv1alpha1.DeploymentPhaseDeploying},
 		{phase: "Failed", want: airunwayv1alpha1.DeploymentPhaseFailed},
 	}
 	for _, tt := range tests {

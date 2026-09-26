@@ -102,6 +102,20 @@ Each entry is a `StorageVolume`. Maximum 8 volumes per deployment.
 | `storageClassName` | string | no | StorageClass for controller-created PVCs. Omit to use the cluster default. Set to `""` to disable dynamic provisioning. Only used when `size` is set. |
 | `accessMode` | string | no | PVC access mode for controller-created PVCs. One of `ReadWriteOnce`, `ReadWriteMany`, `ReadOnlyMany`, `ReadWriteOncePod`. Default: `ReadWriteMany`. Only used when `size` is set. |
 
+### status.provider workload references
+
+Providers can report `requestRef`, `workloadRef`, and `inferencePoolRef`. Each
+reference contains `apiVersion`, `kind`, `name`, `namespace`, and the observed
+`uid`. Existing `resourceName` and `resourceKind` fields remain for compatibility.
+
+For automatic Dynamo deployments, `requestRef` identifies the DGDR and
+`workloadRef` identifies the generated DGD. `intent` contains `phase`,
+`profilingPhase`, `inputHash`, and the accepted `attempt` token. These fields are
+controller-owned status, not configuration users should populate.
+
+See [Dynamo deployment modes](providers.md#dynamo-deployment-modes) for typed intent
+inputs and explicit reconfiguration semantics.
+
 ## InferenceProviderConfig
 
 Cluster-scoped resource for provider registration. Each provider controller self-registers its `InferenceProviderConfig` at startup, declaring capabilities and selection rules in `spec`, and display, installation, health, and documentation metadata in `metadata.annotations`:

@@ -46,6 +46,7 @@ import (
 	"github.com/ai-runway/airunway/controller/internal/gateway"
 	airmetrics "github.com/ai-runway/airunway/controller/internal/metrics"
 	"github.com/ai-runway/airunway/controller/internal/validation"
+	"github.com/ai-runway/airunway/controller/pkg/dynamointent"
 )
 
 // ModelDeploymentReconciler reconciles a ModelDeployment object
@@ -390,6 +391,9 @@ func isNoMatchError(err error) bool {
 // validateSpec performs validation on the ModelDeployment spec
 func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, providerConfigs []airunwayv1alpha1.InferenceProviderConfig, engineType airunwayv1alpha1.EngineType, servingMode airunwayv1alpha1.ServingMode) error {
 	spec := &md.Spec
+	if err := dynamointent.Validate(md); err != nil {
+		return err
+	}
 
 	if err := spec.ValidateImageFields(); err != nil {
 		r.setImageFieldConflictStatus(md, err)
@@ -420,10 +424,7 @@ func (r *ModelDeploymentReconciler) validateSpec(ctx context.Context, md *airunw
 
 	// Validate provider/engine/serving-mode/GPU-CPU compatibility via the
 	// shared helper so the webhook and reconciler cannot drift.
-	gpuCount := int32(0)
-	if spec.Resources != nil && spec.Resources.GPU != nil {
-		gpuCount = spec.Resources.GPU.Count
-	}
+	gpuCount := dynamointent.GPUCount(md)
 	providerName := ""
 	var namedConfig *airunwayv1alpha1.InferenceProviderConfig
 	if spec.Provider != nil {
@@ -511,10 +512,7 @@ func (r *ModelDeploymentReconciler) selectEngine(ctx context.Context, md *airunw
 
 	// Collect supported engines from ready providers, filtering by per-engine compatibility
 	// Determine deployment characteristics
-	hasGPU := false
-	if md.Spec.Resources != nil && md.Spec.Resources.GPU != nil && md.Spec.Resources.GPU.Count > 0 {
-		hasGPU = true
-	}
+	hasGPU := dynamointent.GPUCount(md) > 0
 	if md.Spec.Serving != nil && md.Spec.Serving.Mode == airunwayv1alpha1.ServingModeDisaggregated {
 		hasGPU = true
 	}

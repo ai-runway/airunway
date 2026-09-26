@@ -1879,3 +1879,53 @@ func TestGateway_EPP_OnlyImageOverride(t *testing.T) {
 		}
 	})
 }
+
+func TestGateway_IntentUsesResolvedFrontend(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("intent-model", "default")
+	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "custom-generated-frontend", Port: 8000}
+	md.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo", RequestRef: &airunwayv1alpha1.ProviderResourceReference{Name: "request"}, WorkloadRef: &airunwayv1alpha1.ProviderResourceReference{Name: "custom-generated", Namespace: "default"}}
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	r := newTestReconciler(scheme, detector, md)
+	if err := r.reconcileGateway(context.Background(), md); err != nil {
+		t.Fatal(err)
+	}
+	var route gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &route); err != nil {
+		t.Fatal(err)
+	}
+	b := route.Spec.Rules[0].BackendRefs[0]
+	if b.Kind == nil || *b.Kind != "Service" || string(b.Name) != "custom-generated-frontend" || b.Port == nil || *b.Port != 8000 {
+		t.Fatalf("wrong frontend binding: %#v", b)
+	}
+	var pools inferencev1.InferencePoolList
+	if err := r.List(context.Background(), &pools); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatal("a standalone frontend must not create an inference pool")
+	}
+
+}
+
+func TestGateway_UsesConcretePoolBinding(t *testing.T) {
+	scheme := newTestScheme()
+	md := newModelDeployment("intent-model", "default")
+	md.Status.Provider = &airunwayv1alpha1.ProviderStatus{Name: "dynamo", InferencePoolRef: &airunwayv1alpha1.ProviderResourceReference{Name: "actual-workload-pool", Namespace: "default", UID: "pool-uid"}}
+	pool := &inferencev1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: "actual-workload-pool", Namespace: "default", UID: "pool-uid"}}
+	r := newTestReconciler(scheme, fakeDetector(true, "my-gateway", "gateway-ns"), md, pool)
+	if err := r.reconcileGateway(context.Background(), md); err != nil {
+		t.Fatal(err)
+	}
+	var route gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(), types.NamespacedName{Name: md.Name, Namespace: md.Namespace}, &route); err != nil {
+		t.Fatal(err)
+	}
+	if got := route.Spec.Rules[0].BackendRefs[0].Name; got != "actual-workload-pool" {
+		t.Fatalf("wrong pool %q", got)
+	}
+	md.Status.Provider.InferencePoolRef.UID = "previous-pool"
+	if _, err := r.reconcileProviderManagedInferencePool(context.Background(), md, pool.Name, pool.Namespace); err == nil {
+		t.Fatal("stale pool UID accepted")
+	}
+}

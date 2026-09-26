@@ -1,3 +1,4 @@
+import { dynamoOverridesSchema, dynamoReconfigureSchema, reconfigureDynamoDeployment } from '../lib/dynamo-intent';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -16,6 +17,9 @@ import logger from '../lib/logger';
 import type { AppEnv } from '../types/hono';
 import {
   parseFrontendService,
+  isDynamoIntent,
+  getDynamoIntent,
+  type ModelDeployment,
   toModelDeploymentManifest,
   type DeploymentStatus,
   type DeploymentConfig,
@@ -144,7 +148,17 @@ const recipeProvenanceSchema = z.object({
   revision: z.string().optional(),
 }).optional();
 
-const createDeploymentSchema = z.object({
+const createDeploymentSchema = z.unknown().superRefine((raw, ctx) => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  const input = raw as Record<string, unknown>;
+  const overrides = input.providerOverrides as Record<string, unknown> | undefined;
+  if (input.provider !== 'dynamo' || overrides?.deploymentMode !== 'intent') return;
+  // The legacy create API strips unknown fields. Do not silently accept manual-only
+  // CRD fields in an automatic request before that stripping happens.
+  for (const field of ['scaling', 'serving', 'nodeSelector', 'tolerations', 'podTemplate', 'mocker', 'autoApply']) {
+    if (input[field] !== undefined) ctx.addIssue({ code: 'custom', message: `${field} is not supported in automatic configuration`, path: [field] });
+  }
+}).pipe(z.object({
   name: resourceNameSchema,
   modelId: z.string().min(1, 'Model ID is required'),
   engine: z.enum(['vllm', 'sglang', 'trtllm', 'llamacpp']),
@@ -153,7 +167,7 @@ const createDeploymentSchema = z.object({
   provider: resourceNameSchema.optional(),
   servedModelName: z.string().optional(),
   routerMode: z.enum(['default', 'kv', 'round-robin']).optional().default('default'),
-  replicas: z.number().int().min(0).optional().default(1),
+  replicas: z.number().int().min(0).optional(),
   hfTokenSecret: z.string().optional().default(''),
   contextLength: z.number().int().positive().optional(),
   enforceEager: z.boolean().optional().default(false),
@@ -182,6 +196,27 @@ const createDeploymentSchema = z.object({
   recipeProvenance: recipeProvenanceSchema,
   storage: storageSchema,
 }).superRefine((data, ctx) => {
+  if (data.providerOverrides?.intent !== undefined || isDynamoIntent(data.provider, data.providerOverrides)) {
+    if (data.provider !== 'dynamo') {
+      ctx.addIssue({ code: 'custom', message: 'Automatic configuration requires the Dynamo provider', path: ['provider'] });
+    }
+    const result = dynamoOverridesSchema.safeParse(data.providerOverrides);
+    if (!result.success) for (const issue of result.error.issues) {
+      ctx.addIssue({ code: 'custom', message: issue.message, path: ['providerOverrides', ...issue.path] });
+    }
+    if (data.replicas !== undefined || data.mode === 'disaggregated' || data.resources || data.prefillReplicas !== undefined || data.decodeReplicas !== undefined || data.prefillGpus !== undefined || data.decodeGpus !== undefined) {
+      ctx.addIssue({ code: 'custom', message: 'Automatic configuration uses a GPU budget, not manual sizing or layout', path: ['resources'] });
+    }
+    if (data.engine === 'llamacpp' || data.routerMode !== 'default') {
+      ctx.addIssue({ code: 'custom', message: 'Automatic configuration supports vllm, sglang or trtllm with default routing', path: ['engine'] });
+    }
+    if (data.storage?.volumes?.length || Object.keys(data.env || {}).length || (data.hfTokenSecret && data.hfTokenSecret !== 'hf-token-secret')) {
+      ctx.addIssue({ code: 'custom', message: 'Storage, environment variables and custom Hugging Face secret names require manual configuration', path: ['providerOverrides'] });
+    }
+    if (data.imageRef || data.contextLength || data.maxModelLen || data.enforceEager || data.trustRemoteCode || data.servedModelName || Object.keys(data.engineArgs || {}).length || data.engineExtraArgs?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Custom images, engine settings and served names require manual configuration', path: ['providerOverrides'] });
+    }
+  }
   const volumes = data.storage?.volumes;
   if (!volumes || volumes.length === 0) return;
 
@@ -364,7 +399,7 @@ const createDeploymentSchema = z.object({
       path: ['storage', 'volumes'],
     });
   }
-});
+}));
 
 
 function validateSupportedCapability(
@@ -454,7 +489,7 @@ async function validateProviderCapabilities(config: DeploymentConfig): Promise<v
   validateSupportedCapability(
     config.provider,
     supportedModesForEngine && config.engine ? `mode for engine ${config.engine}` : 'mode',
-    config.mode,
+    isDynamoIntent(config.provider, config.providerOverrides) ? undefined : config.mode,
     supportedModesForEngine ?? capabilities.modes,
   );
   const effectiveModelSource = config.modelSource ?? 'huggingface';
@@ -842,11 +877,12 @@ async function handleDeploymentChat(
   }
 
   const frontendServicePort = frontendService.servicePort || DEFAULT_FRONTEND_SERVICE_PORT;
+  const frontendNamespace = deployment.frontendNamespace || resolvedNamespace;
 
   const directModel = await resolveDirectChatModel(
     deployment,
     frontendService.serviceName,
-    resolvedNamespace,
+    frontendNamespace,
     frontendServicePort,
     signal,
     userToken,
@@ -855,7 +891,7 @@ async function handleDeploymentChat(
 
   const upstreamResponse = await kubernetesService.proxyServicePostStream(
     frontendService.serviceName,
-    resolvedNamespace,
+    frontendNamespace,
     frontendServicePort,
     'v1/chat/completions',
     {
@@ -874,7 +910,7 @@ async function handleDeploymentChat(
       const gatewayModel = await resolveGatewayChatModel(
         deployment,
         frontendService.serviceName,
-        resolvedNamespace,
+        frontendNamespace,
         frontendServicePort,
         signal,
         userToken
@@ -1033,6 +1069,7 @@ const deployments = new Hono<AppEnv>()
 
     const config = resolveDeploymentImages({
       ...body,
+      replicas: body.replicas ?? 1,
       namespace: body.namespace || (await configService.getDefaultNamespace()),
     });
     await validateProviderCapabilities(config);
@@ -1045,7 +1082,15 @@ const deployments = new Hono<AppEnv>()
       const model = models.models.find((m) => m.id === config.modelId);
       const modelMinGpus = (model as { minGpus?: number })?.minGpus ?? 1;
 
-      const gpuFitResult = validateGpuFit(config, capacity, modelMinGpus);
+      const intent = getDynamoIntent(config.provider, config.providerOverrides);
+      const gpuFitResult = intent ? {
+        fits: intent.hardware.totalGpus <= capacity.availableGpus,
+        warnings: intent.hardware.totalGpus > capacity.availableGpus ? [{
+          type: 'total_insufficient' as const,
+          message: 'The GPU budget exceeds currently available capacity.',
+          required: intent.hardware.totalGpus, available: capacity.availableGpus,
+        }] : [],
+      } : validateGpuFit(config, capacity, modelMinGpus);
       if (!gpuFitResult.fits) {
         gpuWarnings = formatGpuWarnings(gpuFitResult);
         logger.warn(
@@ -1091,10 +1136,28 @@ const deployments = new Hono<AppEnv>()
       201
     );
   })
+  .post('/:namespace/:name/reconfigure',
+    zValidator('param', namespacedDeploymentParamsSchema),
+    zValidator('json', dynamoReconfigureSchema),
+    async (c) => {
+      const { namespace, name } = c.req.valid('param');
+      const userToken = c.get('token') as string | undefined;
+      const current = await kubernetesService.getDeploymentManifest(name, namespace, userToken);
+      if (!current) throw new HTTPException(404, { message: 'Deployment not found' });
+      const next = reconfigureDynamoDeployment(current as unknown as ModelDeployment, c.req.valid('json'));
+      try {
+        await kubernetesService.replaceDeployment(next, userToken);
+      } catch (error) {
+        const { message, statusCode } = handleK8sError(error, { operation: 'reconfigureDeployment', deploymentName: name, namespace });
+        throw new HTTPException(statusCode as ContentfulStatusCode, { message });
+      }
+      return c.json({ message: 'Automatic configuration requested', attempt: next.metadata.annotations?.['airunway.ai/dynamo-attempt'] });
+    })
   .post('/preview', zValidator('json', createDeploymentSchema), async (c) => {
     const body = c.req.valid('json');
     const config = resolveDeploymentImages({
       ...body,
+      replicas: body.replicas ?? 1,
       namespace: body.namespace || (await configService.getDefaultNamespace()),
     });
     await validateProviderCapabilities(config);
@@ -1292,7 +1355,7 @@ const deployments = new Hono<AppEnv>()
         throw new HTTPException(404, { message: 'Deployment not found' });
       }
 
-      const pods = await kubernetesService.getDeploymentPods(name, resolvedNamespace);
+      const pods = await kubernetesService.getDeploymentPods(name, resolvedNamespace, deployment.providerStatus?.workloadRef);
       return c.json({ pods });
     }
   )
@@ -1313,7 +1376,7 @@ const deployments = new Hono<AppEnv>()
       }
 
       const frontendService = parseFrontendService(deployment.frontendService);
-      const metricsResponse = await metricsService.getDeploymentMetrics(name, resolvedNamespace, {
+      const metricsResponse = await metricsService.getDeploymentMetrics(name, deployment.frontendNamespace || resolvedNamespace, {
         providerId: deployment.provider,
         serviceName: frontendService?.serviceName,
         port: frontendService?.servicePort,
@@ -1348,7 +1411,7 @@ const deployments = new Hono<AppEnv>()
 
         // Get failure reasons for the first pending pod (they're typically the same)
         const podName = pendingPods[0].name;
-        const reasons = await kubernetesService.getPodFailureReasons(podName, resolvedNamespace);
+        const reasons = await kubernetesService.getPodFailureReasons(podName, deployment.providerStatus?.workloadRef?.namespace || resolvedNamespace);
 
         return c.json({ reasons });
       } catch (error) {
@@ -1395,7 +1458,7 @@ const deployments = new Hono<AppEnv>()
         }
 
         // Use service account for pod listing and log fetching
-        const pods = await kubernetesService.getDeploymentPods(name, resolvedNamespace);
+        const pods = await kubernetesService.getDeploymentPods(name, resolvedNamespace, deployment.providerStatus?.workloadRef);
 
         if (pods.length === 0) {
           logger.debug({ name, namespace: resolvedNamespace }, 'No pods found for deployment');
@@ -1415,7 +1478,7 @@ const deployments = new Hono<AppEnv>()
 
         logger.debug({ name, namespace: resolvedNamespace, targetPodName }, 'Fetching logs for pod');
 
-        const logs = await kubernetesService.getPodLogs(targetPodName, resolvedNamespace, {
+        const logs = await kubernetesService.getPodLogs(targetPodName, deployment.providerStatus?.workloadRef?.namespace || resolvedNamespace, {
           container,
           tailLines: tailLines || 100,
           timestamps: timestamps || false,

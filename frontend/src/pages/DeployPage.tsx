@@ -63,6 +63,7 @@ export function DeployPage() {
   // Precision controls for the throughput estimate. Weight precision and
   // KV-cache precision are independent knobs (KV cache often stays fp16/bf16
   // even when weights are quantized).
+  const [automatic, setAutomatic] = useState(false)
   const [weightQuant, setWeightQuant] = useState<WeightQuant>('fp16')
   const [kvCacheDtype, setKvCacheDtype] = useState<KvQuant>('fp16')
 
@@ -82,7 +83,7 @@ export function DeployPage() {
     : undefined
   const { data: throughput, isLoading: throughputLoading } = useGpuThroughput(
     throughputParams ?? {},
-    { enabled: !!throughputParams }
+    { enabled: !!throughputParams && !automatic }
   )
 
   // The backend downgrades an FP8 KV cache to FP16 on GPUs without a native FP8
@@ -232,7 +233,7 @@ export function DeployPage() {
       {/* Performance & Precision: precision controls + speed estimate live here.
           Changing any control recomputes the estimate. FP8 selections also feed
           the real deployment (engine args) — see DeploymentForm. */}
-      {throughputParams && (
+      {throughputParams && !automatic && (
         <div className="glass-panel animate-slide-up" style={{ animationDelay: '75ms', animationFillMode: 'both' }}>
           <h2 className="text-lg font-semibold mb-1">Performance &amp; Precision</h2>
           <p className="text-sm text-muted-foreground mb-4">
@@ -311,6 +312,7 @@ export function DeployPage() {
       <div className="animate-slide-up" style={{ animationDelay: '100ms', animationFillMode: 'both' }}>
         <DeploymentForm
           model={model}
+          onAutomaticConfigurationChange={setAutomatic}
           detailedCapacity={detailedCapacity}
           autoscaler={autoscaler}
           runtimes={runtimesData?.runtimes}

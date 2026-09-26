@@ -455,8 +455,43 @@ type ModelDeploymentSpec struct {
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
+// ProviderResourceReference identifies a particular upstream resource incarnation.
+type ProviderResourceReference struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace"`
+	// +optional
+	UID string `json:"uid,omitempty"`
+}
+
+// ProviderIntentStatus records the accepted, immutable profiling attempt.
+type ProviderIntentStatus struct {
+	// +optional
+	Phase string `json:"phase,omitempty"`
+	// +optional
+	ProfilingPhase string `json:"profilingPhase,omitempty"`
+	// +optional
+	InputHash string `json:"inputHash,omitempty"`
+	// +optional
+	Attempt string `json:"attempt,omitempty"`
+}
+
 // ProviderStatus contains information about the selected provider
 type ProviderStatus struct {
+	// requestRef identifies an upstream configuration request, when used.
+	// +optional
+	RequestRef *ProviderResourceReference `json:"requestRef,omitempty"`
+	// workloadRef identifies the actual serving workload.
+	// +optional
+	WorkloadRef *ProviderResourceReference `json:"workloadRef,omitempty"`
+	// inferencePoolRef identifies a provider-managed routing pool, when present.
+	// +optional
+	InferencePoolRef *ProviderResourceReference `json:"inferencePoolRef,omitempty"`
+	// intent records profiling progress and accepted input identity.
+	// +optional
+	Intent *ProviderIntentStatus `json:"intent,omitempty"`
+
 	// name is the selected provider name
 	// +optional
 	Name string `json:"name,omitempty"`

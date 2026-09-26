@@ -36,6 +36,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/internal/validation"
+	"github.com/ai-runway/airunway/controller/pkg/dynamointent"
 )
 
 const (
@@ -85,6 +86,10 @@ func (d *ModelDeploymentCustomDefaulter) Default(_ context.Context, obj *airunwa
 	modeldeploymentlog.Info("Defaulting for ModelDeployment", "name", obj.GetName())
 
 	spec := &obj.Spec
+	intent, err := dynamointent.Parse(obj)
+	if err != nil {
+		return err
+	}
 
 	// Default model source to huggingface
 	if spec.Model.Source == "" {
@@ -101,7 +106,7 @@ func (d *ModelDeploymentCustomDefaulter) Default(_ context.Context, obj *airunwa
 	}
 
 	// Default scaling replicas to 1 for aggregated mode
-	if spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated {
+	if intent == nil && spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated {
 		if spec.Scaling == nil {
 			spec.Scaling = &airunwayv1alpha1.ScalingSpec{
 				Replicas: 1,
@@ -117,7 +122,7 @@ func (d *ModelDeploymentCustomDefaulter) Default(_ context.Context, obj *airunwa
 	// - engine is not specified (auto-selection will determine GPU requirements)
 	// - engine is llamacpp (supports CPU-only inference)
 	// - the user provided a custom image (may not need GPU)
-	if spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated && spec.Resources == nil &&
+	if intent == nil && spec.Serving.Mode == airunwayv1alpha1.ServingModeAggregated && spec.Resources == nil &&
 		spec.Engine.Type != "" && spec.Engine.Type != airunwayv1alpha1.EngineTypeLlamaCpp &&
 		spec.Image == "" {
 		spec.Resources = &airunwayv1alpha1.ResourceSpec{
@@ -237,6 +242,10 @@ func (v *ModelDeploymentCustomValidator) ValidateUpdate(ctx context.Context, old
 	warnings = append(warnings, specWarnings...)
 	allErrs = append(allErrs, specErrs...)
 
+	if err := dynamointent.ValidateUpdate(oldObj, newObj); err != nil {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "provider", "overrides"), err.Error()))
+	}
+
 	// Validate immutable fields (identity fields that trigger delete+recreate)
 	allErrs = append(allErrs, v.validateImmutableFields(oldObj, newObj)...)
 
@@ -263,6 +272,9 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 	var allErrs field.ErrorList
 	spec := &obj.Spec
 	specPath := field.NewPath("spec")
+	if err := dynamointent.Validate(obj); err != nil {
+		allErrs = append(allErrs, field.Invalid(specPath.Child("provider", "overrides", "intent"), "<intent>", err.Error()))
+	}
 
 	// Validate image override fields are not conflicting.
 	if err := spec.ValidateImageFields(); err != nil {
@@ -388,10 +400,7 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 				spec.Provider.Name, err,
 			))
 		case providerConfig.Spec.Capabilities != nil:
-			gpuCount := int32(0)
-			if spec.Resources != nil && spec.Resources.GPU != nil {
-				gpuCount = spec.Resources.GPU.Count
-			}
+			gpuCount := dynamointent.GPUCount(obj)
 			for _, ce := range validation.CheckProviderCompatibility(
 				spec.Provider.Name,
 				&providerConfig,
@@ -531,9 +540,10 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 
 	oldSpec := &oldObj.Spec
 	newSpec := &newObj.Spec
+	reconfigure := dynamointent.Enabled(oldObj) && dynamointent.Enabled(newObj) && oldObj.Annotations[dynamointent.AttemptAnnotation] != newObj.Annotations[dynamointent.AttemptAnnotation]
 
 	// model.id is an identity field
-	if oldSpec.Model.ID != newSpec.Model.ID {
+	if !reconfigure && oldSpec.Model.ID != newSpec.Model.ID {
 		allErrs = append(allErrs, field.Invalid(
 			specPath.Child("model", "id"),
 			newSpec.Model.ID,
@@ -551,7 +561,7 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 	}
 
 	// engine.type is an identity field (once set)
-	if oldSpec.Engine.Type != "" && newSpec.Engine.Type != "" && oldSpec.Engine.Type != newSpec.Engine.Type {
+	if !reconfigure && oldSpec.Engine.Type != "" && newSpec.Engine.Type != "" && oldSpec.Engine.Type != newSpec.Engine.Type {
 		allErrs = append(allErrs, field.Invalid(
 			specPath.Child("engine", "type"),
 			newSpec.Engine.Type,

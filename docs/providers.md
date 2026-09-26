@@ -85,49 +85,134 @@ The Web UI backend reads provider information (capabilities, installation steps,
 | llm-d         | none                  | ✅ Available | [llmd.yaml](https://github.com/ai-runway/airunway/blob/main/providers/llmd/deploy/llmd.yaml) | Flexible inference with vLLM (GPU) with KV-cache routing and disaggregated serving |
 | Direct vLLM   | Deployment            | ✅ Available | [vllm.yaml](https://github.com/ai-runway/airunway/blob/main/providers/vllm/deploy/vllm.yaml) | Direct vLLM OpenAI-compatible server deployments using `spec.engine.image`; see [Direct vLLM guide](providers/vllm.md) |
 
-### Dynamo Deployment Modes
+### Dynamo deployment modes
 
-Dynamo uses direct `DynamoGraphDeployment` rendering by default. Set
-`spec.provider.overrides.deploymentMode: intent` to create a
-`nvidia.com/v1beta1` `DynamoGraphDeploymentRequest` (DGDR) instead:
+Dynamo supports manual configuration through `DynamoGraphDeployment` (DGD) and
+automatic configuration through `DynamoGraphDeploymentRequest` (DGDR). Both are
+managed through `ModelDeployment`. The web UI exposes the same two modes.
+
+#### Automatic configuration
+
+Specify the model, backend, total GPU budget, expected traffic, and optional
+latency targets. Do not specify manual resources or replica counts: Dynamo chooses
+the topology and allocation within the profiling budget.
 
 ```yaml
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen-auto
+  namespace: default
 spec:
-    provider:
-        name: dynamo
-        overrides:
-            deploymentMode: intent
-            spec:
-                searchStrategy: rapid
-                sla:
-                    ttft: 500
+  model:
+    id: Qwen/Qwen3-0.6B
+    source: huggingface
+  engine:
+    type: vllm
+  provider:
+    name: dynamo
+    overrides:
+      deploymentMode: intent
+      intent:
+        hardware:
+          totalGpus: 1
+        searchStrategy: rapid
+        workload:
+          isl: 1024
+          osl: 256
+          requestRate: 1
+        sla:
+          ttft: 1000
+          itl: 50
+  gateway:
+    enabled: true
 ```
 
-The optional `overrides.spec` object is a partial DGDR spec. AI Runway supplies these values:
+The typed `intent` block is validated by admission and provider reconciliation:
 
-| ModelDeployment field | DGDR field | Behavior |
-| --- | --- | --- |
-| `spec.model.id` | `spec.model` | Authoritative; an override cannot replace it |
-| resolved `spec.engine.type` | `spec.backend` | `vllm`, `sglang`, or `trtllm`; otherwise `auto` |
-| GPU counts and requested replicas | `spec.hardware.totalGpus` | Aggregate GPU budget; Dynamo chooses the final topology and replica layout |
-| first `modelCache` volume | `spec.modelCache.pvcName` and `pvcMountPath` | References the existing or AI Runway-managed PVC |
-| `overrides.spec` | remaining DGDR spec | Deep-merged over generated defaults; `autoApply` defaults to `true` but may be set to `false` |
+- `hardware.totalGpus` is a required budget from 1 through 64. Optional `gpuSku`,
+  `vramMb`, and `numGpusPerNode` supply hardware information when discovery is not
+  available. This budget does not reserve GPUs in the cluster.
+- `workload.isl` and `osl` are positive token counts. Use `requestRate` or
+  `concurrency`, not both.
+- `sla.ttft` and `itl` are millisecond targets. Alternatively specify `e2eLatency`.
+  Targets must be positive and end-to-end latency cannot be combined with the
+  other targets.
+- The initial typed workflow supports `searchStrategy: rapid` and submits
+  `autoApply: true`. Real-GPU thorough searches, Planner controls, and
+  review-before-apply are not exposed by this workflow.
+- The installed operator supplies its matching profiler image. Ensure GPU
+  discovery is available, or supply complete hardware information. Upstream's
+  default profiler expects a namespace-local `hf-token-secret` with an `HF_TOKEN`
+  key.
 
-Intent mode deliberately does not map `spec.serving.mode` to a topology because Dynamo 1.1.1
-does not expose an initial topology selector. The requested serving mode and replica layout are
-therefore advisory inputs to the GPU budget; Dynamo profiling chooses aggregated or
-disaggregated serving. Use the default manual mode when the exact topology must be preserved.
+Rapid profiling uses performance estimates and can fall back to a basic
+configuration. A generated configuration or healthy deployment is not proof that
+it meets the requested performance targets.
 
-`spec.image` and `spec.engine.image` are also ignored in intent mode. DGDR's top-level `image`
-is the profiling image, not a topology-independent runtime image. Set the DGDR profiling image
-through `overrides.spec.image`; customize generated runtime components through the embedded
-resource at `overrides.spec.overrides.dgd`.
+#### Request lifecycle and explicit reconfiguration
 
-DGDR specs become immutable after profiling begins. When a `ModelDeployment` generation changes,
-the provider deletes the generated DGD first, deletes the old DGDR, and creates a new request.
-Deleting the `ModelDeployment` performs the same explicit cleanup because Dynamo intentionally
-does not garbage-collect a generated DGD when its DGDR is deleted. The provider discovers that
-DGD from `status.dgdName` and Dynamo's DGDR relationship labels.
+Once profiling starts, normal edits to profiling inputs are rejected. Gateway
+changes do not restart profiling. Failed requests do not automatically rerun.
+Use the web UI's Retry or Reconfigure action to explicitly create a new request.
+Reconfiguration can interrupt service; it is not a zero-downtime migration.
+
+For YAML workflows, changing the `airunway.ai/dynamo-attempt` annotation to a new
+short token explicitly starts a fresh attempt. To change profiling inputs, update
+the annotation and desired inputs together. Reapplying the same token is not a
+retry. The controller records the accepted token and input hash durably so a
+controller restart does not repeat profiling.
+
+The request and actual serving workload are tracked separately in
+`status.provider.requestRef` and `status.provider.workloadRef`, including their
+UIDs. `status.provider.intent` reports the request phase and profiling progress.
+Endpoints, serving health, pod discovery, and routing come from the generated DGD.
+When the generated topology has a frontend Service rather than an inference pool,
+the gateway routes to that Service.
+
+Deleting a native DGDR leaves its DGD running. Deleting a Runway ModelDeployment
+instead cleans up its managed request and serving workload, using their recorded
+identities rather than treating a matching name as ownership.
+
+#### Manual configuration and legacy overrides
+
+Omit `deploymentMode`, or set it to `manual`, to render a DGD directly. Manual
+configuration retains ordinary resource updates and scaling; DGDR input
+immutability does not apply to manual deployments.
+
+Existing `deploymentMode: intent` resources using `overrides.spec` retain the
+legacy pass-through format. That format derives the GPU budget from normal
+resource/replica fields and lets upstream validate additional fields. It must not
+be combined with the typed `intent` block. Legacy profiler-only requests using
+`autoApply: false` are not equivalent to a serving deployment.
+
+Typed intent deliberately does not reuse `spec.engine.image` as a profiler image,
+or reinterpret manual engine arguments as topology-independent overrides.
+Custom engine images/arguments, served-model aliases, environment variables, pod
+metadata, placement settings, custom token-secret names, and storage volumes are
+not accepted by the initial typed workflow. Use manual mode for those settings,
+or the legacy intent format for an explicit upstream model-cache snapshot path.
+The existing API-defaulted `engine.enablePrefixCaching` value is not an optimizer
+constraint; cache tuning belongs in manual mode. Unsupported customization fails
+validation rather than being silently dropped.
+
+#### Dynamo compatibility
+
+New installation metadata defaults to Dynamo 1.5.0. The provider supports the
+1.1.1 alpha DGD contract and the 1.5 beta DGD contract; DGDR uses `v1beta1` on both.
+Installed APIs determine the supported path, not a blanket minimum-version gate.
+An installation without DGDR support can still use manual DGD deployments.
+
+Do not mix a new runtime image with an old launch contract. Existing manual
+workloads retain their API/image choices across a Runway-only upgrade. New 1.5
+workloads use the native Rust endpoint-picker contract, while the legacy contract
+is preserved for existing deployments. Unsupported raw fields fail strict API
+validation instead of being pruned.
+
+Compatibility checks include released CRD schemas for 1.1.1 and 1.5.0. Real
+profiling and end-to-end serving additionally require a GPU cluster and the
+corresponding operator/runtime installation. Schema tests alone do not establish
+engine performance or cluster-network compatibility.
 
 ### KAITO Provider
 

@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/dynamointent"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -83,6 +84,8 @@ type DynamoOverrides struct {
 	// DeploymentMode selects direct DGD rendering or Dynamo's DGDR intent path.
 	DeploymentMode string `json:"deploymentMode,omitempty"`
 
+	Intent *dynamointent.Spec `json:"intent,omitempty"`
+
 	// RouterMode is the request routing strategy: kv, round-robin, none
 	RouterMode string `json:"routerMode,omitempty"`
 
@@ -120,10 +123,17 @@ type dynamoOverridesWire struct {
 	Frontend       *FrontendOverrides `json:"frontend,omitempty"`
 	Epp            *EPPOverrides      `json:"epp,omitempty"`
 	Spec           json.RawMessage    `json:"spec,omitempty"`
+	Intent         *dynamointent.Spec `json:"intent,omitempty"`
 }
 
 // Transformer handles transformation of ModelDeployment to DynamoGraphDeployment
-type Transformer struct{}
+type Transformer struct {
+	// Per-call rendering options. TransformForVersion copies the transformer before
+	// setting them; never mutate package defaults or a shared transformer.
+	runtimeVersion string
+	nativeBeta     bool
+	modernRuntime  bool
+}
 
 // NewTransformer creates a new Dynamo transformer
 func NewTransformer() *Transformer {
@@ -132,6 +142,10 @@ func NewTransformer() *Transformer {
 
 // Transform converts a ModelDeployment to a DynamoGraphDeployment
 func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) ([]*unstructured.Unstructured, error) {
+	return t.transformAlpha(ctx, md)
+}
+
+func (t *Transformer) transformAlpha(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) ([]*unstructured.Unstructured, error) {
 	// Parse overrides if present
 	overrides, err := t.parseOverrides(md)
 	if err != nil {
@@ -183,6 +197,36 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 		return nil, fmt.Errorf("failed to build services: %w", err)
 	}
 	spec["services"] = services
+	if t.nativeBeta {
+		if len(md.Spec.Env) > 0 {
+			data, err := json.Marshal(md.Spec.Env)
+			if err != nil {
+				return nil, err
+			}
+			var env []any
+			if err := json.Unmarshal(data, &env); err != nil {
+				return nil, err
+			}
+			spec["envs"] = env
+		}
+		if md.Spec.PodTemplate != nil && md.Spec.PodTemplate.Metadata != nil {
+			metadata := md.Spec.PodTemplate.Metadata
+			if len(metadata.Labels) > 0 {
+				labels := map[string]any{}
+				for k, v := range metadata.Labels {
+					labels[k] = v
+				}
+				spec["labels"] = labels
+			}
+			if len(metadata.Annotations) > 0 {
+				annotations := map[string]any{}
+				for k, v := range metadata.Annotations {
+					annotations[k] = v
+				}
+				spec["annotations"] = annotations
+			}
+		}
+	}
 
 	// Add PVCs if storage is configured
 	if md.Spec.Model.Storage != nil && len(md.Spec.Model.Storage.Volumes) > 0 {
@@ -262,7 +306,13 @@ func (t *Transformer) transformIntent(
 	// defaults may be refined through provider.overrides.spec.
 	spec["model"] = md.Spec.Model.ID
 	spec["backend"] = t.intentBackend(md.ResolvedEngineType())
-	setIntentTotalGPUs(spec, intentTotalGPUs(md))
+	if overrides.Intent != nil {
+		if err := t.applyTypedIntent(spec, md, overrides.Intent); err != nil {
+			return nil, err
+		}
+	} else {
+		setIntentTotalGPUs(spec, intentTotalGPUs(md))
+	}
 	if err := unstructured.SetNestedField(dgdr.Object, spec, "spec"); err != nil {
 		return nil, fmt.Errorf("failed to set DGDR spec: %w", err)
 	}
@@ -359,7 +409,36 @@ func (t *Transformer) parseOverrides(md *airunwayv1alpha1.ModelDeployment) (*Dyn
 		return nil, fmt.Errorf("failed to unmarshal overrides: %w", err)
 	}
 
+	if wire.Intent != nil {
+		for key := range overrideRoots {
+			if strings.EqualFold(key, "intent") && key != "intent" || strings.EqualFold(key, "deploymentMode") && key != "deploymentMode" {
+				return nil, fmt.Errorf("typed intent requires exact intent and deploymentMode key spelling")
+			}
+		}
+		if wire.DeploymentMode != DeploymentModeIntent {
+			return nil, fmt.Errorf("intent requires deploymentMode: intent")
+		}
+		if len(wire.Spec) > 0 {
+			return nil, fmt.Errorf("intent and legacy overrides.spec cannot be combined")
+		}
+		// Parse/Validate share the admission contract. Auto-selected providers may
+		// have an empty spec.provider.name, so validate a private copy as Dynamo.
+		copy := md.DeepCopy()
+		copy.Spec.Provider.Name = "dynamo"
+		canonical, err := json.Marshal(map[string]any{"deploymentMode": wire.DeploymentMode, "intent": wire.Intent})
+		if err != nil {
+			return nil, err
+		}
+		copy.Spec.Provider.Overrides.Raw = canonical
+		if err := dynamointent.Validate(copy); err != nil {
+			return nil, err
+		}
+	}
+	if _, present := overrideRoots["intent"]; present && wire.Intent == nil {
+		return nil, fmt.Errorf("intent must be an object")
+	}
 	return &DynamoOverrides{
+		Intent:         wire.Intent,
 		DeploymentMode: wire.DeploymentMode,
 		RouterMode:     wire.RouterMode,
 		Frontend:       wire.Frontend,
@@ -407,6 +486,28 @@ func (t *Transformer) buildServices(md *airunwayv1alpha1.ModelDeployment, overri
 		// GAIE path: Gateway → EPP → worker frontendSidecar. No standalone
 		// Frontend — each worker's sidecar handles requests locally.
 		services["Epp"] = t.buildEPP(overrides, servingMode)
+		if t.modernRuntime {
+			epp := services["Epp"].(map[string]any)
+			model := md.Spec.Model.ID
+			if md.Spec.Model.ServedName != "" {
+				model = md.Spec.Model.ServedName
+			}
+			t.injectEnvVar(epp, "DYN_MODEL_NAME", model)
+			if md.ResolvedEngineType() == airunwayv1alpha1.EngineTypeVLLM {
+				args, err := t.buildEngineArgs(md)
+				if err != nil {
+					return nil, err
+				}
+				blockSize := flagValue(args, "--block-size")
+				if blockSize == "" {
+					blockSize = DefaultKVCacheBlockSize
+				}
+				t.injectEnvVar(epp, "DYN_KV_CACHE_BLOCK_SIZE", blockSize)
+			}
+			if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
+				epp["envFromSecret"] = md.Spec.Secrets.HuggingFaceToken
+			}
+		}
 	} else {
 		// Non-GAIE path: standalone Frontend service handles routing.
 		// No EPP or frontendSidecars needed.
@@ -524,7 +625,7 @@ func (t *Transformer) buildEPP(overrides *DynamoOverrides, servingMode airunwayv
 	// EPP image defaults to the frontend runtime image (per Dynamo docs, the
 	// frontend image can be used for the EPP) but can be overridden if you
 	// choose to build the EPP image.
-	eppImage := defaultFrontendImage
+	eppImage := t.runtimeImage("dynamo-frontend", defaultFrontendImage)
 	if overrides.Epp != nil && overrides.Epp.Image != "" {
 		eppImage = overrides.Epp.Image
 	}
@@ -573,6 +674,11 @@ func (t *Transformer) buildEPP(overrides *DynamoOverrides, servingMode airunwayv
 		},
 	}
 
+	if t.modernRuntime {
+		// No eppConfig selects the native Rust launch contract in Dynamo 1.5.
+		// Explicit legacy spec overrides are merged later and retain the Go path.
+		delete(epp, "eppConfig")
+	}
 	return epp
 }
 
@@ -623,13 +729,13 @@ func (t *Transformer) buildEPPPluginsAndProfiles(isDisagg bool) ([]interface{}, 
 
 	if !isDisagg {
 		return []interface{}{
-				disaggHandler,
-				decodeFilter,
-				picker,
-				dynDecode,
-			}, []interface{}{
-				decodeProfile,
-			}
+			disaggHandler,
+			decodeFilter,
+			picker,
+			dynDecode,
+		}, []interface{}{
+			decodeProfile,
+		}
 	}
 
 	prefillFilter := map[string]interface{}{
@@ -659,16 +765,16 @@ func (t *Transformer) buildEPPPluginsAndProfiles(isDisagg bool) ([]interface{}, 
 	}
 
 	return []interface{}{
-			disaggHandler,
-			prefillFilter,
-			decodeFilter,
-			picker,
-			dynPrefill,
-			dynDecode,
-		}, []interface{}{
-			prefillProfile,
-			decodeProfile,
-		}
+		disaggHandler,
+		prefillFilter,
+		decodeFilter,
+		picker,
+		dynPrefill,
+		dynDecode,
+	}, []interface{}{
+		prefillProfile,
+		decodeProfile,
+	}
 }
 
 // buildAggregatedWorker creates the worker service for aggregated mode.
@@ -753,7 +859,7 @@ func (t *Transformer) buildFrontendSidecar(md *airunwayv1alpha1.ModelDeployment,
 		args = append(args, "--router-mode", "direct")
 	}
 	sidecar := map[string]interface{}{
-		"image": defaultVLLMRuntimeImage,
+		"image": t.runtimeImage("vllm-runtime", defaultVLLMRuntimeImage),
 		"args":  args,
 	}
 	if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
@@ -1026,7 +1132,14 @@ func (t *Transformer) buildEngineArgs(md *airunwayv1alpha1.ModelDeployment) ([]s
 	// Preserve raw token order after deterministic structured args. Disaggregated
 	// workers append Dynamo-owned role and KV-transfer flags after this result.
 	args = append(args, md.Spec.Engine.ExtraArgs...)
-
+	if t.modernRuntime && md.ResolvedEngineType() == airunwayv1alpha1.EngineTypeVLLM && (md.Spec.Gateway == nil || md.Spec.Gateway.Enabled == nil || *md.Spec.Gateway.Enabled) {
+		if !hasFlag(args, "--block-size") {
+			args = append(args, "--block-size", DefaultKVCacheBlockSize)
+		}
+		if !hasFlag(args, "--kv-events-config") {
+			args = append(args, "--kv-events-config", `{"enable_kv_cache_events":true}`)
+		}
+	}
 	return args, nil
 }
 
@@ -1092,7 +1205,7 @@ func (t *Transformer) getImage(md *airunwayv1alpha1.ModelDeployment) string {
 	// planner image must win even over an explicit spec.image: a custom image
 	// without the dynamo.mocker module would silently break the test backend.
 	if isMockerMode(md) {
-		return defaultMockerImage
+		return t.runtimeImage("dynamo-planner", defaultMockerImage)
 	}
 
 	// Use custom image if specified. spec.engine.image is preferred over the
@@ -1101,6 +1214,17 @@ func (t *Transformer) getImage(md *airunwayv1alpha1.ModelDeployment) string {
 		return image
 	}
 
+	// An explicitly selected installed runtime wins over build-time defaults.
+	if t.runtimeVersion != "" {
+		repository := "vllm-runtime"
+		switch md.ResolvedEngineType() {
+		case airunwayv1alpha1.EngineTypeSGLang:
+			repository = "sglang-runtime"
+		case airunwayv1alpha1.EngineTypeTRTLLM:
+			repository = "tensorrtllm-runtime"
+		}
+		return t.runtimeImage(repository, "")
+	}
 	// Use default image for engine type
 	if image, ok := defaultImages[md.ResolvedEngineType()]; ok && image != "" {
 		return image
@@ -1358,7 +1482,7 @@ func applyOverrides(obj *unstructured.Unstructured, md *airunwayv1alpha1.ModelDe
 
 // consumedOverrideKeys are the provider.overrides root keys parseOverrides decodes into
 // DynamoOverrides. Lowercased, because encoding/json matches field names case-insensitively.
-var consumedOverrideKeys = map[string]bool{"deploymentmode": true, "routermode": true, "frontend": true, "epp": true}
+var consumedOverrideKeys = map[string]bool{"deploymentmode": true, "routermode": true, "frontend": true, "epp": true, "intent": true}
 
 func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 	// Block dangerous top-level keys to prevent privilege escalation.
@@ -1382,7 +1506,7 @@ func validateDynamoOverrideRootKeys(overrides map[string]interface{}) error {
 
 	sort.Strings(unsupported)
 	return fmt.Errorf("unsupported provider.overrides key(s) %q: only \"spec\" and the "+
-		"Dynamo-specific keys deploymentMode, routerMode, frontend and epp are supported", unsupported)
+		"Dynamo-specific keys deploymentMode, routerMode, frontend, epp and intent are supported", unsupported)
 }
 
 // deepMerge recursively merges src into dst. dst is modified in place and also

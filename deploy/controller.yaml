@@ -1940,9 +1940,62 @@ spec:
               provider:
                 description: provider contains information about the selected provider
                 properties:
+                  inferencePoolRef:
+                    description: inferencePoolRef identifies a provider-managed routing
+                      pool, when present.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    - namespace
+                    type: object
+                  intent:
+                    description: intent records profiling progress and accepted input
+                      identity.
+                    properties:
+                      attempt:
+                        type: string
+                      inputHash:
+                        type: string
+                      phase:
+                        type: string
+                      profilingPhase:
+                        type: string
+                    type: object
                   name:
                     description: name is the selected provider name
                     type: string
+                  requestRef:
+                    description: requestRef identifies an upstream configuration request,
+                      when used.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    - namespace
+                    type: object
                   resourceKind:
                     description: resourceKind is the kind of the created provider
                       resource
@@ -1954,6 +2007,25 @@ spec:
                   selectedReason:
                     description: selectedReason explains why this provider was selected
                     type: string
+                  workloadRef:
+                    description: workloadRef identifies the actual serving workload.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    - namespace
+                    type: object
                 type: object
               replicas:
                 description: replicas contains replica count information

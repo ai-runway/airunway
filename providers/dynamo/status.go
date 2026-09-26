@@ -18,6 +18,7 @@ package dynamo
 
 import (
 	"fmt"
+	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -104,6 +105,23 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	// Extract replica information if available
 	result.Replicas = t.extractReplicas(status)
 
+	// Stale or partially available component status must not advertise readiness.
+	if result.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
+		observed, hasObserved, _ := unstructured.NestedInt64(status, "observedGeneration")
+		if upstream.GetDeletionTimestamp() != nil || (hasObserved && observed < upstream.GetGeneration()) || (result.Replicas != nil && (result.Replicas.Ready < result.Replicas.Desired || result.Replicas.Available < result.Replicas.Desired)) {
+			result.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+		}
+		conditions, _, _ := unstructured.NestedSlice(status, "conditions")
+		for _, raw := range conditions {
+			condition, _ := raw.(map[string]any)
+			if condition["type"] == "Ready" && condition["status"] != "True" {
+				result.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+				if msg, ok := condition["message"].(string); ok {
+					result.Message = msg
+				}
+			}
+		}
+	}
 	// Extract endpoint information if available
 	result.Endpoint = t.extractEndpoint(upstream, status)
 
@@ -117,7 +135,7 @@ func (t *StatusTranslator) translateDGDRStatus(
 	phase, _, _ := unstructured.NestedString(status, "phase")
 	switch phase {
 	case "Deployed":
-		result.Phase = airunwayv1alpha1.DeploymentPhaseRunning
+		result.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
 	case "Profiling", "Ready", "Deploying":
 		result.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
 	case "Failed":
@@ -180,8 +198,8 @@ func (t *StatusTranslator) extractReplicas(status map[string]interface{}) *airun
 	// Dynamo may report these in different ways depending on the version
 
 	// Check for services status
-	services, found, _ := unstructured.NestedMap(status, "services")
-	if found {
+	services := dynamoComponents(map[string]any{"status": status}, "status")
+	if services != nil {
 		var totalDesired, totalReady, totalAvailable int32
 		for _, svcStatus := range services {
 			if svc, ok := svcStatus.(map[string]interface{}); ok {
@@ -236,7 +254,7 @@ func (t *StatusTranslator) extractEndpoint(upstream *unstructured.Unstructured, 
 			return nil
 		}
 		// Default to deployment name + "-frontend"
-		endpoint.Service = fmt.Sprintf("%s-frontend", upstream.GetName())
+		endpoint.Service = fmt.Sprintf("%s-%s", upstream.GetName(), strings.ToLower(frontendComponent(upstream)))
 	}
 
 	if port, found, _ := unstructured.NestedInt64(status, "endpoint", "port"); found {
@@ -250,14 +268,18 @@ func (t *StatusTranslator) extractEndpoint(upstream *unstructured.Unstructured, 
 }
 
 // hasFrontendService reads the spec to check if a Frontend service exists.
-func hasFrontendService(upstream *unstructured.Unstructured) bool {
-	services, found, _ := unstructured.NestedMap(upstream.Object, "spec", "services")
-	if !found {
-		return false
+func frontendComponent(upstream *unstructured.Unstructured) string {
+	for name, raw := range dynamoComponents(upstream.Object, "spec") {
+		component, _ := raw.(map[string]any)
+		kind := dynamoComponentType(component)
+		if strings.EqualFold(kind, "frontend") || (kind == "" && name == "Frontend") {
+			return name
+		}
 	}
-
-	_, hasFrontend := services["Frontend"]
-	return hasFrontend
+	return ""
+}
+func hasFrontendService(upstream *unstructured.Unstructured) bool {
+	return frontendComponent(upstream) != ""
 }
 
 // IsReady checks if the DynamoGraphDeployment is ready
@@ -266,12 +288,8 @@ func (t *StatusTranslator) IsReady(upstream *unstructured.Unstructured) bool {
 		return false
 	}
 
-	state, found, err := unstructured.NestedString(upstream.Object, "status", "state")
-	if err != nil || !found {
-		return false
-	}
-
-	return DynamoState(state) == DynamoStateSuccessful
+	result, err := t.TranslateStatus(upstream)
+	return err == nil && result.Phase == airunwayv1alpha1.DeploymentPhaseRunning
 }
 
 // GetErrorMessage extracts error messages from a failed deployment

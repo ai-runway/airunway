@@ -1,0 +1,29 @@
+# Requires Dynamo with DGDR support and GPU discovery, plus upstream profiler credentials.
+apiVersion: airunway.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen-auto
+  namespace: default
+spec:
+  model:
+    id: Qwen/Qwen3-0.6B
+    source: huggingface
+  engine:
+    type: vllm
+  provider:
+    name: dynamo
+    overrides:
+      deploymentMode: intent
+      intent:
+        hardware:
+          totalGpus: 1
+        searchStrategy: rapid
+        workload:
+          isl: 1024
+          osl: 256
+          requestRate: 1
+        sla:
+          ttft: 1000
+          itl: 50
+  gateway:
+    enabled: true

@@ -443,7 +443,7 @@ func TestReconcileRequeuesOnStrictRejection(t *testing.T) {
 		`DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: ` +
 			`strict decoding error: unknown field "spec.services.VllmWorker.frontendSidecar"`)
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithObjects(operatorRuntimeFixtures("1.1.1", "")...).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
@@ -829,7 +829,7 @@ func TestReconcileTransformFailureClearsStaleStatus(t *testing.T) {
 	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
 	md.Status.Replicas = &airunwayv1alpha1.ReplicaStatus{Desired: 1, Ready: 1}
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithObjects(operatorRuntimeFixtures("1.1.1", "")...).WithStatusSubresource(md).Build()
 	r := NewDynamoProviderReconciler(c, scheme, "")
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -1290,7 +1290,7 @@ func TestReconcileTransientCreateFailureClearsStaleStatus(t *testing.T) {
 	})
 
 	var createCalled bool
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithObjects(operatorRuntimeFixtures("1.1.1", "")...).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
@@ -1351,7 +1351,7 @@ func TestReconcileNotFoundWriteFailureClearsStaleStatus(t *testing.T) {
 		Message: "last observed workload is ready",
 	})
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithObjects(operatorRuntimeFixtures("1.1.1", "")...).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {
@@ -1420,7 +1420,7 @@ func TestReconcileValidationFailureIsTerminal(t *testing.T) {
 			"must be greater than zero",
 		)},
 	)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithObjects(operatorRuntimeFixtures("1.1.1", "")...).WithStatusSubresource(md).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == DynamoGraphDeploymentKind {

@@ -3,7 +3,7 @@
 // then run `make verify-versions` from the repo root to confirm it is in sync.
 
 export const GAIE_VERSION = "v1.5.0";
-export const DYNAMO_VERSION = "1.1.1";
+export const DYNAMO_VERSION = "1.5.0";
 export const KAITO_VERSION = "0.10.0";
 export const LLMD_VERSION = "0.6.0";
 export const VLLM_VERSION = "cu130-nightly";

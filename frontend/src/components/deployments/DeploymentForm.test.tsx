@@ -125,6 +125,28 @@ describe('DeploymentForm', () => {
     gatewayMock.data = { available: false }
   })
 
+  it('keeps automatic intent through topology effects and restores manual settings', async () => {
+    const model = createModel({ id: 'Qwen/Qwen3-0.6B', name: 'Qwen3', size: '0.6B', parameterCount: 600_000_000, estimatedGpuMemoryGb: 2 })
+    const runtime = createRuntime({ id: 'dynamo', name: 'Dynamo' })
+    const view = render(<MemoryRouter><DeploymentForm model={model} detailedCapacity={createCapacity()} runtimes={[runtime]} /></MemoryRouter>)
+    fireEvent.click(screen.getByRole('radio', { name: /Automatic configuration/ }))
+    expect(screen.queryByText('Deployment Options')).not.toBeInTheDocument()
+    expect(screen.queryByText('Deployment Mode')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('spinbutton', { name: /GPU budget/ }), { target: { value: '2' } })
+    view.rerender(<MemoryRouter><DeploymentForm model={model} detailedCapacity={createCapacity({ totalMemoryGb: 40 })} runtimes={[runtime]} /></MemoryRouter>)
+    await waitFor(() => expect(screen.getByRole('spinbutton', { name: /GPU budget/ })).toHaveValue(2))
+    fireEvent.submit(screen.getByRole('button', { name: /Deploy Model/ }).closest('form')!)
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled())
+    const config = mutateAsync.mock.calls[0][0]
+    expect(config.providerOverrides).toMatchObject({ deploymentMode: 'intent', intent: { hardware: { totalGpus: 2 }, searchStrategy: 'rapid' } })
+    expect(config.resources).toBeUndefined()
+    expect(config.prefillReplicas).toBeUndefined()
+    expect(config.enforceEager).toBe(false)
+    expect(config.modelId).toBe('Qwen/Qwen3-0.6B')
+    fireEvent.click(screen.getByRole('radio', { name: /Manual configuration/ }))
+    expect(screen.getByText('Deployment Options')).toBeInTheDocument()
+  })
+
   it.each([true, false])('selects and deploys a ready unknown runtime with legacy installed=%s', async (installed) => {
     render(
       <MemoryRouter>

@@ -67,7 +67,7 @@ var ProviderVersion = ProviderConfigName + "-provider:" + shimVersion
 //
 // (see providers/dynamo/Makefile). The string literal below is a fallback for
 // `go run` / `go test` invocations that bypass the Makefile.
-var DynamoVersion = "1.1.1"
+var DynamoVersion = "1.5.0"
 
 // DynamoPlatformChartURL is the upstream Dynamo platform chart package.
 // Computed from DynamoVersion so an ldflags override of DynamoVersion flows
@@ -232,25 +232,27 @@ func (m *ProviderConfigManager) Register(ctx context.Context) error {
 
 // checkBackendCRDInstalled checks if the upstream DynamoGraphDeployment CRD is installed
 func (m *ProviderConfigManager) checkBackendCRDInstalled() bool {
-	return shim.IsAPIResourceInstalled(
-		m.client,
-		m.discoveryClient,
-		DynamoAPIGroup,
-		DynamoAPIVersion,
-		DynamoGraphDeploymentKind,
-		dynamoGraphDeploymentResource,
-	)
+	for _, version := range []string{dynamoBetaVersion, DynamoAPIVersion} {
+		if shim.IsAPIResourceInstalled(m.client, m.discoveryClient, DynamoAPIGroup, version, DynamoGraphDeploymentKind, dynamoGraphDeploymentResource) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateStatus updates the status of the InferenceProviderConfig
 func (m *ProviderConfigManager) UpdateStatus(ctx context.Context, ready bool) error {
+	version := DynamoAPIVersion
+	if shim.IsAPIResourceInstalled(m.client, m.discoveryClient, DynamoAPIGroup, dynamoBetaVersion, DynamoGraphDeploymentKind, dynamoGraphDeploymentResource) {
+		version = dynamoBetaVersion
+	}
 	return shim.UpdateProviderConfigStatus(
 		ctx,
 		m.client,
 		ProviderConfigName,
 		ready,
 		ProviderVersion,
-		fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
+		fmt.Sprintf("%s/%s", DynamoAPIGroup, version),
 	)
 }
 

@@ -49,6 +49,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/controller/pkg/dynamointent"
 	"github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
@@ -214,7 +215,11 @@ func NewDynamoProviderReconciler(client client.Client, scheme *runtime.Scheme, d
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=airunway.ai,resources=inferenceproviderconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
@@ -312,9 +317,34 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// --- Phase 3: Create/update DGD ---
 
 	// Transform ModelDeployment to DynamoGraphDeployment
-	resources, err := r.Transformer.Transform(ctx, &md)
+	resources, err := r.renderResources(ctx, &md)
 	if err != nil {
 		logger.Error(err, "Failed to transform ModelDeployment", "name", md.Name)
+		var runtimeErr *runtimeDiscoveryError
+		if stderrors.As(err, &runtimeErr) {
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "RuntimeVersionUndetermined", err.Error())
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionUnknown, "RuntimeVersionUndetermined", err.Error())
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+			md.Status.Message = err.Error()
+			return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, r.Status().Update(ctx, &md)
+		}
+
+		if isResourceConflict(err) || isRetryableUpstreamWriteError(err) {
+			reason := "CreateFailed"
+			interval := RequeueInterval
+			if isResourceConflict(err) {
+				reason = "ResourceConflict"
+				interval = ExternalRecoveryInterval
+			}
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, reason, err.Error())
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reason, err.Error())
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+			md.Status.Message = err.Error()
+			return ctrl.Result{RequeueAfter: interval}, r.Status().Update(ctx, &md)
+		}
+
 		// Same treatment as the upstream-rejection path below: force Ready False and drop
 		// the stale endpoint/replica counts. Otherwise a previously-Running deployment whose
 		// spec is edited into something unrenderable reports Failed while still advertising
@@ -332,14 +362,38 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	for _, resource := range resources {
 		transitioning, transitionErr := r.ensureDeploymentModeTransition(ctx, resource, &md)
 		if transitionErr != nil {
+			var locked *intentLockedError
+			if stderrors.As(transitionErr, &locked) {
+				md.Status.Message = locked.Error()
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "IntentInputsLocked", locked.Error())
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, r.Status().Update(ctx, &md)
+			}
 			return ctrl.Result{}, transitionErr
 		}
 		if transitioning {
+			if err := r.Status().Update(ctx, &md); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		if err := r.createOrUpdateResource(ctx, resource, &md); err != nil {
 			if stderrors.Is(err, errIntentResourceReplacing) {
+				if err := r.Status().Update(ctx, &md); err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			var locked *intentLockedError
+			if stderrors.As(err, &locked) {
+				// The desired edit failed, but the existing workload may still be healthy.
+				if md.Status.Provider.RequestRef != nil {
+					if syncErr := r.syncStatus(ctx, &md, referenceResource(md.Status.Provider.RequestRef)); syncErr != nil {
+						return ctrl.Result{}, syncErr
+					}
+				}
+				md.Status.Message = locked.Error()
+				r.setCondition(&md, airunwayv1alpha1.ConditionTypeResourceCreated, metav1.ConditionFalse, "IntentInputsLocked", locked.Error())
+				return ctrl.Result{RequeueAfter: ExternalRecoveryInterval}, r.Status().Update(ctx, &md)
 			}
 			logger.Error(err, "Failed to create/update resource", "name", resource.GetName(), "kind", resource.GetKind())
 			// Strict field validation rejected the write: the cluster does not accept a field
@@ -432,14 +486,19 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	)
 
 	// Update provider status
-	md.Status.Provider.ResourceName = md.Name
+	md.Status.Provider.ResourceName = resources[0].GetName()
 	md.Status.Provider.ResourceKind = resourceKind
 
 	// Sync status from upstream resource
 	if len(resources) > 0 {
 		if err := r.syncStatus(ctx, &md, resources[0]); err != nil {
 			logger.Error(err, "Failed to sync status", "name", md.Name)
-			// Don't fail the reconciliation, just log the error
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
+			md.Status.Provider.InferencePoolRef = nil
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+			md.Status.Message = fmt.Sprintf("Unable to read Dynamo serving status: %s", err)
+			r.setCondition(&md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionUnknown, "StatusUnavailable", md.Status.Message)
 		}
 	}
 
@@ -485,6 +544,14 @@ func (r *DynamoProviderReconciler) validateCompatibility(md *airunwayv1alpha1.Mo
 		return nil
 	}
 
+	if err := dynamointent.Validate(md); err != nil {
+		return err
+	}
+	if intent, err := dynamointent.Parse(md); err != nil {
+		return err
+	} else if intent != nil {
+		return nil
+	}
 	// Dynamo requires GPU
 	hasGPU := false
 	if md.Spec.Resources != nil && md.Spec.Resources.GPU != nil && md.Spec.Resources.GPU.Count > 0 {
@@ -540,6 +607,19 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(
 ) error {
 	logger := log.FromContext(ctx)
 
+	if resource.GetKind() == DynamoGraphDeploymentRequestKind {
+		return r.reconcileIntent(ctx, resource, md)
+	}
+	annotations := resource.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[manualInputHashAnnotation] = manualFingerprint(md)
+	if annotations[runtimeVersionAnnotation] == "" {
+		annotations[runtimeVersionAnnotation] = existingRuntimeVersion(resource)
+	}
+	resource.SetAnnotations(annotations)
+
 	// Check if resource exists
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(resource.GroupVersionKind())
@@ -562,20 +642,16 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(
 	if err := verifyDynamoOwnership(existing, md.UID); err != nil {
 		return err
 	}
-	if resource.GetKind() == DynamoGraphDeploymentRequestKind {
-		if existing.GetDeletionTimestamp() != nil {
-			return errIntentResourceReplacing
-		}
-		if existing.GetAnnotations()[modelDeploymentGenerationAnnotation] !=
-			resource.GetAnnotations()[modelDeploymentGenerationAnnotation] {
-			_, err := r.deleteIntentResource(ctx, md, existing)
-			if err != nil {
-				return err
-			}
-			return errIntentResourceReplacing
-		}
+	if existing.GetAnnotations()[manualInputHashAnnotation] == annotations[manualInputHashAnnotation] {
 		return nil
 	}
+	// Retain operator/user metadata on spec updates.
+	for key, value := range existing.GetAnnotations() {
+		if _, ok := annotations[key]; !ok {
+			annotations[key] = value
+		}
+	}
+	resource.SetAnnotations(annotations)
 	resourceWasOwnedActiveAndServing := false
 	if existing.GetDeletionTimestamp() == nil && r.StatusTranslator != nil {
 		statusResult, statusErr := r.StatusTranslator.TranslateStatus(existing)
@@ -598,50 +674,117 @@ func (r *DynamoProviderReconciler) createOrUpdateResource(
 	if !equality.Semantic.DeepEqual(stripEmptyDefaults(existingSpec), stripEmptyDefaults(newSpec)) ||
 		overrideSpecDiffers(md, existingSpec, newSpec) {
 		logger.Info("Updating resource", "kind", resource.GetKind(), "name", resource.GetName())
-		resource.SetResourceVersion(existing.GetResourceVersion())
-		return wrapResourceWriteError(r.Update(ctx, resource, strictFieldValidation), resourceWasOwnedActiveAndServing)
+		// Keep upstream finalizers, defaults in metadata, and other owners. A
+		// rendered spec update must not remove the operator's cleanup machinery.
+		next := existing.DeepCopy()
+		for key, value := range resource.Object {
+			if key != "metadata" && key != "status" {
+				next.Object[key] = value
+			}
+		}
+		next.SetAnnotations(annotations)
+		labels := next.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		for key, value := range resource.GetLabels() {
+			labels[key] = value
+		}
+		next.SetLabels(labels)
+		return wrapResourceWriteError(r.Update(ctx, next, strictFieldValidation), resourceWasOwnedActiveAndServing)
+	}
+
+	if existing.GetAnnotations()[manualInputHashAnnotation] != annotations[manualInputHashAnnotation] {
+		next := existing.DeepCopy()
+		next.SetAnnotations(annotations)
+		return r.Patch(ctx, next, client.MergeFromWithOptions(existing, client.MergeFromWithOptimisticLock{}), strictFieldValidation)
 	}
 
 	return nil
 }
 
-func (r *DynamoProviderReconciler) ensureDeploymentModeTransition(
-	ctx context.Context,
-	desired *unstructured.Unstructured,
-	md *airunwayv1alpha1.ModelDeployment,
-) (bool, error) {
+func (r *DynamoProviderReconciler) ensureDeploymentModeTransition(ctx context.Context, desired *unstructured.Unstructured, md *airunwayv1alpha1.ModelDeployment) (bool, error) {
+	p := ensureProviderStatus(md)
 	if desired.GetKind() == DynamoGraphDeploymentRequestKind {
-		dgd := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, md.Name, md.Namespace)
-		if err := r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd); err != nil {
-			return false, client.IgnoreNotFound(err)
+		if p.RequestRef != nil {
+			return false, nil
+		}
+		name := md.Name
+		if p.WorkloadRef != nil {
+			name = p.WorkloadRef.Name
+		}
+		dgd, err := r.findDGD(ctx, md.Namespace, name, p.WorkloadRef)
+		if err != nil {
+			return false, err
+		}
+		if dgd == nil {
+			if p.Intent == nil {
+				p.WorkloadRef = nil
+			}
+			return false, nil
 		}
 		if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
 			return false, nil
 		}
-		if dgd.GetDeletionTimestamp() == nil {
-			if err := r.Delete(ctx, dgd); err != nil && !errors.IsNotFound(err) {
-				return false, err
-			}
+		ready := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
+		if p.WorkloadRef == nil || ready == nil || ready.Reason != "Reconfiguring" || md.Status.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+			p.WorkloadRef = resourceReference(dgd)
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+			md.Status.Endpoint = nil
+			md.Status.Replicas = nil
+			p.InferencePoolRef = nil
+			r.setCondition(md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "Reconfiguring", "Switching to automatic configuration")
+			return true, nil
 		}
-		return true, nil
+		pending, err := r.deleteRecordedWorkload(ctx, md)
+		return pending, err
 	}
-
-	dgdr := newDynamoResource(
-		DynamoGraphDeploymentRequestAPIVersion,
-		DynamoGraphDeploymentRequestKind,
-		md.Name,
-		md.Namespace,
-	)
-	if err := r.Get(ctx, client.ObjectKeyFromObject(dgdr), dgdr); err != nil {
-		if upstreamResourceUnavailable(err) {
-			return r.deleteIntentResource(ctx, md, nil)
-		}
+	request, err := r.findRequest(ctx, md)
+	if err != nil {
 		return false, err
 	}
-	if err := verifyDynamoOwnership(dgdr, md.UID); err != nil {
+	if request == nil && p.RequestRef == nil {
 		return false, nil
 	}
-	return r.deleteIntentResource(ctx, md, dgdr)
+	attempt := ""
+	if p.Intent != nil {
+		attempt = p.Intent.Attempt
+	} else if request != nil {
+		attempt = request.GetAnnotations()[dynamointent.AttemptAnnotation]
+	}
+	if md.Annotations[dynamointent.AttemptAnnotation] == attempt {
+		return false, &intentLockedError{message: "Change airunway.ai/dynamo-attempt before replacing automatic configuration with a manual deployment"}
+	}
+	needsCheckpoint := p.Intent == nil || p.Intent.Phase != "Replacing"
+	if request != nil {
+		previous := p.WorkloadRef
+		p.RequestRef = resourceReference(request)
+		if _, err := r.resolveGeneratedDGD(ctx, md, request); err != nil {
+			return false, err
+		}
+		if previous == nil && p.WorkloadRef != nil {
+			needsCheckpoint = true
+		}
+	}
+	if p.Intent == nil {
+		p.Intent = &airunwayv1alpha1.ProviderIntentStatus{Attempt: attempt}
+	}
+	p.Intent.Phase = "Replacing"
+	md.Status.Endpoint = nil
+	md.Status.Replicas = nil
+	p.InferencePoolRef = nil
+	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
+	r.setCondition(md, airunwayv1alpha1.ConditionTypeReady, metav1.ConditionFalse, "Reconfiguring", "Switching to manual configuration")
+	if needsCheckpoint {
+		return true, nil
+	}
+	pending, err := r.deleteIntentResource(ctx, md, request)
+	if err == nil && !pending {
+		p.RequestRef = nil
+		p.WorkloadRef = nil
+		p.Intent = nil
+	}
+	return pending, err
 }
 
 func newDynamoResource(version, kind, name, namespace string) *unstructured.Unstructured {
@@ -667,44 +810,23 @@ func (r *DynamoProviderReconciler) deleteIntentResource(
 	if dgdr.GetDeletionTimestamp() != nil {
 		return true, nil
 	}
-	if err := r.Delete(ctx, dgdr); err != nil && !upstreamResourceUnavailable(err) {
+	if err := r.deleteWithIdentityPreconditions(ctx, dgdr); err != nil && !errors.IsNotFound(err) {
 		return false, err
 	}
 	return true, nil
 }
 
-func (r *DynamoProviderReconciler) deleteGeneratedDGDs(
-	ctx context.Context,
-	md *airunwayv1alpha1.ModelDeployment,
-	dgdr *unstructured.Unstructured,
-) (bool, error) {
-	names, err := r.generatedDGDNames(ctx, md, dgdr)
-	if err != nil {
-		return false, err
-	}
-
-	pending := false
-	for name := range names {
-		dgd := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, name, md.Namespace)
-		if err := r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd); err != nil {
-			if upstreamResourceUnavailable(err) {
-				continue
-			}
+func (r *DynamoProviderReconciler) deleteGeneratedDGDs(ctx context.Context, md *airunwayv1alpha1.ModelDeployment, dgdr *unstructured.Unstructured) (bool, error) {
+	p := ensureProviderStatus(md)
+	if p.WorkloadRef == nil && dgdr != nil {
+		if _, err := r.resolveGeneratedDGD(ctx, md, dgdr); err != nil {
 			return false, err
 		}
-		dgdLabels := dgd.GetLabels()
-		if dgdLabels[dynamoDGDRNameLabel] != md.Name ||
-			dgdLabels[dynamoDGDRNamespaceLabel] != md.Namespace {
-			continue
-		}
-		pending = true
-		if dgd.GetDeletionTimestamp() == nil {
-			if err := r.deleteWithIdentityPreconditions(ctx, dgd); err != nil && !upstreamResourceUnavailable(err) {
-				return false, err
-			}
-		}
+		if p.WorkloadRef != nil {
+			return true, nil
+		} // caller must persist identity before cleanup
 	}
-	return pending, nil
+	return r.deleteRecordedWorkload(ctx, md)
 }
 
 func (r *DynamoProviderReconciler) deleteWithIdentityPreconditions(
@@ -718,40 +840,8 @@ func (r *DynamoProviderReconciler) deleteWithIdentityPreconditions(
 	if resourceVersion := resource.GetResourceVersion(); resourceVersion != "" {
 		preconditions.ResourceVersion = &resourceVersion
 	}
-	return r.Delete(ctx, resource, &client.DeleteOptions{Preconditions: preconditions})
-}
-
-func (r *DynamoProviderReconciler) generatedDGDNames(
-	ctx context.Context,
-	md *airunwayv1alpha1.ModelDeployment,
-	dgdr *unstructured.Unstructured,
-) (map[string]struct{}, error) {
-	names := map[string]struct{}{}
-	if dgdr != nil {
-		if dgdName, found, _ := unstructured.NestedString(dgdr.Object, "status", "dgdName"); found && dgdName != "" {
-			names[dgdName] = struct{}{}
-		}
-	}
-	dgdList := &unstructured.UnstructuredList{}
-	dgdList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   DynamoAPIGroup,
-		Version: DynamoAPIVersion,
-		Kind:    DynamoGraphDeploymentKind + "List",
-	})
-	labels := client.MatchingLabels{
-		dynamoDGDRNameLabel:      md.Name,
-		dynamoDGDRNamespaceLabel: md.Namespace,
-	}
-	if err := r.List(ctx, dgdList, client.InNamespace(md.Namespace), labels); err != nil {
-		if !upstreamResourceUnavailable(err) {
-			return nil, err
-		}
-	} else {
-		for index := range dgdList.Items {
-			names[dgdList.Items[index].GetName()] = struct{}{}
-		}
-	}
-	return names, nil
+	propagation := metav1.DeletePropagationForeground
+	return r.Delete(ctx, resource, &client.DeleteOptions{Preconditions: preconditions, PropagationPolicy: &propagation})
 }
 
 // overrideSpecDiffers reports whether any path explicitly supplied through
@@ -875,14 +965,15 @@ func (r *DynamoProviderReconciler) syncStatus(ctx context.Context, md *airunwayv
 		return fmt.Errorf("failed to get upstream resource: %w", err)
 	}
 
-	// Translate status
-	statusResult, err := r.StatusTranslator.TranslateStatus(upstream)
+	// Read the request and actual serving deployment separately.
+	statusResult, err := r.readServingStatus(ctx, md, upstream)
 	if err != nil {
-		return fmt.Errorf("failed to translate status: %w", err)
+		return fmt.Errorf("failed to resolve serving status: %w", err)
 	}
 
 	// Update ModelDeployment status
 	md.Status.Phase = statusResult.Phase
+	md.Status.Message = statusResult.Message
 	if statusResult.Message != "" {
 		md.Status.Message = statusResult.Message
 	} else if statusResult.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
@@ -921,59 +1012,63 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		logger.Error(err, "Failed to update status to Terminating")
 	}
 
-	// Dynamo intentionally leaves a generated DGD behind when its DGDR is deleted.
-	// Remove the generated DGD first, then the request, before managed storage.
-	dgdr := newDynamoResource(
-		DynamoGraphDeploymentRequestAPIVersion,
-		DynamoGraphDeploymentRequestKind,
-		md.Name,
-		md.Namespace,
-	)
-	dgdrErr := r.Get(ctx, client.ObjectKeyFromObject(dgdr), dgdr)
-	if dgdrErr == nil {
-		if ownershipErr := verifyDynamoOwnership(dgdr, md.UID); ownershipErr == nil {
-			pending, err := r.deleteIntentResource(ctx, md, dgdr)
-			if err != nil {
-				return r.cleanupRetryResult(ctx, md)
-			}
-			if pending {
-				return r.cleanupRetryResult(ctx, md)
-			}
-		}
-	} else if !upstreamResourceUnavailable(dgdrErr) {
+	// Persist exact generated workload identity before initiating cleanup.
+	p := ensureProviderStatus(md)
+	request, err := r.findRequest(ctx, md)
+	if err != nil {
 		return r.cleanupRetryResult(ctx, md)
-	} else {
-		pending, err := r.deleteGeneratedDGDs(ctx, md, nil)
+	}
+	if request != nil {
+		previous := p.WorkloadRef
+		p.RequestRef = resourceReference(request)
+		if _, err := r.resolveGeneratedDGD(ctx, md, request); err != nil {
+			md.Status.Message = err.Error()
+			_ = r.Status().Update(ctx, md)
+			return r.cleanupRetryResult(ctx, md)
+		}
+		if previous == nil && p.WorkloadRef != nil {
+			if err := r.Status().Update(ctx, md); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+	}
+	if p.RequestRef != nil || request != nil {
+		pending, err := r.deleteIntentResource(ctx, md, request)
 		if err != nil {
+			md.Status.Message = err.Error()
+			_ = r.Status().Update(ctx, md)
 			return r.cleanupRetryResult(ctx, md)
 		}
 		if pending {
 			return r.cleanupRetryResult(ctx, md)
 		}
+	} else if p.ResourceKind == DynamoGraphDeploymentRequestKind && p.WorkloadRef == nil {
+		md.Status.Message = "Dynamo request is missing and no workload UID was recorded; cleanup requires operator verification"
+		_ = r.Status().Update(ctx, md)
+		return r.cleanupRetryResult(ctx, md)
 	}
-
-	// Delete a directly rendered DGD first so its Pods terminate before PVCs/Jobs.
-	dgd := newDynamoResource(DynamoAPIVersion, DynamoGraphDeploymentKind, md.Name, md.Namespace)
-	err := r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd)
-
-	if err == nil {
-		// Verify ownership before deleting
-		if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
-			logger.Info("Resource exists but is not managed by this ModelDeployment, skipping deletion", "name", md.Name)
-		} else {
-			logger.Info("Deleting DynamoGraphDeployment", "name", md.Name)
-			if err := r.Delete(ctx, dgd); err != nil {
-				if !upstreamResourceUnavailable(err) {
-					return r.cleanupRetryResult(ctx, md)
-				}
-			} else {
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	// Direct deployments retain their existing API representation on deletion.
+	directName := md.Name
+	var directRef *airunwayv1alpha1.ProviderResourceReference
+	if p.RequestRef == nil && p.WorkloadRef != nil {
+		directName = p.WorkloadRef.Name
+		directRef = p.WorkloadRef
+	}
+	dgd, err := r.findDGD(ctx, md.Namespace, directName, directRef)
+	if err != nil {
+		return r.cleanupRetryResult(ctx, md)
+	}
+	if dgd != nil && verifyDynamoOwnership(dgd, md.UID) == nil {
+		if p.RequestRef == nil && p.WorkloadRef != nil && p.WorkloadRef.UID != "" && p.WorkloadRef.UID != string(dgd.GetUID()) {
+			return r.cleanupRetryResult(ctx, md)
+		}
+		if dgd.GetDeletionTimestamp() == nil {
+			if err := r.deleteWithIdentityPreconditions(ctx, dgd); err != nil && !errors.IsNotFound(err) {
+				return r.cleanupRetryResult(ctx, md)
 			}
 		}
-	}
-
-	if !upstreamResourceUnavailable(err) {
-		return r.cleanupRetryResult(ctx, md)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// The upstream resource is already gone or its CRD is no longer installed,
@@ -1008,10 +1103,6 @@ func (r *DynamoProviderReconciler) cleanupRetryResult(
 	ctx context.Context,
 	md *airunwayv1alpha1.ModelDeployment,
 ) (ctrl.Result, error) {
-	if time.Since(md.DeletionTimestamp.Time) > FinalizerTimeout {
-		controllerutil.RemoveFinalizer(md, FinalizerName)
-		return ctrl.Result{}, r.Update(ctx, md)
-	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
@@ -1128,44 +1219,14 @@ func (r *DynamoProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Without this check, the manager crashes at startup when
 	// the backend CRDs are not present (see #178).
 	mapper := mgr.GetRESTMapper()
-	if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind}, DynamoAPIVersion); err == nil {
-		logger := mgr.GetLogger()
-		logger.Info("DynamoGraphDeployment CRD detected, enabling event-driven watch")
-		builder = builder.Watches(
-			&unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": fmt.Sprintf("%s/%s", DynamoAPIGroup, DynamoAPIVersion),
-				"kind":       DynamoGraphDeploymentKind,
-			}},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				for _, ref := range obj.GetOwnerReferences() {
-					if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
-						ref.Kind == "ModelDeployment" {
-						return []reconcile.Request{
-							{
-								NamespacedName: types.NamespacedName{
-									Name:      ref.Name,
-									Namespace: obj.GetNamespace(),
-								},
-							},
-						}
-					}
-				}
-				labels := obj.GetLabels()
-				if labels[airunwayv1alpha1.LabelManagedBy] == "airunway" {
-					if deployment := labels[airunwayv1alpha1.LabelModelDeployment]; deployment != "" {
-						return []reconcile.Request{
-							{
-								NamespacedName: types.NamespacedName{
-									Name:      deployment,
-									Namespace: obj.GetNamespace(),
-								},
-							},
-						}
-					}
-				}
-				return nil
-			}),
-		)
+	for _, version := range []string{dynamoBetaVersion, DynamoAPIVersion} {
+		if _, err := mapper.RESTMapping(schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentKind}, version); err != nil {
+			continue
+		}
+		builder = builder.Watches(newDynamoResource(version, DynamoGraphDeploymentKind, "", ""), handler.EnqueueRequestsFromMapFunc(r.mapDynamoWorkload))
+		// Watching both served views creates duplicate events for the same UID.
+		// One preferred watch observes all storage changes; polling covers late CRDs.
+		break
 	}
 	if _, err := mapper.RESTMapping(
 		schema.GroupKind{Group: DynamoAPIGroup, Kind: DynamoGraphDeploymentRequestKind},

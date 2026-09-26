@@ -224,6 +224,15 @@ When a user updates a `ModelDeployment` spec, changes are handled based on field
 | `nodeSelector`, `tolerations`           | Scheduling constraints                 |
 | `provider.overrides`                    | Provider-specific configuration        |
 
+### Dynamo configuration requests
+
+Automatic Dynamo deployments track a DGDR request and its generated DGD
+separately. Profiling progress comes from the request; serving readiness and
+endpoints come from the DGD. The controller does not restart profiling for a
+ModelDeployment generation change. Locked profiling inputs require an explicit
+new attempt through `airunway.ai/dynamo-attempt`. These restrictions do not apply
+to direct, manually configured DGD deployments. See [Dynamo deployment modes](providers.md#dynamo-deployment-modes).
+
 ## Status Mapping
 
 The controller extracts meaningful error messages from provider status:

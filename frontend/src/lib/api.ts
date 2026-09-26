@@ -1,3 +1,4 @@
+import { deploymentRequest, type DynamoReconfigureRequest } from '@airunway/shared';
 // API Base URL - when not specified, use relative URL (same origin)
 // This allows the frontend to work both in development (with VITE_API_URL=http://localhost:3001)
 // and in production (served from the same container as the backend)
@@ -341,7 +342,7 @@ export const deploymentsApi = {
   create: (config: DeploymentConfig) =>
     request<{ message: string; name: string; namespace: string; warnings?: string[] }>('/deployments', {
       method: 'POST',
-      body: JSON.stringify(config),
+      body: JSON.stringify(deploymentRequest(config)),
     }),
 
   preview: (config: DeploymentConfig) =>
@@ -355,8 +356,14 @@ export const deploymentsApi = {
       primaryResource: { kind: string; apiVersion: string };
     }>('/deployments/preview', {
       method: 'POST',
-      body: JSON.stringify(config),
+      body: JSON.stringify(deploymentRequest(config)),
     }),
+
+  reconfigure: (name: string, namespace: string, payload: DynamoReconfigureRequest) =>
+    request<{ message: string; attempt: string }>(
+      `/deployments/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/reconfigure`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
 
   delete: (name: string, namespace?: string) =>
     request<{ message: string }>(

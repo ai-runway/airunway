@@ -1,3 +1,4 @@
+import { DynamoConfigurationStatus } from '@/components/deployments/DynamoConfigurationStatus'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import { useDeployment, useDeleteDeployment } from '@/hooks/useDeployments'
 import { useToast } from '@/hooks/useToast'
@@ -146,6 +147,8 @@ export function DeploymentDetailsPage() {
         </Button>
       </div>
 
+      {deployment.configurationMode === 'automatic' && <DynamoConfigurationStatus deployment={deployment} />}
+
       {/* Status Overview */}
       <div className="glass-panel animate-slide-up" style={{ animationDelay: '50ms', animationFillMode: 'both' }}>
         <h2 className="text-lg font-heading mb-4">Status</h2>
@@ -174,7 +177,7 @@ export function DeploymentDetailsPage() {
           </div>
           <div>
             <p className="text-label text-slate-500 mb-1">Mode</p>
-            <p className="font-medium capitalize">{deployment.mode}</p>
+            <p className="font-medium capitalize">{deployment.configurationMode === 'automatic' ? 'Automatic' : deployment.mode}</p>
           </div>
         </div>
       </div>
@@ -251,7 +254,7 @@ export function DeploymentDetailsPage() {
       )}
 
       {/* Access Model */}
-      <div className="glass-panel animate-slide-up" style={{ animationDelay: '150ms', animationFillMode: 'both' }}>
+      {(deployment.configurationMode !== 'automatic' || deployment.frontendService || hasGateway) && <div className="glass-panel animate-slide-up" style={{ animationDelay: '150ms', animationFillMode: 'both' }}>
         <div className="flex items-center gap-2 mb-1">
           <Terminal className="h-5 w-5" />
           <h2 className="text-lg font-heading">Access Model</h2>
@@ -297,7 +300,7 @@ export function DeploymentDetailsPage() {
                 </div>
               </div>
               {/* Port Forward - Secondary */}
-              <details className="pt-2 border-t">
+              {deployment.frontendService && <details className="pt-2 border-t">
                 <summary className="text-sm font-medium cursor-pointer text-muted-foreground hover:text-foreground">
                   Alternative: Port Forward
                 </summary>
@@ -314,7 +317,7 @@ export function DeploymentDetailsPage() {
                     After running the command, access the model at http://localhost:8000
                   </p>
                 </div>
-              </details>
+              </details>}
             </>
           ) : (
             <>
@@ -332,7 +335,7 @@ export function DeploymentDetailsPage() {
             </>
           )}
         </div>
-      </div>
+      </div>}
 
       {/* Chat */}
       {showChatPanel && (

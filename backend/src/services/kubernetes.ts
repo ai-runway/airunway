@@ -1,6 +1,6 @@
 import * as k8s from '@kubernetes/client-node';
 import { configService } from './config';
-import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig, InstallationState } from '@airunway/shared';
+import type { DeploymentStatus, PodStatus, ClusterStatus, PodPhase, DeploymentConfig, RuntimeStatus, ModelDeployment, ProviderResourceRef, GatewayInfo, GatewayModelInfo, GatewayCRDStatus, ProviderHealthConfig, InstallationState } from '@airunway/shared';
 import { toModelDeploymentManifest, toDeploymentStatus, INFERENCE_GATEWAY_LABEL } from '@airunway/shared';
 import { withRetry } from '../lib/retry';
 import { loadKubeConfig, makeApiClient, kubeConfigToBunTls, type BunTlsOptions } from '../lib/kubeconfig';
@@ -540,7 +540,7 @@ class KubernetesService {
     const deployments: DeploymentStatus[] = [];
     for (const item of items) {
       const itemNamespace = item.metadata.namespace || fallbackNamespace || 'default';
-      const pods = await this.getDeploymentPods(item.metadata.name, itemNamespace);
+      const pods = await this.getDeploymentPods(item.metadata.name, itemNamespace, item.status?.provider?.workloadRef);
       deployments.push(toDeploymentStatus(item, pods));
     }
 
@@ -641,7 +641,7 @@ class KubernetesService {
       );
 
       const md = response as ModelDeployment;
-      const pods = await this.getDeploymentPods(name, namespace);
+      const pods = await this.getDeploymentPods(name, namespace, md.status?.provider?.workloadRef);
       return toDeploymentStatus(md, pods);
     } catch (error) {
       const statusCode = getK8sStatusCode(error);
@@ -705,6 +705,19 @@ class KubernetesService {
     logger.info({ name: config.name, namespace: config.namespace }, 'ModelDeployment created');
   }
 
+  /** resourceVersion provides optimistic concurrency; do not retry an outdated write. */
+  async replaceDeployment(deployment: ModelDeployment, userToken?: string): Promise<void> {
+    const api = this.getCustomObjectsApi(userToken);
+    await api.replaceNamespacedCustomObject({
+      group: MODEL_DEPLOYMENT_CRD.apiGroup,
+      version: MODEL_DEPLOYMENT_CRD.apiVersion,
+      plural: MODEL_DEPLOYMENT_CRD.plural,
+      name: deployment.metadata.name,
+      namespace: deployment.metadata.namespace,
+      body: deployment,
+    });
+  }
+
   async deleteDeployment(name: string, namespace: string, userToken?: string): Promise<void> {
     // First, check if deployment exists
     const deployment = await this.getDeployment(name, namespace, userToken);
@@ -729,7 +742,12 @@ class KubernetesService {
     logger.info({ name, namespace }, 'ModelDeployment deleted');
   }
 
-  async getDeploymentPods(name: string, namespace: string): Promise<PodStatus[]> {
+  async getDeploymentPods(name: string, namespace: string, workloadRef?: ProviderResourceRef): Promise<PodStatus[]> {
+    // Dynamo's generated workload can have a different name and namespace.
+    if (workloadRef?.kind === 'DynamoGraphDeployment' && workloadRef.name) {
+      name = workloadRef.name;
+      namespace = workloadRef.namespace || namespace;
+    }
     const coreApi = this.coreV1Api;
     const podsByName = new Map<string, k8s.V1Pod>();
     const addPods = (pods: k8s.V1Pod[]) => {

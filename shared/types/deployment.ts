@@ -1,3 +1,4 @@
+import { getDynamoIntent, isDynamoIntent, type DynamoIntent } from './dynamo';
 import { Engine } from './model';
 
 // ==================== ModelDeployment CRD Types ====================
@@ -186,15 +187,32 @@ export interface ReplicaStatus {
   available: number;
 }
 
+export interface ProviderResourceRef {
+  apiVersion?: string;
+  kind?: string;
+  name?: string;
+  namespace?: string;
+  uid?: string;
+}
+
+export interface ProviderIntentStatus {
+  phase?: string;
+  profilingPhase?: string;
+  inputHash?: string;
+  attempt?: string;
+}
+
 export interface ProviderStatus {
   name?: string;
   selectedReason?: string;
-  resourceRef?: {
-    apiVersion?: string;
-    kind?: string;
-    name?: string;
-    namespace?: string;
-  };
+  resourceName?: string;
+  resourceKind?: string;
+  /** Compatibility with older API clients. New controllers emit resourceName/resourceKind. */
+  resourceRef?: ProviderResourceRef;
+  requestRef?: ProviderResourceRef;
+  workloadRef?: ProviderResourceRef;
+  inferencePoolRef?: ProviderResourceRef;
+  intent?: ProviderIntentStatus;
 }
 
 export interface Condition {
@@ -243,6 +261,7 @@ export interface ImageStatus {
 }
 
 export interface EndpointStatus {
+  namespace?: string;
   service?: string;
   port?: number;
 }
@@ -279,6 +298,8 @@ export interface ModelDeployment {
   metadata: {
     name: string;
     namespace: string;
+    resourceVersion?: string;
+    uid?: string;
     creationTimestamp?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
@@ -300,6 +321,12 @@ export interface PodStatus {
 }
 
 export interface DeploymentStatus {
+  resourceVersion?: string;
+  providerStatus?: ProviderStatus;
+  configurationMode?: 'manual' | 'automatic';
+  intent?: DynamoIntent;
+  message?: string;
+  frontendNamespace?: string;
   name: string;
   namespace: string;
   modelId: string;
@@ -379,14 +406,14 @@ export function parseFrontendService(frontendService?: string): FrontendServiceR
 }
 
 export function buildPortForwardCommand(
-  deployment: Pick<DeploymentStatus, 'name' | 'namespace' | 'frontendService'>,
+  deployment: Pick<DeploymentStatus, 'name' | 'namespace' | 'frontendService' | 'frontendNamespace'>,
   localPort = LEGACY_FRONTEND_SERVICE_PORT
 ): string {
   const frontendService = parseFrontendService(deployment.frontendService);
   const serviceName = frontendService?.serviceName || `${deployment.name}-frontend`;
   const servicePort = frontendService?.servicePort || LEGACY_FRONTEND_SERVICE_PORT;
 
-  return `kubectl port-forward svc/${serviceName} ${localPort}:${servicePort} -n ${deployment.namespace}`;
+  return `kubectl port-forward svc/${serviceName} ${localPort}:${servicePort} -n ${deployment.frontendNamespace || deployment.namespace}`;
 }
 
 const FATAL_POD_REASONS = new Set([
@@ -673,25 +700,38 @@ export function toModelDeploymentSpec(config: DeploymentConfig): ModelDeployment
     };
   }
 
+  if (getDynamoIntent(config.provider, config.providerOverrides)) {
+    delete spec.resources;
+    delete spec.scaling;
+    delete spec.serving;
+  }
   return spec;
 }
 
 export function toDeploymentStatus(md: ModelDeployment, pods: PodStatus[] = []): DeploymentStatus {
   const status = md.status || {};
   const spec = md.spec;
-  const frontendServiceName = status.endpoint?.service || md.metadata.name;
+  const automatic = isDynamoIntent(spec.provider?.name || status.provider?.name, spec.provider?.overrides);
+  // A request is not a Service. Wait for the provider to publish its serving endpoint.
+  const frontendServiceName = status.endpoint?.service || (automatic || status.provider?.workloadRef ? undefined : md.metadata.name);
   const replicas = resolveReplicaStatus(spec, status, pods);
 
   return {
     name: md.metadata.name,
     namespace: md.metadata.namespace,
+    resourceVersion: md.metadata.resourceVersion,
+    providerStatus: status.provider,
+    configurationMode: automatic ? 'automatic' : 'manual',
+    intent: getDynamoIntent(spec.provider?.name || status.provider?.name, spec.provider?.overrides),
+    message: status.message,
+    frontendNamespace: status.endpoint?.namespace || status.provider?.workloadRef?.namespace || md.metadata.namespace,
     modelId: spec.model.id,
     servedModelName: spec.model.servedName,
     engine: (spec.engine?.type as Engine) || (status.engine?.type as Engine) || undefined,
     mode: spec.serving?.mode || 'aggregated',
-    phase: resolveDeploymentPhase(spec, status, pods),
+    phase: automatic ? (status.phase || 'Pending') : resolveDeploymentPhase(spec, status, pods),
     provider: status.provider?.name || spec.provider?.name || 'unknown',
-    replicas,
+    replicas: automatic ? (status.replicas || { desired: 0, ready: 0, available: 0 }) : replicas,
     conditions: status.conditions,
     pods,
     createdAt: md.metadata.creationTimestamp || new Date().toISOString(),

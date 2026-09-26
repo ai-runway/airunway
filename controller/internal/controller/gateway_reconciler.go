@@ -97,6 +97,16 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		logger.V(1).Info("Error resolving provider gateway capabilities, proceeding without provider-specific gateway capabilities", "error", err)
 	}
 
+	// A concrete provider binding takes precedence over a naming pattern.
+	if md.Status.Provider != nil && md.Status.Provider.InferencePoolRef != nil {
+		if gatewayCapabilities == nil {
+			gatewayCapabilities = &airunwayv1alpha1.GatewayCapabilities{}
+		} else {
+			gatewayCapabilities = gatewayCapabilities.DeepCopy()
+		}
+		gatewayCapabilities.ManagesInferencePool = true
+	}
+
 	// Ensure model pods have the selector label for InferencePool
 	if err := r.labelModelPods(ctx, md); err != nil {
 		logger.V(1).Info("Could not label model pods", "error", err)
@@ -113,63 +123,73 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		}
 	}
 
-	// Determine the HTTPRoute backend via the GAIE InferencePool/EPP path.
-	poolName, poolNamespace := md.Name, md.Namespace
+	// Configuration requests can produce a standalone frontend rather than an
+	// inference pool. Route to the resolved Service without parsing provider specs.
+	backend, directService := resolvedProviderServiceBackend(md)
+	if !directService {
+		// Determine the HTTPRoute backend via the GAIE InferencePool/EPP path.
+		poolName, poolNamespace := md.Name, md.Namespace
 
-	// Two independent extension points exist:
-	//   1. InferencePool delegation (e.g. Dynamo): the provider's upstream
-	//      operator creates the InferencePool AND the EPP. The controller
-	//      skips both. Opt-in via gatewayCapabilities.ManagesInferencePool.
-	//   2. EPP customization (e.g. llm-d): the controller creates the
-	//      InferencePool and the EPP scaffolding, but uses the provider-
-	//      supplied EPP image and plugin config. Opt-in via
-	//      gatewayCapabilities.EndpointPicker.
+		// Two independent extension points exist:
+		//   1. InferencePool delegation (e.g. Dynamo): the provider's upstream
+		//      operator creates the InferencePool AND the EPP. The controller
+		//      skips both. Opt-in via gatewayCapabilities.ManagesInferencePool.
+		//   2. EPP customization (e.g. llm-d): the controller creates the
+		//      InferencePool and the EPP scaffolding, but uses the provider-
+		//      supplied EPP image and plugin config. Opt-in via
+		//      gatewayCapabilities.EndpointPicker.
 
-	// Use provider managed inference pool if it exists,
-	// otherwise use the default inference pool.
-	if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities); ok && err == nil {
-		logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", resolvedProviderName(md))
+		// Use provider managed inference pool if it exists,
+		// otherwise use the default inference pool.
+		if ok, err := r.providerInferencePoolExistsOrCreateDefault(ctx, md, gatewayCapabilities); ok && err == nil {
+			logger.Info("Skipping InferencePool creation, provider manages InferencePool", "provider", resolvedProviderName(md))
 
-		// Resolve the InferencePool name for the provider.
-		// The provider-managed pool will be configured to be named with the model deployment name and namespace.
-		poolName = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamePattern, md.Name, md.Namespace, md.Name)
-		poolNamespace = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace, md.Namespace)
+			// Resolve the InferencePool name for the provider.
+			// The provider-managed pool will be configured to be named with the model deployment name and namespace.
+			poolName = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamePattern, md.Name, md.Namespace, md.Name)
+			poolNamespace = resolveProviderPoolField(gatewayCapabilities.InferencePoolNamespace, md.Name, md.Namespace, md.Namespace)
+			if md.Status.Provider != nil && md.Status.Provider.InferencePoolRef != nil {
+				poolName = md.Status.Provider.InferencePoolRef.Name
+				poolNamespace = md.Status.Provider.InferencePoolRef.Namespace
+			}
 
-		// Use provider-managed InferencePool
-		providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace)
-		if err != nil {
-			logger.Info("Error reconciling provider-managed InferencePool", "error", err)
+			// Use provider-managed InferencePool
+			providerEPPName, err := r.reconcileProviderManagedInferencePool(ctx, md, poolName, poolNamespace)
+			if err != nil {
+				logger.Info("Error reconciling provider-managed InferencePool", "error", err)
+				return err
+			}
+
+			// Reconcile DestinationRule for provider-managed EPP (Istio TLS)
+			if providerEPPName != "" {
+				if err := r.reconcileEPPDestinationRule(ctx, md, providerEPPName, poolNamespace); err != nil {
+					return fmt.Errorf("reconciling EPP DestinationRule for provider-managed EPP: %w", err)
+				}
+			}
+		} else if err != nil {
 			return err
 		}
 
-		// Reconcile DestinationRule for provider-managed EPP (Istio TLS)
-		if providerEPPName != "" {
-			if err := r.reconcileEPPDestinationRule(ctx, md, providerEPPName, poolNamespace); err != nil {
-				return fmt.Errorf("reconciling EPP DestinationRule for provider-managed EPP: %w", err)
+		if gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool {
+			logger.Info("Skipping EPP creation, provider manages EPP", "provider", resolvedProviderName(md))
+		} else { // Use controller-managed EPP (default or provider-customized).
+			var eppOverrides *airunwayv1alpha1.EndpointPickerCapabilities
+			if gatewayCapabilities != nil {
+				eppOverrides = gatewayCapabilities.EndpointPicker
+			}
+			if err := r.reconcileEPP(ctx, md, eppOverrides); err != nil {
+				r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "EPPFailed", err.Error())
+				return fmt.Errorf("reconciling EPP: %w", err)
 			}
 		}
-	} else if err != nil {
-		return err
-	}
 
-	if gatewayCapabilities != nil && gatewayCapabilities.ManagesInferencePool {
-		logger.Info("Skipping EPP creation, provider manages EPP", "provider", resolvedProviderName(md))
-	} else { // Use controller-managed EPP (default or provider-customized).
-		var eppOverrides *airunwayv1alpha1.EndpointPickerCapabilities
-		if gatewayCapabilities != nil {
-			eppOverrides = gatewayCapabilities.EndpointPicker
+		backend = httpRouteBackendTarget{
+			group:     "inference.networking.k8s.io",
+			kind:      "InferencePool",
+			name:      poolName,
+			namespace: poolNamespace,
 		}
-		if err := r.reconcileEPP(ctx, md, eppOverrides); err != nil {
-			r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionFalse, "EPPFailed", err.Error())
-			return fmt.Errorf("reconciling EPP: %w", err)
-		}
-	}
 
-	backend := httpRouteBackendTarget{
-		group:     "inference.networking.k8s.io",
-		kind:      "InferencePool",
-		name:      poolName,
-		namespace: poolNamespace,
 	}
 
 	// Resolve model name early (needed for HTTPRoute header match and status)
@@ -193,7 +213,7 @@ func (r *ModelDeploymentReconciler) reconcileGateway(ctx context.Context, md *ai
 		ModelName:        modelName,
 		GatewayNamespace: gwConfig.GatewayNamespace,
 	}
-	r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionTrue, "GatewayConfigured", "InferencePool and HTTPRoute created")
+	r.setCondition(md, airunwayv1alpha1.ConditionTypeGatewayReady, metav1.ConditionTrue, "GatewayConfigured", "Serving route configured")
 
 	logger.Info("Gateway resources reconciled", "name", md.Name, "gateway", gwConfig.GatewayName, "model", modelName)
 	return nil
@@ -303,6 +323,15 @@ func (r *ModelDeploymentReconciler) reconcileProviderManagedInferencePool(ctx co
 			return "", err
 		}
 		return "", fmt.Errorf("failed to get provider-managed InferencePool %s: %w", poolKey, err)
+	}
+
+	// Do not route to a replacement object while the provider still reports the
+	// previous pool incarnation. The provider watch will publish a fresh binding.
+	if md.Status.Provider != nil && md.Status.Provider.InferencePoolRef != nil {
+		ref := md.Status.Provider.InferencePoolRef
+		if ref.UID != "" && ref.UID != string(pool.UID) {
+			return "", fmt.Errorf("provider inference pool identity changed; waiting for a fresh binding")
+		}
 	}
 
 	logger.V(1).Info("Found provider-managed InferencePool", "pool", poolKey)
@@ -649,7 +678,7 @@ func (r *ModelDeploymentReconciler) resolveProviderGatewayCapabilities(ctx conte
 }
 
 // httpRouteBackendTarget describes where an HTTPRoute should forward traffic
-// via a GAIE InferencePool backend.
+// via an InferencePool or a provider-resolved frontend Service.
 type httpRouteBackendTarget struct {
 	// group is the backend API group (e.g. "inference.networking.k8s.io").
 	group gatewayv1.Group
@@ -660,6 +689,27 @@ type httpRouteBackendTarget struct {
 	// namespace is the backend object namespace. May differ from the
 	// ModelDeployment namespace for provider-managed backends.
 	namespace string
+	port      int32
+}
+
+// resolvedProviderServiceBackend uses only the provider's published binding.
+// It intentionally does not derive resource names or interpret an upstream graph.
+func resolvedProviderServiceBackend(md *airunwayv1alpha1.ModelDeployment) (httpRouteBackendTarget, bool) {
+	p := md.Status.Provider
+	if p == nil || p.RequestRef == nil || p.WorkloadRef == nil || p.InferencePoolRef != nil ||
+		md.Status.Endpoint == nil || md.Status.Endpoint.Service == "" || md.Status.Endpoint.Port <= 0 {
+		return httpRouteBackendTarget{}, false
+	}
+	namespace := p.WorkloadRef.Namespace
+	if namespace == "" {
+		namespace = md.Namespace
+	}
+	// Provider resources must remain in the ModelDeployment namespace. Cross-
+	// namespace routing needs a separately authorized ReferenceGrant contract.
+	if namespace != md.Namespace {
+		return httpRouteBackendTarget{}, false
+	}
+	return httpRouteBackendTarget{kind: "Service", name: md.Status.Endpoint.Service, namespace: namespace, port: md.Status.Endpoint.Port}, true
 }
 
 func buildHTTPRouteSpec(gwConfig *gateway.GatewayConfig, modelName string, backend httpRouteBackendTarget) gatewayv1.HTTPRouteSpec {
@@ -690,6 +740,11 @@ func buildHTTPRouteSpec(gwConfig *gateway.GatewayConfig, modelName string, backe
 		Kind:      &backendKind,
 		Name:      gatewayv1.ObjectName(backend.name),
 		Namespace: &backendNs,
+	}
+
+	if backend.port > 0 {
+		port := gatewayv1.PortNumber(backend.port)
+		backendRef.Port = &port
 	}
 
 	return gatewayv1.HTTPRouteSpec{
