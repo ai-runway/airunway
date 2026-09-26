@@ -22,6 +22,14 @@ describe('automatic deployment conversion', () => {
     expect(result.replicas).toEqual({ desired: 0, ready: 0, available: 0 });
   });
 
+  test('normalizes omitted zero counters without treating profiler pods as serving', () => {
+    const md: ModelDeployment = { apiVersion: 'airunway.ai/v1alpha1', kind: 'ModelDeployment', metadata: { name: 'auto', namespace: 'models' }, spec: toModelDeploymentSpec(config), status: { phase: 'Failed', replicas: {} } };
+    const pods = [{ name: 'profiler', phase: 'Running' as const, ready: true, restarts: 0 }];
+    expect(toDeploymentStatus(md, pods).replicas).toEqual({ desired: 0, ready: 0, available: 0 });
+    md.status!.replicas = { desired: 2 };
+    expect(toDeploymentStatus(md, pods).replicas).toEqual({ desired: 2, ready: 0, available: 0 });
+  });
+
   test('exposes real endpoint, namespace, refs and optimistic revision', () => {
     const md: ModelDeployment = { apiVersion: 'airunway.ai/v1alpha1', kind: 'ModelDeployment', metadata: { name: 'auto', namespace: 'models', resourceVersion: '42' }, spec: toModelDeploymentSpec(config), status: { phase: 'Running', endpoint: { service: 'custom-frontend', port: 9000 }, provider: { resourceKind: 'DynamoGraphDeploymentRequest', resourceName: 'request-1', workloadRef: { name: 'custom', namespace: 'serving', kind: 'DynamoGraphDeployment', uid: 'uid' }, intent: { phase: 'Deployed', attempt: 'attempt' } }, replicas: { desired: 2, ready: 2, available: 2 } } };
     const result = toDeploymentStatus(md);

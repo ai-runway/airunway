@@ -276,7 +276,7 @@ export interface ModelDeploymentStatus {
   message?: string;
   engine?: EngineStatus;
   provider?: ProviderStatus;
-  replicas?: ReplicaStatus;
+  replicas?: Partial<ReplicaStatus>;
   prefillReplicas?: {
     desired: number;
     ready: number;
@@ -731,7 +731,12 @@ export function toDeploymentStatus(md: ModelDeployment, pods: PodStatus[] = []):
     mode: spec.serving?.mode || 'aggregated',
     phase: automatic ? (status.phase || 'Pending') : resolveDeploymentPhase(spec, status, pods),
     provider: status.provider?.name || spec.provider?.name || 'unknown',
-    replicas: automatic ? (status.replicas || { desired: 0, ready: 0, available: 0 }) : replicas,
+    replicas: automatic ? {
+      // Go omits zero-valued status counters. Never infer serving copies from a profiling pod.
+      desired: status.replicas?.desired ?? 0,
+      ready: status.replicas?.ready ?? 0,
+      available: status.replicas?.available ?? 0,
+    } : replicas,
     conditions: status.conditions,
     pods,
     createdAt: md.metadata.creationTimestamp || new Date().toISOString(),
