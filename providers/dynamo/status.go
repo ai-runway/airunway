@@ -102,6 +102,21 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 		result.Message = message
 	}
 
+	// Both released APIs report reconciliation failures through Ready conditions;
+	// beta has no top-level status.message. Preserve an explicit legacy message.
+	if result.Message == "" {
+		conditions, _, _ := unstructured.NestedSlice(status, "conditions")
+		for _, raw := range conditions {
+			condition, _ := raw.(map[string]any)
+			if condition["type"] == "Ready" && condition["status"] != "True" {
+				if message, ok := condition["message"].(string); ok && message != "" {
+					result.Message = message
+					break
+				}
+			}
+		}
+	}
+
 	// Extract replica information if available
 	result.Replicas = t.extractReplicas(status)
 

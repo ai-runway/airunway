@@ -458,3 +458,24 @@ func TestMapStateToPhase(t *testing.T) {
 		}
 	}
 }
+
+func TestDGDReadyConditionExplainsFailureAndProgress(t *testing.T) {
+	for _, version := range []string{"v1alpha1", "v1beta1"} {
+		for _, state := range []string{"failed", "deploying", "pending"} {
+			t.Run(version+"/"+state, func(t *testing.T) {
+				message := "failed to reconcile resources: queue 'dynamo' not found"
+				dgd := newDGDWithStatus(map[string]any{"state": state, "conditions": []any{map[string]any{"type": "Ready", "status": "False", "message": message}}})
+				dgd.SetAPIVersion("nvidia.com/" + version)
+				status, err := NewStatusTranslator().TranslateStatus(dgd)
+				if err != nil || status.Message != message {
+					t.Fatalf("condition message lost: %#v, %v", status, err)
+				}
+				_ = unstructured.SetNestedField(dgd.Object, "explicit legacy message", "status", "message")
+				status, err = NewStatusTranslator().TranslateStatus(dgd)
+				if err != nil || status.Message != "explicit legacy message" {
+					t.Fatalf("explicit message replaced: %#v, %v", status, err)
+				}
+			})
+		}
+	}
+}
