@@ -46,7 +46,8 @@ import {
   Trash2,
   Globe,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, formatRelativeTime } from '@/lib/utils'
+import type { InstallationState } from '@airunway/shared'
 import { useSearchParams } from 'react-router-dom'
 
 type SettingsTab = 'general' | 'runtimes' | 'integrations'
@@ -59,7 +60,9 @@ type RuntimeCrdMetadata = {
 }
 
 type RuntimeSelectionMetadata = RuntimeCrdMetadata & {
+  installationState?: InstallationState | null
   installed?: boolean | null
+  healthy?: boolean | null
 }
 
 const KNOWN_RUNTIME_IDS = new Set(['dynamo', 'kuberay', 'kaito', 'llmd', 'vllm'])
@@ -80,6 +83,10 @@ const canonicalizeRuntimeId = (id: string) => {
 const runtimeIdsMatch = (left: string | null | undefined, right: string | null | undefined) =>
   normalizeRuntimeId(left) === normalizeRuntimeId(right)
 
+const runtimeInstallationState = (
+  runtime: RuntimeSelectionMetadata | null | undefined
+): InstallationState => runtime?.installationState ?? (runtime?.installed ? 'installed' : 'not-installed')
+
 const runtimeRequiresCRD = (runtime: RuntimeCrdMetadata | null | undefined, fallbackId?: string | null) => {
   if (typeof runtime?.requiresCRD === 'boolean') {
     return runtime.requiresCRD
@@ -94,6 +101,14 @@ const runtimeRequiresCRD = (runtime: RuntimeCrdMetadata | null | undefined, fall
   }
 
   return true
+}
+
+const runtimeIsReady = (runtime: RuntimeSelectionMetadata): boolean => {
+  if (runtime.installationState === 'unknown') return runtime.healthy === true
+  if (runtime.installationState == null && !runtimeRequiresCRD(runtime)) {
+    return Boolean(runtime.installed || runtime.healthy)
+  }
+  return runtimeInstallationState(runtime) === 'installed'
 }
 
 const runtimeDescription = (id: string, name?: string | null) => {
@@ -125,14 +140,67 @@ const crdLessRuntimeStateLabel = (ready: boolean | null | undefined) => (
   ready ? 'Ready' : 'Registered'
 )
 
+type ShimStatusSource = {
+  shimRegistered?: boolean
+  shimConnected?: boolean
+  shimLastHeartbeat?: string
+}
+
+type IntegrationStatus = {
+  label: 'Connected' | 'Not responding' | 'Not set up'
+  tone: 'success' | 'warning' | 'unknown'
+  description: string
+}
+
+const formatHeartbeatAge = (heartbeat?: string): string | null => {
+  if (!heartbeat) return null
+  const ts = Date.parse(heartbeat)
+  if (Number.isNaN(ts)) return null
+  // Clamp future timestamps (clock skew between cluster and browser) to "now"
+  // so the UI never shows a negative age. formatRelativeTime then handles the
+  // human-readable formatting, keeping it consistent with the rest of the app.
+  const safe = Math.min(Date.now(), ts)
+  return formatRelativeTime(new Date(safe).toISOString())
+}
+
+const describeIntegrationStatus = (source: ShimStatusSource | undefined | null): IntegrationStatus => {
+  if (!source?.shimRegistered) {
+    return {
+      label: 'Not set up',
+      tone: 'unknown',
+      description: "AI Runway has not been set up to work with this runtime yet.",
+    }
+  }
+  if (source.shimConnected) {
+    const age = formatHeartbeatAge(source.shimLastHeartbeat)
+    return {
+      label: 'Connected',
+      tone: 'success',
+      description: age
+        ? `The AI Runway integration is checking in normally (last reported ${age}).`
+        : 'The AI Runway integration is checking in normally.',
+    }
+  }
+  const age = formatHeartbeatAge(source.shimLastHeartbeat)
+  return {
+    label: 'Not responding',
+    tone: 'warning',
+    description: age
+      ? `The AI Runway integration is disconnected (last reported ${age}).`
+      : 'The AI Runway integration has not checked in yet.',
+  }
+}
+
 const selectDefaultRuntimeId = (runtimes: RuntimeSelectionMetadata[] | undefined): RuntimeId | null => {
   if (!runtimes) {
     return null
   }
 
-  const installedRuntime = runtimes.find(r => r.installed && r.id)
-  if (installedRuntime?.id) {
-    return canonicalizeRuntimeId(installedRuntime.id)
+  const readyRuntime = runtimes.find(r => r.id && (
+    r.installationState === 'unknown' ? r.healthy === true : runtimeInstallationState(r) === 'installed'
+  ))
+  if (readyRuntime?.id) {
+    return canonicalizeRuntimeId(readyRuntime.id)
   }
 
   const dynamoRuntime = runtimes.find(r => runtimeIdsMatch(r.id, 'dynamo') && r.id)
@@ -180,7 +248,7 @@ export function SettingsPage() {
   const [showUninstallDialog, setShowUninstallDialog] = useState(false)
 
   const runtimes = runtimesStatus?.runtimes || []
-  const readyRuntimeCount = runtimes.filter(r => runtimeRequiresCRD(r) ? r.installed : (r.installed || r.healthy)).length
+  const readyRuntimeCount = runtimes.filter(runtimeIsReady).length
   const helmAvailable = helmStatus?.available ?? false
   const defaultRuntime = selectDefaultRuntimeId(runtimesStatus?.runtimes)
 
@@ -262,8 +330,17 @@ export function SettingsPage() {
     toast({ title: 'Copied', description: 'Command copied to clipboard' })
   }
 
-  const isInstalled = installationStatus?.installed ?? false
-  const isWaitingForInstall = selectedRuntimeRequiresCRD && pendingInstallRuntime !== null && runtimeIdsMatch(pendingInstallRuntime, effectiveRuntime) && !isInstalled
+  const selectedInstallationState = installationStatus?.installationState
+    ?? currentRuntime?.installationState
+    ?? runtimeInstallationState(installationStatus ?? currentRuntime)
+  const isInstallationUnknown = selectedRuntimeRequiresCRD && selectedInstallationState === 'unknown'
+  const isInstalled = selectedInstallationState === 'unknown'
+    ? !selectedRuntimeRequiresCRD && currentRuntime?.healthy === true
+    : selectedInstallationState === 'installed'
+  const isWaitingForInstall = selectedRuntimeRequiresCRD
+    && selectedInstallationState === 'not-installed'
+    && pendingInstallRuntime !== null
+    && runtimeIdsMatch(pendingInstallRuntime, effectiveRuntime)
   const selectedRuntimeMessage = isWaitingForInstall
     ? 'Install command completed. Waiting for the runtime service to become ready...'
     : selectedRuntimeRequiresCRD
@@ -550,7 +627,12 @@ export function SettingsPage() {
           <div>
             <h2 className="text-xl font-heading font-semibold mb-4">Available Runtimes</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {runtimes.map((runtime) => (
+              {runtimes.map((runtime) => {
+                const installationState = runtimeInstallationState(runtime)
+                const installationUnknown = runtimeRequiresCRD(runtime) && installationState === 'unknown'
+                const ready = runtimeIsReady(runtime)
+
+                return (
                 <div
                   key={runtime.id}
                   className={cn(
@@ -565,7 +647,7 @@ export function SettingsPage() {
                     <div className="flex items-center justify-between">
                       <span className="font-heading font-bold">{runtime.name}</span>
                       {!runtimeRequiresCRD(runtime) ? (
-                        runtime.installed || runtime.healthy ? (
+                        ready ? (
                           <Badge variant="success" className="shrink-0">
                             <CheckCircle className="h-4 w-4" />
                             {crdLessRuntimeStateLabel(true)}
@@ -576,15 +658,20 @@ export function SettingsPage() {
                             {crdLessRuntimeStateLabel(false)}
                           </span>
                         )
-                      ) : runtime.installed ? (
+                      ) : installationState === 'installed' ? (
                         <Badge variant="success" className="shrink-0">
                           <CheckCircle className="h-4 w-4" />
                           Installed
                         </Badge>
-                      ) : runtimeIdsMatch(pendingInstallRuntime, runtime.id) ? (
+                      ) : installationState === 'not-installed' && runtimeIdsMatch(pendingInstallRuntime, runtime.id) ? (
                         <span className="text-cyan-400 text-sm flex items-center gap-1">
                           <Loader2 className="h-4 w-4 animate-spin" />
                           Starting
+                        </span>
+                      ) : installationUnknown ? (
+                        <span className="text-muted-foreground text-sm flex items-center gap-1">
+                          <AlertCircle className="h-4 w-4" />
+                          Status unknown
                         </span>
                       ) : (
                         <span className="text-muted-foreground text-sm flex items-center gap-1">
@@ -601,18 +688,23 @@ export function SettingsPage() {
                     <div className="space-y-2 text-sm">
                       {!runtimeRequiresCRD(runtime) ? (
                         <div className="flex items-center gap-2 rounded-lg bg-muted/60 p-3 text-muted-foreground">
-                          {runtime.installed || runtime.healthy ? (
+                          {ready ? (
                             <CheckCircle className="h-4 w-4 text-green-400" />
                           ) : (
                             <AlertCircle className="h-4 w-4 text-yellow-500" />
                           )}
-                          <span>{crdLessRuntimeReadinessMessage(runtime.installed || runtime.healthy)}</span>
+                          <span>{crdLessRuntimeReadinessMessage(ready)}</span>
                         </div>
                       ) : (
                         <>
                           <div className="flex items-center justify-between">
                             <span className="text-muted-foreground">CRD</span>
-                            {runtime.crdFound ?? runtime.installed ? (
+                            {installationUnknown ? (
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <AlertCircle className="h-4 w-4" />
+                                Not checked
+                              </span>
+                            ) : runtime.crdFound ?? runtime.installed ? (
                               <CheckCircle className="h-4 w-4 text-green-400" />
                             ) : (
                               <XCircle className="h-4 w-4 text-red-500" />
@@ -620,7 +712,12 @@ export function SettingsPage() {
                           </div>
                           <div className="flex items-center justify-between">
                             <span className="text-muted-foreground">Operator</span>
-                            {runtime.operatorRunning ?? runtime.healthy ? (
+                            {installationUnknown ? (
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <AlertCircle className="h-4 w-4" />
+                                Not checked
+                              </span>
+                            ) : runtime.operatorRunning ?? runtime.healthy ? (
                               <CheckCircle className="h-4 w-4 text-green-400" />
                             ) : (
                               <XCircle className="h-4 w-4 text-red-500" />
@@ -634,10 +731,33 @@ export function SettingsPage() {
                           <span className="font-mono text-xs">{runtime.version}</span>
                         </div>
                       )}
+                      {runtime.shimRegistered !== undefined && (() => {
+                        const integration = describeIntegrationStatus(runtime)
+                        return (
+                          <div
+                            className="space-y-1"
+                            data-testid={`integration-status-${runtime.id}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-muted-foreground">AI Runway integration</span>
+                              <span className="flex items-center gap-1 text-xs">
+                                {integration.tone === 'success' ? (
+                                  <CheckCircle className="h-3.5 w-3.5 text-green-400" />
+                                ) : (
+                                  <AlertCircle className="h-3.5 w-3.5 text-yellow-500" />
+                                )}
+                                <span>{integration.label}</span>
+                              </span>
+                            </div>
+                            <p className="text-xs text-muted-foreground">{integration.description}</p>
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
 
@@ -676,6 +796,11 @@ export function SettingsPage() {
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Starting
                   </span>
+                ) : isInstallationUnknown ? (
+                  <span className="text-muted-foreground text-sm flex items-center gap-1">
+                    <AlertCircle className="h-4 w-4" />
+                    Status unknown
+                  </span>
                 ) : (
                   <span className="text-muted-foreground text-sm flex items-center gap-1">
                     <XCircle className="h-4 w-4 text-red-500" />
@@ -695,24 +820,41 @@ export function SettingsPage() {
               ) : (
                 <>
                   {selectedRuntimeRequiresCRD ? (
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div className="flex items-center justify-between rounded-lg bg-muted p-3">
-                        <span>CRD Installed</span>
-                        {installationStatus?.crdFound ? (
-                          <CheckCircle className="h-4 w-4 text-green-500" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-red-500" />
-                        )}
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        Whether {installationStatus?.providerName || currentRuntime?.name || 'this runtime'} itself is set up
+                        in your environment. AI Runway needs it before it can run models on it.
+                        {!isInstallationUnknown && installationStatus?.installable !== false && ' Use the install button below if any part is missing.'}
+                      </p>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="flex items-center justify-between rounded-lg bg-muted p-3">
+                          <span>CRD Installed</span>
+                          {isInstallationUnknown ? (
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <AlertCircle className="h-4 w-4" />
+                              Not checked
+                            </span>
+                          ) : installationStatus?.crdFound ? (
+                            <CheckCircle className="h-4 w-4 text-green-500" />
+                          ) : (
+                            <XCircle className="h-4 w-4 text-red-500" />
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg bg-muted p-3">
+                          <span>Operator Running</span>
+                          {isInstallationUnknown ? (
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <AlertCircle className="h-4 w-4" />
+                              Not checked
+                            </span>
+                          ) : installationStatus?.operatorRunning ? (
+                            <CheckCircle className="h-4 w-4 text-green-500" />
+                          ) : (
+                            <XCircle className="h-4 w-4 text-red-500" />
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center justify-between rounded-lg bg-muted p-3">
-                        <span>Operator Running</span>
-                        {installationStatus?.operatorRunning ? (
-                          <CheckCircle className="h-4 w-4 text-green-500" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-red-500" />
-                        )}
-                      </div>
-                    </div>
+                    </>
                   ) : (
                     <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-sm text-muted-foreground">
                       {isInstalled ? (
@@ -724,9 +866,37 @@ export function SettingsPage() {
                     </div>
                   )}
 
+                  {(() => {
+                    if (installationStatus?.shimRegistered === undefined) {
+                      return null
+                    }
+                    const integration = describeIntegrationStatus(installationStatus)
+                    return (
+                      <div
+                        className="flex items-center justify-between rounded-lg bg-muted/60 p-3 text-sm"
+                        data-testid="integration-status-detail"
+                      >
+                        <div>
+                          <div className="font-medium">AI Runway integration</div>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {integration.description}
+                          </p>
+                        </div>
+                        <span className="flex items-center gap-1 shrink-0">
+                          {integration.tone === 'success' ? (
+                            <CheckCircle className="h-4 w-4 text-green-500" />
+                          ) : (
+                            <AlertCircle className="h-4 w-4 text-yellow-500" />
+                          )}
+                          <span className="text-xs">{integration.label}</span>
+                        </span>
+                      </div>
+                    )
+                  })()}
+
                   {selectedRuntimeRequiresCRD && (
                     <div className="flex gap-3">
-                      {!isInstalled && (
+                      {!isInstalled && !isInstallationUnknown && installationStatus?.installable !== false && (
                         <Button
                           onClick={() => handleInstall(effectiveRuntime)}
                           disabled={isInstalling || isWaitingForInstall || !helmAvailable || !clusterStatus?.connected}
@@ -785,7 +955,7 @@ export function SettingsPage() {
                     </div>
                   )}
 
-                  {selectedRuntimeRequiresCRD && !helmAvailable && (
+                  {selectedRuntimeRequiresCRD && !isInstallationUnknown && !helmAvailable && (
                     <div className="flex items-start gap-2 rounded-lg bg-yellow-50 p-4 text-sm text-yellow-800 dark:bg-yellow-950 dark:text-yellow-200">
                       <AlertTriangle className="h-5 w-5 flex-shrink-0 mt-0.5" />
                       <div>
@@ -814,7 +984,7 @@ export function SettingsPage() {
           )}
 
           {/* Installation Steps */}
-          {installationStatus?.installationSteps && installationStatus.installationSteps.length > 0 && (
+          {!isInstallationUnknown && installationStatus?.installationSteps && installationStatus.installationSteps.length > 0 && (
             <div className="bg-white/[0.03] border border-white/5 rounded-2xl p-6 backdrop-blur-sm">
               <div className="mb-4">
                 <h3 className="font-heading text-lg font-semibold">Manual Installation Steps</h3>

@@ -173,6 +173,83 @@ func TestTransformDisaggregated(t *testing.T) {
 	}
 }
 
+func TestTransformVLLMWorkersPreserveExtraArgs(t *testing.T) {
+	tr := NewTransformer()
+	extraArgs := []string{
+		"--airunway-extra-args-marker",
+		"expected-extra-args-value",
+		"--inline=value",
+		"--disaggregation-mode",
+		"user-supplied",
+	}
+
+	aggregated := newTestMD("aggregated", "default")
+	aggregated.Spec.Engine.ExtraArgs = extraArgs
+	aggregatedResources, err := tr.Transform(context.Background(), aggregated)
+	if err != nil {
+		t.Fatalf("transform aggregated deployment: %v", err)
+	}
+
+	disaggregated := newTestMD("disaggregated", "default")
+	disaggregated.Spec.Engine.ExtraArgs = extraArgs
+	disaggregated.Spec.Serving = &airunwayv1alpha1.ServingSpec{
+		Mode: airunwayv1alpha1.ServingModeDisaggregated,
+	}
+	disaggregated.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 1,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 1},
+		},
+		Decode: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 1,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 1},
+		},
+	}
+	disaggregatedResources, err := tr.Transform(context.Background(), disaggregated)
+	if err != nil {
+		t.Fatalf("transform disaggregated deployment: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		resource  *unstructured.Unstructured
+		worker    string
+		ownedArgs []string
+		modelID   string
+	}{
+		{
+			name:     "aggregated",
+			resource: aggregatedResources[0],
+			worker:   "VllmWorker",
+			modelID:  aggregated.Spec.Model.ID,
+		},
+		{
+			name:      "prefill",
+			resource:  disaggregatedResources[0],
+			worker:    "VllmPrefillWorker",
+			ownedArgs: []string{"--disaggregation-mode", SubComponentTypePrefill, "--kv-transfer-config", VLLMKVTransferConfig},
+			modelID:   disaggregated.Spec.Model.ID,
+		},
+		{
+			name:      "decode",
+			resource:  disaggregatedResources[0],
+			worker:    "VllmDecodeWorker",
+			ownedArgs: []string{"--disaggregation-mode", SubComponentTypeDecode, "--kv-transfer-config", VLLMKVTransferConfig},
+			modelID:   disaggregated.Spec.Model.ID,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := mainContainer(t, dgdService(t, tc.resource, tc.worker))
+			got := toStringSlice(t, container["args"])
+			want := append([]string{"--model", tc.modelID}, extraArgs...)
+			want = append(want, tc.ownedArgs...)
+			if !sliceEqual(got, want) {
+				t.Fatalf("worker args = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestMapEngineType(t *testing.T) {
 	tr := NewTransformer()
 
@@ -761,6 +838,36 @@ func TestBuildEngineArgsWithCustomArgs(t *testing.T) {
 	}
 	if !sliceContainsStr(args, "--tensor-parallel-size") {
 		t.Errorf("expected --tensor-parallel-size in args: %v", args)
+	}
+}
+
+func TestBuildEngineArgsAppendsExtraArgsVerbatim(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test", "default")
+	md.Spec.Engine.Args = map[string]string{
+		"zebra-param": "z",
+		"alpha-param": "a",
+	}
+	md.Spec.Engine.ExtraArgs = []string{
+		"--airunway-extra-args-marker",
+		"expected-extra-args-value",
+		"--inline=value",
+	}
+
+	args, err := tr.buildEngineArgs(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{
+		"--model", md.Spec.Model.ID,
+		"--alpha-param", "a",
+		"--zebra-param", "z",
+		"--airunway-extra-args-marker",
+		"expected-extra-args-value",
+		"--inline=value",
+	}
+	if !sliceEqual(args, want) {
+		t.Fatalf("buildEngineArgs() = %v, want %v", args, want)
 	}
 }
 

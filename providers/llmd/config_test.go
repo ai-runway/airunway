@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	"github.com/ai-runway/airunway/providers/pkg/shim"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -124,6 +126,28 @@ func TestProviderDocumentation(t *testing.T) {
 	}
 }
 
+func TestUnregister(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = airunwayv1alpha1.AddToScheme(scheme)
+	existing := &airunwayv1alpha1.InferenceProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
+
+	if err := NewProviderConfigManager(c).Unregister(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &airunwayv1alpha1.InferenceProviderConfig{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
+		t.Fatalf("failed to get updated provider config: %v", err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, "UpstreamReady")
+	if updated.Status.Ready || condition == nil || condition.Reason != shim.ReasonUnregistered {
+		t.Fatalf("unexpected unregistered status: %+v", updated.Status)
+	}
+}
+
 func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	annotations, err := buildAnnotations()
 	if err != nil {
@@ -205,31 +229,6 @@ func TestUpdateStatus(t *testing.T) {
 	}
 	if updated.Status.UpstreamCRDVersion != "apps/v1" {
 		t.Fatalf("expected provider upstream CRD version %q, got %q", "apps/v1", updated.Status.UpstreamCRDVersion)
-	}
-}
-
-func TestUnregister(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = airunwayv1alpha1.AddToScheme(scheme)
-
-	existing := &airunwayv1alpha1.InferenceProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: ProviderConfigName},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithStatusSubresource(existing).Build()
-	mgr := NewProviderConfigManager(c)
-
-	err := mgr.Unregister(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	updated := &airunwayv1alpha1.InferenceProviderConfig{}
-	if err := c.Get(context.Background(), client.ObjectKey{Name: ProviderConfigName}, updated); err != nil {
-		t.Fatalf("failed to get updated provider config: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatal("expected provider status to be not ready after unregister")
 	}
 }
 
