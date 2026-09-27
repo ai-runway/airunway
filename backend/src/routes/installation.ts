@@ -144,10 +144,7 @@ function isKaitoWorkspaceChart(providerId: string, chart: ProviderHelmChartDetai
 }
 
 function shouldPreInstallMissingCrds(providerId: string, chart: ProviderHelmChartDetails) {
-  return (
-    isKaitoWorkspaceChart(providerId, chart)
-    || (providerId === 'dynamo' && chart.name === 'dynamo-platform')
-  );
+  return isKaitoWorkspaceChart(providerId, chart);
 }
 
 type ProviderInstallChart = ProviderHelmChartDetails & Pick<HelmChart, 'keepCrdResources'>;
