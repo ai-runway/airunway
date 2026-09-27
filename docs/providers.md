@@ -221,17 +221,23 @@ conversion webhooks enabled, verify both served API versions after the upgrade,
 and confirm storage migration completed. A Helm rollback does not by itself
 reverse a migration to beta storage.
 
-The manual native-EPP path also needs a separate gateway interoperability check.
-With Istio 1.30.0, live requests failed even while the DGD and its pods were
-ready: the ext_proc connection sent an `outbound|9002||...` cluster identifier as
-TLS SNI, which the Rust EPP rejected. Changing only the cluster's SNI setting did
-not resolve the gRPC authority behavior. Treat this combination as blocked until
-a gateway transport fix is validated; do not disable TLS or change `FailClose`
-to conceal the failure. DGDR gateway routing through the generated Frontend
-Service does not use this hop and was not affected.
+The native Rust EPP path on Dynamo 1.5.0 with Istio 1.30.0 requires the
+[documented Istio configuration workaround](gateway.md#istio-workaround-for-dynamo-native-epp):
+a DNS authority on the EPP gRPC route and
+`send_body_without_waiting_for_header_response: true` on the gateway's EPP HTTP
+filter. Both settings were validated with aggregated vLLM, streaming and
+non-streaming requests, and an EPP restart. Runway does not install this
+workaround automatically.
 
-Dynamo 1.5's native EPP generates an ephemeral self-signed certificate. Its
-default encrypted connection is not a CA-verified Service-DNS identity setup.
+The body-streaming setting affects all EPP routes on that gateway listener,
+not only one model. Preserve TLS and `FailClose`, retain the complete existing
+per-route configuration, and validate other EPP implementations sharing the
+gateway. DGDR routing through a generated standalone Frontend Service does not
+use this EPP hop. Other versions and topologies need separate validation.
+
+Dynamo 1.5's native EPP generates an ephemeral self-signed certificate. The
+workaround preserves the existing trust settings; it does not add CA or
+Service-DNS identity verification.
 
 Compatibility checks include released CRD schemas for 1.1.1 and 1.5.0. Real
 profiling and end-to-end serving additionally require a GPU cluster and the

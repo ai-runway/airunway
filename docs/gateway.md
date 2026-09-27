@@ -376,12 +376,200 @@ When gateway resources are cleaned up (e.g., `gateway.enabled: false`):
 
 ### Dynamo Provider Gateway Support
 
-The Dynamo provider registers full gateway capabilities. When a ModelDeployment uses Dynamo with gateway enabled:
+The Dynamo provider registers full gateway capabilities. When a manually configured ModelDeployment uses Dynamo with gateway enabled:
 
-1. The Dynamo operator creates a `DynamoGraphDeployment` with an `Epp` service configured for KV-cache-aware scoring
+1. The Runway provider creates a `DynamoGraphDeployment` with an `Epp` component configured for KV-cache-aware scoring
 2. The Dynamo operator creates an InferencePool pointing at its managed EPP
 3. The AIRunway controller detects the provider's gateway capabilities, waits for the InferencePool, creates the ReferenceGrant and HTTPRoute
 4. Requests are routed through Dynamo's intelligent EPP instead of the generic EPP since that EPP creation has been skipped.
+
+#### Istio workaround for Dynamo native EPP
+
+This config-only workaround was validated with **Dynamo 1.5.0, Istio 1.30.0 and
+GAIE 1.5.0**, using an aggregated vLLM deployment on one A100. Streaming and
+non-streaming chat requests passed, including after an EPP restart. Other
+versions, engines and topologies require their own validation.
+
+It applies to the native Rust EPP path through an **InferencePool**. A
+DGDR-generated topology routed directly to a standalone Frontend Service does
+not use this EPP hop and does not need the workaround.
+
+Two settings are required, even when the client uses non-streaming chat:
+
+1. Set the EPP gRPC service's **authority** to its Service DNS name. Without it,
+   Envoy defaults to the internal cluster name, such as `outbound|9002||...`.
+   With `autoSni` enabled, that value becomes invalid TLS SNI and Rustls rejects
+   the handshake. Changing only the fixed TLS SNI does not override `autoSni`.
+2. Set `send_body_without_waiting_for_header_response: true` on the gateway's
+   EPP HTTP filter. Rust EPP needs the request body to tokenize the prompt and
+   select a worker before answering the header callback. The existing
+   `FULL_DUPLEX_STREAMED` request and response modes must remain enabled.
+
+> [!WARNING]
+> The authority patch is per route. The body-streaming setting applies to
+> **all EPP routes on the selected Gateway's HTTP listener**, not just this model.
+> It matches `envoy.filters.http.ext_proc` exactly and does not modify the separate
+> `envoy.filters.http.ext_proc.bbr` body-based-router filter. Validate other EPP
+> implementations sharing that gateway before enabling it. EnvoyFilter depends
+> on Istio/Envoy internals, so repeat the checks below after upgrades.
+
+**Locate the active route first.** Use the intended cluster context and a ready
+pod belonging to the selected Gateway. If the gateway has several replicas,
+repeat the verification on each replica.
+
+```bash
+CONTEXT="your-cluster-context"
+GATEWAY_NAMESPACE="default"
+GATEWAY_NAME="inference-gateway"
+
+kubectl --context "$CONTEXT" -n "$GATEWAY_NAMESPACE" get pods \
+  -l "gateway.networking.k8s.io/gateway-name=$GATEWAY_NAME" -o wide
+
+GATEWAY_POD="replace-with-a-ready-gateway-pod"
+istioctl --context "$CONTEXT" proxy-config routes "$GATEWAY_POD" \
+  -n "$GATEWAY_NAMESPACE" -o json |
+  jq '[.[] | .virtualHosts[]?.routes[]?
+    | select(.typedPerFilterConfig["envoy.filters.http.ext_proc"].overrides.grpcService.envoyGrpc.clusterName != null)
+    | {route: .name,
+       grpc: .typedPerFilterConfig["envoy.filters.http.ext_proc"].overrides.grpcService.envoyGrpc,
+       processingMode: .typedPerFilterConfig["envoy.filters.http.ext_proc"].overrides.processingMode,
+       failureModeAllow: .typedPerFilterConfig["envoy.filters.http.ext_proc"].overrides.failureModeAllow}]'
+```
+
+The example below assumes Gateway `default/inference-gateway` on port `80`,
+Envoy route `default.qwen3.0`, and EPP Service `default/qwen3-epp` on port
+`9002`. Replace the namespace, gateway selector, listener port, route name,
+cluster name and Service DNS authority with the values for your deployment.
+Set `metadata.namespace` to the Gateway namespace; use the EPP Service's
+namespace in `clusterName` and `authority`. These namespaces may differ.
+Copy the **actual Envoy route and cluster names** from the active configuration;
+do not assume their naming convention is stable.
+
+> [!IMPORTANT]
+> Preserve the **complete existing** `typedPerFilterConfig["envoy.filters.http.ext_proc"]`
+> entry. Istio's `MERGE` replaces this map entry rather than recursively merging
+> its contents. A patch containing only `authority` drops the required
+> `clusterName` and causes Envoy to reject the route update. The example includes
+> the complete validated default entry; retain any additional fields in your
+> installation instead of overwriting them with these defaults. Treat full proxy
+> configuration dumps as potentially sensitive and do not commit them.
+>
+> The body-streaming flag belongs in the `HTTP_FILTER` patch, not in per-route
+> `ExtProcOverrides`. Do not disable TLS or change the InferencePool's
+> `FailClose` / Envoy's `failureModeAllow: false` to make requests succeed.
+
+Save the adapted manifest as `native-epp-compat.yaml`:
+
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: qwen3-native-epp-compat
+  namespace: default
+spec:
+  workloadSelector:
+    labels:
+      gateway.networking.k8s.io/gateway-name: inference-gateway
+  configPatches:
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost:
+            route:
+              name: default.qwen3.0
+      patch:
+        operation: MERGE
+        value:
+          typed_per_filter_config:
+            envoy.filters.http.ext_proc:
+              '@type': type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+              overrides:
+                processingMode:
+                  requestHeaderMode: SEND
+                  responseHeaderMode: SEND
+                  requestBodyMode: FULL_DUPLEX_STREAMED
+                  responseBodyMode: FULL_DUPLEX_STREAMED
+                  requestTrailerMode: SEND
+                  responseTrailerMode: SEND
+                grpcService:
+                  envoyGrpc:
+                    clusterName: outbound|9002||qwen3-epp.default.svc.cluster.local
+                    authority: qwen3-epp.default.svc.cluster.local
+                failureModeAllow: false
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          portNumber: 80
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.ext_proc
+      patch:
+        operation: MERGE
+        value:
+          name: envoy.filters.http.ext_proc
+          typed_config:
+            '@type': type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+            send_body_without_waiting_for_header_response: true
+```
+
+Review existing EnvoyFilters for conflicts before applying this one. If both
+settings are already active, do not add a duplicate workaround. Runway does not
+create or manage this workaround automatically.
+
+```bash
+kubectl --context "$CONTEXT" -n "$GATEWAY_NAMESPACE" get envoyfilters
+kubectl --context "$CONTEXT" apply --dry-run=server -f native-epp-compat.yaml
+kubectl --context "$CONTEXT" apply -f native-epp-compat.yaml
+```
+
+**Verify the effective configuration and traffic.** A successful apply, Ready
+pods or an accepted HTTPRoute alone do not prove this path works.
+
+- Repeat the route inspection above. Confirm the DNS authority is present,
+  `clusterName` is unchanged, both body modes are `FULL_DUPLEX_STREAMED`, and
+  `failureModeAllow` is still `false`. If the gateway reports
+  `EnvoyGrpcValidationError.ClusterName`, reconstruct the complete map entry;
+  Envoy retained the previous route after rejecting the incomplete update.
+- Inspect the listener below. Only the EPP filter should gain
+  `sendBodyWithoutWaitingForHeaderResponse: true`; BBR's configuration must
+  remain unchanged. A Rust EPP `ProtocolConfiguration mismatch` reporting this
+  flag as false means the listener change is not active.
+- Confirm the EPP cluster's TLS settings, HTTP/2 and `h2` ALPN are unchanged,
+  and the InferencePool still uses `FailClose`.
+- [Call the model through the gateway](#calling-models-via-curl) with both
+  `stream: false` and `stream: true`. Require a real completion and the SSE
+  `[DONE]` marker, not just HTTP 200. In a test deployment, restart the EPP
+  and repeat to check reconnection behavior.
+
+```bash
+istioctl --context "$CONTEXT" proxy-config listeners "$GATEWAY_POD" \
+  -n "$GATEWAY_NAMESPACE" --port 80 -o json |
+  jq '[.[] | .filterChains[]?.filters[]?
+    | select(.name == "envoy.filters.network.http_connection_manager")
+    | .typedConfig.httpFilters[]
+    | select(.name == "envoy.filters.http.ext_proc" or .name == "envoy.filters.http.ext_proc.bbr")
+    | {name, sendBodyWithoutWaitingForHeaderResponse: .typedConfig.sendBodyWithoutWaitingForHeaderResponse}]'
+```
+
+Use your actual listener port in that command. This workaround leaves the
+existing certificate trust configuration unchanged. Dynamo 1.5's native EPP
+uses an ephemeral self-signed certificate; a valid DNS authority does not add
+CA or Service-DNS identity verification.
+
+**Maintain or remove it explicitly.** Update the route patch if the route or EPP
+Service identity changes. Deleting the ModelDeployment does not delete this
+manually installed EnvoyFilter. Before removing it, check whether other Rust EPP
+routes depend on its shared listener setting; preserve that setting if needed.
+For the example, removal is:
+
+```bash
+kubectl --context "$CONTEXT" -n "$GATEWAY_NAMESPACE" \
+  delete envoyfilter qwen3-native-epp-compat
+```
 
 ### llm-d Provider Gateway Support
 
@@ -539,6 +727,13 @@ curl http://${GATEWAY_IP}/v1/chat/completions \
    - **NoGateway** — No Gateway resource found. Create one or set `--gateway-name`/`--gateway-namespace`.
    - **Multiple Gateways** — Multiple Gateways exist but none is labeled `airunway.ai/inference-gateway=true`.
    - **InferencePoolFailed** / **HTTPRouteFailed** — RBAC issue or CRD version mismatch.
+
+### Native Dynamo EPP returns HTTP 500 despite Ready pods
+
+For Rust EPP on Istio, check for `Illegal SNI hostname` or
+`ProtocolConfiguration mismatch` in EPP logs. See the
+[version-scoped Istio workaround](#istio-workaround-for-dynamo-native-epp) for
+the required authority and body-streaming settings.
 
 ### Requests return 404 or connection refused
 
