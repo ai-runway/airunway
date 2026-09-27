@@ -221,6 +221,18 @@ conversion webhooks enabled, verify both served API versions after the upgrade,
 and confirm storage migration completed. A Helm rollback does not by itself
 reverse a migration to beta storage.
 
+The manual native-EPP path also needs a separate gateway interoperability check.
+With Istio 1.30.0, live requests failed even while the DGD and its pods were
+ready: the ext_proc connection sent an `outbound|9002||...` cluster identifier as
+TLS SNI, which the Rust EPP rejected. Changing only the cluster's SNI setting did
+not resolve the gRPC authority behavior. Treat this combination as blocked until
+a gateway transport fix is validated; do not disable TLS or change `FailClose`
+to conceal the failure. DGDR gateway routing through the generated Frontend
+Service does not use this hop and was not affected.
+
+Dynamo 1.5's native EPP generates an ephemeral self-signed certificate. Its
+default encrypted connection is not a CA-verified Service-DNS identity setup.
+
 Compatibility checks include released CRD schemas for 1.1.1 and 1.5.0. Real
 profiling and end-to-end serving additionally require a GPU cluster and the
 corresponding operator/runtime installation. Schema tests alone do not establish
