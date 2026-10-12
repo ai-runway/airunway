@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { GpuFitIndicator } from './GpuFitIndicator';
 import { ThroughputEstimate } from './ThroughputEstimate';
 import type { HfModelSearchResult } from '@airunway/shared';
@@ -65,7 +66,21 @@ export function HfModelCard({ model, gpuCapacityGb, gpuCount, gpuCapacityLabel, 
       <div className="pb-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex-1 min-w-0">
-            <h3 className="text-lg font-semibold text-white leading-tight truncate group-hover:text-cyan-400 transition-colors duration-200">{model.name}</h3>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <h3
+                    tabIndex={0}
+                    className="text-lg font-semibold text-white leading-tight truncate rounded-sm cursor-help group-hover:text-cyan-400 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+                  >
+                    {model.name}
+                  </h3>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" align="start" className="max-w-xs break-all">
+                  <p className="font-mono">{model.id}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             <p className="text-xs text-slate-500 truncate mt-0.5">
               {model.author}
             </p>
