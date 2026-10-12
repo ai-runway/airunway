@@ -94,6 +94,60 @@ func TestHasManagedPVCs(t *testing.T) {
 	}
 }
 
+func TestReferencedPVCNames(t *testing.T) {
+	const sharedCacheClaim = "shared-cache"
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "model"},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "explicit", ClaimName: sharedCacheClaim},
+				{Name: "duplicate", ClaimName: sharedCacheClaim},
+				{Name: "generated"},
+				{Name: "managed", Size: pvcSize("5Gi")},
+			}},
+		}},
+	}
+
+	got := ReferencedPVCNames(md)
+	if len(got) != 2 || got[0] != sharedCacheClaim || got[1] != "model-generated" {
+		t.Fatalf("unexpected referenced PVC names: %#v", got)
+	}
+}
+
+func TestHasTerminatingPVCsChecksAllClaimsWithoutPreparingThem(t *testing.T) {
+	now := metav1.Now()
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "default"},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "missing", ClaimName: "missing-pvc"},
+				{Name: "terminating", ClaimName: "terminating-pvc"},
+				{Name: "managed", Size: pvcSize("5Gi")},
+			}},
+		}},
+	}
+	terminatingPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:              "terminating-pvc",
+		Namespace:         md.Namespace,
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"kubernetes.io/pvc-protection"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(terminatingPVC).Build()
+
+	terminating, err := HasTerminatingPVCs(context.Background(), c, md)
+	if err != nil {
+		t.Fatalf("checking terminating PVCs: %v", err)
+	}
+	if !terminating {
+		t.Fatal("expected the terminating referenced PVC to be detected")
+	}
+
+	managed := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "model-managed", Namespace: md.Namespace}, managed); err == nil {
+		t.Fatal("termination detection must not create a missing managed PVC")
+	}
+}
+
 func TestEnsurePVCsCreation(t *testing.T) {
 	scheme := newScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -733,18 +787,21 @@ func TestEnsurePVCsStaleNoOwnerRef(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingPVC).WithStatusSubresource(existingPVC).Build()
 
 	allReady, err := EnsurePVCs(context.Background(), c, md)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected a labeled PVC without a prior ModelDeployment owner reference to be rejected")
 	}
 	if allReady {
-		t.Error("expected allReady=false when stale PVC (no owner ref) is deleted")
+		t.Error("a colliding PVC must not be reported ready")
+	}
+	if !strings.Contains(err.Error(), "refusing to delete") {
+		t.Fatalf("expected safe collision error, got %v", err)
 	}
 
-	// Verify stale PVC was deleted
+	// Verify the labels alone did not authorize deletion.
 	pvc := &corev1.PersistentVolumeClaim{}
-	err = c.Get(context.Background(), types.NamespacedName{Name: "my-model-model-cache", Namespace: "default"}, pvc)
-	if err == nil {
-		t.Error("expected stale PVC with no OwnerReferences to be deleted")
+	getErr := c.Get(context.Background(), types.NamespacedName{Name: "my-model-model-cache", Namespace: "default"}, pvc)
+	if getErr != nil {
+		t.Fatalf("expected colliding PVC to be preserved: %v", getErr)
 	}
 }
 
@@ -801,12 +858,12 @@ func TestEnsurePVCsRefusesToDeleteUnmanagedPVC(t *testing.T) {
 
 	_, err := EnsurePVCs(context.Background(), c, md)
 	if err == nil {
-		t.Fatal("expected error when PVC exists without airunway managed-by label")
+		t.Fatal("expected error when PVC is not owned by this or a prior ModelDeployment")
 	}
 
 	// Verify the error message is actionable
-	if !strings.Contains(err.Error(), "was not created by airunway") {
-		t.Errorf("expected error to mention 'was not created by airunway', got: %s", err.Error())
+	if !strings.Contains(err.Error(), "not owned by this ModelDeployment") {
+		t.Errorf("expected error to explain the owner-reference mismatch, got: %s", err.Error())
 	}
 
 	// Verify the unmanaged PVC was NOT deleted
@@ -910,6 +967,161 @@ func TestEnsurePVCsPreExistingPending(t *testing.T) {
 	}
 	if allReady {
 		t.Error("expected allReady=false for Pending pre-existing PVC")
+	}
+}
+
+func TestEnsurePVCsPreExistingTerminating(t *testing.T) {
+	scheme := newScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-model",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{
+			Model: airunwayv1alpha1.ModelSpec{
+				ID: "test-model",
+				Storage: &airunwayv1alpha1.StorageSpec{
+					Volumes: []airunwayv1alpha1.StorageVolume{
+						{
+							Name:      "model-cache",
+							ClaimName: "existing-pvc",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	now := metav1.Now()
+	existingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "existing-pvc",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingPVC).WithStatusSubresource(existingPVC).Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected terminating state for terminating pre-existing PVC, got %s", state)
+	}
+}
+
+func TestEnsurePVCsManagedTerminating(t *testing.T) {
+	md := newDownloadMD("managed-model", "managed-storage")
+	now := metav1.Now()
+	managedPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              md.Spec.Model.Storage.Volumes[0].ResolvedClaimName(md.Name),
+			Namespace:         md.Namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+			OwnerReferences:   []metav1.OwnerReference{{UID: md.UID}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithObjects(managedPVC).
+		WithStatusSubresource(managedPVC).
+		Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected terminating state for managed PVC, got %s", state)
+	}
+}
+
+func TestEnsurePVCsStatePreservesTerminationAcrossLaterError(t *testing.T) {
+	scheme := newScheme()
+	_ = corev1.AddToScheme(scheme)
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-model", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "terminating", ClaimName: "terminating-pvc"},
+				{Name: "lost", ClaimName: "lost-pvc"},
+			}},
+		}},
+	}
+	now := metav1.Now()
+	terminatingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "terminating-pvc",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	lostPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "lost-pvc", Namespace: "default"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimLost},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(terminatingPVC, lostPVC).
+		WithStatusSubresource(terminatingPVC, lostPVC).
+		Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err == nil {
+		t.Fatal("expected Lost claim error")
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected terminating state to take precedence, got %s", state)
+	}
+}
+
+func TestEnsurePVCsStateFindsTerminationAfterEarlierError(t *testing.T) {
+	scheme := newScheme()
+	_ = corev1.AddToScheme(scheme)
+	md := &airunwayv1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "ordered-model", Namespace: "storage-order", UID: types.UID("ordered-uid")},
+		Spec: airunwayv1alpha1.ModelDeploymentSpec{Model: airunwayv1alpha1.ModelSpec{
+			Storage: &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{
+				{Name: "missing", ClaimName: "missing-pvc"},
+				{Name: "terminating", ClaimName: "terminating-pvc"},
+			}},
+		}},
+	}
+	now := metav1.Now()
+	terminatingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "terminating-pvc",
+			Namespace:         md.Namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"kubernetes.io/pvc-protection"},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(terminatingPVC).
+		WithStatusSubresource(terminatingPVC).
+		Build()
+
+	state, err := EnsurePVCsState(context.Background(), c, md)
+	if err == nil {
+		t.Fatal("expected missing claim error")
+	}
+	if state != PVCStateTerminating {
+		t.Fatalf("expected later terminating claim to take precedence, got %s", state)
 	}
 }
 

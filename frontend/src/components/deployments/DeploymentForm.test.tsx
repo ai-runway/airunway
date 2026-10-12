@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
+import type { StorageVolume } from '@airunway/shared'
 import { server } from '@/test/mocks/server'
 import type { DetailedClusterCapacity, Model, RuntimeStatus } from '@/lib/api'
 import { DeploymentForm, setFp8PrecisionEngineArgs } from './DeploymentForm'
@@ -68,7 +69,41 @@ vi.mock('./CostEstimate', () => ({
 }))
 
 vi.mock('./StorageVolumesSection', () => ({
-  StorageVolumesSection: () => null,
+  StorageVolumesSection: ({
+    volumes,
+    onChange,
+  }: {
+    volumes: StorageVolume[]
+    onChange: (volumes: StorageVolume[]) => void
+  }) => (
+    <div
+      data-testid="storage-volumes-section"
+      data-volume-count={volumes.length}
+      data-volume-names={volumes.map((volume) => volume.name).join(',')}
+    >
+      <button
+        type="button"
+        onClick={() => onChange([...volumes, {
+          name: 'model-cache',
+          purpose: 'modelCache',
+          size: '100Gi',
+          accessMode: 'ReadWriteMany',
+        }])}
+      >
+        Add test volume
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange([...volumes, {
+          name: 'existing-model-cache',
+          purpose: 'modelCache',
+          claimName: 'existing-model-cache',
+        }])}
+      >
+        Add existing claim volume
+      </button>
+    </div>
+  ),
 }))
 
 function createModel(overrides: Partial<Model> = {}): Model {
@@ -320,6 +355,153 @@ describe('DeploymentForm', () => {
 
     expect(kuberayCard).toHaveAttribute('aria-checked', 'true')
     expect(kaitoCard).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('shows persistent storage only for runtimes with portable pod storage support', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'kaito', name: 'KAITO', installed: true, healthy: true }),
+            createRuntime({ id: 'kuberay', name: 'KubeRay', installed: true, healthy: true }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByTestId('storage-volumes-section')).toBeInTheDocument()
+    expect(screen.getByText(/Dynamo configures it automatically, while other runtimes require a matching engine setting/i)).toBeInTheDocument()
+
+    const kaitoCard = screen.getByText('KAITO').closest('[role="radio"]') as HTMLElement
+    fireEvent.click(kaitoCard)
+
+    expect(screen.queryByTestId('storage-volumes-section')).not.toBeInTheDocument()
+  })
+
+  it('preserves storage when switching between supported runtimes', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({ id: 'kuberay', name: 'KubeRay', installed: true, healthy: true }),
+            createRuntime({ id: 'llmd', name: 'llm-d', installed: true, healthy: true }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add test volume' }))
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+
+    fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
+
+    expect(screen.getByText('llm-d').closest('[role="radio"]')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+  })
+
+  it('clears existing claim storage when a supported runtime switch changes namespace', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({
+              id: 'kuberay',
+              name: 'KubeRay',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'kuberay-system',
+            }),
+            createRuntime({
+              id: 'llmd',
+              name: 'llm-d',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'default',
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+
+    fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
+
+    expect(screen.getByText('llm-d').closest('[role="radio"]')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '0')
+  })
+
+  it('preserves existing claim storage when a supported runtime switch keeps the namespace', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({
+              id: 'kuberay',
+              name: 'KubeRay',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'shared-models',
+            }),
+            createRuntime({
+              id: 'llmd',
+              name: 'llm-d',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'shared-models',
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    fireEvent.click(screen.getByText('llm-d').closest('[role="radio"]') as HTMLElement)
+
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+  })
+
+  it('clears existing claim storage when the namespace is edited directly', () => {
+    render(
+      <MemoryRouter>
+        <DeploymentForm
+          model={createModel({ supportedEngines: ['vllm'] })}
+          detailedCapacity={createCapacity()}
+          runtimes={[
+            createRuntime({
+              id: 'kuberay',
+              name: 'KubeRay',
+              installed: true,
+              healthy: true,
+              defaultNamespace: 'kuberay-system',
+            }),
+          ]}
+        />
+      </MemoryRouter>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add test volume' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add existing claim volume' }))
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '2')
+    fireEvent.click(screen.getByText(/Advanced Settings/i))
+    fireEvent.change(screen.getByLabelText('Namespace'), {
+      target: { value: 'other-namespace' },
+    })
+    fireEvent.change(screen.getByLabelText('Namespace'), {
+      target: { value: 'third-namespace' },
+    })
+
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-count', '1')
+    expect(screen.getByTestId('storage-volumes-section')).toHaveAttribute('data-volume-names', 'model-cache')
   })
 
   it('disables disaggregated mode when a custom runtime only advertises aggregated serving', () => {

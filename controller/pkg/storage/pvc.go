@@ -48,6 +48,88 @@ func HasStorageVolumes(md *airunwayv1alpha1.ModelDeployment) bool {
 	return md.Spec.Model.Storage != nil && len(md.Spec.Model.Storage.Volumes) > 0
 }
 
+// ReferencedPVCNames returns the unique claims that must already exist because
+// their storage volume does not request controller-managed capacity.
+func ReferencedPVCNames(md *airunwayv1alpha1.ModelDeployment) []string {
+	if md.Spec.Model.Storage == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(md.Spec.Model.Storage.Volumes))
+	references := make([]string, 0, len(md.Spec.Model.Storage.Volumes))
+	for i := range md.Spec.Model.Storage.Volumes {
+		volume := &md.Spec.Model.Storage.Volumes[i]
+		if volume.Size != nil {
+			continue
+		}
+		claimName := volume.ResolvedClaimName(md.Name)
+		if claimName == "" {
+			continue
+		}
+		if _, exists := seen[claimName]; exists {
+			continue
+		}
+		seen[claimName] = struct{}{}
+		references = append(references, claimName)
+	}
+	return references
+}
+
+// HasTerminatingPVCs checks desired and live-consumer claims without creating, deleting,
+// or otherwise preparing them. It lets reconcilers prioritize consumer
+// teardown even when normal validation cannot proceed.
+func HasTerminatingPVCs(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+) (bool, error) {
+	claims, firstErr := consumedPVCNames(ctx, c, md)
+	if md.Spec.Model.Storage != nil {
+		for i := range md.Spec.Model.Storage.Volumes {
+			claims = append(claims, md.Spec.Model.Storage.Volumes[i].ResolvedClaimName(md.Name))
+		}
+	}
+	seen := make(map[string]struct{}, len(claims))
+	terminating := false
+	for _, claimName := range claims {
+		if claimName == "" {
+			continue
+		}
+		if _, exists := seen[claimName]; exists {
+			continue
+		}
+		seen[claimName] = struct{}{}
+
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, pvc)
+		if errors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to get PVC %s while checking for termination: %w", claimName, err)
+			}
+			continue
+		}
+		if !pvc.DeletionTimestamp.IsZero() {
+			terminating = true
+		}
+	}
+
+	return terminating, firstErr
+}
+
+// PVCState describes whether the claims required by a ModelDeployment are
+// ready for consumers, still being prepared, or waiting for existing
+// consumers to release a terminating claim.
+type PVCState string
+
+const (
+	PVCStateReady       PVCState = "ready"
+	PVCStatePending     PVCState = "pending"
+	PVCStateTerminating PVCState = "terminating"
+)
+
 // EnsurePVCs ensures that all storage volume PVCs exist and are usable.
 //
 // For managed PVCs (Size is set): returns ready once the PVC has been created,
@@ -58,116 +140,198 @@ func HasStorageVolumes(md *airunwayv1alpha1.ModelDeployment) bool {
 // For pre-existing PVCs (Size is nil): returns ready only when the PVC is Bound,
 // since these are outside the controller's control.
 func EnsurePVCs(ctx context.Context, c client.Client, md *airunwayv1alpha1.ModelDeployment) (bool, error) {
-	logger := log.FromContext(ctx)
+	state, err := EnsurePVCsState(ctx, c, md)
+	return state == PVCStateReady, err
+}
 
+// EnsurePVCsState is the stateful form of EnsurePVCs. Callers that own pod
+// workloads use PVCStateTerminating to stop those consumers before waiting for
+// Kubernetes PVC protection to finish deletion.
+func EnsurePVCsState(ctx context.Context, c client.Client, md *airunwayv1alpha1.ModelDeployment) (PVCState, error) {
 	if md.Spec.Model.Storage == nil {
-		return true, nil
+		return PVCStateReady, nil
 	}
 
-	allReady := true
-	for _, vol := range md.Spec.Model.Storage.Volumes {
+	tracker := pvcStateTracker{state: PVCStateReady}
+	for i := range md.Spec.Model.Storage.Volumes {
+		vol := &md.Spec.Model.Storage.Volumes[i]
 		if vol.Size == nil {
-			// Pre-existing PVC: verify it exists and is usable before proceeding
-			claimName := vol.ResolvedClaimName(md.Name)
-			existing := &corev1.PersistentVolumeClaim{}
-			err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, existing)
-			if errors.IsNotFound(err) {
-				return false, fmt.Errorf(
-					"pre-existing PVC %q not found in namespace %q (referenced by volume %q); "+
-						"ensure the PVC exists before creating the ModelDeployment",
-					claimName, md.Namespace, vol.Name,
-				)
-			}
-			if err != nil {
-				return false, fmt.Errorf("failed to get pre-existing PVC %s: %w", claimName, err)
-			}
-			switch existing.Status.Phase {
-			case corev1.ClaimBound:
-				logger.Info("Pre-existing PVC is Bound", "name", claimName)
-			case corev1.ClaimPending:
-				logger.Info("Pre-existing PVC is Pending", "name", claimName)
-				allReady = false
-			case corev1.ClaimLost:
-				return false, fmt.Errorf("pre-existing PVC %q is in Lost phase", claimName)
-			default:
-				allReady = false
-			}
+			ensureExistingPVCState(ctx, c, md, vol, &tracker)
 			continue
 		}
 
-		claimName := vol.ResolvedClaimName(md.Name)
-
-		// Check if PVC already exists
-		existing := &corev1.PersistentVolumeClaim{}
-		err := c.Get(ctx, types.NamespacedName{
-			Name:      claimName,
-			Namespace: md.Namespace,
-		}, existing)
-
-		if errors.IsNotFound(err) {
-			// Create the PVC
-			pvc, buildErr := buildPVC(md, &vol)
-			if buildErr != nil {
-				return false, fmt.Errorf("failed to build PVC %s: %w", claimName, buildErr)
-			}
-			logger.Info("Creating PVC", "name", claimName, "namespace", md.Namespace, "size", vol.Size.String())
-			if createErr := c.Create(ctx, pvc); createErr != nil {
-				if !errors.IsAlreadyExists(createErr) {
-					return false, fmt.Errorf("failed to create PVC %s: %w", claimName, createErr)
-				}
-				logger.Info("PVC already exists (concurrent creation)", "name", claimName)
-			}
-			allReady = false
-			continue
-		}
-		if err != nil {
-			return false, fmt.Errorf("failed to get PVC %s: %w", claimName, err)
-		}
-
-		// Verify the existing PVC is owned by this ModelDeployment (same UID).
-		// If a ModelDeployment is deleted and recreated with the same name, there's a
-		// race window where the old PVC still exists. Delete it and requeue so the
-		// next reconcile creates a fresh PVC.
-		if !IsOwnedByMD(existing, md.UID) {
-			// Safety guard: only delete PVCs that were created by airunway.
-			// A PVC without the managed-by label was created by another controller
-			// or manually — deleting it would be destructive and unintended.
-			if existing.Labels[airunwayv1alpha1.LabelManagedBy] != "airunway" {
-				return false, fmt.Errorf(
-					"PVC %s exists but was not created by airunway (missing %s label); "+
-						"refusing to delete — remove the PVC manually or change the volume claimName",
-					claimName, airunwayv1alpha1.LabelManagedBy,
-				)
-			}
-			if err := deleteStalePVC(ctx, c, existing); err != nil {
-				return false, err
-			}
-			allReady = false
-			continue // requeue → next reconcile creates fresh PVC
-		}
-
-		// PVC exists and is owned by this MD — check phase.
-		// For managed PVCs, Pending is acceptable: the download Job or inference
-		// pod will act as the first consumer and trigger WaitForFirstConsumer binding.
-		switch existing.Status.Phase {
-		case corev1.ClaimBound:
-			logger.Info("PVC is Bound", "name", claimName)
-		case corev1.ClaimPending:
-			logger.Info("PVC is Pending (will bind when a consumer pod is scheduled)", "name", claimName)
-			// Don't set allReady=false — proceed to create the download Job
-			// which will reference this PVC and trigger binding.
-		case corev1.ClaimLost:
-			return false, fmt.Errorf("PVC %s is in Lost phase", claimName)
-		default:
-			allReady = false
-		}
+		ensureManagedPVCState(ctx, c, md, vol, &tracker)
 	}
 
-	return allReady, nil
+	return tracker.state, tracker.firstErr
+}
+
+type pvcStateTracker struct {
+	state    PVCState
+	firstErr error
+}
+
+func (t *pvcStateTracker) markPending() {
+	if t.state != PVCStateTerminating {
+		t.state = PVCStatePending
+	}
+}
+
+func (t *pvcStateTracker) markTerminating() {
+	t.state = PVCStateTerminating
+}
+
+func (t *pvcStateTracker) recordError(err error) {
+	if t.firstErr == nil {
+		t.firstErr = err
+	}
+	t.markPending()
+}
+
+func ensureExistingPVCState(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	tracker *pvcStateTracker,
+) {
+	claimName := vol.ResolvedClaimName(md.Name)
+	existing := &corev1.PersistentVolumeClaim{}
+	err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		tracker.recordError(fmt.Errorf(
+			"pre-existing PVC %q not found in namespace %q (referenced by volume %q); "+
+				"ensure the PVC exists before creating the ModelDeployment",
+			claimName, md.Namespace, vol.Name,
+		))
+		return
+	}
+	if err != nil {
+		tracker.recordError(fmt.Errorf("failed to get pre-existing PVC %s: %w", claimName, err))
+		return
+	}
+
+	logger := log.FromContext(ctx)
+	if !existing.DeletionTimestamp.IsZero() {
+		logger.Info("Pre-existing PVC is terminating", "name", claimName)
+		tracker.markTerminating()
+		return
+	}
+
+	switch existing.Status.Phase {
+	case corev1.ClaimBound:
+		logger.Info("Pre-existing PVC is Bound", "name", claimName)
+	case corev1.ClaimPending:
+		logger.Info("Pre-existing PVC is Pending", "name", claimName)
+		tracker.markPending()
+	case corev1.ClaimLost:
+		tracker.recordError(fmt.Errorf("pre-existing PVC %q is in Lost phase", claimName))
+	default:
+		tracker.markPending()
+	}
+}
+
+func ensureManagedPVCState(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+	tracker *pvcStateTracker,
+) {
+	existing, created, err := getOrCreateManagedPVC(ctx, c, md, vol)
+	if err != nil {
+		tracker.recordError(err)
+		return
+	}
+	if created {
+		tracker.markPending()
+		return
+	}
+
+	ensureCurrentManagedPVCState(ctx, c, md, existing, tracker)
+}
+
+func getOrCreateManagedPVC(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+) (*corev1.PersistentVolumeClaim, bool, error) {
+	claimName := vol.ResolvedClaimName(md.Name)
+	existing := &corev1.PersistentVolumeClaim{}
+	err := c.Get(ctx, types.NamespacedName{Name: claimName, Namespace: md.Namespace}, existing)
+	if err == nil {
+		return existing, false, nil
+	}
+	if !errors.IsNotFound(err) {
+		return nil, false, fmt.Errorf("failed to get PVC %s: %w", claimName, err)
+	}
+
+	pvc, err := buildPVC(md, vol)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to build PVC %s: %w", claimName, err)
+	}
+
+	logger := log.FromContext(ctx)
+	logger.Info("Creating PVC", "name", claimName, "namespace", md.Namespace, "size", vol.Size.String())
+	if err := c.Create(ctx, pvc); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return nil, false, fmt.Errorf("failed to create PVC %s: %w", claimName, err)
+		}
+		logger.Info("PVC already exists (concurrent creation)", "name", claimName)
+	}
+	return nil, true, nil
+}
+
+func ensureCurrentManagedPVCState(
+	ctx context.Context,
+	c client.Client,
+	md *airunwayv1alpha1.ModelDeployment,
+	existing *corev1.PersistentVolumeClaim,
+	tracker *pvcStateTracker,
+) {
+	claimName := existing.Name
+	if !IsOwnedByMD(existing, md.UID) {
+		if !isOwnedByPriorMD(existing, md) {
+			tracker.recordError(fmt.Errorf(
+				"PVC %s already exists but is not owned by this ModelDeployment or a prior ModelDeployment with the same name; "+
+					"refusing to delete it — remove the PVC manually or change the volume claimName",
+				claimName,
+			))
+			return
+		}
+		if err := deleteStalePVC(ctx, c, existing); err != nil {
+			tracker.recordError(err)
+			return
+		}
+		tracker.markTerminating()
+		return
+	}
+
+	logger := log.FromContext(ctx)
+	if !existing.DeletionTimestamp.IsZero() {
+		logger.Info("PVC is terminating", "name", claimName)
+		tracker.markTerminating()
+		return
+	}
+
+	switch existing.Status.Phase {
+	case corev1.ClaimBound:
+		logger.Info("PVC is Bound", "name", claimName)
+	case corev1.ClaimPending:
+		logger.Info("PVC is Pending (will bind when a consumer pod is scheduled)", "name", claimName)
+	case corev1.ClaimLost:
+		tracker.recordError(fmt.Errorf("PVC %s is in Lost phase", claimName))
+	default:
+		tracker.markPending()
+	}
 }
 
 // buildPVC creates a PVC spec from a StorageVolume with Size set.
-func buildPVC(md *airunwayv1alpha1.ModelDeployment, vol *airunwayv1alpha1.StorageVolume) (*corev1.PersistentVolumeClaim, error) {
+func buildPVC(
+	md *airunwayv1alpha1.ModelDeployment,
+	vol *airunwayv1alpha1.StorageVolume,
+) (*corev1.PersistentVolumeClaim, error) {
 	if vol.Size == nil {
 		return nil, fmt.Errorf("volume size must be set for controller-created PVCs")
 	}
@@ -262,6 +426,22 @@ func DeleteManagedPVCs(ctx context.Context, c client.Client, md *airunwayv1alpha
 func IsOwnedByMD(obj client.Object, mdUID types.UID) bool {
 	for _, ref := range obj.GetOwnerReferences() {
 		if ref.UID == mdUID {
+			return true
+		}
+	}
+	return false
+}
+
+// isOwnedByPriorMD reports whether an object is provably owned by an older
+// ModelDeployment with the same namespace/name. It is used only to authorize
+// replacement of generated-name resources after a ModelDeployment is recreated.
+func isOwnedByPriorMD(obj client.Object, md *airunwayv1alpha1.ModelDeployment) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == airunwayv1alpha1.GroupVersion.String() &&
+			ref.Kind == "ModelDeployment" &&
+			ref.Name == md.Name &&
+			ref.UID != "" &&
+			ref.UID != md.UID {
 			return true
 		}
 	}

@@ -61,7 +61,14 @@ func boolPtr(b bool) *bool { return &b }
 // newTestReconciler creates a ModelDeploymentReconciler with a fake client and
 // an optional gateway detector.
 func newTestReconciler(scheme *runtime.Scheme, detector *gateway.Detector, objs ...client.Object) *ModelDeploymentReconciler {
-	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{})
+	cb := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{}).
+		WithIndex(
+			&airunwayv1alpha1.ModelDeployment{},
+			modelDeploymentPVCReferenceField,
+			modelDeploymentPVCReferenceIndexValues,
+		)
 	if len(objs) > 0 {
 		cb = cb.WithObjects(objs...)
 	}

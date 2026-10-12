@@ -1281,7 +1281,7 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("253-character"))
 		})
 
-		It("Should admit managed volume when derived PVC claim name is within limit", func() {
+		It("Should admit managed custom volume when derived PVC claim name is within limit", func() {
 			// 200-char MD name + 1 dash + 5-char volume name = 206 <= 253
 			obj.Name = strings.Repeat("a", 200)
 			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
@@ -1293,8 +1293,8 @@ var _ = Describe("ModelDeployment Webhook", func() {
 					{
 						Name:      volName,
 						ClaimName: claimName,
-						MountPath: "/model-cache",
-						Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+						MountPath: "/cache",
+						Purpose:   airunwayv1alpha1.VolumePurposeCustom,
 						Size:      &size,
 					},
 				},
@@ -1304,9 +1304,9 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			Expect(warnings).To(BeEmpty())
 		})
 
-		It("Should reject when download job name exceeds 253 chars", func() {
-			// 250-char MD name + "-model-download" (15 chars) = 265 > 253
-			obj.Name = strings.Repeat("a", 250)
+		It("Should reject when download job name exceeds the 63-character Job controller label limit", func() {
+			// 49-char MD name + "-model-download" (15 chars) = 64 > 63
+			obj.Name = strings.Repeat("a", 49)
 			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
 			size := resource.MustParse("100Gi")
 			volName := "mc"
@@ -1325,7 +1325,63 @@ var _ = Describe("ModelDeployment Webhook", func() {
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("download Job name"))
-			Expect(err.Error()).To(ContainSubstring("253-character"))
+			Expect(err.Error()).To(ContainSubstring("63-character"))
+		})
+
+		It("Should admit when the download job name is exactly 63 characters", func() {
+			// 48-char MD name + "-model-download" (15 chars) = 63
+			obj.Name = strings.Repeat("a", 48)
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			size := resource.MustParse("100Gi")
+			volName := "mc"
+			claimName := obj.Name + "-" + volName
+			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+				Volumes: []airunwayv1alpha1.StorageVolume{
+					{
+						Name:      volName,
+						ClaimName: claimName,
+						MountPath: "/model-cache",
+						Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+						Size:      &size,
+					},
+				},
+			}
+
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("Should reject an overlong download Job name for a writable existing model cache", func() {
+			obj.Name = strings.Repeat("a", 49)
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Model.Source = airunwayv1alpha1.ModelSourceHuggingFace
+			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+				Name:      "model-cache",
+				ClaimName: "existing-cache",
+				Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+			}}}
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("download Job name"))
+		})
+
+		It("Should allow an overlong would-be Job name for a read-only existing model cache", func() {
+			obj.Name = strings.Repeat("a", 49)
+			obj.Spec.Model.ID = "meta-llama/Llama-2-7b-chat-hf"
+			obj.Spec.Model.Source = airunwayv1alpha1.ModelSourceHuggingFace
+			obj.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+				Name:      "model-cache",
+				ClaimName: "existing-cache",
+				Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+				ReadOnly:  true,
+			}}}
+
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0]).To(ContainSubstring("model download will be skipped"))
 		})
 
 		It("Should not validate download job name when no managed modelCache volume exists", func() {

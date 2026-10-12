@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -13,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 func newScheme() *runtime.Scheme {
@@ -362,5 +365,61 @@ func TestSyncStatusStaleAvailableConditionIsNotReady(t *testing.T) {
 	ready := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "DeploymentInProgress" {
 		t.Errorf("Ready = %+v, want False with reason DeploymentInProgress", ready)
+	}
+}
+
+func TestReconcileTerminatingPVCDeletesOwnedDeploymentsAcrossServingModes(t *testing.T) {
+	md := newMDForController("terminating-llmd", "llmd-storage-recovery")
+	md.UID = types.UID("test-uid")
+	md.Generation = 2
+	controllerutil.AddFinalizer(md, FinalizerName)
+	md.Spec.Serving = &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated}
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
+		Decode:  &airunwayv1alpha1.ComponentScalingSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 1}},
+	}
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name: "cache", ClaimName: "shared-cache", MountPath: "/cache",
+	}}}
+	md.Status.Conditions = []metav1.Condition{{
+		Type:               airunwayv1alpha1.ConditionTypeStorageReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "PVCsTerminating",
+		ObservedGeneration: md.Generation,
+	}}
+
+	objects := []unstructured.Unstructured{}
+	for _, name := range []string{md.Name, md.Name + "-decode", md.Name + "-prefill"} {
+		deploy := unstructured.Unstructured{}
+		deploy.SetGroupVersionKind(deploymentGVK)
+		deploy.SetName(name)
+		deploy.SetNamespace(md.Namespace)
+		deploy.SetOwnerReferences([]metav1.OwnerReference{{UID: md.UID}})
+		objects = append(objects, deploy)
+	}
+	scheme := newScheme()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, &objects[0], &objects[1], &objects[2]).
+		WithStatusSubresource(md).
+		Build()
+	r := NewLLMDProviderReconciler(c, scheme)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: md.Name, Namespace: md.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("expected storage recovery requeue after 5s, got %v", result.RequeueAfter)
+	}
+	for _, deploy := range objects {
+		remaining := &unstructured.Unstructured{}
+		remaining.SetGroupVersionKind(deploymentGVK)
+		err := c.Get(context.Background(), types.NamespacedName{Name: deploy.GetName(), Namespace: deploy.GetNamespace()}, remaining)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected owned Deployment %s deletion, got %v", deploy.GetName(), err)
+		}
 	}
 }

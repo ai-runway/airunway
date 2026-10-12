@@ -23,9 +23,11 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,6 +36,7 @@ import (
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
 	"github.com/ai-runway/airunway/controller/internal/validation"
+	storageutil "github.com/ai-runway/airunway/controller/pkg/storage"
 )
 
 const (
@@ -214,6 +217,8 @@ func (v *ModelDeploymentCustomValidator) ValidateCreate(ctx context.Context, obj
 	warnings = append(warnings, specWarnings...)
 	allErrs = append(allErrs, specErrs...)
 
+	allErrs = append(allErrs, validateKAITOStorage(nil, obj)...)
+
 	// Check for warnings
 	warnings = append(warnings, v.checkWarnings(obj)...)
 
@@ -234,6 +239,8 @@ func (v *ModelDeploymentCustomValidator) ValidateUpdate(ctx context.Context, old
 	specWarnings, specErrs := v.validateSpec(ctx, newObj)
 	warnings = append(warnings, specWarnings...)
 	allErrs = append(allErrs, specErrs...)
+
+	allErrs = append(allErrs, validateKAITOStorage(oldObj, newObj)...)
 
 	// Validate immutable fields (identity fields that trigger delete+recreate)
 	allErrs = append(allErrs, v.validateImmutableFields(oldObj, newObj)...)
@@ -614,7 +621,11 @@ func (v *ModelDeploymentCustomValidator) validateImmutableFields(oldObj, newObj 
 		}
 	}
 
-	if len(oldManagedVolumes) > 0 {
+	// KAITO cannot create storage consumers. Permit removing its legacy invalid
+	// storage configuration so a previously accepted edit can be repaired.
+	removingUnsupportedStorage := kaitoSelected(oldObj) &&
+		(newSpec.Model.Storage == nil || len(newSpec.Model.Storage.Volumes) == 0)
+	if len(oldManagedVolumes) > 0 && !removingUnsupportedStorage {
 		storagePath := specPath.Child("model", "storage", "volumes")
 
 		// Build a set of new volume names for quick lookup
@@ -759,7 +770,6 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 	claimNamesSeen := map[string]bool{}
 	modelCacheCount := 0
 	compilationCacheCount := 0
-	hasManagedModelCache := false
 
 	for i, vol := range storage.Volumes {
 		volPath := storagePath.Index(i)
@@ -914,9 +924,6 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 		switch vol.Purpose {
 		case airunwayv1alpha1.VolumePurposeModelCache:
 			modelCacheCount++
-			if vol.Size != nil && !vol.ReadOnly {
-				hasManagedModelCache = true
-			}
 		case airunwayv1alpha1.VolumePurposeCompilationCache:
 			compilationCacheCount++
 		}
@@ -940,17 +947,17 @@ func (v *ModelDeploymentCustomValidator) validateStorage(obj *airunwayv1alpha1.M
 		))
 	}
 
-	// Validate that the auto-generated download job name fits within
-	// the 253-character Kubernetes name limit.
+	// Validate that the auto-generated download Job name fits the DNS-label
+	// limit used by the Job controller's generated pod labels.
 	// The download job name is <md-name>-model-download (15-char suffix).
 	downloadJobName := obj.Name + "-model-download"
-	if hasManagedModelCache && len(downloadJobName) > 253 {
+	if storageutil.NeedsDownloadJob(obj) && len(downloadJobName) > k8svalidation.DNS1123LabelMaxLength {
 		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("metadata", "name"),
 			obj.Name,
 			fmt.Sprintf(
-				"auto-generated download Job name %q exceeds the 253-character Kubernetes name limit (got %d characters); use a shorter ModelDeployment name",
-				downloadJobName, len(downloadJobName)),
+				"auto-generated download Job name %q exceeds the %d-character Job controller label limit (got %d characters); use a shorter ModelDeployment name",
+				downloadJobName, k8svalidation.DNS1123LabelMaxLength, len(downloadJobName)),
 		))
 	}
 
@@ -1111,4 +1118,30 @@ func validateResourceQuantity(value string, max string, fldPath *field.Path) fie
 		allErrs = append(allErrs, field.Invalid(fldPath, value, fmt.Sprintf("exceeds maximum allowed (%s)", max)))
 	}
 	return allErrs
+}
+
+const kaitoStorageProviderName = "kaito"
+
+// validateKAITOStorage rejects newly unsupported storage without preventing
+// legacy status updates or removal of an already persisted invalid setting.
+func validateKAITOStorage(oldObj, obj *airunwayv1alpha1.ModelDeployment) field.ErrorList {
+	if obj.Spec.Model.Storage == nil || len(obj.Spec.Model.Storage.Volumes) == 0 {
+		return nil
+	}
+	selected := obj.Spec.Provider != nil && obj.Spec.Provider.Name == kaitoStorageProviderName
+	if oldObj != nil && oldObj.Status.Provider != nil && oldObj.Status.Provider.Name == kaitoStorageProviderName {
+		selected = true
+	}
+	if !selected {
+		return nil
+	}
+	if oldObj != nil && kaitoSelected(oldObj) && apiequality.Semantic.DeepEqual(oldObj.Spec.Model.Storage, obj.Spec.Model.Storage) {
+		return nil
+	}
+	return field.ErrorList{field.Forbidden(field.NewPath("spec", "model", "storage"), "KAITO does not support storage volumes; remove storage or choose a provider that supports it")}
+}
+
+func kaitoSelected(obj *airunwayv1alpha1.ModelDeployment) bool {
+	return (obj.Spec.Provider != nil && obj.Spec.Provider.Name == kaitoStorageProviderName) ||
+		(obj.Status.Provider != nil && obj.Status.Provider.Name == kaitoStorageProviderName)
 }

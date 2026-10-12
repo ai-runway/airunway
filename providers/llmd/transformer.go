@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	storageutil "github.com/ai-runway/airunway/controller/pkg/storage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -211,6 +212,9 @@ func (t *Transformer) buildDeployment(md *airunwayv1alpha1.ModelDeployment, name
 	podSpec := map[string]interface{}{
 		"containers": []interface{}{container},
 	}
+	if volumes := storageutil.PodVolumes(md); len(volumes) > 0 {
+		podSpec["volumes"] = volumes
+	}
 
 	if len(md.Spec.NodeSelector) > 0 {
 		nodeSelector := make(map[string]interface{})
@@ -322,6 +326,9 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 		"startupProbe":   buildStartupProbe(),
 		"livenessProbe":  buildLivenessProbe(),
 		"readinessProbe": buildReadinessProbe(),
+	}
+	if mounts := storageutil.ContainerVolumeMounts(md); len(mounts) > 0 {
+		container["volumeMounts"] = mounts
 	}
 
 	// Resource limits/requests
@@ -538,7 +545,7 @@ func (t *Transformer) buildEnvVars(md *airunwayv1alpha1.ModelDeployment) []inter
 		})
 	}
 
-	return envVars
+	return storageutil.AppendModelCacheEnv(md, envVars)
 }
 
 // buildTolerations converts tolerations from ModelDeployment to unstructured format.

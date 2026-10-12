@@ -27,6 +27,16 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - get
@@ -112,6 +122,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - apps
+  resources:
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - authorization.k8s.io
   resources:
   - subjectaccessreviews
@@ -174,6 +193,16 @@ rules:
   - update
   - watch
 - apiGroups:
+  - grove.io
+  resources:
+  - podcliques
+  - podcliquescalinggroups
+  - podcliquesets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - inference.networking.k8s.io
   resources:
   - inferencepools
@@ -208,6 +237,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - leaderworkerset.x-k8s.io
+  resources:
+  - leaderworkersets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - networking.istio.io
   resources:
   - destinationrules
@@ -218,6 +255,24 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocomponentdeployments
+  - dynamographdeployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ray.io
+  resources:
+  - rayclusters
+  - rayservices
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io

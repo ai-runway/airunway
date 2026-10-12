@@ -20,6 +20,8 @@ import { useApiClient } from '../lib/api-client';
 import type { DeploymentConfig, Engine, Model, RuntimeStatus, ModelTask, StorageVolume } from '@airunway/shared';
 import { toModelDeploymentManifest } from '@airunway/shared';
 import { getBadgeColors } from '../lib/theme';
+import { generateDeploymentName } from '../lib/deployment-name';
+import { storageVolumesAfterNamespaceChange } from '../lib/storage';
 import { StorageVolumesEditor } from '../components/StorageVolumesEditor';
 import { ManifestPreview } from '../components/ManifestPreview';
 
@@ -57,20 +59,12 @@ const RUNTIME_ENGINES: Record<RuntimeId, Engine[]> = {
   llmd: ['vllm'],
 };
 
+const STORAGE_SUPPORTED_RUNTIMES = new Set<RuntimeId>(['dynamo', 'kuberay', 'llmd']);
+
 // Check runtime compatibility with model
 function isRuntimeCompatible(runtimeId: RuntimeId, modelEngines: Engine[]): boolean {
   const runtimeEngines = RUNTIME_ENGINES[runtimeId];
   return modelEngines.some((e) => runtimeEngines.includes(e));
-}
-
-// Generate deployment name from model ID
-function generateDeploymentName(modelId: string): string {
-  return modelId
-    .replace(/[/:.]/g, '-')
-    .toLowerCase()
-    .replace(/--+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 53);
 }
 
 export function CreateDeployment() {
@@ -221,8 +215,12 @@ export function CreateDeployment() {
 
   // Handle runtime change
   const handleRuntimeChange = useCallback((runtime: RuntimeId) => {
+    const nextNamespace = RUNTIME_INFO[runtime].defaultNamespace;
     setSelectedRuntime(runtime);
-    setNamespace(RUNTIME_INFO[runtime].defaultNamespace);
+    setNamespace(nextNamespace);
+    setStorageVolumes((volumes) => STORAGE_SUPPORTED_RUNTIMES.has(runtime)
+      ? storageVolumesAfterNamespaceChange(volumes, namespace, nextNamespace)
+      : []);
     if (runtime !== 'dynamo' && runtime !== 'llmd') {
       setMode('aggregated');
     }
@@ -235,7 +233,14 @@ export function CreateDeployment() {
         setEngine(availableEngines[0]);
       }
     }
-  }, [model, engine]);
+  }, [model, engine, namespace]);
+
+  const handleNamespaceChange = useCallback((nextNamespace: string) => {
+    setStorageVolumes((volumes) =>
+      storageVolumesAfterNamespaceChange(volumes, namespace, nextNamespace)
+    );
+    setNamespace(nextNamespace);
+  }, [namespace]);
 
   // Check if selected runtime supports disaggregated serving
   const supportsDisaggregated = selectedRuntime === 'dynamo' || selectedRuntime === 'llmd';
@@ -666,7 +671,7 @@ export function CreateDeployment() {
               <input
                 type="text"
                 value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
+                onChange={(e) => handleNamespaceChange(e.target.value)}
                 style={{
                   width: '100%',
                   padding: '10px 12px',
@@ -874,16 +879,18 @@ export function CreateDeployment() {
       </div>
 
       {/* Storage Volumes */}
-      <div style={{ marginBottom: '24px' }}>
-        <h3 style={{ marginBottom: '12px' }}>💾 Storage Volumes</h3>
-        <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
-          Attach persistent storage for model caching or custom data
+      {STORAGE_SUPPORTED_RUNTIMES.has(selectedRuntime) && (
+        <div style={{ marginBottom: '24px' }}>
+          <h3 style={{ marginBottom: '12px' }}>💾 Storage Volumes</h3>
+          <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
+            Attach persistent storage for model caching or custom data
+          </div>
+          <StorageVolumesEditor
+            volumes={storageVolumes}
+            onChange={setStorageVolumes}
+          />
         </div>
-        <StorageVolumesEditor
-          volumes={storageVolumes}
-          onChange={setStorageVolumes}
-        />
-      </div>
+      )}
 
       {/* Advanced Options */}
       <div style={{ marginBottom: '24px' }}>
