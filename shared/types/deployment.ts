@@ -164,6 +164,7 @@ export interface GatewaySpec {
   enabled?: boolean;
   modelName?: string;
   httpRouteRef?: string;
+  poolRef?: string;
 }
 
 export interface ModelDeploymentSpec {

@@ -180,6 +180,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Save a deep copy as the patch base so we only send changed status fields.
 	// This avoids clobbering status fields set by out-of-tree provider controllers.
 	base := md.DeepCopy()
+	userProvidedPool := md.Spec.Gateway != nil && md.Spec.Gateway.PoolRef != ""
 
 	logger.Info("Reconciling ModelDeployment", "name", md.Name, "namespace", md.Namespace)
 
@@ -189,6 +190,9 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.cleanupGatewayResources(ctx, &md); err != nil {
 			logger.Error(err, "Failed to clean up gateway resources on deletion")
 			r.recordReconcileError(&md, "gateway")
+			if userProvidedPool {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{}, nil
 	}
@@ -352,6 +356,9 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			if err := r.cleanupGatewayResources(ctx, &md); err != nil {
 				logger.Error(err, "Failed to clean up gateway resources")
 				r.recordReconcileError(&md, "gateway")
+				if userProvidedPool {
+					return ctrl.Result{}, err
+				}
 			}
 		} else {
 			if err := r.reconcileGateway(ctx, &md); err != nil {
@@ -361,8 +368,14 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				if isNoMatchError(err) && r.GatewayDetector != nil {
 					logger.Info("Gateway CRDs may have been removed, refreshing detection cache")
 					r.GatewayDetector.Refresh()
-				} else if apierrors.IsNotFound(err) {
-					// Return an error to trigger exponential backoff retries.
+				}
+				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) || userProvidedPool {
+					// Gateway mutations can fail after partial cleanup or a pod
+					// conflict. Persist their condition before retrying even when
+					// no remaining resource watch will enqueue us.
+					if patchErr := r.Status().Patch(ctx, &md, client.MergeFrom(base)); patchErr != nil {
+						return ctrl.Result{}, patchErr
+					}
 					return ctrl.Result{}, err
 				}
 				// Non-fatal: don't block overall reconciliation
@@ -988,6 +1001,46 @@ func (r *ModelDeploymentReconciler) mapProviderConfigToModelDeployments(ctx cont
 	return requests
 }
 
+func (r *ModelDeploymentReconciler) mapInferencePoolToModelDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	pool, ok := obj.(*inferencev1.InferencePool)
+	if !ok {
+		return nil
+	}
+
+	seen := make(map[k8stypes.NamespacedName]struct{})
+	requests := make([]reconcile.Request, 0)
+	addRequest := func(key k8stypes.NamespacedName) {
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+	}
+
+	// Preserve the previous Owns(InferencePool) behavior for controller-owned
+	// pools while also watching explicitly referenced, user-owned pools.
+	for _, owner := range pool.OwnerReferences {
+		if owner.APIVersion == airunwayv1alpha1.GroupVersion.String() && owner.Kind == "ModelDeployment" && owner.Controller != nil && *owner.Controller {
+			addRequest(k8stypes.NamespacedName{Name: owner.Name, Namespace: pool.Namespace})
+		}
+	}
+
+	var mdList airunwayv1alpha1.ModelDeploymentList
+	if err := r.List(ctx, &mdList, client.InNamespace(pool.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ModelDeployments for InferencePool change", "pool", pool.Name, "namespace", pool.Namespace)
+		return requests
+	}
+	for i := range mdList.Items {
+		md := &mdList.Items[i]
+		if md.Spec.Gateway == nil || md.Spec.Gateway.PoolRef != pool.Name {
+			continue
+		}
+		addRequest(k8stypes.NamespacedName{Name: md.Name, Namespace: md.Namespace})
+	}
+
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.phaseCache = make(map[k8stypes.NamespacedName]phaseEntry)
@@ -1001,13 +1054,17 @@ func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Named("modeldeployment")
 
-	// Watch InferencePool so the controller reconciles when one is created/deleted.
+	// Watch InferencePool so the controller reconciles when an owned or referenced
+	// pool is created, deleted, or changes status.
 	// HTTPRoutes are not watched — they may be user-managed (BYO) and we don't
 	// want deletion of an HTTPRoute to trigger a reconcile that recreates it.
 	// Only add this watch if the gateway CRDs are actually installed.
 	if r.GatewayDetector != nil && r.GatewayDetector.IsAvailable(context.Background()) {
 		builder = builder.
-			Owns(&inferencev1.InferencePool{})
+			Watches(
+				&inferencev1.InferencePool{},
+				handler.EnqueueRequestsFromMapFunc(r.mapInferencePoolToModelDeployments),
+			)
 	}
 
 	return builder.Complete(r)

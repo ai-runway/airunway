@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -301,6 +302,19 @@ func (v *ModelDeploymentCustomValidator) validateSpec(ctx context.Context, obj *
 
 	// Validate provider overrides don't contain dangerous fields
 	allErrs = append(allErrs, v.validateOverrides(spec, specPath)...)
+
+	// poolRef is a namespaced object name, not a free-form identifier. Validate
+	// it at admission time so an invalid backend reference fails synchronously
+	// instead of producing an HTTPRoute that can never resolve.
+	if spec.Gateway != nil && spec.Gateway.PoolRef != "" {
+		for _, msg := range k8svalidation.IsDNS1123Subdomain(spec.Gateway.PoolRef) {
+			allErrs = append(allErrs, field.Invalid(
+				specPath.Child("gateway", "poolRef"),
+				spec.Gateway.PoolRef,
+				msg,
+			))
+		}
+	}
 
 	// Resolve serving mode for validation checks below
 	servingMode := airunwayv1alpha1.ServingModeAggregated
