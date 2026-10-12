@@ -472,22 +472,31 @@ Install a provider via Helm.
 
 ### POST /installation/providers/:id/uninstall
 
-Uninstall a provider (preserves CRDs by default).
+Regular uninstall removes only resources owned by the provider's Helm release.
+The provider namespace is retained, as are upstream CRDs and custom resources
+whose CRDs remain installed.
+
+For KAITO workspace chart `0.10.0`, regular uninstall retains the
+`kaito-workspace` namespace and all five chart CRDs. The three top-level CRDs
+are outside the Helm release; `inferencesets.kaito.sh` and
+`workspaces.kaito.sh` carry `helm.sh/resource-policy: keep`. Existing KAITO
+custom resources remain. The remaining Helm release resources, including the
+operator workloads, ClusterRole, ClusterRoleBinding, StorageClass, and
+ValidatingWebhookConfiguration, are removed.
+
+An existing KAITO release without the retained-CRD metadata is rejected without
+uninstalling. Upgrade it once with the current installation profile before
+retrying this endpoint.
 
 **Response:**
 
 ```json
 {
   "success": true,
-  "message": "Provider uninstalled (CRDs preserved - use 'Uninstall CRDs' for complete removal)",
-  "installationStatus": {
-    "installed": false,
-    "crdFound": true,
-    "operatorRunning": false
-  },
+  "message": "Provider uninstalled successfully (namespace, CRDs, and custom resources preserved)",
   "results": [
     {
-      "step": "Uninstall Helm chart: kaito-workspace",
+      "step": "uninstall-kaito-workspace",
       "success": true,
       "output": "release \"kaito-workspace\" uninstalled"
     }
@@ -497,19 +506,25 @@ Uninstall a provider (preserves CRDs by default).
 
 ### POST /installation/providers/:id/uninstall-crds
 
-Delete CRDs for a provider (complete removal).
+Delete only the provider's declared upstream CRDs. This endpoint first requires
+every provider Helm release to be absent. It verifies each declared CRD's
+ownership and confirms that no custom resources exist. All CRDs are preflighted
+before deletion; a failed safety check prevents deletion and returns `409`.
+
+For KAITO, the endpoint deletes only `inferencesets.kaito.sh` and
+`workspaces.kaito.sh`. It retains the three top-level chart CRDs
+(`inferencepools.inference.networking.k8s.io`,
+`inferenceobjectives.inference.networking.x-k8s.io`, and
+`nodeclaims.karpenter.sh`) and the namespace. A Kubernetes failure after
+preflight can still produce a partial removal; the response reports the
+per-CRD results.
 
 **Response:**
 
 ```json
 {
   "success": true,
-  "message": "Provider CRDs uninstalled",
-  "installationStatus": {
-    "installed": false,
-    "crdFound": false,
-    "operatorRunning": false
-  },
+  "message": "Provider CRDs removed successfully; custom resources were verified empty",
   "results": [
     {
       "step": "Delete CRD: workspaces.kaito.sh",
@@ -522,9 +537,10 @@ Delete CRDs for a provider (complete removal).
 
 **Notes:**
 
-- This is a destructive operation - existing workloads using the CRDs will be affected
-- Use regular uninstall first to remove Helm releases while preserving CRDs
-- Use this endpoint only when you want complete removal
+- Existing custom resources block deletion so workloads are not silently
+  removed; delete them separately only when that is intentional.
+- A CRD owned by another tool blocks deletion.
+- Use regular uninstall first to remove Helm releases.
 
 ### GET /installation/gpu-operator/status
 

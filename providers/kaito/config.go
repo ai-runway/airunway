@@ -18,12 +18,14 @@ package kaito
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,6 +44,9 @@ const (
 	// HeartbeatInterval is the interval for updating the provider heartbeat
 	HeartbeatInterval = 1 * time.Minute
 )
+
+//go:embed installation-values.json
+var kaitoInstallationValues []byte
 
 // shimVersion is this shim's reported version tag, injected at build time via:
 //
@@ -130,11 +135,14 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 		},
 		HelmCharts: []airunwayv1alpha1.HelmChart{
 			{
-				Name:            "kaito-workspace",
-				Chart:           "kaito/workspace",
-				Version:         "0.10.0",
-				Namespace:       "kaito-workspace",
-				CreateNamespace: true,
+				Name:                  "kaito-workspace",
+				Chart:                 "kaito/workspace",
+				Version:               "0.10.0",
+				Namespace:             "kaito-workspace",
+				CreateNamespace:       true,
+				SkipCRDs:              true,
+				PreInstallMissingCRDs: true,
+				Values:                &runtime.RawExtension{Raw: append([]byte(nil), kaitoInstallationValues...)},
 			},
 		},
 		Steps: []airunwayv1alpha1.InstallationStep{
@@ -149,9 +157,15 @@ func GetInstallationInfo() *airunwayv1alpha1.InstallationInfo {
 				Description: "Update local Helm repository cache.",
 			},
 			{
-				Title:       "Install KAITO Workspace Operator",
-				Command:     "helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 -n kaito-workspace --create-namespace --set featureGates.disableNodeAutoProvisioning=true --set nvidiaDevicePlugin.enabled=false --set localCSIDriver.useLocalCSIDriver=false --set gpu-feature-discovery.gfd.enabled=false --set gpu-feature-discovery.nfd.master.deploy=false --set gpu-feature-discovery.nfd.worker.deploy=false --wait",
-				Description: "Install the KAITO workspace operator v0.10.0 with Node Auto-Provisioning disabled (BYO nodes mode), and sub-chart dependencies disabled.",
+				Title: "Install KAITO workspace operator",
+				Description: "Install the KAITO workspace operator v0.10.0 in BYO nodes mode. " +
+					"NVIDIA device plugin, local CSI, and both GPU Feature Discovery dependencies are disabled, " +
+					"so these dependencies add no workloads. Use the generated Helm command below. This creates " +
+					"the kaito-workspace namespace and cluster-scoped CRDs inferencepools.inference.networking.k8s.io, " +
+					"inferenceobjectives.inference.networking.x-k8s.io, nodeclaims.karpenter.sh, inferencesets.kaito.sh, " +
+					"and workspaces.kaito.sh; ClusterRole/kaito-workspace-clusterrole; " +
+					"ClusterRoleBinding/kaito-workspace-rolebinding; StorageClass/kaito-local-nvme-disk; and " +
+					"ValidatingWebhookConfiguration/validation.workspace.kaito.sh.",
 			},
 		},
 	}
@@ -289,6 +303,7 @@ func buildAnnotations() (map[string]string, error) {
 	health := map[string]interface{}{
 		"crds": []map[string]string{
 			{"name": "workspaces.kaito.sh", "displayName": "KAITO workspace CRD"},
+			{"name": "inferencesets.kaito.sh", "displayName": "KAITO inference set CRD"},
 		},
 		"operatorPods": []map[string]interface{}{
 			{

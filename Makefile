@@ -368,9 +368,9 @@ verify-versions:
 	@# 4. providers/kaito/config.go chart version literal must match KAITO_VERSION
 	@grep -qE 'Version:[[:space:]]+"$(KAITO_VERSION_RE)"' providers/kaito/config.go || \
 	  { echo "❌ providers/kaito/config.go chart Version != $(KAITO_VERSION) (from versions.env)"; exit 1; }
-	@# 5. providers/kaito/config.go install Command --version arg must match KAITO_VERSION
-	@grep -qE -- '--version $(KAITO_VERSION_RE) ' providers/kaito/config.go || \
-	  { echo "❌ providers/kaito/config.go install Command --version != $(KAITO_VERSION) (from versions.env)"; exit 1; }
+	@# 5. providers/kaito/Makefile must use KAITO_VERSION from versions.env.
+	@grep -qE -- '--version \$$\(KAITO_VERSION\)' providers/kaito/Makefile || \
+	  { echo "❌ providers/kaito/Makefile install chart version must use KAITO_VERSION (from versions.env)"; exit 1; }
 	@# 6. providers/vllm/transformer.go fallback literal must match VLLM_VERSION
 	@grep -qE '^var VLLMVersion = "$(VLLM_VERSION_RE)"$$' providers/vllm/transformer.go || \
 	  { echo "❌ providers/vllm/transformer.go VLLMVersion fallback != $(VLLM_VERSION) (from versions.env)"; exit 1; }

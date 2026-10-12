@@ -1,6 +1,8 @@
 import app from './hono-app';
 import logger from './lib/logger';
 import { authService } from './services/auth';
+import { readFileSync } from 'fs';
+import { addKeepResourcePolicyToCrdManifest } from './services/helm';
 
 const PORT = process.env.PORT || 3001;
 
@@ -153,7 +155,17 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  logger.error({ error }, 'Fatal error');
-  process.exit(1);
-});
+if (process.env.AIRUNWAY_HELM_POST_RENDERER === 'keep-crd-resources') {
+  const renderedManifest = addKeepResourcePolicyToCrdManifest(readFileSync(0, 'utf8'));
+  process.stdout.write(renderedManifest, (error) => {
+    if (error) {
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+} else {
+  main().catch((error) => {
+    logger.error({ error }, 'Fatal error');
+    process.exit(1);
+  });
+}

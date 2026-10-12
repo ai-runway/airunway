@@ -114,24 +114,23 @@ generate-deploy-manifests:
 KAITO_NAMESPACE ?= kaito-workspace
 KAITO_RELEASE   ?= kaito-workspace
 KAITO_REPO_URL  ?= https://kaito-project.github.io/kaito/charts/kaito
+KAITO_VALUES    ?= $(CURDIR)/installation-values.json
 
 setup-kaito: verify-versions
 	@echo "Installing KAITO workspace operator v$(KAITO_VERSION)..."
-	@helm repo add kaito $(KAITO_REPO_URL) --force-update
+	@helm repo add kaito "$(KAITO_REPO_URL)" --force-update
 	@helm repo update kaito
-	@helm upgrade --install $(KAITO_RELEASE) kaito/workspace \
+	@helm upgrade --install "$(KAITO_RELEASE)" kaito/workspace \
 		--version $(KAITO_VERSION) \
-		--namespace $(KAITO_NAMESPACE) \
+		--namespace "$(KAITO_NAMESPACE)" \
 		--create-namespace \
-		--set featureGates.disableNodeAutoProvisioning=true \
-		--set nvidiaDevicePlugin.enabled=false \
-		--set gpu-feature-discovery.nfd.enabled=false \
-		--set gpu-feature-discovery.gfd.enabled=false \
+		--values "$(KAITO_VALUES)" \
+		--post-renderer "$(CURDIR)/keep-crd-resources.js" \
 		--wait --timeout=5m
 	@echo "✅ KAITO workspace operator v$(KAITO_VERSION) installed in namespace $(KAITO_NAMESPACE)"
 
 ## Uninstall KAITO workspace operator from the cluster
 cleanup-kaito:
-	@helm uninstall $(KAITO_RELEASE) --namespace $(KAITO_NAMESPACE) --ignore-not-found
-	@kubectl delete namespace $(KAITO_NAMESPACE) --ignore-not-found
-	@echo "✅ KAITO workspace operator uninstalled from namespace $(KAITO_NAMESPACE)"
+	@set -eu; releases=$$(helm list --namespace "$(KAITO_NAMESPACE)" --short); if ! printf '%s\n' "$$releases" | grep -Fxq '$(KAITO_RELEASE)'; then exit 0; fi; manifest=$$(helm get manifest "$(KAITO_RELEASE)" --namespace "$(KAITO_NAMESPACE)"); printf '%s\n' "$$manifest" | node "$(CURDIR)/keep-crd-resources.js" --check-kept inferencesets.kaito.sh workspaces.kaito.sh
+	@helm uninstall "$(KAITO_RELEASE)" --namespace "$(KAITO_NAMESPACE)" --wait --ignore-not-found
+	@echo "✅ KAITO workspace operator uninstalled; namespace and CRDs were preserved"

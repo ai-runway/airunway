@@ -1,0 +1,19 @@
+{
+  "featureGates": {
+    "disableNodeAutoProvisioning": true
+  },
+  "nvidiaDevicePlugin": {
+    "enabled": false
+  },
+  "localCSIDriver": {
+    "useLocalCSIDriver": false
+  },
+  "gpu-feature-discovery": {
+    "nfd": {
+      "enabled": false
+    },
+    "gfd": {
+      "enabled": false
+    }
+  }
+}

@@ -334,6 +334,8 @@ export function SettingsPage() {
     ?? currentRuntime?.installationState
     ?? runtimeInstallationState(installationStatus ?? currentRuntime)
   const isInstallationUnknown = selectedRuntimeRequiresCRD && selectedInstallationState === 'unknown'
+  const installationSteps = installationStatus?.installationSteps ?? []
+  const helmCommands = installationStatus?.helmCommands ?? []
   const isInstalled = selectedInstallationState === 'unknown'
     ? !selectedRuntimeRequiresCRD && currentRuntime?.healthy === true
     : selectedInstallationState === 'installed'
@@ -984,7 +986,7 @@ export function SettingsPage() {
           )}
 
           {/* Installation Steps */}
-          {!isInstallationUnknown && installationStatus?.installationSteps && installationStatus.installationSteps.length > 0 && (
+          {!isInstallationUnknown && installationStatus && (installationSteps.length > 0 || helmCommands.length > 0) && (
             <div className="bg-white/[0.03] border border-white/5 rounded-2xl p-6 backdrop-blur-sm">
               <div className="mb-4">
                 <h3 className="font-heading text-lg font-semibold">Manual Installation Steps</h3>
@@ -993,7 +995,7 @@ export function SettingsPage() {
                 </p>
               </div>
               <div className="space-y-4">
-                {installationStatus.installationSteps.map((step, index) => (
+                {installationSteps.map((step, index) => (
                   <div key={index} className="space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
@@ -1012,6 +1014,29 @@ export function SettingsPage() {
                     )}
                   </div>
                 ))}
+              {!isInstalled && helmCommands.length > 0 && (
+                <div className="mt-6 border-t border-white/10 pt-4">
+                  <h4 className="mb-3 font-medium">Generated Helm Commands</h4>
+                  <div className="space-y-3">
+                    {helmCommands.map((command, index) => (
+                      <div key={index} className="flex items-start gap-2">
+                        <pre className="min-w-0 flex-1 whitespace-pre-wrap break-words rounded bg-muted px-3 py-2 text-xs font-mono">
+                          {command}
+                        </pre>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title="Copy Helm command"
+                          aria-label={'Copy Helm command ' + (index + 1)}
+                          onClick={() => copyToClipboard(command)}
+                        >
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               </div>
             </div>
           )}
@@ -1491,7 +1516,7 @@ export function SettingsPage() {
             <DialogTitle>Uninstall Runtime</DialogTitle>
             <DialogDescription>
               Are you sure you want to uninstall {runtimes.find(r => r.id === effectiveRuntime)?.name || 'this runtime'}?
-              This will remove the operator and all associated resources.
+              This removes the Helm-managed operator resources only. The namespace, CRDs, and custom resources are preserved.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -3,6 +3,7 @@ package kaito
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -103,6 +104,67 @@ func TestGetInstallationInfo(t *testing.T) {
 	}
 	if len(info.Steps) != 3 {
 		t.Fatalf("expected 3 installation steps, got %d", len(info.Steps))
+	}
+	chart := info.HelmCharts[0]
+	if !chart.SkipCRDs || !chart.PreInstallMissingCRDs {
+		t.Fatal("expected KAITO installation to preinstall only missing top-level CRDs and skip Helm CRD ownership")
+	}
+	if chart.Values == nil {
+		t.Fatal("expected KAITO installation values")
+	}
+	profileFile, err := os.ReadFile("installation-values.json")
+	if err != nil {
+		t.Fatalf("read shared KAITO installation profile: %v", err)
+	}
+	if string(chart.Values.Raw) != string(profileFile) {
+		t.Fatal("provider metadata must embed the shared KAITO installation profile")
+	}
+	var values map[string]any
+	if err := json.Unmarshal(chart.Values.Raw, &values); err != nil {
+		t.Fatalf("expected valid installation values JSON: %v", err)
+	}
+	expectedValues := map[string]any{
+		"featureGates":       map[string]bool{"disableNodeAutoProvisioning": true},
+		"nvidiaDevicePlugin": map[string]bool{"enabled": false},
+		"localCSIDriver":     map[string]bool{"useLocalCSIDriver": false},
+		"gpu-feature-discovery": map[string]any{
+			"nfd": map[string]bool{"enabled": false},
+			"gfd": map[string]bool{"enabled": false},
+		},
+	}
+	expectedJSON, _ := json.Marshal(expectedValues)
+	valuesJSON, _ := json.Marshal(values)
+	if string(valuesJSON) != string(expectedJSON) {
+		t.Fatalf("expected KAITO BYO profile %s, got %s", expectedJSON, valuesJSON)
+	}
+	if info.Steps[2].Command != "" {
+		t.Fatal("the provider must not expose an unprotected manual Helm command")
+	}
+	for _, expected := range []string{
+		"kaito-workspace namespace",
+		"inferencepools.inference.networking.k8s.io",
+		"inferenceobjectives.inference.networking.x-k8s.io",
+		"nodeclaims.karpenter.sh",
+		"inferencesets.kaito.sh",
+		"workspaces.kaito.sh",
+		"ClusterRole/kaito-workspace-clusterrole",
+		"ClusterRoleBinding/kaito-workspace-rolebinding",
+		"StorageClass/kaito-local-nvme-disk",
+		"ValidatingWebhookConfiguration/validation.workspace.kaito.sh",
+	} {
+		if !strings.Contains(info.Steps[2].Description, expected) {
+			t.Errorf("installation preview must include %q", expected)
+		}
+	}
+	makefile, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatalf("read provider Makefile: %v", err)
+	}
+	if !strings.Contains(string(makefile), "--values \"$(KAITO_VALUES)\"") ||
+		!strings.Contains(string(makefile), "installation-values.json") ||
+		!strings.Contains(string(makefile), "--post-renderer \"$(CURDIR)/keep-crd-resources.js\"") ||
+		!strings.Contains(string(makefile), "--check-kept inferencesets.kaito.sh workspaces.kaito.sh") {
+		t.Fatal("Makefile must use the shared profile and retain KAITO CRDs through uninstall")
 	}
 }
 
@@ -330,7 +392,7 @@ func TestBuildAnnotationsIncludesDiscoveryMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(annotations[airunwayv1alpha1.AnnotationHealth]), &health); err != nil {
 		t.Fatalf("failed to decode health annotation: %v", err)
 	}
-	if len(health.CRDs) != 1 || health.CRDs[0].Name != "workspaces.kaito.sh" {
+	if len(health.CRDs) != 2 || health.CRDs[0].Name != "workspaces.kaito.sh" || health.CRDs[1].Name != "inferencesets.kaito.sh" {
 		t.Fatalf("expected KAITO CRD health probe, got %+v", health.CRDs)
 	}
 	if len(health.OperatorPods) < 2 {

@@ -129,6 +129,22 @@ const vllmSetupSteps = [
 
 const getMockInstallationStatus = (providerId: string) => {
   switch (providerId) {
+    case 'kaito':
+      return {
+        installed: false,
+        providerName: 'KAITO',
+        message: 'KAITO is not installed yet.',
+        crdFound: false,
+        operatorRunning: false,
+        requiresCRD: true,
+        installable: true,
+        installationSteps: [{
+          title: 'Install KAITO workspace operator',
+          description: 'Creates the kaito-workspace namespace and cluster-scoped KAITO resources.',
+        }],
+        helmCommands: ['helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 --namespace kaito-workspace --values installation-values.json'],
+      }
+
     case 'available-runtime':
       return {
         installed: false,
@@ -1000,6 +1016,21 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Create HuggingFace Token Secret')).toBeInTheDocument()
     expect(screen.queryByText('Install vLLM CRD')).not.toBeInTheDocument()
     expect(screen.queryByText('Start vLLM operator')).not.toBeInTheDocument()
+  })
+
+  it('previews the KAITO footprint and generated Helm command before installation', () => {
+    mockRuntimes = [{ id: 'kaito', name: 'KAITO', installed: false, healthy: false }]
+    render(
+      <MemoryRouter initialEntries={['/settings?tab=runtimes']}>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    const panel = screen.getByText('Manual Installation Steps').closest('.rounded-2xl')
+    expect(panel).not.toBeNull()
+    expect(within(panel as HTMLElement).getByText('Generated Helm Commands')).toBeInTheDocument()
+    expect(within(panel as HTMLElement).getByText(/creates the kaito-workspace namespace and cluster-scoped KAITO resources/i)).toBeInTheDocument()
+    expect(within(panel as HTMLElement).getByText('helm upgrade --install kaito-workspace kaito/workspace --version 0.10.0 --namespace kaito-workspace --values installation-values.json')).toBeInTheDocument()
+    expect(within(panel as HTMLElement).getByRole('button', { name: 'Copy Helm command 1' })).toBeInTheDocument()
   })
 
   it('defaults to a registered provider instead of Dynamo when no runtime is installed and Dynamo is absent', async () => {

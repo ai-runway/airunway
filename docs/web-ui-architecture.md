@@ -181,7 +181,10 @@ Handles all Kubernetes API interactions:
 - Get detailed GPU capacity with per-node and per-pool breakdown
 - Check GPU Operator installation status (CRDs, pods)
 - Get pod failure reasons from Kubernetes Events
-- Delete CRDs and namespaces for complete provider uninstallation
+- Regularly uninstall Helm releases. For KAITO chart 0.10.0, this retains the
+  namespace and all five chart CRDs with their custom resources; explicit
+  removal deletes only the two declared KAITO CRDs after ownership and resource
+  checks, while the three top-level chart CRDs remain
 
 ### MetricsService
 Fetches and processes Prometheus metrics from inference deployments:

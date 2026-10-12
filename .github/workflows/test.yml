@@ -502,6 +502,10 @@ jobs:
       - name: make test
         run: make -C providers/${{ matrix.provider }} test
 
+      - name: Verify pinned KAITO install profile
+        if: matrix.provider == 'kaito'
+        run: bash providers/kaito/verify-install-profile.sh
+
   controller-unit-tests:
     runs-on: ubuntu-latest
 
