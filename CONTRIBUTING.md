@@ -381,7 +381,7 @@ Create an issue using the **Prompt Request** template if you:
 ### Best Practices for AI Prompts
 
 1. **Be specific** — Include file paths, function names, and concrete requirements
-2. **Reference project conventions** — Mention agents.md and relevant patterns
+2. **Reference project conventions** — Mention `AGENTS.md` and relevant patterns
 3. **Define acceptance criteria** — How will we know it worked?
 4. **Include context** — Link to issues, docs, or examples
 5. **Test locally when possible** — Verify the prompt produces working code

@@ -4,8 +4,8 @@
  * Read-only display of storage volumes attached to a deployment.
  */
 
-import { SimpleTable } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import type { StorageVolume, VolumePurpose } from '@airunway/shared';
+import { SimpleTable } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import { PURPOSE_LABELS } from '../lib/constants';
 
 interface StorageVolumesDisplayProps {

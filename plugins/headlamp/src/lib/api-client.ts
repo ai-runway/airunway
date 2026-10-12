@@ -5,8 +5,8 @@
  * including authentication token injection from Headlamp's context.
  */
 
-import { createApiClient, type ApiClient } from '@airunway/shared/api';
-import { getBackendUrlSync, clearBackendCache } from './backend-discovery';
+import { type ApiClient, createApiClient } from '@airunway/shared/api';
+import { clearBackendCache, getBackendUrlSync } from './backend-discovery';
 
 // Re-export types for convenience
 export type { ApiClient } from '@airunway/shared/api';

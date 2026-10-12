@@ -5,23 +5,23 @@
  * Matches the native UI flow - model is pre-selected from catalog.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useHistory, useLocation } from 'react-router-dom';
-import {
-  SectionBox,
-  Loader,
-} from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import { Router } from '@kinvolk/headlamp-plugin/lib';
-import Button from '@mui/material/Button';
-import IconButton from '@mui/material/IconButton';
-import CircularProgress from '@mui/material/CircularProgress';
-import { Icon } from '@iconify/react';
-import { useApiClient } from '../lib/api-client';
-import type { DeploymentConfig, Engine, Model, RuntimeStatus, ModelTask, StorageVolume } from '@airunway/shared';
+import type { DeploymentConfig, Engine, Model, ModelTask, RuntimeStatus, StorageVolume } from '@airunway/shared';
 import { toModelDeploymentManifest } from '@airunway/shared';
-import { getBadgeColors } from '../lib/theme';
-import { StorageVolumesEditor } from '../components/StorageVolumesEditor';
+import { Icon } from '@iconify/react';
+import { Router } from '@kinvolk/headlamp-plugin/lib';
+import {
+  Loader,
+  SectionBox,
+} from '@kinvolk/headlamp-plugin/lib/CommonComponents';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import IconButton from '@mui/material/IconButton';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useHistory, useLocation } from 'react-router-dom';
 import { ManifestPreview } from '../components/ManifestPreview';
+import { StorageVolumesEditor } from '../components/StorageVolumesEditor';
+import { useApiClient } from '../lib/api-client';
+import { getBadgeColors } from '../lib/theme';
 
 type RuntimeId = 'kaito' | 'kuberay' | 'dynamo' | 'llmd';
 
@@ -493,53 +493,67 @@ export function CreateDeployment() {
             return (
               <div
                 key={rtId}
-                onClick={() => !isDisabled && handleRuntimeChange(rtId)}
                 style={{
-                  padding: '16px',
                   border: isSelected ? '2px solid #1976d2' : '1px solid rgba(128, 128, 128, 0.3)',
                   borderRadius: '8px',
                   backgroundColor: isSelected ? 'rgba(25, 118, 210, 0.1)' : 'transparent',
-                  cursor: isDisabled ? 'not-allowed' : 'pointer',
                   opacity: isDisabled ? 0.5 : 1,
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <div style={{
-                      width: '20px',
-                      height: '20px',
-                      borderRadius: '50%',
-                      border: isSelected ? '2px solid #1976d2' : '2px solid rgba(128, 128, 128, 0.5)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}>
-                      {isSelected && <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#1976d2' }} />}
+                <button
+                  type="button"
+                  disabled={isDisabled}
+                  aria-pressed={isSelected}
+                  onClick={() => handleRuntimeChange(rtId)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    padding: '16px',
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'inherit',
+                    textAlign: 'left',
+                    cursor: isDisabled ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <div style={{
+                        width: '20px',
+                        height: '20px',
+                        borderRadius: '50%',
+                        border: isSelected ? '2px solid #1976d2' : '2px solid rgba(128, 128, 128, 0.5)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}>
+                        {isSelected && <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#1976d2' }} />}
+                      </div>
+                      <span style={{ fontWeight: 500 }}>{info.name}</span>
                     </div>
-                    <span style={{ fontWeight: 500 }}>{info.name}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    {!isCompatible && (
-                      <span style={{ padding: '2px 8px', backgroundColor: getBadgeColors('neutral').bg, borderRadius: '4px', fontSize: '12px' }}>
-                        Not Compatible
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      {!isCompatible && (
+                        <span style={{ padding: '2px 8px', backgroundColor: getBadgeColors('neutral').bg, borderRadius: '4px', fontSize: '12px' }}>
+                          Not Compatible
+                        </span>
+                      )}
+                      <span style={{
+                        padding: '2px 8px',
+                        backgroundColor: isInstalled ? getBadgeColors('success').bg : getBadgeColors('error').bg,
+                        color: isInstalled ? getBadgeColors('success').color : getBadgeColors('error').color,
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                      }}>
+                        {isInstalled ? '✓ Installed' : '⊘ Not Installed'}
                       </span>
-                    )}
-                    <span style={{
-                      padding: '2px 8px',
-                      backgroundColor: isInstalled ? getBadgeColors('success').bg : getBadgeColors('error').bg,
-                      color: isInstalled ? getBadgeColors('success').color : getBadgeColors('error').color,
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                    }}>
-                      {isInstalled ? '✓ Installed' : '⊘ Not Installed'}
-                    </span>
+                    </div>
                   </div>
-                </div>
-                <p style={{ margin: 0, marginLeft: '32px', fontSize: '13px', opacity: 0.7 }}>{info.description}</p>
+                  <p style={{ margin: 0, marginLeft: '32px', fontSize: '13px', opacity: 0.7 }}>{info.description}</p>
+                </button>
                 {/* Show install message with link when selected but not installed */}
                 {isSelected && !isInstalled && (
                   <p style={{
-                    margin: '8px 0 0 32px',
+                    margin: '0 16px 16px 48px',
                     fontSize: '13px',
                     color: '#f57c00',
                   }}>
@@ -547,7 +561,6 @@ export function CreateDeployment() {
                       href={Router.createRouteURL('AI Runway Runtimes')}
                       onClick={(e) => {
                         e.preventDefault();
-                        e.stopPropagation();
                         history.push(Router.createRouteURL('AI Runway Runtimes'));
                       }}
                       style={{
@@ -607,7 +620,16 @@ export function CreateDeployment() {
             ]).map((option) => (
               <div
                 key={option.id}
+                role="button"
+                tabIndex={0}
+                aria-pressed={mode === option.id}
                 onClick={() => setMode(option.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setMode(option.id);
+                  }
+                }}
                 style={{
                   padding: '16px',
                   border: mode === option.id ? '2px solid #1976d2' : '1px solid rgba(128, 128, 128, 0.3)',
@@ -643,8 +665,9 @@ export function CreateDeployment() {
         <div style={{ display: 'grid', gap: '16px', maxWidth: '500px' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Deployment Name</label>
+              <label htmlFor="deployment-name" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Deployment Name</label>
               <input
+                id="deployment-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -662,8 +685,9 @@ export function CreateDeployment() {
               </div>
             </div>
             <div>
-              <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Namespace</label>
+              <label htmlFor="deployment-namespace" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Namespace</label>
               <input
+                id="deployment-namespace"
                 type="text"
                 value={namespace}
                 onChange={(e) => setNamespace(e.target.value)}
@@ -688,13 +712,17 @@ export function CreateDeployment() {
           /* Disaggregated mode: separate prefill and decode scaling */
           <div style={{ display: 'grid', gap: '20px', maxWidth: '500px' }}>
             {/* Prefill Pipeline */}
-            <div style={{
+            <div
+              role="group"
+              aria-labelledby="prefill-pipeline-heading"
+              style={{
               border: '1px solid rgba(128, 128, 128, 0.3)',
               borderRadius: '8px',
               padding: '16px',
               backgroundColor: 'rgba(128, 128, 128, 0.05)',
-            }}>
-              <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
+              }}
+            >
+              <h4 id="prefill-pipeline-heading" style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
                 Prefill Pipeline
               </h4>
               <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
@@ -702,10 +730,11 @@ export function CreateDeployment() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                 <div>
-                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
+                  <label htmlFor="prefill-replicas" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
                     Replicas
                   </label>
                   <input
+                    id="prefill-replicas"
                     type="number"
                     min={1}
                     max={10}
@@ -722,10 +751,11 @@ export function CreateDeployment() {
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
+                  <label htmlFor="prefill-gpus" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
                     GPUs per Replica
                   </label>
                   <input
+                    id="prefill-gpus"
                     type="number"
                     min={0}
                     max={8}
@@ -745,13 +775,17 @@ export function CreateDeployment() {
             </div>
 
             {/* Decode Pipeline */}
-            <div style={{
+            <div
+              role="group"
+              aria-labelledby="decode-pipeline-heading"
+              style={{
               border: '1px solid rgba(128, 128, 128, 0.3)',
               borderRadius: '8px',
               padding: '16px',
               backgroundColor: 'rgba(128, 128, 128, 0.05)',
-            }}>
-              <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
+              }}
+            >
+              <h4 id="decode-pipeline-heading" style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 500 }}>
                 Decode Pipeline
               </h4>
               <div style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
@@ -759,10 +793,11 @@ export function CreateDeployment() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                 <div>
-                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
+                  <label htmlFor="decode-replicas" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
                     Replicas
                   </label>
                   <input
+                    id="decode-replicas"
                     type="number"
                     min={1}
                     max={10}
@@ -779,10 +814,11 @@ export function CreateDeployment() {
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
+                  <label htmlFor="decode-gpus" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
                     GPUs per Replica
                   </label>
                   <input
+                    id="decode-gpus"
                     type="number"
                     min={0}
                     max={8}
@@ -812,10 +848,11 @@ export function CreateDeployment() {
           <div style={{ display: 'grid', gap: '16px', maxWidth: '500px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
+                <label htmlFor="deployment-replicas" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
                   Replicas
                 </label>
                 <input
+                  id="deployment-replicas"
                   type="number"
                   min={1}
                   max={10}
@@ -832,7 +869,7 @@ export function CreateDeployment() {
                 />
               </div>
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
+                <label htmlFor="deployment-gpus" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>
                   GPUs per Replica
                   {model.estimatedGpuMemoryGb && gpuCount === Math.ceil(model.estimatedGpuMemoryGb / 80) && (
                     <span style={{
@@ -848,6 +885,7 @@ export function CreateDeployment() {
                   )}
                 </label>
                 <input
+                  id="deployment-gpus"
                   type="number"
                   min={0}
                   max={8}
@@ -909,8 +947,9 @@ export function CreateDeployment() {
           <div style={{ marginTop: '16px', paddingLeft: '16px', borderLeft: '2px solid rgba(128, 128, 128, 0.3)' }}>
             <div style={{ display: 'grid', gap: '16px', maxWidth: '500px' }}>
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Context Length (optional)</label>
+                <label htmlFor="context-length" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Context Length (optional)</label>
                 <input
+                  id="context-length"
                   type="number"
                   placeholder={model.contextLength?.toString() || 'Default'}
                   value={contextLength || ''}
@@ -956,8 +995,9 @@ export function CreateDeployment() {
 
               {/* Served Model Name */}
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Served Model Name (optional)</label>
+                <label htmlFor="served-model-name" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Served Model Name (optional)</label>
                 <input
+                  id="served-model-name"
                   type="text"
                   placeholder={model.id}
                   value={servedModelName}
@@ -977,8 +1017,8 @@ export function CreateDeployment() {
               </div>
 
               {/* Engine Arguments */}
-              <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Engine Arguments</label>
+              <div role="group" aria-labelledby="engine-arguments-label">
+                <div id="engine-arguments-label" style={{ display: 'block', marginBottom: '6px', fontWeight: 500 }}>Engine Arguments</div>
                 <div style={{ fontSize: '12px', opacity: 0.6, marginBottom: '8px' }}>
                   Key-value pairs passed to the inference engine.
                 </div>
@@ -986,6 +1026,7 @@ export function CreateDeployment() {
                   <div key={index} style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
                     <input
                       type="text"
+                      aria-label={`Engine argument ${index + 1} key`}
                       placeholder="Key"
                       value={arg.key}
                       onChange={(e) => {
@@ -1005,6 +1046,7 @@ export function CreateDeployment() {
                     />
                     <input
                       type="text"
+                      aria-label={`Engine argument ${index + 1} value`}
                       placeholder="Value"
                       value={arg.value}
                       onChange={(e) => {
@@ -1024,6 +1066,7 @@ export function CreateDeployment() {
                     />
                     <IconButton
                       size="small"
+                      aria-label={`Remove engine argument ${index + 1}`}
                       onClick={() => {
                         setEngineArgs((prev) => prev.filter((_, i) => i !== index));
                       }}

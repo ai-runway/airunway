@@ -9,7 +9,7 @@
 - kubectl configured with cluster access
 - [TruffleHog](https://github.com/trufflesecurity/trufflehog#installation) —
   required by `$autoreview`, which is expected before commit/ship (see
-  [Continuous Review](https://github.com/ai-runway/airunway/blob/main/agents.md#continuous-review))
+  [Continuous Review](https://github.com/ai-runway/airunway/blob/main/AGENTS.md#continuous-review))
 
 > [!NOTE]
 > `$autoreview` scans the changes under review for credentials before sending
@@ -410,10 +410,13 @@ Do not widen that version without validating `bun run build:backend` and `bun ru
 
 ```bash
 cd backend
-bun test                           # Run all backend tests
-bun test src/routes/autoscaler.test.ts  # Run a specific test file
-bun test --watch                   # Watch mode
-bun test --coverage                # With coverage report
+bun run test                              # Deterministic unit and route tests
+bun test src/routes/autoscaler.test.ts    # Run a specific mocked test file
+bun run test:watch                        # Watch deterministic tests
+bun run test:coverage                     # Coverage without real-cluster tests
+
+# Dedicated disposable-cluster workflow only
+bun run test:integration                  # Strict real-Kubernetes integration suite
 ```
 
 **Test organization:**
@@ -421,12 +424,13 @@ bun test --coverage                # With coverage report
 - `src/routes/*.test.ts` — Route-level tests using Hono's `app.request()` (exercises full middleware stack)
 - `src/services/*.test.ts` — Service unit tests with mocked dependencies
 - `src/lib/*.test.ts` — Utility/library unit tests
-- `src/test/helpers.ts` — Shared test utilities (`mockServiceMethod`, `withTimeout`)
+- `src/test/helpers.ts` — Shared deterministic mocks (`mockServiceMethod`, `mockFetch`, `mockFetchByUrl`)
 - `src/test/fixtures.ts` — Reusable mock data for K8s resources
+- `src/integration/*.integration.ts` — Strict tests that require a disposable Kubernetes cluster
 
-**How mocking works:** Tests import the Hono `app` directly and use `app.request()` to invoke routes in-process (no HTTP server needed). K8s-dependent services are mocked via property replacement on singleton instances. Tests that may hit K8s use `withTimeout` to gracefully skip when no cluster is available.
+**How mocking works:** Unit and route tests import the Hono `app` directly and use `app.request()` to invoke routes in-process (no HTTP server needed). Kubernetes-dependent services are replaced with deterministic mocks, and the normal test scripts exclude `src/integration`.
 
-**CI pipelines:** The `test.yml` workflow runs all tests in an environment without a Kubernetes cluster (K8s-dependent tests gracefully skip via timeout). The `e2e-backend.yml` workflow runs the same tests against a real Kind cluster with KAITO and the controller deployed, where K8s-dependent tests execute fully.
+**CI pipelines:** The `test.yml` workflow runs `bun run test:coverage` without a Kubernetes cluster. The separate `e2e-backend.yml` workflow creates a disposable Kind cluster and runs `bun run test:integration`; missing resources, timeouts, and Kubernetes API failures fail that strict lane instead of being skipped.
 
 ### Headlamp Plugin
 

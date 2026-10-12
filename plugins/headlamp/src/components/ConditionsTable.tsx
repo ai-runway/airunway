@@ -4,12 +4,12 @@
  * Displays Kubernetes-style conditions in a table with color-coded status.
  */
 
+import type { Condition } from '@airunway/shared';
 import {
   SimpleTable,
   StatusLabel,
   StatusLabelProps,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import type { Condition } from '@airunway/shared';
 
 interface ConditionsTableProps {
   conditions: Condition[];

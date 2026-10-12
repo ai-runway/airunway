@@ -4,23 +4,23 @@
  * Displays all deployments across namespaces with filtering and status.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import type { DeploymentStatus } from '@airunway/shared';
+import { Icon } from '@iconify/react';
+import { Utils } from '@kinvolk/headlamp-plugin/lib';
 import {
+  Link as HeadlampLink,
+  Loader,
   SectionBox,
   SectionFilterHeader,
   SimpleTable,
-  Link as HeadlampLink,
-  Loader,
   StatusLabel,
 } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-import { Utils } from '@kinvolk/headlamp-plugin/lib';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
-import { Icon } from '@iconify/react';
-import { useApiClient } from '../lib/api-client';
-import type { DeploymentStatus } from '@airunway/shared';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ConnectionError } from '../components/ConnectionBanner';
-import { getDeploymentPhaseColor, formatAge } from '../lib/utils';
+import { useApiClient } from '../lib/api-client';
+import { formatAge, getDeploymentPhaseColor } from '../lib/utils';
 
 export function DeploymentsList() {
   const api = useApiClient();
@@ -50,7 +50,7 @@ export function DeploymentsList() {
 
   // Filter deployments based on Headlamp's global filter state
   const filteredDeployments = useMemo(() => {
-    return deployments.filter(filterFunc);
+    return deployments.filter((deployment) => filterFunc(deployment));
   }, [deployments, filterFunc]);
 
   // Initial fetch and refresh

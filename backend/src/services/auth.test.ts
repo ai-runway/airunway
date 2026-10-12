@@ -1,5 +1,8 @@
-import { describe, test, expect, afterEach } from 'bun:test';
-import { authService } from './auth';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { authService, AuthService } from './auth';
 
 describe('AuthService', () => {
   describe('isAuthEnabled', () => {
@@ -58,6 +61,8 @@ describe('AuthService', () => {
   });
 
   describe('credential storage', () => {
+    const testCredentialsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airunway-auth-'));
+    const testAuthService = new AuthService(testCredentialsDir);
     const testCredentials = {
       token: 'test-token-123',
       username: 'testuser@example.com',
@@ -65,13 +70,16 @@ describe('AuthService', () => {
     };
 
     afterEach(() => {
-      // Clean up credentials after each test
-      authService.clearCredentials();
+      testAuthService.clearCredentials();
+    });
+
+    afterAll(() => {
+      fs.rmSync(testCredentialsDir, { recursive: true, force: true });
     });
 
     test('saveCredentials and loadCredentials work together', () => {
-      authService.saveCredentials(testCredentials);
-      const loaded = authService.loadCredentials();
+      testAuthService.saveCredentials(testCredentials);
+      const loaded = testAuthService.loadCredentials();
       
       expect(loaded).not.toBeNull();
       expect(loaded?.token).toBe(testCredentials.token);
@@ -80,16 +88,16 @@ describe('AuthService', () => {
     });
 
     test('clearCredentials removes stored credentials', () => {
-      authService.saveCredentials(testCredentials);
-      expect(authService.loadCredentials()).not.toBeNull();
+      testAuthService.saveCredentials(testCredentials);
+      expect(testAuthService.loadCredentials()).not.toBeNull();
       
-      authService.clearCredentials();
-      expect(authService.loadCredentials()).toBeNull();
+      testAuthService.clearCredentials();
+      expect(testAuthService.loadCredentials()).toBeNull();
     });
 
     test('loadCredentials returns null when no credentials stored', () => {
-      authService.clearCredentials();
-      expect(authService.loadCredentials()).toBeNull();
+      testAuthService.clearCredentials();
+      expect(testAuthService.loadCredentials()).toBeNull();
     });
   });
 

@@ -6,21 +6,20 @@
  */
 
 import {
+  registerPluginSettings,
   registerRoute,
   registerSidebarEntry,
-  registerPluginSettings,
 } from '@kinvolk/headlamp-plugin/lib';
-
-import { ROUTES } from './routes';
-import { PluginSettings } from './settings';
-import { DeploymentsList } from './pages/DeploymentsList';
+import { CreateDeployment } from './pages/CreateDeployment';
 import { DeploymentDetails } from './pages/DeploymentDetails';
+import { DeploymentsList } from './pages/DeploymentsList';
+import { GatewayStatus } from './pages/GatewayStatus';
+import { HuggingFaceCallback } from './pages/HuggingFaceCallback';
+import { Integrations } from './pages/Integrations';
 import { ModelsCatalog } from './pages/ModelsCatalog';
 import { RuntimesStatus } from './pages/RuntimesStatus';
-import { GatewayStatus } from './pages/GatewayStatus';
-import { CreateDeployment } from './pages/CreateDeployment';
-import { Integrations } from './pages/Integrations';
-import { HuggingFaceCallback } from './pages/HuggingFaceCallback';
+import { ROUTES } from './routes';
+import { PluginSettings } from './settings';
 
 // ============================================================================
 // Sidebar Registration

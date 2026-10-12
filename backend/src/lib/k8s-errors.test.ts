@@ -128,6 +128,11 @@ describe('getK8sErrorStatusCode', () => {
     expect(getK8sErrorStatusCode({ response: { statusCode: 404 } })).toBe(404);
   });
 
+  it('extracts numeric status codes from the Kubernetes client code property', () => {
+    expect(getK8sErrorStatusCode({ code: 429 })).toBe(429);
+    expect(getK8sErrorStatusCode({ code: 503 })).toBe(503);
+  });
+
   it('extracts status code from body.code', () => {
     expect(getK8sErrorStatusCode({ body: { code: 422 } })).toBe(422);
   });
@@ -153,5 +158,12 @@ describe('handleK8sError', () => {
     const result = handleK8sError(error, { operation: 'createDeployment' });
     expect(result.message).toContain('Forbidden');
     expect(result.statusCode).toBe(403);
+  });
+
+  it('preserves numeric Kubernetes client status codes and friendly messages', () => {
+    const result = handleK8sError({ code: 503, message: 'HTTP request failed' });
+
+    expect(result.message).toContain('temporarily unavailable');
+    expect(result.statusCode).toBe(503);
   });
 });

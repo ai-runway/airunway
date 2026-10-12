@@ -5,7 +5,7 @@
  * Provides helpful information about how to fix the connection issue.
  */
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useHistory } from 'react-router-dom';
 import { api } from '../lib/api-client';
 import { getBackendUrlSync } from '../lib/backend-discovery';

@@ -124,7 +124,7 @@ body:
       description: Please confirm the following.
       options:
         - label: I have tested this prompt locally (or explained why I couldn't)
-        - label: The prompt follows project conventions in agents.md
+        - label: The prompt follows project conventions in AGENTS.md
         - label: No secrets, API keys, or sensitive data are included in the prompt
           required: true
 

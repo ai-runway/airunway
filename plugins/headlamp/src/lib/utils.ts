@@ -2,8 +2,8 @@
  * Utility functions for the Headlamp plugin
  */
 
-import type { StatusLabelProps } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 import type { DeploymentPhase } from '@airunway/shared';
+import type { StatusLabelProps } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
 
 /** Map a DeploymentPhase to a Headlamp StatusLabel color */
 export function getDeploymentPhaseColor(phase: DeploymentPhase | string): StatusLabelProps['status'] {

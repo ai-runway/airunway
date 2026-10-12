@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { compress } from 'hono/compress';
 import { trimTrailingSlash } from 'hono/trailing-slash';
@@ -261,7 +261,7 @@ app.notFound((c) => {
 });
 
 // Global error handler
-app.onError((err, c) => {
+export function handleAppError(err: Error, c: Context<AppEnv>): Response {
   logger.error({ error: err, stack: err.stack }, `Error: ${err.message}`);
 
   if (err instanceof HTTPException) {
@@ -286,7 +286,9 @@ app.onError((err, c) => {
     },
     500
   );
-});
+}
+
+app.onError(handleAppError);
 
 // Export for RPC type inference
 export type AppType = typeof app;

@@ -4,8 +4,8 @@
  * Basic tests to ensure the plugin routes are configured correctly.
  */
 
-import { describe, it, expect } from 'vitest';
-import { ROUTES, getDeploymentDetailsUrl } from './routes';
+import { describe, expect, it } from 'vitest';
+import { getDeploymentDetailsUrl, ROUTES } from './routes';
 
 describe('AI Runway Plugin Routes', () => {
   it('exports ROUTES configuration', () => {

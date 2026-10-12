@@ -1,7 +1,7 @@
-import type { PropsWithChildren } from 'react';
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RuntimeStatus } from '@airunway/shared';
+import { cleanup, render, screen } from '@testing-library/react';
+import type { PropsWithChildren } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RuntimesStatus } from './RuntimesStatus';
 
 const api = { runtimes: { getStatus: vi.fn() } };

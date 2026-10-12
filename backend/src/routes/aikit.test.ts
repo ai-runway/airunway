@@ -1,16 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import app from '../hono-app';
-
-// Helper to add timeout to async operations for K8s-dependent tests
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`Operation timed out after ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]);
-}
-
-// Shorter timeout for tests that depend on K8s (which may not be available)
-const K8S_TEST_TIMEOUT = 2000;
+import { buildKitService } from '../services/buildkit';
+import { registryService } from '../services/registry';
+import { mockServiceMethod } from '../test/helpers';
 
 describe('AIKit Routes', () => {
   describe('GET /api/aikit/models', () => {
@@ -253,71 +245,75 @@ describe('AIKit Routes', () => {
 
   describe('GET /api/aikit/infrastructure/status', () => {
     test('returns infrastructure status', async () => {
+      const restores = [
+        mockServiceMethod(registryService, 'checkStatus', async () => ({
+          ready: true,
+          message: 'Ready',
+        }) as never),
+        mockServiceMethod(buildKitService, 'getBuilderStatus', async () => ({
+          exists: true,
+          ready: true,
+          running: true,
+          message: 'Ready',
+        }) as never),
+      ];
       try {
-        const res = await withTimeout(
-          Promise.resolve(app.request('/api/aikit/infrastructure/status')),
-          K8S_TEST_TIMEOUT
-        );
-
-        // May succeed or fail depending on k8s availability
-        expect([200, 500]).toContain(res.status);
-
-        if (res.status === 200) {
-          const data = await res.json();
-          expect(typeof data.ready).toBe('boolean');
-          expect(data.registry).toBeDefined();
-          expect(data.builder).toBeDefined();
-        }
-      } catch (error) {
-        // If K8s is not available, the request may timeout - that's acceptable
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping test: K8s API not available (timeout)');
-          return;
-        }
-        throw error;
+        const res = await app.request('/api/aikit/infrastructure/status');
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.ready).toBe(true);
+        expect(data.registry.ready).toBe(true);
+        expect(data.builder.ready).toBe(true);
+      } finally {
+        restores.forEach((restore) => restore());
       }
     });
 
     test('returns proper structure even when k8s unavailable', async () => {
+      const restores = [
+        mockServiceMethod(registryService, 'checkStatus', async () => {
+          throw new Error('Kubernetes unavailable');
+        }),
+        mockServiceMethod(buildKitService, 'getBuilderStatus', async () => {
+          throw new Error('Kubernetes unavailable');
+        }),
+      ];
       try {
-        const res = await withTimeout(
-          Promise.resolve(app.request('/api/aikit/infrastructure/status')),
-          K8S_TEST_TIMEOUT
-        );
-
+        const res = await app.request('/api/aikit/infrastructure/status');
         const data = await res.json();
-        // Should have these fields regardless of k8s availability
-        expect(data).toHaveProperty('ready');
-        expect(data).toHaveProperty('registry');
-        expect(data).toHaveProperty('builder');
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping test: K8s API not available (timeout)');
-          return;
-        }
-        throw error;
+        expect(data.ready).toBe(false);
+        expect(data.registry.ready).toBe(false);
+        expect(data.builder.exists).toBe(false);
+        expect(data.error).toBe('Kubernetes unavailable');
+      } finally {
+        restores.forEach((restore) => restore());
       }
     });
   });
 
   describe('POST /api/aikit/infrastructure/setup', () => {
     test('route exists and accepts POST', async () => {
+      const restores = [
+        mockServiceMethod(registryService, 'ensureRegistry', async () => ({
+          ready: true,
+          message: 'Ready',
+        }) as never),
+        mockServiceMethod(buildKitService, 'ensureBuilder', async () => ({
+          exists: true,
+          ready: true,
+          running: true,
+          message: 'Ready',
+        }) as never),
+      ];
       try {
-        const res = await withTimeout(
-          Promise.resolve(app.request('/api/aikit/infrastructure/setup', { method: 'POST' })),
-          K8S_TEST_TIMEOUT
-        );
-
-        // Should return 200 (success) or 500 (k8s not available)
-        // Should NOT return 404 (route exists)
-        expect(res.status).not.toBe(404);
-        expect([200, 500]).toContain(res.status);
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('timed out')) {
-          console.log('Skipping test: K8s API not available (timeout)');
-          return;
-        }
-        throw error;
+        const res = await app.request('/api/aikit/infrastructure/setup', { method: 'POST' });
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.success).toBe(true);
+        expect(data.registry.ready).toBe(true);
+        expect(data.builder.ready).toBe(true);
+      } finally {
+        restores.forEach((restore) => restore());
       }
     });
   });
