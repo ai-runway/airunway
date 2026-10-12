@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"math"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -1004,7 +1006,8 @@ func (v *ModelDeploymentCustomValidator) validateOverrides(spec *airunwayv1alpha
 
 	providerOverridesPath := specPath.Child("provider", "overrides")
 	allErrs = append(allErrs, checkBlockedKeys(overrideMap, providerOverridesPath)...)
-	allErrs = append(allErrs, checkSizingOverrideKeys(overrideMap, providerOverridesPath)...)
+	allowIntentDGDSizing := spec.Provider.Name == "dynamo" && overrideMap["deploymentMode"] == "intent"
+	allErrs = append(allErrs, checkSizingOverrideKeys(overrideMap, providerOverridesPath, allowIntentDGDSizing)...)
 
 	return allErrs
 }
@@ -1027,12 +1030,25 @@ func checkBlockedKeys(m map[string]interface{}, fldPath *field.Path) field.Error
 	})
 }
 
-// checkSizingOverrideKeys recursively walks provider overrides and rejects
-// fields that would let raw provider overrides bypass resource/replica ceilings.
-func checkSizingOverrideKeys(m map[string]interface{}, fldPath *field.Path) field.ErrorList {
-	allErrs := checkForbiddenOverrideKeys(m, fldPath, sizingOverrideKeys, func(key string) string {
+// checkSizingOverrideKeys recursively walks provider overrides and rejects fields
+// that would let raw provider overrides bypass resource/replica ceilings. Dynamo
+// intent mode may customize its embedded DGD after those values are validated.
+func checkSizingOverrideKeys(m map[string]any, fldPath *field.Path, allowIntentDGD bool) field.ErrorList {
+	checkedOverrides := m
+	var allErrs field.ErrorList
+	if allowIntentDGD {
+		if dgdSpec, found := intentDGDOverrideSpec(m); found {
+			checkedOverrides = withoutIntentDGDOverrideSpec(m)
+			allErrs = append(allErrs, validateIntentDGDOverrideSizing(
+				dgdSpec,
+				fldPath.Child("spec", "overrides", "dgd", "spec"),
+			)...)
+		}
+	}
+
+	allErrs = append(allErrs, checkForbiddenOverrideKeys(checkedOverrides, fldPath, sizingOverrideKeys, func(key string) string {
 		return fmt.Sprintf("overriding %q is not allowed because it can bypass admission resource limits; use spec.resources / spec.scaling instead", key)
-	})
+	})...)
 
 	// KAITO names its replica field resource.count rather than replicas. Keep this
 	// check path-specific: other count fields in provider-specific configuration do
@@ -1046,6 +1062,119 @@ func checkSizingOverrideKeys(m map[string]interface{}, fldPath *field.Path) fiel
 		}
 	}
 
+	return allErrs
+}
+
+func intentDGDOverrideSpec(overrides map[string]any) (map[string]any, bool) {
+	spec, ok := overrides["spec"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	dgdrOverrides, ok := spec["overrides"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	dgd, ok := dgdrOverrides["dgd"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	dgdSpec, ok := dgd["spec"].(map[string]any)
+	return dgdSpec, ok
+}
+
+func withoutIntentDGDOverrideSpec(overrides map[string]any) map[string]any {
+	result := cloneOverrideMap(overrides)
+	spec := cloneOverrideMap(result["spec"].(map[string]any))
+	dgdrOverrides := cloneOverrideMap(spec["overrides"].(map[string]any))
+	dgd := cloneOverrideMap(dgdrOverrides["dgd"].(map[string]any))
+	delete(dgd, "spec")
+	dgdrOverrides["dgd"] = dgd
+	spec["overrides"] = dgdrOverrides
+	result["spec"] = spec
+	return result
+}
+
+func cloneOverrideMap(source map[string]any) map[string]any {
+	clone := make(map[string]any, len(source))
+	maps.Copy(clone, source)
+	return clone
+}
+
+func validateIntentDGDOverrideSizing(dgdSpec map[string]any, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	for key, value := range dgdSpec {
+		valuePath := fldPath.Child(key)
+		switch key {
+		case "replicas":
+			allErrs = append(allErrs, validateIntentDGDReplicas(value, valuePath)...)
+		case "resources":
+			allErrs = append(allErrs, validateIntentDGDResources(value, valuePath)...)
+		default:
+			allErrs = append(allErrs, validateIntentDGDOverrideSizingValue(value, valuePath)...)
+		}
+	}
+	return allErrs
+}
+
+func validateIntentDGDOverrideSizingValue(value any, fldPath *field.Path) field.ErrorList {
+	switch typedValue := value.(type) {
+	case map[string]any:
+		return validateIntentDGDOverrideSizing(typedValue, fldPath)
+	case []any:
+		var allErrs field.ErrorList
+		for index, item := range typedValue {
+			allErrs = append(allErrs, validateIntentDGDOverrideSizingValue(item, fldPath.Index(index))...)
+		}
+		return allErrs
+	default:
+		return nil
+	}
+}
+
+func validateIntentDGDReplicas(value any, fldPath *field.Path) field.ErrorList {
+	replicas, ok := value.(float64)
+	if !ok || math.Trunc(replicas) != replicas {
+		return field.ErrorList{field.Invalid(fldPath, value, "must be an integer")}
+	}
+	if replicas > MaxReplicas {
+		return field.ErrorList{field.Invalid(
+			fldPath,
+			value,
+			fmt.Sprintf("exceeds maximum allowed (%d)", MaxReplicas),
+		)}
+	}
+	return nil
+}
+
+func validateIntentDGDResources(value any, fldPath *field.Path) field.ErrorList {
+	resources, ok := value.(map[string]any)
+	if !ok {
+		return field.ErrorList{field.Invalid(fldPath, value, "must be an object")}
+	}
+
+	allErrs := validateIntentDGDResourceList(resources, fldPath)
+	for _, listName := range []string{"limits", "requests"} {
+		if resourceList, found := resources[listName].(map[string]any); found {
+			allErrs = append(allErrs, validateIntentDGDResourceList(resourceList, fldPath.Child(listName))...)
+		}
+	}
+	return allErrs
+}
+
+func validateIntentDGDResourceList(resources map[string]any, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	for resourceName, value := range resources {
+		valueString := fmt.Sprint(value)
+		valuePath := fldPath.Child(resourceName)
+		switch {
+		case resourceName == "cpu":
+			allErrs = append(allErrs, validateResourceQuantity(valueString, MaxCPU, valuePath)...)
+		case resourceName == "memory":
+			allErrs = append(allErrs, validateResourceQuantity(valueString, MaxMemory, valuePath)...)
+		case resourceName == "gpu" || strings.HasSuffix(resourceName, "/gpu"):
+			allErrs = append(allErrs, validateResourceQuantity(valueString, fmt.Sprint(MaxGPUCount), valuePath)...)
+		}
+	}
 	return allErrs
 }
 

@@ -118,6 +118,147 @@ func TestTransformAggregated(t *testing.T) {
 	}
 }
 
+func TestTransformIntent(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Generation = 7
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{Replicas: 2}
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{Volumes: []airunwayv1alpha1.StorageVolume{{
+		Name:      "model-cache",
+		ClaimName: "shared-models",
+		MountPath: "/models",
+		Purpose:   airunwayv1alpha1.VolumePurposeModelCache,
+	}}}
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name: "dynamo",
+		Overrides: &runtime.RawExtension{Raw: []byte(`{
+			"deploymentMode":"intent",
+			"spec":{
+				"searchStrategy":"rapid",
+				"autoApply":false,
+				"hardware":{"totalGpus":2048},
+				"sla":{"ttft":500},
+				"overrides":{"dgd":{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{"services":{"worker":{"replicas":2}}}}}
+			}
+		}`)},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("expected one resource, got %d", len(resources))
+	}
+	dgdr := resources[0]
+	spec, _, _ := unstructured.NestedMap(dgdr.Object, "spec")
+	assertIntentMetadata(t, dgdr)
+	assertIntentSpec(t, md, spec)
+}
+
+func assertIntentMetadata(t *testing.T, dgdr *unstructured.Unstructured) {
+	t.Helper()
+	if dgdr.GetKind() != DynamoGraphDeploymentRequestKind || dgdr.GetAPIVersion() != "nvidia.com/v1beta1" {
+		t.Fatalf("unexpected intent resource %s %s", dgdr.GetAPIVersion(), dgdr.GetKind())
+	}
+	if dgdr.GetAnnotations()[modelDeploymentGenerationAnnotation] != "7" {
+		t.Error("expected ModelDeployment generation annotation")
+	}
+}
+
+func assertIntentSpec(
+	t *testing.T,
+	md *airunwayv1alpha1.ModelDeployment,
+	spec map[string]any,
+) {
+	t.Helper()
+	if spec["model"] != md.Spec.Model.ID || spec["backend"] != "vllm" {
+		t.Errorf("unexpected model/backend: %#v", spec)
+	}
+	if spec["autoApply"] != false || spec["searchStrategy"] != "rapid" {
+		t.Errorf("expected DGDR spec overrides, got %#v", spec)
+	}
+	hardware, _, _ := unstructured.NestedMap(spec, "hardware")
+	if hardware["totalGpus"] != int64(2) {
+		t.Errorf("expected totalGpus=2, got %#v", hardware["totalGpus"])
+	}
+	modelCache, _, _ := unstructured.NestedMap(spec, "modelCache")
+	if modelCache["pvcName"] != "shared-models" || modelCache["pvcMountPath"] != "/models" {
+		t.Errorf("unexpected model cache mapping: %#v", modelCache)
+	}
+	dgdName, found, _ := unstructured.NestedString(spec, "overrides", "dgd", "metadata", "name")
+	if found || dgdName != "" {
+		t.Errorf("expected Dynamo to choose the generated DGD name, got %q", dgdName)
+	}
+	dgdReplicas, _, _ := unstructured.NestedFieldNoCopy(spec, "overrides", "dgd", "spec", "services", "worker", "replicas")
+	if dgdReplicas != float64(2) {
+		t.Errorf("expected generated DGD customization to survive, got %#v", dgdReplicas)
+	}
+}
+
+func TestTransformRejectsUnknownDeploymentMode(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Provider = &airunwayv1alpha1.ProviderSpec{
+		Name:      "dynamo",
+		Overrides: &runtime.RawExtension{Raw: []byte(`{"deploymentMode":"automatic"}`)},
+	}
+
+	_, err := tr.Transform(context.Background(), md)
+	if err == nil || !strings.Contains(err.Error(), "deploymentMode") {
+		t.Fatalf("expected deploymentMode validation error, got %v", err)
+	}
+}
+
+func TestIntentComponentGPUs(t *testing.T) {
+	tests := []struct {
+		name      string
+		component *airunwayv1alpha1.ComponentScalingSpec
+		want      int32
+	}{
+		{name: "nil component"},
+		{name: "nil GPU", component: &airunwayv1alpha1.ComponentScalingSpec{}},
+		{
+			name:      "default replica",
+			component: &airunwayv1alpha1.ComponentScalingSpec{GPU: &airunwayv1alpha1.GPUSpec{Count: 2}},
+			want:      2,
+		},
+		{
+			name: "explicit replicas",
+			component: &airunwayv1alpha1.ComponentScalingSpec{
+				Replicas: 3,
+				GPU:      &airunwayv1alpha1.GPUSpec{Count: 2},
+			},
+			want: 6,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := intentComponentGPUs(tt.component); got != tt.want {
+				t.Errorf("intentComponentGPUs() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIntentTotalGPUsDisaggregated(t *testing.T) {
+	md := newTestMD("test-model", "default")
+	md.Spec.Serving = &airunwayv1alpha1.ServingSpec{Mode: airunwayv1alpha1.ServingModeDisaggregated}
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{
+		Prefill: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 2,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 2},
+		},
+		Decode: &airunwayv1alpha1.ComponentScalingSpec{
+			Replicas: 3,
+			GPU:      &airunwayv1alpha1.GPUSpec{Count: 1},
+		},
+	}
+	if got := intentTotalGPUs(md); got != 7 {
+		t.Fatalf("intentTotalGPUs() = %d, want 7", got)
+	}
+}
+
 func TestTransformDisaggregated(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
