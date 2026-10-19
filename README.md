@@ -142,6 +142,8 @@ The same content also lives in [`docs/`](docs/) for in-repo browsing.
 
 ## Community
 
+We are a Cloud Native Computing Foundation sandbox project. Participation in the AI Runway community is governed by the [CNCF Code of Conduct](CODE_OF_CONDUCT.md).
+
 - **Slack:** Join the [CNCF Slack](https://slack.cncf.io/) workspace and find us in `#airunway`
 - **Issues:** Report bugs or request features in [GitHub Issues](https://github.com/ai-runway/airunway/issues)
 - **Roadmap:** Follow planned work on the [AI Runway project board](https://github.com/orgs/ai-runway/projects/2)

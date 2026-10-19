@@ -54,6 +54,19 @@
   background-color: var(--ifm-color-primary);
 }
 
+/* --- Footer --- */
+/* Docusaurus dims linked footer logos until hover, which never happens on
+   touch screens. Keep the CNCF logo at full strength. */
+.footer__bottom a:has(> .footer__logo) {
+  opacity: 1;
+}
+
+/* The primary link color is too dark on the dark footer in light mode. */
+.footer__copyright a {
+  color: var(--ifm-footer-link-color);
+  text-decoration: underline;
+}
+
 /* --- Landing page --- */
 .landing-main {
   display: flex;
