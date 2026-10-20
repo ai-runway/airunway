@@ -154,7 +154,9 @@ func (t *StatusTranslator) mapConditionsToPhase(
 	return airunwayv1alpha1.DeploymentPhasePending, ""
 }
 
-func replicaFailureMessage(condMap map[string]conditionInfo) (string, bool) {
+// replicaFailureMessage surfaces replica creation failures that can block a rollout
+// while old replicas remain available. hasFailure is true even if no details are provided.
+func replicaFailureMessage(condMap map[string]conditionInfo) (message string, hasFailure bool) {
 	failure, found := condMap[conditionReplicaFailure]
 	if !found || failure.Status != conditionTrue {
 		return "", false

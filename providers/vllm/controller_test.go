@@ -584,13 +584,14 @@ func TestSyncStatusStaleAvailableConditionIsNotReady(t *testing.T) {
 	}
 }
 
-func TestSyncStatusBlockedCurrentRolloutSurfacesReplicaFailure(t *testing.T) {
+func TestReconcileBlockedCurrentRolloutSurfacesReplicaFailure(t *testing.T) {
 	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.Generation = 4
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
 
-	deploy := &unstructured.Unstructured{}
-	deploy.SetGroupVersionKind(deploymentGVK)
-	deploy.SetName("test")
-	deploy.SetNamespace("default")
+	deploy := ownedDeploymentForMD(md)
 	deploy.SetGeneration(4)
 	deploy.Object["spec"] = map[string]any{"replicas": int64(2)}
 	deploy.Object["status"] = map[string]any{
@@ -611,17 +612,22 @@ func TestSyncStatusBlockedCurrentRolloutSurfacesReplicaFailure(t *testing.T) {
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deploy, ownedServiceForMD(md)).
+		WithStatusSubresource(md).WithInterceptorFuncs(interceptor.Funcs{
+		// Keep the observed Deployment snapshot while simulating successful resource applies.
+		Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+			return nil
+		},
+	}).Build()
 	r := NewVLLMProviderReconciler(c, scheme)
-	md := &airunwayv1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 4}}
+	r.ImageResolver = successfulFakeResolver(fakeResolvedImage(DefaultVLLMImage, "sha256:default"))
 
-	desired := &unstructured.Unstructured{}
-	desired.SetGroupVersionKind(deploymentGVK)
-	desired.SetName("test")
-	desired.SetNamespace("default")
-
-	if err := r.syncStatus(context.Background(), md, desired); err != nil {
+	key := types.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := c.Get(context.Background(), key, md); err != nil {
+		t.Fatalf("failed to get persisted ModelDeployment: %v", err)
 	}
 	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
 		t.Errorf("phase = %s, want Deploying", md.Status.Phase)
