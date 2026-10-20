@@ -201,3 +201,53 @@ func TestPrefixCacheOmittedDefaultsTrueAndExplicitTrueStaysEnabled(t *testing.T)
 	assertPrefixCacheFlags(t, &defaulted, true, false)
 	assertPrefixCacheFlags(t, explicit, true, false)
 }
+
+func TestSGLangPrefixCachingFlagsForAllWorkers(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		enabled     *bool
+		wantDisable bool
+	}{
+		{name: "omitted"},
+		{name: "enabled", enabled: boolPtr(true)},
+		{name: "disabled", enabled: boolPtr(false), wantDisable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, worker := range []string{"VllmWorker", "VllmPrefillWorker", "VllmDecodeWorker"} {
+				t.Run(worker, func(t *testing.T) {
+					md := newTestMD("sglang-prefix-cache", "default")
+					md.Spec.Engine.Type = airunwayv1alpha1.EngineTypeSGLang
+					md.Spec.Engine.EnablePrefixCaching = tc.enabled
+					if worker != "VllmWorker" {
+						md = disaggregatedCopy(md)
+					}
+					resources, err := NewTransformer().Transform(context.Background(), md)
+					if err != nil {
+						t.Fatal(err)
+					}
+					args, found, err := unstructured.NestedStringSlice(resources[0].Object,
+						"spec", "services", worker, "extraPodSpec", "mainContainer", "args")
+					if err != nil || !found {
+						t.Fatalf("read worker args: found=%v err=%v", found, err)
+					}
+					disableCount := 0
+					for _, arg := range args {
+						switch arg {
+						case "--enable-prefix-caching", "--no-enable-prefix-caching":
+							t.Errorf("unsupported SGLang flag %q in %v", arg, args)
+						case "--disable-radix-cache":
+							disableCount++
+						}
+					}
+					wantCount := 0
+					if tc.wantDisable {
+						wantCount = 1
+					}
+					if disableCount != wantCount {
+						t.Errorf("got %d disable flags, want %d in %v", disableCount, wantCount, args)
+					}
+				})
+			}
+		})
+	}
+}

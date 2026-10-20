@@ -831,7 +831,7 @@ func (t *Transformer) buildEngineArgs(md *airunwayv1alpha1.ModelDeployment) ([]s
 
 	// Add prefix caching.
 	// nil means omitted (allow CRD/upstream defaults), explicit false must be
-	// preserved for vLLM by emitting the supported negative flag.
+	// preserved using each engine's supported disable flag.
 	if md.Spec.Engine.EnablePrefixCaching != nil {
 		switch md.ResolvedEngineType() {
 		case airunwayv1alpha1.EngineTypeVLLM:
@@ -841,8 +841,8 @@ func (t *Transformer) buildEngineArgs(md *airunwayv1alpha1.ModelDeployment) ([]s
 				args = append(args, "--no-enable-prefix-caching")
 			}
 		case airunwayv1alpha1.EngineTypeSGLang:
-			if *md.Spec.Engine.EnablePrefixCaching {
-				args = append(args, "--enable-prefix-caching")
+			if !*md.Spec.Engine.EnablePrefixCaching {
+				args = append(args, "--disable-radix-cache")
 			}
 		}
 	}
