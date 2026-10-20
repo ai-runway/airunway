@@ -187,7 +187,7 @@ func (t *StatusTranslator) isRolloutComplete(
 
 	return hasObservedGeneration && observedGeneration >= upstream.GetGeneration() &&
 		hasTotalReplicas && hasUpdatedReplicas && totalReplicas == updatedReplicas &&
-		updatedReplicas >= desired &&
+		updatedReplicas == desired &&
 		replicas.Ready >= replicas.Desired && replicas.Available >= replicas.Desired
 }
 

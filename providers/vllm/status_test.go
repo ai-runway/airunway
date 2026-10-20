@@ -128,6 +128,7 @@ func TestTranslateStatusAvailableTrueRequiresCurrentRollout(t *testing.T) {
 		{name: "new revision has no replicas", totalReplicas: 2, updatedReplicas: 0, observedGeneration: 4},
 		{name: "new revision is only partially updated", totalReplicas: 2, updatedReplicas: 1, observedGeneration: 4},
 		{name: "old replicas remain", totalReplicas: 3, updatedReplicas: 2, observedGeneration: 4},
+		{name: "scale-down has excess updated replicas", totalReplicas: 3, updatedReplicas: 3, observedGeneration: 4},
 		{name: "deployment controller has not observed current generation", totalReplicas: 2, updatedReplicas: 2, observedGeneration: 3},
 	}
 
@@ -135,7 +136,7 @@ func TestTranslateStatusAvailableTrueRequiresCurrentRollout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDeployment("test", "default")
 			d.SetGeneration(4)
-			setDeploymentReplicas(d, 2, 2, 2)
+			setDeploymentReplicas(d, 2, tt.totalReplicas, tt.totalReplicas)
 			_ = unstructured.SetNestedField(d.Object, tt.totalReplicas, "status", "replicas")
 			_ = unstructured.SetNestedField(d.Object, tt.updatedReplicas, "status", "updatedReplicas")
 			_ = unstructured.SetNestedField(d.Object, tt.observedGeneration, "status", "observedGeneration")
