@@ -134,6 +134,9 @@ func (t *StatusTranslator) mapConditionsToPhase(
 		if msg == "" {
 			msg = "deployment timed out waiting for rollout"
 		}
+		if failureMessage, hasFailure := replicaFailureMessage(condMap); hasFailure && failureMessage != "" {
+			msg += "; " + failureMessage
+		}
 		return airunwayv1alpha1.DeploymentPhaseFailed, msg
 	}
 

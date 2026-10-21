@@ -207,6 +207,42 @@ func TestTranslateStatusProgressingDeadlineExceeded(t *testing.T) {
 	}
 }
 
+func TestTranslateStatusProgressDeadlinePreservesReplicaFailure(t *testing.T) {
+	for _, timeoutMessage := range []string{"ReplicaSet has timed out progressing.", ""} {
+		t.Run(timeoutMessage, func(t *testing.T) {
+			d := newTestDeployment("test", "default")
+			setDeploymentReplicas(d, 2, 2, 2)
+			_ = unstructured.SetNestedField(d.Object, int64(0), "status", "updatedReplicas")
+			setDeploymentConditions(d, []map[string]any{
+				{"type": "Available", "status": "True"},
+				{
+					"type": "Progressing", "status": "False",
+					"reason": "ProgressDeadlineExceeded", "message": timeoutMessage,
+				},
+				{
+					"type": "ReplicaFailure", "status": "True",
+					"reason": "FailedCreate", "message": "exceeded quota for GPU requests",
+				},
+			})
+
+			result, err := NewStatusTranslator().TranslateStatus(d)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+				t.Errorf("expected Failed phase, got %s", result.Phase)
+			}
+			if timeoutMessage == "" {
+				timeoutMessage = "deployment timed out waiting for rollout"
+			}
+			want := timeoutMessage + "; FailedCreate: exceeded quota for GPU requests"
+			if result.Message != want {
+				t.Errorf("message = %q, want %q", result.Message, want)
+			}
+		})
+	}
+}
+
 func TestTranslateStatusProgressing(t *testing.T) {
 	st := NewStatusTranslator()
 	d := newTestDeployment("test", "default")
