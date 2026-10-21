@@ -142,6 +142,22 @@ func TestTransformAggregatedReplicas(t *testing.T) {
 	}
 }
 
+func TestTransformAggregatedZeroReplicas(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{Replicas: 0}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	replicas, found, err := unstructured.NestedInt64(resources[0].Object, "spec", "replicas")
+	if err != nil || !found || replicas != 0 {
+		t.Errorf("expected 0 replicas, got %v (found=%v, err=%v)", replicas, found, err)
+	}
+}
+
 func TestTransformAggregatedDefaultReplicas(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
