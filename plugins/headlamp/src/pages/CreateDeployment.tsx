@@ -262,7 +262,7 @@ export function CreateDeployment() {
       replicas,
       hfTokenSecret: hfSecretConfigured ? 'hf-token-secret' : undefined,
       enforceEager,
-      enablePrefixCaching: false,
+      enablePrefixCaching: true,
       trustRemoteCode,
       contextLength,
       resources: {

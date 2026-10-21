@@ -336,6 +336,33 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 	}
 }
 
+func TestReconcileAddsFinalizerPreservesExplicitPrefixCachingFalse(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test-preserve-false", "default")
+	md.Spec.Engine.EnablePrefixCaching = boolPtr(false)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md).WithStatusSubresource(md).Build()
+	r := NewDynamoProviderReconciler(c, scheme, "")
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-preserve-false", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var updated airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-preserve-false", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get updated ModelDeployment: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&updated, FinalizerName) {
+		t.Fatal("expected finalizer to be added")
+	}
+	if updated.Spec.Engine.EnablePrefixCaching == nil || *updated.Spec.Engine.EnablePrefixCaching {
+		t.Fatalf("expected explicit false to be preserved, got %#v", updated.Spec.Engine.EnablePrefixCaching)
+	}
+}
+
 func TestReconcileIncompatibleEngine(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
