@@ -63,7 +63,7 @@ spec:
 | `image` | string | no | Engine-specific container image override. This is the preferred field for Direct vLLM and custom vLLM OpenAI-compatible server images. |
 | `contextLength` | int | no | Maximum context length. Providers map this to engine-specific flags such as vLLM `--max-model-len`. |
 | `trustRemoteCode` | bool | no | Allows remote HuggingFace model code execution when supported by the engine. |
-| `enablePrefixCaching` | bool | no | Enables prefix caching when supported by the engine. |
+| `enablePrefixCaching` | bool | no | Defaults to `true`. Explicit `false` disables prefix caching when supported by the engine. Dynamo maps this to `--no-enable-prefix-caching` for vLLM and `--disable-radix-cache` for SGLang; SGLang needs no flag to enable caching. |
 | `enforceEager` | bool | no | Forces eager execution when supported by the engine. |
 | `args` | map[string]string | no | Engine-specific named arguments. Providers pass these through to the engine; for boolean-style flags, use an empty string value when supported by the provider. |
 | `extraArgs` | []string | no | Additional raw engine flags for arguments that do not have a structured field or map representation yet. |
