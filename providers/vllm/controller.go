@@ -279,8 +279,11 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(&md, FinalizerName) {
+		base := md.DeepCopy()
 		controllerutil.AddFinalizer(&md, FinalizerName)
-		if err := r.Update(ctx, &md); err != nil {
+		// Patch only the finalizer: a full Update can omit an explicit zero-valued
+		// replica field and let the API server replace it with the CRD default.
+		if err := r.Patch(ctx, &md, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
