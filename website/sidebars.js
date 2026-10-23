@@ -47,7 +47,7 @@ const sidebars = {
       type: 'category',
       label: 'Contributing',
       collapsed: false,
-      items: ['standards'],
+      items: ['standards', 'dependency-management'],
     },
   ],
 };
