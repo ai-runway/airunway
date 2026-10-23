@@ -264,7 +264,7 @@ type EngineSpec struct {
 	// Only applicable for vllm and sglang engines
 	// +kubebuilder:default=true
 	// +optional
-	EnablePrefixCaching bool `json:"enablePrefixCaching,omitempty"`
+	EnablePrefixCaching *bool `json:"enablePrefixCaching,omitempty"`
 
 	// enforceEager forces eager execution mode (disables CUDA graphs)
 	// Only applicable for vllm and sglang engines

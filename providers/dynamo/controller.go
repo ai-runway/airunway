@@ -189,6 +189,34 @@ type DynamoProviderReconciler struct {
 	DownloadJobImage string
 }
 
+func (r *DynamoProviderReconciler) addFinalizer(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+	if controllerutil.ContainsFinalizer(md, FinalizerName) {
+		return nil
+	}
+	base := md.DeepCopy()
+	desired := md.DeepCopy()
+	controllerutil.AddFinalizer(desired, FinalizerName)
+	if err := r.Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return err
+	}
+	md.Finalizers = desired.Finalizers
+	return nil
+}
+
+func (r *DynamoProviderReconciler) removeFinalizer(ctx context.Context, md *airunwayv1alpha1.ModelDeployment) error {
+	if !controllerutil.ContainsFinalizer(md, FinalizerName) {
+		return nil
+	}
+	base := md.DeepCopy()
+	desired := md.DeepCopy()
+	controllerutil.RemoveFinalizer(desired, FinalizerName)
+	if err := r.Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return err
+	}
+	md.Finalizers = desired.Finalizers
+	return nil
+}
+
 // NewDynamoProviderReconciler creates a new Dynamo provider reconciler
 func NewDynamoProviderReconciler(client client.Client, scheme *runtime.Scheme, downloadJobImage string) *DynamoProviderReconciler {
 	if downloadJobImage == "" {
@@ -242,8 +270,7 @@ func (r *DynamoProviderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(&md, FinalizerName) {
-		controllerutil.AddFinalizer(&md, FinalizerName)
-		if err := r.Update(ctx, &md); err != nil {
+		if err := r.addFinalizer(ctx, &md); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -747,8 +774,7 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		// Verify ownership before deleting
 		if err := verifyDynamoOwnership(dgd, md.UID); err != nil {
 			logger.Info("Resource exists but is not managed by this ModelDeployment, skipping deletion", "name", dgdName)
-			controllerutil.RemoveFinalizer(md, FinalizerName)
-			return ctrl.Result{}, r.Update(ctx, md)
+			return ctrl.Result{}, r.removeFinalizer(ctx, md)
 		}
 
 		// Resource exists and is owned by us, delete it
@@ -763,8 +789,7 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 				deletionTime := md.DeletionTimestamp.Time
 				if time.Since(deletionTime) > FinalizerTimeout {
 					logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-					controllerutil.RemoveFinalizer(md, FinalizerName)
-					return ctrl.Result{}, r.Update(ctx, md)
+					return ctrl.Result{}, r.removeFinalizer(ctx, md)
 				}
 
 				// Requeue to retry deletion
@@ -781,8 +806,7 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		deletionTime := md.DeletionTimestamp.Time
 		if time.Since(deletionTime) > FinalizerTimeout {
 			logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-			controllerutil.RemoveFinalizer(md, FinalizerName)
-			return ctrl.Result{}, r.Update(ctx, md)
+			return ctrl.Result{}, r.removeFinalizer(ctx, md)
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
@@ -803,16 +827,14 @@ func (r *DynamoProviderReconciler) handleDeletion(ctx context.Context, md *airun
 		deletionTime := md.DeletionTimestamp.Time
 		if time.Since(deletionTime) > FinalizerTimeout {
 			logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-			controllerutil.RemoveFinalizer(md, FinalizerName)
-			return ctrl.Result{}, r.Update(ctx, md)
+			return ctrl.Result{}, r.removeFinalizer(ctx, md)
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// All resources cleaned up, remove finalizer
 	logger.Info("All resources deleted, removing finalizer", "name", md.Name)
-	controllerutil.RemoveFinalizer(md, FinalizerName)
-	return ctrl.Result{}, r.Update(ctx, md)
+	return ctrl.Result{}, r.removeFinalizer(ctx, md)
 }
 
 func upstreamResourceUnavailable(err error) bool {
