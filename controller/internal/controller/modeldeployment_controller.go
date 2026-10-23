@@ -110,7 +110,8 @@ func getCELEnv() (*cel.Env, error) {
 }
 
 const (
-	ExplicitProviderSelectionReason = "explicit provider selection"
+	ExplicitProviderSelectionReason  = "explicit provider selection"
+	providerChangeNotSupportedReason = "ProviderChangeNotSupported"
 )
 
 // +kubebuilder:rbac:groups=airunway.ai,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -297,12 +298,16 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			md.Status.Provider.Name, md.Spec.Provider.Name,
 		)
 		logger.Info("Rejected unsupported provider change", "name", md.Name, "from", md.Status.Provider.Name, "to", md.Spec.Provider.Name)
-		r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionFalse, "ProviderChangeNotSupported", msg)
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionFalse, providerChangeNotSupportedReason, msg)
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
 		md.Status.Message = msg
 		r.recordReconcileError(&md, "provider_change")
 		return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
 	}
+
+	// The unsupported switch is no longer requested. Restore the existing
+	// selection even when selectProvider skips an already-selected provider.
+	r.recoverRejectedProviderChange(&md)
 
 	// Step 8: Run provider selection if needed
 	if r.EnableProviderSelector {
@@ -371,9 +376,66 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	// Kubernetes garbage collection will handle cleanup when the ModelDeployment is deleted.
 
+	// A successful reconciliation resolves core-controller validation and
+	// selection failures. Clear the matching stale core-owned message without
+	// disturbing progress or readiness messages written by provider controllers.
+	clearResolvedCoreStatusMessage(base, &md)
+
 	logger.Info("Reconciliation complete", "name", md.Name, "phase", md.Status.Phase, "provider", md.Status.Provider)
 
-	return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
+	// A provider may have updated shared status since our read. Return the
+	// conflict so reconciliation retries from fresh status instead of erasing it.
+	return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+// recoverRejectedProviderChange restores selection after the caller has checked
+// that spec no longer requests an unsupported switch. Provider resources and
+// any newer provider-owned phase/message remain authoritative.
+func (r *ModelDeploymentReconciler) recoverRejectedProviderChange(md *airunwayv1alpha1.ModelDeployment) {
+	if md.Status.Provider == nil || md.Status.Provider.Name == "" {
+		return
+	}
+	condition := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeProviderSelected)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != providerChangeNotSupportedReason {
+		return
+	}
+	if md.Status.Message == condition.Message {
+		md.Status.Message = ""
+		if md.Status.Phase == airunwayv1alpha1.DeploymentPhaseFailed {
+			md.Status.Phase = airunwayv1alpha1.DeploymentPhasePending
+		}
+	}
+	r.setCondition(md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionTrue,
+		"ProviderUnchanged", fmt.Sprintf("Continuing with previously selected provider %s", md.Status.Provider.Name))
+}
+
+// clearResolvedCoreStatusMessage clears a message written by this controller
+// only when its matching condition is successful at the end of reconciliation.
+// Provider controllers also own status.message, so an unconditional clear
+// would erase their progress and readiness details.
+func clearResolvedCoreStatusMessage(base, current *airunwayv1alpha1.ModelDeployment) {
+	if base.Status.Message == "" || current.Status.Message != base.Status.Message {
+		return
+	}
+
+	resolvedFailures := []struct {
+		conditionType string
+		messagePrefix string
+	}{
+		{airunwayv1alpha1.ConditionTypeValidated, "Validation failed: "},
+		{airunwayv1alpha1.ConditionTypeEngineSelected, "Engine selection failed: "},
+		{airunwayv1alpha1.ConditionTypeProviderSelected, "Provider selection failed: "},
+		{airunwayv1alpha1.ConditionTypeProviderSelected, "No provider specified and provider-selector not enabled"},
+	}
+
+	for _, failure := range resolvedFailures {
+		resolved := meta.FindStatusCondition(current.Status.Conditions, failure.conditionType)
+		if resolved != nil && resolved.Status == metav1.ConditionTrue &&
+			strings.HasPrefix(base.Status.Message, failure.messagePrefix) {
+			current.Status.Message = ""
+			return
+		}
+	}
 }
 
 // isNoMatchError checks if an error indicates that a CRD/resource type is not registered.
