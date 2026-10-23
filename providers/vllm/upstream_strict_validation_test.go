@@ -835,8 +835,18 @@ func seedUnreadyDeploymentStatus(t *testing.T, deployment *unstructured.Unstruct
 
 func seedDeploymentStatus(t *testing.T, deployment *unstructured.Unstructured, available string, readyReplicas, availableReplicas int64) {
 	t.Helper()
+	deployment.SetGeneration(1)
 	if err := unstructured.SetNestedField(deployment.Object, int64(1), "spec", "replicas"); err != nil {
 		t.Fatalf("set Deployment desired replicas: %v", err)
+	}
+	if err := unstructured.SetNestedField(deployment.Object, int64(1), "status", "observedGeneration"); err != nil {
+		t.Fatalf("set Deployment observed generation: %v", err)
+	}
+	if err := unstructured.SetNestedField(deployment.Object, int64(1), "status", "replicas"); err != nil {
+		t.Fatalf("set Deployment total replicas: %v", err)
+	}
+	if err := unstructured.SetNestedField(deployment.Object, int64(1), "status", "updatedReplicas"); err != nil {
+		t.Fatalf("set Deployment updated replicas: %v", err)
 	}
 	if err := unstructured.SetNestedField(deployment.Object, readyReplicas, "status", "readyReplicas"); err != nil {
 		t.Fatalf("set Deployment ready replicas: %v", err)

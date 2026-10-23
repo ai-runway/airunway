@@ -35,8 +35,10 @@ type ProviderStatusResult struct {
 
 // Kubernetes Deployment condition types
 const (
-	conditionAvailable   = "Available"
-	conditionProgressing = "Progressing"
+	conditionAvailable      = "Available"
+	conditionProgressing    = "Progressing"
+	conditionReplicaFailure = "ReplicaFailure"
+	conditionTrue           = "True"
 )
 
 // StatusTranslator handles translating Kubernetes Deployment status to ModelDeployment status
@@ -73,7 +75,8 @@ func (t *StatusTranslator) TranslateStatus(upstream *unstructured.Unstructured) 
 	condMap := t.parseConditions(conditions)
 	result.Replicas = t.extractReplicas(upstream)
 
-	result.Phase, result.Message = t.mapConditionsToPhase(condMap, result.Replicas)
+	rolloutComplete := t.isRolloutComplete(upstream, result.Replicas)
+	result.Phase, result.Message = t.mapConditionsToPhase(condMap, rolloutComplete)
 	result.Endpoint = t.extractEndpoint(upstream)
 
 	return result, nil
@@ -109,20 +112,19 @@ func (t *StatusTranslator) parseConditions(conditions []interface{}) map[string]
 
 // mapConditionsToPhase maps Kubernetes Deployment conditions to a ModelDeployment phase.
 //
-// Mapping logic:
-//   - Available=True with all desired replicas currently ready and available → Running
-//   - Available=False AND Progressing=True → Deploying
-//   - Progressing=False (DeadlineExceeded) OR Available=False with reason → Failed
-//   - else → Pending
-func (t *StatusTranslator) mapConditionsToPhase(condMap map[string]conditionInfo, replicas *airunwayv1alpha1.ReplicaStatus) (airunwayv1alpha1.DeploymentPhase, string) {
+// Available=True means minimum availability, not that the requested revision
+// has rolled out. Running additionally requires current-generation status,
+// updated desired replicas, no old replicas, and ready and available counts.
+func (t *StatusTranslator) mapConditionsToPhase(
+	condMap map[string]conditionInfo,
+	rolloutComplete bool,
+) (airunwayv1alpha1.DeploymentPhase, string) {
 	avail, hasAvail := condMap[conditionAvailable]
 	prog, hasProg := condMap[conditionProgressing]
 
-	// Available=True guarantees only minimum availability, and Deployment status
-	// can lag the underlying Pods. Require full current counts before advertising
-	// that all replicas are ready.
-	if hasAvail && avail.Status == "True" && replicas != nil && replicas.Desired > 0 &&
-		replicas.Ready >= replicas.Desired && replicas.Available >= replicas.Desired {
+	// Available=True guarantees only minimum availability, and the available
+	// replicas may still belong to an older ReplicaSet.
+	if hasAvail && avail.Status == conditionTrue && rolloutComplete {
 		return airunwayv1alpha1.DeploymentPhaseRunning, ""
 	}
 
@@ -132,7 +134,14 @@ func (t *StatusTranslator) mapConditionsToPhase(condMap map[string]conditionInfo
 		if msg == "" {
 			msg = "deployment timed out waiting for rollout"
 		}
+		if failureMessage, hasFailure := replicaFailureMessage(condMap); hasFailure && failureMessage != "" {
+			msg += "; " + failureMessage
+		}
 		return airunwayv1alpha1.DeploymentPhaseFailed, msg
+	}
+
+	if message, hasFailure := replicaFailureMessage(condMap); hasFailure {
+		return airunwayv1alpha1.DeploymentPhaseDeploying, message
 	}
 
 	// Progressing=True and Available=False → still rolling out
@@ -146,6 +155,43 @@ func (t *StatusTranslator) mapConditionsToPhase(condMap map[string]conditionInfo
 	}
 
 	return airunwayv1alpha1.DeploymentPhasePending, ""
+}
+
+// replicaFailureMessage surfaces replica creation failures that can block a rollout
+// while old replicas remain available. hasFailure is true even if no details are provided.
+func replicaFailureMessage(condMap map[string]conditionInfo) (message string, hasFailure bool) {
+	failure, found := condMap[conditionReplicaFailure]
+	if !found || failure.Status != conditionTrue {
+		return "", false
+	}
+	if failure.Reason != "" && failure.Message != "" {
+		return failure.Reason + ": " + failure.Message, true
+	}
+	if failure.Message != "" {
+		return failure.Message, true
+	}
+	return failure.Reason, true
+}
+
+func (t *StatusTranslator) isRolloutComplete(
+	upstream *unstructured.Unstructured,
+	replicas *airunwayv1alpha1.ReplicaStatus,
+) bool {
+	if replicas == nil || replicas.Desired <= 0 || upstream.GetGeneration() <= 0 {
+		return false
+	}
+
+	observedGeneration, hasObservedGeneration, _ := unstructured.NestedInt64(
+		upstream.Object, "status", "observedGeneration",
+	)
+	totalReplicas, hasTotalReplicas, _ := unstructured.NestedInt64(upstream.Object, "status", "replicas")
+	updatedReplicas, hasUpdatedReplicas, _ := unstructured.NestedInt64(upstream.Object, "status", "updatedReplicas")
+	desired := int64(replicas.Desired)
+
+	return hasObservedGeneration && observedGeneration >= upstream.GetGeneration() &&
+		hasTotalReplicas && hasUpdatedReplicas && totalReplicas == updatedReplicas &&
+		updatedReplicas == desired &&
+		replicas.Ready >= replicas.Desired && replicas.Available >= replicas.Desired
 }
 
 // extractReplicas extracts replica counts from Deployment status.

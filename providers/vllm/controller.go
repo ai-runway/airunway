@@ -440,7 +440,9 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning &&
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
-		md.Status.Message = "Deployments created, waiting for pods to be ready"
+		if md.Status.Message == "" {
+			md.Status.Message = "Deployments created, waiting for pods to be ready"
+		}
 	}
 
 	if err := r.Status().Update(ctx, &md); err != nil {
