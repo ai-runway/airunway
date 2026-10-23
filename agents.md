@@ -168,6 +168,7 @@ Read these files **only when relevant** to your task:
 | [docs/gateway.md](docs/gateway.md) | Gateway API Inference Extension integration |
 | [docs/csi-azure-lustre.md](docs/csi-azure-lustre.md) | Installing Azure Lustre CSI driver on AKS |
 | [docs/standards.md](docs/standards.md) | Code style questions (prefer running linters instead) |
+| [docs/dependency-management.md](docs/dependency-management.md) | Adding, updating or pinning dependencies |
 | [plugins/headlamp/README.md](plugins/headlamp/README.md) | Headlamp plugin development, patterns, components |
 
 ## Security Rules

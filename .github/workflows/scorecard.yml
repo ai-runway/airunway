@@ -1,0 +1,50 @@
+name: Scorecard supply-chain security
+
+on:
+  # Branch-Protection is only evaluated for the default branch.
+  branch_protection_rule:
+  # Keeps the Maintained check current between pushes.
+  schedule:
+    - cron: '27 6 * * 1'
+  push:
+    branches: [main]
+
+# Publishing results to api.scorecard.dev requires that this workflow has no
+# top-level env, defaults or write permissions, and that the analysis job only
+# runs approved actions (no `run` steps).
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    if: github.repository == 'ai-runway/airunway' && github.event.repository.default_branch == github.ref_name
+    permissions:
+      # Signs the results published to api.scorecard.dev, which backs the
+      # README badge. Read access to this public repository needs no grant.
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
