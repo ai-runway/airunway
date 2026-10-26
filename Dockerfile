@@ -76,7 +76,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 LABEL org.opencontainers.image.title="AIRunway"
 LABEL org.opencontainers.image.description="Web-based platform for deploying and managing LLM frameworks on Kubernetes"
 LABEL org.opencontainers.image.source="https://github.com/ai-runway/airunway"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Copy the compiled binary and CLI tools used by installation routes
 COPY --from=builder /app/dist/airunway /airunway
