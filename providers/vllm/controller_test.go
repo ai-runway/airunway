@@ -353,7 +353,7 @@ func TestReconcileAddingFinalizerPreservesExplicitZeroReplicas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected reconcile error: %v", err)
 	}
-	if !result.Requeue {
+	if result.IsZero() {
 		t.Fatal("expected requeue after adding finalizer")
 	}
 
