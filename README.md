@@ -1,5 +1,7 @@
 # AI Runway
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ai-runway/airunway/badge)](https://scorecard.dev/viewer/?uri=github.com/ai-runway/airunway)
+
 <img src="./frontend/public/logo.png" alt="AI Runway Logo" width="200">
 
 Deploy and manage large language models on Kubernetes — no YAML required.
@@ -142,9 +144,11 @@ The same content also lives in [`docs/`](docs/) for in-repo browsing.
 
 ## Community
 
+We are a Cloud Native Computing Foundation sandbox project. Participation in the AI Runway community is governed by the [CNCF Code of Conduct](CODE_OF_CONDUCT.md).
+
 - **Slack:** Join the [CNCF Slack](https://slack.cncf.io/) workspace and find us in `#airunway`
 - **Issues:** Report bugs or request features in [GitHub Issues](https://github.com/ai-runway/airunway/issues)
-- **Roadmap:** Follow planned work on the [AI Runway project board](https://github.com/orgs/ai-runway/projects/2)
+- **Roadmap:** Follow planned work on the [AI Runway roadmap](https://github.com/orgs/ai-runway/projects/2) project board
 
 ## Contributing
 

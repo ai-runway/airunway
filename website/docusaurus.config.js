@@ -151,7 +151,17 @@ const config = {
             ],
           },
         ],
-        copyright: `Copyright © ${new Date().getFullYear()} The AI Runway Authors. Built with Docusaurus.`,
+        logo: {
+          alt: 'Cloud Native Computing Foundation',
+          src: 'img/cncf-white.svg',
+          href: 'https://www.cncf.io/',
+          width: 240,
+        },
+        copyright: `
+          <p>We are a Cloud Native Computing Foundation sandbox project.</p>
+          <p>Copyright AI Runway a Series of LF Projects, LLC</p>
+          <p>For website terms of use, trademark policy and other project policies please see <a href="https://lfprojects.org/policies/">lfprojects.org/policies/</a>.</p>
+        `,
       },
       prism: {
         theme: prismThemes.github,
