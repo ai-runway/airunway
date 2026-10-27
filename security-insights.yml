@@ -1,0 +1,111 @@
+header:
+  schema-version: 2.2.0
+  last-updated: '2026-10-23'
+  last-reviewed: '2026-10-23'
+  url: https://raw.githubusercontent.com/ai-runway/airunway/main/security-insights.yml
+
+project:
+  name: AI Runway
+  homepage: https://ai-runway.github.io/airunway/
+  roadmap: https://github.com/orgs/ai-runway/projects/2
+  administrators:
+    - name: Suraj Deshmukh
+      social: https://github.com/surajssd
+      primary: false
+    - name: Robbie Cronin
+      social: https://github.com/robert-cronin
+      primary: false
+    - name: Sertaç Özercan
+      social: https://github.com/sozercan
+      primary: true
+  repositories:
+    - name: airunway
+      url: https://github.com/ai-runway/airunway
+      comment: |
+        Controller, providers, web UI, Headlamp plugin and documentation for AI Runway.
+  documentation:
+    quickstart-guide: https://github.com/ai-runway/airunway#quick-start
+    detailed-guide: https://ai-runway.github.io/airunway/
+    code-of-conduct: https://github.com/ai-runway/airunway/blob/main/CODE_OF_CONDUCT.md
+    support-policy: https://github.com/ai-runway/airunway/blob/main/SECURITY.md#supported-versions
+  vulnerability-reporting:
+    reports-accepted: true
+    bug-bounty-available: false
+    policy: https://github.com/ai-runway/airunway/blob/main/SECURITY.md
+    comment: |
+      Report vulnerabilities privately through GitHub Security Advisories:
+      https://github.com/ai-runway/airunway/security/advisories/new
+
+repository:
+  url: https://github.com/ai-runway/airunway
+  status: active
+  bug-fixes-only: false
+  accepts-change-request: true
+  accepts-automated-change-request: true
+  no-third-party-packages: false
+  core-team:
+    - name: Suraj Deshmukh
+      social: https://github.com/surajssd
+      primary: false
+    - name: Robbie Cronin
+      social: https://github.com/robert-cronin
+      primary: false
+    - name: Sertaç Özercan
+      social: https://github.com/sozercan
+      primary: true
+  documentation:
+    contributing-guide: https://github.com/ai-runway/airunway/blob/main/CONTRIBUTING.md
+    dependency-management-policy: https://github.com/ai-runway/airunway/blob/main/docs/dependency-management.md
+    governance: https://github.com/ai-runway/airunway/blob/main/GOVERNANCE.md
+    security-policy: https://github.com/ai-runway/airunway/blob/main/SECURITY.md
+  license:
+    url: https://github.com/ai-runway/airunway/blob/main/LICENSE.md
+    expression: Apache-2.0
+  release:
+    automated-pipeline: true
+    distribution-points:
+      - uri: https://github.com/ai-runway/airunway/releases
+        comment: |
+          AI Runway binaries for Linux, macOS and Windows, with SHA-256 checksums.
+      - uri: https://github.com/orgs/ai-runway/packages?repo_name=airunway
+        comment: |
+          Container images published to ghcr.io/ai-runway/airunway.
+  security:
+    assessments:
+      self:
+        comment: |
+          A security self-assessment has not been completed yet.
+    tools:
+      - name: govulncheck
+        type: SCA
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: true
+          release: false
+        results: {}
+        comment: |
+          Runs against the controller and every provider Go module in CI, and on demand with make govulncheck in each module. Findings are reported without failing the build.
+      - name: Dependabot
+        type: SCA
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: false
+          release: false
+        results: {}
+        comment: |
+          Alerts and security updates are enabled. Version updates run weekly for GitHub Actions and the npm packages in the root workspace.
+      - name: OpenSSF Scorecard
+        type: other
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: true
+          release: false
+        results: {}
+        comment: |
+          Runs weekly and on every push to main. Results: https://scorecard.dev/viewer/?uri=github.com/ai-runway/airunway

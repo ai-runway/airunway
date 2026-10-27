@@ -224,7 +224,7 @@ func TestTransformAggregatedPrefixCachingFlag(t *testing.T) {
 	// EnablePrefixCaching=true should emit --enable-prefix-caching (the CRD
 	// default applied by the API server before reaching the provider).
 	mdOn := newTestMD("test-model", "default")
-	mdOn.Spec.Engine.EnablePrefixCaching = true
+	mdOn.Spec.Engine.EnablePrefixCaching = boolPtr(true)
 	resOn, err := tr.Transform(context.Background(), mdOn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -241,7 +241,7 @@ func TestTransformAggregatedPrefixCachingFlag(t *testing.T) {
 	// Explicitly disabled should emit --no-enable-prefix-caching so the
 	// provider's choice survives any vLLM-side default flips.
 	mdOff := newTestMD("test-model", "default")
-	mdOff.Spec.Engine.EnablePrefixCaching = false
+	mdOff.Spec.Engine.EnablePrefixCaching = boolPtr(false)
 	resOff, err := tr.Transform(context.Background(), mdOff)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

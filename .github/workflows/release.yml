@@ -8,8 +8,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   REGISTRY: ghcr.io
@@ -20,6 +19,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     name: Build and Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,6 +118,9 @@ jobs:
   docker:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,6 +167,9 @@ jobs:
   controller-docker:
     name: Build and Push Controller Docker Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     # The in-process container provider reports a new build revision as soon as
     # this image is deployed. Publish the matching immutable runtime image tags
     # first so agents do not transiently fail to pull that revision.
@@ -233,6 +240,9 @@ jobs:
   model-downloader-docker:
     name: Build and Push Model Downloader Docker Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -277,6 +287,9 @@ jobs:
   agent-images-docker:
     name: Build and Push ${{ matrix.name }} Agent Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -377,6 +390,9 @@ jobs:
   agent-provider-images-docker:
     name: Build and Push ${{ matrix.name }} Agent Provider Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     # The standalone container provider reports the same revision contract as
     # the combined controller, so it must observe the same publication barrier.
     needs: agent-images-docker
