@@ -19,7 +19,6 @@ These aren't pinned yet:
 
 - CI and the release workflow install Bun with `bun-version: latest`.
 - The end-to-end workflows install kind with `go install sigs.k8s.io/kind@latest`.
-- The gateway end-to-end workflow installs the latest Gateway API CRDs and Istio release, not the versions in `versions.env`.
 - The model downloader image installs `click` without a version.
 
 ## Adding a dependency
