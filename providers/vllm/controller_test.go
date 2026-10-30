@@ -325,6 +325,63 @@ func TestReconcileHappyPathCreatesDeploymentAndService(t *testing.T) {
 	}
 }
 
+func TestReconcileAddingFinalizerPreservesExplicitZeroReplicas(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test-model", "default")
+	md.Spec.Scaling = &airunwayv1alpha1.ScalingSpec{Replicas: 0}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md).
+		WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				// A full update drops the zero value through omitempty; the API server
+				// then applies the CRD's default of one replica.
+				if updated, ok := obj.(*airunwayv1alpha1.ModelDeployment); ok && updated.Spec.Scaling != nil && updated.Spec.Scaling.Replicas == 0 {
+					updated.Spec.Scaling.Replicas = 1
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := NewVLLMProviderReconciler(c, scheme)
+	r.ImageResolver = successfulFakeResolver(fakeResolvedImage(DefaultVLLMImage, "sha256:default"))
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-model"}}
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if result.IsZero() {
+		t.Fatal("expected requeue after adding finalizer")
+	}
+
+	var got airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-model"}, &got); err != nil {
+		t.Fatalf("failed to get ModelDeployment: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&got, FinalizerName) {
+		t.Errorf("expected finalizer %s to be added", FinalizerName)
+	}
+	if got.Spec.Scaling == nil || got.Spec.Scaling.Replicas != 0 {
+		t.Errorf("expected explicit zero replicas to be preserved, got scaling %+v", got.Spec.Scaling)
+	}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("unexpected reconcile error after adding finalizer: %v", err)
+	}
+	deploy := &unstructured.Unstructured{}
+	deploy.SetGroupVersionKind(deploymentGVK)
+	if err := c.Get(context.Background(), req.NamespacedName, deploy); err != nil {
+		t.Fatalf("expected Deployment to be created: %v", err)
+	}
+	replicas, found, err := unstructured.NestedInt64(deploy.Object, "spec", "replicas")
+	if err != nil || !found || replicas != 0 {
+		t.Errorf("expected created Deployment to have 0 replicas, got %d (found=%v, err=%v)", replicas, found, err)
+	}
+}
+
 func TestReconcileOwnershipConflictNamesOwner(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test-model", "default")

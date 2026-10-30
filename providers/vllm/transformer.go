@@ -104,7 +104,7 @@ func (t *Transformer) Transform(ctx context.Context, md *airunwayv1alpha1.ModelD
 // transformAggregated creates a single Deployment + Service for aggregated serving.
 func (t *Transformer) transformAggregated(md *airunwayv1alpha1.ModelDeployment) ([]*unstructured.Unstructured, error) {
 	replicas := int64(1)
-	if md.Spec.Scaling != nil && md.Spec.Scaling.Replicas > 0 {
+	if md.Spec.Scaling != nil && md.Spec.Scaling.Replicas >= 0 {
 		replicas = int64(md.Spec.Scaling.Replicas)
 	}
 
