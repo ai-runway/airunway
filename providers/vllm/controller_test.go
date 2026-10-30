@@ -560,10 +560,14 @@ func TestSyncStatusRunningUpdatesMessage(t *testing.T) {
 	deploy.SetGroupVersionKind(deploymentGVK)
 	deploy.SetName("test")
 	deploy.SetNamespace("default")
+	deploy.SetGeneration(1)
 	deploy.Object["spec"] = map[string]interface{}{"replicas": int64(1)}
 	deploy.Object["status"] = map[string]interface{}{
-		"readyReplicas":     int64(1),
-		"availableReplicas": int64(1),
+		"observedGeneration": int64(1),
+		"replicas":           int64(1),
+		"readyReplicas":      int64(1),
+		"availableReplicas":  int64(1),
+		"updatedReplicas":    int64(1),
 		"conditions": []interface{}{
 			map[string]interface{}{"type": "Available", "status": "True"},
 		},
@@ -634,5 +638,64 @@ func TestSyncStatusStaleAvailableConditionIsNotReady(t *testing.T) {
 	ready := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "DeploymentInProgress" {
 		t.Errorf("Ready = %+v, want False with reason DeploymentInProgress", ready)
+	}
+}
+
+func TestReconcileBlockedCurrentRolloutSurfacesReplicaFailure(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test", "default")
+	md.Generation = 4
+	md.UID = types.UID("test-uid")
+	controllerutil.AddFinalizer(md, FinalizerName)
+
+	deploy := ownedDeploymentForMD(md)
+	deploy.SetGeneration(4)
+	deploy.Object["spec"] = map[string]any{"replicas": int64(2)}
+	deploy.Object["status"] = map[string]any{
+		"observedGeneration": int64(4),
+		"replicas":           int64(2),
+		"readyReplicas":      int64(2),
+		"availableReplicas":  int64(2),
+		"updatedReplicas":    int64(0),
+		"conditions": []any{
+			map[string]any{"type": "Available", "status": "True"},
+			map[string]any{"type": "Progressing", "status": "True"},
+			map[string]any{
+				"type":    "ReplicaFailure",
+				"status":  "True",
+				"reason":  "FailedCreate",
+				"message": "exceeded quota: requested GPU capacity is unavailable",
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(md, deploy, ownedServiceForMD(md)).
+		WithStatusSubresource(md).WithInterceptorFuncs(interceptor.Funcs{
+		// Keep the observed Deployment snapshot while simulating successful resource applies.
+		Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+			return nil
+		},
+	}).Build()
+	r := NewVLLMProviderReconciler(c, scheme)
+	r.ImageResolver = successfulFakeResolver(fakeResolvedImage(DefaultVLLMImage, "sha256:default"))
+
+	key := types.NamespacedName{Name: md.Name, Namespace: md.Namespace}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := c.Get(context.Background(), key, md); err != nil {
+		t.Fatalf("failed to get persisted ModelDeployment: %v", err)
+	}
+	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+		t.Errorf("phase = %s, want Deploying", md.Status.Phase)
+	}
+	if ready := meta.FindStatusCondition(md.Status.Conditions, airunwayv1alpha1.ConditionTypeReady); ready == nil ||
+		ready.Status != metav1.ConditionFalse ||
+		ready.Reason != "DeploymentInProgress" ||
+		ready.ObservedGeneration != md.Generation {
+		t.Errorf("Ready condition = %+v, want current-generation False/DeploymentInProgress", ready)
+	}
+	if !strings.Contains(md.Status.Message, "exceeded quota") {
+		t.Errorf("ModelDeployment message = %q, want child ReplicaFailure details", md.Status.Message)
 	}
 }

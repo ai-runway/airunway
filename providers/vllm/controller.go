@@ -46,6 +46,8 @@ const (
 	// ProviderName is the name of this provider
 	ProviderName = "vllm"
 
+	deploymentWaitingMessage = "Deployments created, waiting for pods to be ready"
+
 	// imageVerificationNotImplementedMessage records the current verification boundary for Direct vLLM images.
 	imageVerificationNotImplementedMessage = "Image attestation/signature verification is not implemented by this controller"
 
@@ -443,7 +445,9 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning &&
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
-		md.Status.Message = "Deployments created, waiting for pods to be ready"
+		if md.Status.Message == "" {
+			md.Status.Message = deploymentWaitingMessage
+		}
 	}
 
 	if err := r.Status().Update(ctx, &md); err != nil {
@@ -627,7 +631,7 @@ func (r *VLLMProviderReconciler) syncStatus(ctx context.Context, md *airunwayv1a
 	} else {
 		// Do not retain a prior healthy message when current replica evidence
 		// downgrades the Deployment to an in-progress state.
-		md.Status.Message = "Deployments created, waiting for pods to be ready"
+		md.Status.Message = deploymentWaitingMessage
 	}
 	md.Status.Replicas = statusResult.Replicas
 	md.Status.Endpoint = statusResult.Endpoint

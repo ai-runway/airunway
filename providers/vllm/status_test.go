@@ -13,11 +13,13 @@ func newTestDeployment(name, namespace string) *unstructured.Unstructured {
 	d.SetKind("Deployment")
 	d.SetName(name)
 	d.SetNamespace(namespace)
+	d.SetGeneration(1)
+	_ = unstructured.SetNestedField(d.Object, int64(1), "status", "observedGeneration")
 	return d
 }
 
-func setDeploymentConditions(d *unstructured.Unstructured, conditions []map[string]interface{}) {
-	condSlice := make([]interface{}, len(conditions))
+func setDeploymentConditions(d *unstructured.Unstructured, conditions []map[string]any) {
+	condSlice := make([]any, len(conditions))
 	for i, c := range conditions {
 		condSlice[i] = c
 	}
@@ -26,6 +28,8 @@ func setDeploymentConditions(d *unstructured.Unstructured, conditions []map[stri
 
 func setDeploymentReplicas(d *unstructured.Unstructured, desired, ready, available int64) {
 	_ = unstructured.SetNestedField(d.Object, desired, "spec", "replicas")
+	_ = unstructured.SetNestedField(d.Object, desired, "status", "replicas")
+	_ = unstructured.SetNestedField(d.Object, desired, "status", "updatedReplicas")
 	_ = unstructured.SetNestedField(d.Object, ready, "status", "readyReplicas")
 	_ = unstructured.SetNestedField(d.Object, available, "status", "availableReplicas")
 }
@@ -55,7 +59,7 @@ func TestTranslateStatusAvailableTrue(t *testing.T) {
 	st := NewStatusTranslator()
 	d := newTestDeployment("test", "default")
 	setDeploymentReplicas(d, 2, 2, 2)
-	setDeploymentConditions(d, []map[string]interface{}{
+	setDeploymentConditions(d, []map[string]any{
 		{"type": "Available", "status": "True"},
 		{"type": "Progressing", "status": "True"},
 	})
@@ -98,7 +102,7 @@ func TestTranslateStatusAvailableTrueRequiresCurrentReplicas(t *testing.T) {
 			if tt.setReplicas {
 				setDeploymentReplicas(d, tt.desired, tt.ready, tt.available)
 			}
-			setDeploymentConditions(d, []map[string]interface{}{
+			setDeploymentConditions(d, []map[string]any{
 				{"type": "Available", "status": "True"},
 				{"type": "Progressing", "status": "True"},
 			})
@@ -114,10 +118,75 @@ func TestTranslateStatusAvailableTrueRequiresCurrentReplicas(t *testing.T) {
 	}
 }
 
+func TestTranslateStatusAvailableTrueRequiresCurrentRollout(t *testing.T) {
+	tests := []struct {
+		name               string
+		totalReplicas      int64
+		updatedReplicas    int64
+		observedGeneration int64
+	}{
+		{name: "new revision has no replicas", totalReplicas: 2, updatedReplicas: 0, observedGeneration: 4},
+		{name: "new revision is only partially updated", totalReplicas: 2, updatedReplicas: 1, observedGeneration: 4},
+		{name: "old replicas remain", totalReplicas: 3, updatedReplicas: 2, observedGeneration: 4},
+		{name: "scale-down has excess updated replicas", totalReplicas: 3, updatedReplicas: 3, observedGeneration: 4},
+		{name: "deployment controller has not observed current generation", totalReplicas: 2, updatedReplicas: 2, observedGeneration: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDeployment("test", "default")
+			d.SetGeneration(4)
+			setDeploymentReplicas(d, 2, tt.totalReplicas, tt.totalReplicas)
+			_ = unstructured.SetNestedField(d.Object, tt.totalReplicas, "status", "replicas")
+			_ = unstructured.SetNestedField(d.Object, tt.updatedReplicas, "status", "updatedReplicas")
+			_ = unstructured.SetNestedField(d.Object, tt.observedGeneration, "status", "observedGeneration")
+			setDeploymentConditions(d, []map[string]any{
+				{"type": "Available", "status": "True"},
+				{"type": "Progressing", "status": "True"},
+			})
+
+			result, err := NewStatusTranslator().TranslateStatus(d)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+				t.Errorf("expected Deploying phase, got %s", result.Phase)
+			}
+		})
+	}
+}
+
+func TestTranslateStatusReplicaFailureIncludesCause(t *testing.T) {
+	d := newTestDeployment("test", "default")
+	setDeploymentReplicas(d, 2, 2, 2)
+	_ = unstructured.SetNestedField(d.Object, int64(0), "status", "updatedReplicas")
+	setDeploymentConditions(d, []map[string]any{
+		{"type": "Available", "status": "True"},
+		{"type": "Progressing", "status": "True"},
+		{
+			"type":    "ReplicaFailure",
+			"status":  "True",
+			"reason":  "FailedCreate",
+			"message": "exceeded quota for GPU requests",
+		},
+	})
+
+	result, err := NewStatusTranslator().TranslateStatus(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Phase != airunwayv1alpha1.DeploymentPhaseDeploying {
+		t.Fatalf("expected Deploying phase, got %s", result.Phase)
+	}
+	if result.Message != "FailedCreate: exceeded quota for GPU requests" {
+		t.Errorf("message = %q, want child ReplicaFailure reason and message", result.Message)
+	}
+}
+
 func TestTranslateStatusProgressingDeadlineExceeded(t *testing.T) {
 	st := NewStatusTranslator()
 	d := newTestDeployment("test", "default")
-	setDeploymentConditions(d, []map[string]interface{}{
+	setDeploymentConditions(d, []map[string]any{
 		{
 			"type":    "Progressing",
 			"status":  "False",
@@ -138,11 +207,47 @@ func TestTranslateStatusProgressingDeadlineExceeded(t *testing.T) {
 	}
 }
 
+func TestTranslateStatusProgressDeadlinePreservesReplicaFailure(t *testing.T) {
+	for _, timeoutMessage := range []string{"ReplicaSet has timed out progressing.", ""} {
+		t.Run(timeoutMessage, func(t *testing.T) {
+			d := newTestDeployment("test", "default")
+			setDeploymentReplicas(d, 2, 2, 2)
+			_ = unstructured.SetNestedField(d.Object, int64(0), "status", "updatedReplicas")
+			setDeploymentConditions(d, []map[string]any{
+				{"type": "Available", "status": "True"},
+				{
+					"type": "Progressing", "status": "False",
+					"reason": "ProgressDeadlineExceeded", "message": timeoutMessage,
+				},
+				{
+					"type": "ReplicaFailure", "status": "True",
+					"reason": "FailedCreate", "message": "exceeded quota for GPU requests",
+				},
+			})
+
+			result, err := NewStatusTranslator().TranslateStatus(d)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
+				t.Errorf("expected Failed phase, got %s", result.Phase)
+			}
+			if timeoutMessage == "" {
+				timeoutMessage = "deployment timed out waiting for rollout"
+			}
+			want := timeoutMessage + "; FailedCreate: exceeded quota for GPU requests"
+			if result.Message != want {
+				t.Errorf("message = %q, want %q", result.Message, want)
+			}
+		})
+	}
+}
+
 func TestTranslateStatusProgressing(t *testing.T) {
 	st := NewStatusTranslator()
 	d := newTestDeployment("test", "default")
 	setDeploymentReplicas(d, 3, 1, 1)
-	setDeploymentConditions(d, []map[string]interface{}{
+	setDeploymentConditions(d, []map[string]any{
 		{"type": "Available", "status": "False"},
 		{"type": "Progressing", "status": "True"},
 	})
@@ -194,7 +299,7 @@ func TestTranslateStatusResourceName(t *testing.T) {
 func TestTranslateStatusAvailableFalseWithMessage(t *testing.T) {
 	st := NewStatusTranslator()
 	d := newTestDeployment("test", "default")
-	setDeploymentConditions(d, []map[string]interface{}{
+	setDeploymentConditions(d, []map[string]any{
 		{
 			"type":    "Available",
 			"status":  "False",
