@@ -5,9 +5,11 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	airunwayv1alpha1 "github.com/ai-runway/airunway/controller/api/v1alpha1"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 func newModelDeploymentForProviderWatch(name, namespace, specProvider, statusProvider string) *airunwayv1alpha1.ModelDeployment {
@@ -75,4 +77,32 @@ func TestMapProviderConfigToModelDeployments(t *testing.T) {
 		"default/selected-provider",
 		"default/pinned-provider",
 	)
+}
+
+func TestMapInferencePoolToModelDeployments(t *testing.T) {
+	scheme := newTestScheme()
+	owned := newModelDeploymentForProviderWatch("owned", "default", "", "")
+	referenced := newModelDeploymentForProviderWatch("referenced", "default", "", "")
+	referenced.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "shared-pool"}
+	otherPool := newModelDeploymentForProviderWatch("other-pool", "default", "", "")
+	otherPool.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "different-pool"}
+	otherNamespace := newModelDeploymentForProviderWatch("other-namespace", "elsewhere", "", "")
+	otherNamespace.Spec.Gateway = &airunwayv1alpha1.GatewaySpec{PoolRef: "shared-pool"}
+
+	reconciler := newTestReconciler(scheme, nil, owned, referenced, otherPool, otherNamespace)
+	controller := true
+	pool := &inferencev1.InferencePool{ObjectMeta: metav1.ObjectMeta{
+		Name:      "shared-pool",
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: airunwayv1alpha1.GroupVersion.String(),
+			Kind:       "ModelDeployment",
+			Name:       owned.Name,
+			UID:        types.UID("owned-uid"),
+			Controller: &controller,
+		}},
+	}}
+
+	requests := reconciler.mapInferencePoolToModelDeployments(context.Background(), pool)
+	assertRequestsMatch(t, requests, "default/owned", "default/referenced")
 }
