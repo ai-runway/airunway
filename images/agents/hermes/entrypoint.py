@@ -6,6 +6,7 @@ import hmac
 import http.client
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -30,6 +31,11 @@ UPSTREAM_REQUEST_TIMEOUT_SECONDS = 600.0
 GATEWAY_WAIT_POLL_SECONDS = 0.1
 GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 GATEWAY_KILL_TIMEOUT_SECONDS = 5.0
+HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
+    {"connection", "content-length", "transfer-encoding"}
+)
+# RFC 9110 field-name token characters.
+HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 class RequestReadTimeout(TimeoutError):
@@ -244,6 +250,42 @@ def internal_port_for(external_port: int) -> int:
     return DEFAULT_INTERNAL_PORT
 
 
+def write_private_file(path: Path, content: str) -> None:
+    """Atomically replace path with an owner-only file holding content.
+
+    The temporary file is created with mode 0600, so the secrets it carries
+    are never readable by other users, even before the rename.
+    """
+    temp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temp_path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temp_path, path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def forwardable_response_headers(
+    headers: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Return upstream response headers that are safe to relay verbatim.
+
+    Hop-by-hop headers are dropped, as is any header whose name is not a valid
+    token or whose value contains CR, LF or NUL (for example an obs-folded
+    value), so an upstream response can never inject extra header lines.
+    """
+    return [
+        (key, value)
+        for key, value in headers
+        if key.lower() not in HOP_BY_HOP_RESPONSE_HEADERS
+        and HEADER_NAME_PATTERN.fullmatch(key)
+        and not any(char in value for char in "\r\n\0")
+    ]
+
+
 def write_runtime_config(
     config: dict[str, Any], api_key: str, internal_port: int
 ) -> None:
@@ -270,8 +312,7 @@ def write_runtime_config(
         f"    key: {json.dumps(api_key)}\n"
         "    model_name: hermes-agent\n"
     )
-    (STATE_DIR / "config.yaml").write_text(payload, encoding="utf-8")
-    (STATE_DIR / "config.yaml").chmod(0o600)
+    write_private_file(STATE_DIR / "config.yaml", payload)
     system_prompt = config.get("systemPrompt")
     if isinstance(system_prompt, str) and system_prompt.strip():
         (STATE_DIR / "SOUL.md").write_text(system_prompt.strip() + "\n", encoding="utf-8")
@@ -395,13 +436,10 @@ class ProxyHandler(HeaderDeadlineHandler):
                 response = connection.getresponse()
                 payload = response.read()
                 self.send_response(response.status)
-                for key, value in response.getheaders():
-                    if key.lower() not in {
-                        "connection",
-                        "content-length",
-                        "transfer-encoding",
-                    }:
-                        self.send_header(key, value)
+                for key, value in forwardable_response_headers(
+                    response.getheaders()
+                ):
+                    self.send_header(key, value)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
