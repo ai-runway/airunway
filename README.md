@@ -1,6 +1,6 @@
 # AI Runway
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ai-runway/airunway/badge)](https://scorecard.dev/viewer/?uri=github.com/ai-runway/airunway)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ai-runway/airunway/badge)](https://scorecard.dev/viewer/?uri=github.com/ai-runway/airunway) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16329/badge)](https://www.bestpractices.dev/projects/16329)
 
 <img src="./frontend/public/logo.png" alt="AI Runway Logo" width="200">
 
