@@ -40,6 +40,26 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         return
 
 
+class _RawUpstreamHandler(BaseHTTPRequestHandler):
+    """Replies with raw header bytes that a well-behaved server would not send."""
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        payload = b'{"status":"ok"}'
+        self.wfile.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"X-Upstream: kept\r\n"
+            b"X-Folded: first\r\n Injected: header\r\n"
+            b"Content-Length: " + str(len(payload)).encode() + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n" + payload
+        )
+        self.close_connection = True
+
+    def log_message(self, _fmt: str, *_args: object) -> None:
+        return
+
+
 class _ExitedGateway:
     def __init__(self, return_code: int) -> None:
         self.return_code = return_code
@@ -114,6 +134,98 @@ class HermesEntrypointTest(unittest.TestCase):
             config = (Path(tmpdir) / "config.yaml").read_text(encoding="utf-8")
         self.assertIn("platform_toolsets:\n  api_server: []\n", config)
         self.assertIn("port: 8643\n", config)
+
+    def test_runtime_config_is_owner_only_from_creation(self) -> None:
+        created: list[int] = []
+        real_open = os.open
+
+        def recording_open(path, flags, mode=0o777, *args, **kwargs):
+            fd = real_open(path, flags, mode, *args, **kwargs)
+            if flags & os.O_CREAT:
+                created.append(os.fstat(fd).st_mode & 0o777)
+            return fd
+
+        previous_umask = os.umask(0)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+                entrypoint, "STATE_DIR", Path(tmpdir)
+            ), patch.object(entrypoint.os, "open", recording_open), patch.dict(
+                os.environ,
+                {
+                    "OPENAI_MODEL": "test-model",
+                    "OPENAI_BASE_URL": "http://models.invalid/v1",
+                    "OPENAI_API_KEY": "model-key",
+                },
+                clear=True,
+            ):
+                config_path = Path(tmpdir) / "config.yaml"
+                config_path.write_text("stale\n", encoding="utf-8")
+                config_path.chmod(0o644)
+                entrypoint.write_runtime_config({}, "internal-key", 8643)
+                mode = config_path.stat().st_mode & 0o777
+                contents = config_path.read_text(encoding="utf-8")
+                leftovers = sorted(p.name for p in Path(tmpdir).iterdir())
+        finally:
+            os.umask(previous_umask)
+        self.assertEqual(created, [0o600])
+        self.assertEqual(mode, 0o600)
+        self.assertIn('key: "internal-key"', contents)
+        self.assertEqual(leftovers, ["config.yaml"])
+
+    def test_forwardable_response_headers_drop_line_breaks(self) -> None:
+        self.assertEqual(
+            entrypoint.forwardable_response_headers(
+                [
+                    ("Content-Type", "application/json"),
+                    ("X-Request-Id", "abc"),
+                    ("Connection", "keep-alive"),
+                    ("Content-Length", "10"),
+                    ("Transfer-Encoding", "chunked"),
+                    ("X-Folded", "first\r\n Injected: header"),
+                    ("X-Newline", "first\nInjected: header"),
+                    ("X-Return", "first\rInjected: header"),
+                    ("X-Nul", "first\0second"),
+                    ("X-Bad\r\nInjected", "value"),
+                    ("Bad Name", "value"),
+                ]
+            ),
+            [("Content-Type", "application/json"), ("X-Request-Id", "abc")],
+        )
+
+    def test_proxy_drops_upstream_headers_with_line_breaks(self) -> None:
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), _RawUpstreamHandler)
+        entrypoint.ProxyHandler.internal_key = "internal-key"
+        entrypoint.ProxyHandler.access_token = "external-key"
+        entrypoint.ProxyHandler.internal_port = upstream.server_port
+        proxy = entrypoint.BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0), entrypoint.ProxyHandler
+        )
+        threads = [
+            threading.Thread(target=upstream.serve_forever, daemon=True),
+            threading.Thread(target=proxy.serve_forever, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{proxy.server_port}/v1/models",
+                headers={"Authorization": "Bearer external-key"},
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(json.load(response), {"status": "ok"})
+                self.assertEqual(response.headers["X-Upstream"], "kept")
+                self.assertEqual(
+                    response.headers["Content-Type"], "application/json"
+                )
+                self.assertIsNone(response.headers["X-Folded"])
+                self.assertIsNone(response.headers["Injected"])
+        finally:
+            proxy.shutdown()
+            upstream.shutdown()
+            proxy.server_close()
+            upstream.server_close()
+            for thread in threads:
+                thread.join(timeout=5)
 
     def test_proxy_authenticates_and_bounds_the_public_surface(self) -> None:
         upstream = ThreadingHTTPServer(("127.0.0.1", 0), _UpstreamHandler)
