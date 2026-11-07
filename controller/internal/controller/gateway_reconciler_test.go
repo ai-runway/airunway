@@ -1271,6 +1271,128 @@ func TestGateway_EnsurePreservesGatewayNamespaceOnSameToSelector(t *testing.T) {
 	}
 }
 
+// TestGateway_EnsureHealsMissingGatewayNamespaceWithoutPatchChurn covers the
+// upgrade drift from before issue #333: the tenant namespace is already present,
+// but the Selector omitted the Gateway's own namespace. The next reconcile must
+// repair the Selector, and subsequent reconciles must be no-ops.
+func TestGateway_EnsureHealsMissingGatewayNamespaceWithoutPatchChurn(t *testing.T) {
+	multiListener := gwWithNamespaceSelector("my-gateway", "gateway-ns", "team-a", "team-b")
+	secondListener := multiListener.Spec.Listeners[0]
+	secondListener.Name = "https"
+	secondListener.Port = 443
+	secondListener.Protocol = gatewayv1.HTTPSProtocolType
+	multiListener.Spec.Listeners = append(multiListener.Spec.Listeners, secondListener)
+
+	legacyMatchLabels := gwWithNamespaceSelector("my-gateway", "gateway-ns", "team-b")
+	legacyMatchLabels.Spec.Listeners[0].AllowedRoutes.Namespaces.Selector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{"kubernetes.io/metadata.name": "team-b"},
+	}
+
+	tests := []struct {
+		name string
+		gw   *gatewayv1.Gateway
+		want []string
+	}{
+		{
+			name: "single tenant",
+			gw:   gwWithNamespaceSelector("my-gateway", "gateway-ns", "team-b"),
+			want: []string{"gateway-ns", "team-b"},
+		},
+		{
+			name: "multiple tenants and listeners",
+			gw:   multiListener,
+			want: []string{"gateway-ns", "team-a", "team-b"},
+		},
+		{
+			name: "legacy matchLabels selector",
+			gw:   legacyMatchLabels,
+			want: []string{"gateway-ns", "team-b"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			md := newModelDeployment("test-model", "team-b")
+			detector := fakeDetector(true, "my-gateway", "gateway-ns")
+			detector.PatchGateway = true
+
+			base := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{}).
+				WithObjects(md, tc.gw).
+				Build()
+
+			patchCalls := 0
+			c := interceptor.NewClient(base, interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*gatewayv1.Gateway); ok {
+						patchCalls++
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			})
+
+			r := &ModelDeploymentReconciler{
+				Client:           c,
+				Scheme:           scheme,
+				GatewayDetector:  detector,
+				ProviderResolver: gateway.NewInferenceProviderConfigResolver(c),
+			}
+			ctx := context.Background()
+			gwConfig := &gateway.GatewayConfig{GatewayName: "my-gateway", GatewayNamespace: "gateway-ns"}
+
+			if err := r.ensureGatewayAllowsNamespace(ctx, gwConfig, "team-b"); err != nil {
+				t.Fatalf("first ensureGatewayAllowsNamespace failed: %v", err)
+			}
+			if patchCalls != 1 {
+				t.Fatalf("expected one self-heal patch, got %d", patchCalls)
+			}
+
+			var healed gatewayv1.Gateway
+			if err := r.Get(ctx, types.NamespacedName{Name: "my-gateway", Namespace: "gateway-ns"}, &healed); err != nil {
+				t.Fatalf("failed to get healed Gateway: %v", err)
+			}
+			for i, listener := range healed.Spec.Listeners {
+				if listener.AllowedRoutes == nil || listener.AllowedRoutes.Namespaces == nil || listener.AllowedRoutes.Namespaces.Selector == nil {
+					t.Fatalf("listener[%d]: expected namespace Selector after self-heal", i)
+				}
+				namespaces := listener.AllowedRoutes.Namespaces
+				if namespaces.From == nil || *namespaces.From != gatewayv1.NamespacesFromSelector {
+					t.Fatalf("listener[%d]: expected from=Selector after self-heal, got %v", i, namespaces.From)
+				}
+				selector := namespaces.Selector
+				if len(selector.MatchLabels) != 0 {
+					t.Fatalf("listener[%d]: expected legacy matchLabels to be removed, got %v", i, selector.MatchLabels)
+				}
+				if len(selector.MatchExpressions) != 1 {
+					t.Fatalf("listener[%d]: expected one matchExpression, got %v", i, selector.MatchExpressions)
+				}
+				expression := selector.MatchExpressions[0]
+				if expression.Key != "kubernetes.io/metadata.name" || expression.Operator != metav1.LabelSelectorOpIn {
+					t.Fatalf("listener[%d]: unexpected namespace matchExpression: %v", i, expression)
+				}
+				values := expression.Values
+				if len(values) != len(tc.want) {
+					t.Fatalf("listener[%d]: expected healed selector values %v, got %v", i, tc.want, values)
+				}
+				for j := range tc.want {
+					if values[j] != tc.want[j] {
+						t.Fatalf("listener[%d]: expected healed selector values %v, got %v", i, tc.want, values)
+					}
+				}
+			}
+
+			if err := r.ensureGatewayAllowsNamespace(ctx, gwConfig, "team-b"); err != nil {
+				t.Fatalf("second ensureGatewayAllowsNamespace failed: %v", err)
+			}
+			if patchCalls != 1 {
+				t.Fatalf("expected repeat reconcile to avoid another patch, got %d total patches", patchCalls)
+			}
+		})
+	}
+}
+
 // TestGateway_EnsureRetriesOnConflictAndPreservesUnion proves the read-modify-write
 // is race-safe: when a concurrent writer adds a namespace and bumps the
 // resourceVersion between our Get and Patch, the optimistic-lock Patch conflicts,
