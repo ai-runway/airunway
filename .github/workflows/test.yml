@@ -502,6 +502,16 @@ jobs:
       - name: make test
         run: make -C providers/${{ matrix.provider }} test
 
+      - name: Run KAITO real API-server migration tests
+        if: matrix.provider == 'kaito'
+        timeout-minutes: 10
+        run: |
+          # Pin the installer from controller-runtime release-0.23 and Kubernetes assets.
+          make -C controller envtest ENVTEST_VERSION=v0.0.0-20260305142021-f9589b9f2b9d
+          KUBEBUILDER_ASSETS="$(controller/bin/setup-envtest use 1.35.0 --bin-dir "$RUNNER_TEMP/kaito-envtest" -p path)"
+          export KUBEBUILDER_ASSETS
+          make -C providers/kaito test-integration
+
   controller-unit-tests:
     runs-on: ubuntu-latest
 

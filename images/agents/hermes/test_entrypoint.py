@@ -256,6 +256,14 @@ class HermesEntrypointTest(unittest.TestCase):
         health_count_lock = threading.Lock()
         health_capacity_reached = threading.Event()
         release_health = threading.Event()
+        request_finished = threading.Event()
+
+        class NotifyingServer(entrypoint.BoundedThreadingHTTPServer):
+            def process_request_thread(
+                self, request: socket.socket, client_address: tuple[str, int]
+            ) -> None:
+                super().process_request_thread(request, client_address)
+                request_finished.set()
 
         class BlockingHealthHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -279,7 +287,7 @@ class HermesEntrypointTest(unittest.TestCase):
         entrypoint.ProxyHandler.internal_key = "internal-key"
         entrypoint.ProxyHandler.access_token = "external-key"
         entrypoint.ProxyHandler.internal_port = upstream.server_port
-        proxy = entrypoint.BoundedThreadingHTTPServer(
+        proxy = NotifyingServer(
             ("127.0.0.1", 0), entrypoint.ProxyHandler, max_workers=1
         )
         server_threads = [
@@ -316,6 +324,10 @@ class HermesEntrypointTest(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, HTTPStatus.SERVICE_UNAVAILABLE)
             raised.exception.close()
+            # The client can receive the 503 before the server releases its
+            # connection slot. The admitted health requests are still blocked,
+            # so this completion belongs to the rejected probe.
+            self.assertTrue(request_finished.wait(timeout=1))
 
             work_request = urllib.request.Request(
                 f"http://127.0.0.1:{proxy.server_port}/v1/models",

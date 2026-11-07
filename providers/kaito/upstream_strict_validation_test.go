@@ -47,15 +47,15 @@ import (
 // server's behaviour — the fake client has no structural schema and cannot prune, which
 // is exactly why no pre-existing test caught this bug.
 //
-// KAITO writes via Create on first reconcile and a merge Patch thereafter (rather than a
-// full replace), so both paths are covered.
+// KAITO writes via Create on first reconcile and SSA Apply patches thereafter, so both
+// paths are covered.
 
 func kaitoTestOwner() []metav1.OwnerReference {
 	return []metav1.OwnerReference{{
 		APIVersion: airunwayv1alpha1.GroupVersion.String(),
-		Kind:       "ModelDeployment",
+		Kind:       testModelDeploymentKind,
 		Name:       "test",
-		UID:        types.UID("test-uid"),
+		UID:        types.UID(testUID),
 	}}
 }
 
@@ -63,7 +63,7 @@ func kaitoTestMD() *airunwayv1alpha1.ModelDeployment {
 	md := &airunwayv1alpha1.ModelDeployment{}
 	md.Name = "test"
 	md.Namespace = "default"
-	md.UID = types.UID("test-uid")
+	md.UID = types.UID(testUID)
 	return md
 }
 
@@ -90,7 +90,7 @@ func TestUpstreamCreateUsesStrictFieldValidation(t *testing.T) {
 
 	var got string
 	var called bool
-	c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			called = true
 			o := &client.CreateOptions{}
@@ -98,7 +98,7 @@ func TestUpstreamCreateUsesStrictFieldValidation(t *testing.T) {
 				opt.ApplyToCreate(o)
 			}
 			got = o.FieldValidation
-			return nil
+			return cl.Create(ctx, obj, opts...)
 		},
 	}).Build()
 
@@ -125,7 +125,7 @@ func TestUpstreamPatchUsesStrictFieldValidation(t *testing.T) {
 
 	var got string
 	var called bool
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				called = true
@@ -134,7 +134,7 @@ func TestUpstreamPatchUsesStrictFieldValidation(t *testing.T) {
 					opt.ApplyToPatch(o)
 				}
 				got = o.FieldValidation
-				return nil
+				return cl.Patch(ctx, obj, patch, opts...)
 			},
 		}).Build()
 
@@ -409,7 +409,7 @@ func TestReconcileTransformFailureClearsStaleStatus(t *testing.T) {
 func TestReconcileTransientWriteFailurePreservesLastKnownStatus(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = types.UID("test-uid")
+	md.UID = types.UID(testUID)
 	controllerutil.AddFinalizer(md, FinalizerName)
 	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
 	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "stale-svc", Port: 8000}
@@ -478,7 +478,7 @@ func TestReconcileTransientWriteFailurePreservesLastKnownStatus(t *testing.T) {
 			readyReason = cond.Reason
 		}
 	}
-	if createdReason != "CreateFailed" {
+	if createdReason != testCreateFailedReason {
 		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
 	}
 	if createdStatus != metav1.ConditionFalse {
@@ -503,7 +503,7 @@ func TestReconcileTransientWriteFailurePreservesLastKnownStatus(t *testing.T) {
 func TestReconcileTransientWriteFailureOnUnreadyWorkspaceFailsClosed(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = types.UID("test-uid")
+	md.UID = types.UID(testUID)
 	controllerutil.AddFinalizer(md, FinalizerName)
 	seedKaitoStaleServingStatus(md)
 
@@ -551,7 +551,7 @@ func TestReconcileTransientWriteFailureOnUnreadyWorkspaceFailsClosed(t *testing.
 func TestReconcileTerminatingWorkspaceTransientPatchFailsClosed(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = types.UID("test-uid")
+	md.UID = types.UID(testUID)
 	controllerutil.AddFinalizer(md, FinalizerName)
 	seedKaitoStaleServingStatus(md)
 
@@ -602,7 +602,7 @@ func TestReconcileTerminatingWorkspaceTransientPatchFailsClosed(t *testing.T) {
 func TestReconcileTransientWorkspaceGetFailureFailsClosed(t *testing.T) {
 	scheme := newSchemeWithWorkspace()
 	md := newMDForController("test", "default")
-	md.UID = types.UID("test-uid")
+	md.UID = types.UID(testUID)
 	controllerutil.AddFinalizer(md, FinalizerName)
 	seedKaitoStaleServingStatus(md)
 
@@ -682,7 +682,7 @@ func assertKaitoPromptRetryFailedClosed(t *testing.T, c client.Client, res ctrl.
 	if ready == nil || ready.Status != metav1.ConditionFalse {
 		t.Errorf("Ready = %+v, want False", ready)
 	}
-	if created == nil || created.Status != metav1.ConditionFalse || created.Reason != "CreateFailed" {
+	if created == nil || created.Status != metav1.ConditionFalse || created.Reason != testCreateFailedReason {
 		t.Errorf("ResourceCreated = %+v, want False reason CreateFailed", created)
 	}
 	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
@@ -703,7 +703,7 @@ func assertKaitoPromptRetryFailedClosed(t *testing.T, c client.Client, res ctrl.
 func TestReconcileOwnedPatchConflictRetriesPromptly(t *testing.T) {
 	scheme := newScheme()
 	md := newMDForController("test", "default")
-	md.UID = types.UID("test-uid")
+	md.UID = types.UID(testUID)
 	controllerutil.AddFinalizer(md, FinalizerName)
 	md.Status.Phase = airunwayv1alpha1.DeploymentPhaseRunning
 	md.Status.Endpoint = &airunwayv1alpha1.EndpointStatus{Service: "live-svc", Port: 8000}
@@ -780,7 +780,7 @@ func TestReconcileOwnedPatchConflictRetriesPromptly(t *testing.T) {
 			ready = condition
 		}
 	}
-	if created == nil || created.Reason != "ResourceConflict" {
+	if created == nil || created.Reason != testResourceConflictReason {
 		t.Errorf("ResourceCreated = %+v, want reason ResourceConflict", created)
 	}
 	if ready == nil || ready.Status != metav1.ConditionTrue {
@@ -917,7 +917,7 @@ func TestReconcileNotFoundWriteFailureClearsStaleStatus(t *testing.T) {
 	if readyStatus != metav1.ConditionFalse {
 		t.Errorf("Ready = %q, want False", readyStatus)
 	}
-	if createdReason != "CreateFailed" {
+	if createdReason != testCreateFailedReason {
 		t.Errorf("ResourceCreated reason = %q, want CreateFailed", createdReason)
 	}
 	if updated.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
@@ -999,7 +999,7 @@ func TestReconcileValidationFailureIsTerminal(t *testing.T) {
 	if got := statuses[airunwayv1alpha1.ConditionTypeResourceCreated]; got != metav1.ConditionFalse {
 		t.Errorf("ResourceCreated = %q, want False", got)
 	}
-	if got := reasons[airunwayv1alpha1.ConditionTypeResourceCreated]; got != "CreateFailed" {
+	if got := reasons[airunwayv1alpha1.ConditionTypeResourceCreated]; got != testCreateFailedReason {
 		t.Errorf("ResourceCreated reason = %q, want CreateFailed", got)
 	}
 	if updated.Status.Endpoint != nil {
@@ -1109,7 +1109,7 @@ func TestReconcileOwnershipConflictUsesItsOwnReason(t *testing.T) {
 	foreign.SetNamespace("default")
 	foreign.SetOwnerReferences([]metav1.OwnerReference{{
 		APIVersion: airunwayv1alpha1.GroupVersion.String(),
-		Kind:       "ModelDeployment",
+		Kind:       testModelDeploymentKind,
 		Name:       "someone-else",
 		UID:        types.UID("a-different-uid"),
 	}})
@@ -1145,10 +1145,10 @@ func TestReconcileOwnershipConflictUsesItsOwnReason(t *testing.T) {
 	// The branch comment claims "Ready is set below unconditionally with this same reason".
 	// Hold it: an operator alerting on Ready.reason=ResourceConflict needs to distinguish a
 	// collision needing manual intervention from a transient CreateFailed that will retry.
-	if readyReason != "ResourceConflict" {
+	if readyReason != testResourceConflictReason {
 		t.Errorf("Ready reason = %q, want ResourceConflict", readyReason)
 	}
-	if reason != "ResourceConflict" {
+	if reason != testResourceConflictReason {
 		t.Errorf("ResourceCreated reason = %q, want ResourceConflict — an ownership collision "+
 			"must be distinguishable from a generic create failure", reason)
 	}
