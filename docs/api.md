@@ -74,6 +74,8 @@ See [controller-architecture.md](controller-architecture.md) for controller inte
 | `tolerations` | []Toleration | No | `[]` | Tolerations |
 | `gateway.enabled` | *bool | No | `true` (when Gateway detected) | Enable/disable gateway integration |
 | `gateway.modelName` | string | No | Model served name or ID | Override model name for gateway routing |
+| `gateway.poolRef` | string | No | — | Verified existing same-namespace InferencePool to use without managing its pool or EPP resources; problems are surfaced through `GatewayReady` |
+| `gateway.httpRouteRef` | string | No | — | Existing same-namespace HTTPRoute to use without managing the route |
 
 ### Update Semantics
 
