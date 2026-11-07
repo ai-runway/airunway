@@ -78,8 +78,31 @@ func TestTransformAggregated(t *testing.T) {
 	// Check spec
 	spec, _, _ := unstructured.NestedMap(rs.Object, "spec")
 	serveConfig, _ := spec["serveConfigV2"].(string)
-	if !strings.Contains(serveConfig, "num_replicas: 1") {
-		t.Errorf("expected num_replicas: 1 in serveConfig, got: %s", serveConfig)
+	if !strings.Contains(serveConfig, "min_replicas: 1") {
+		t.Errorf("expected min_replicas: 1 in serveConfig, got: %s", serveConfig)
+	}
+	if !strings.Contains(serveConfig, "model_id: meta-llama/Llama-2-7b-chat-hf") {
+		t.Errorf("expected model_id in serveConfig, got: %s", serveConfig)
+	}
+
+	// Validate structured config directly
+	cfg := tr.buildServeConfig(md)
+	if len(cfg.Applications) != 1 {
+		t.Fatalf("expected 1 application, got %d", len(cfg.Applications))
+	}
+	app := cfg.Applications[0]
+	if app.Name != "llm" {
+		t.Errorf("expected application name 'llm', got %s", app.Name)
+	}
+	if app.ImportPath != "ray.serve.llm:build_openai_app" {
+		t.Errorf("expected import_path 'ray.serve.llm:build_openai_app', got %s", app.ImportPath)
+	}
+	if len(app.Args.LLMConfigs) != 1 {
+		t.Fatalf("expected 1 llm config, got %d", len(app.Args.LLMConfigs))
+	}
+	llmCfg := app.Args.LLMConfigs[0]
+	if llmCfg.DeploymentConfig.AutoscalingConfig.MinReplicas != 1 {
+		t.Errorf("expected min_replicas 1, got %d", llmCfg.DeploymentConfig.AutoscalingConfig.MinReplicas)
 	}
 
 	// Check rayClusterConfig exists
@@ -101,6 +124,91 @@ func TestTransformAggregated(t *testing.T) {
 	}
 }
 
+func TestTransformWithGatedHuggingFaceModel(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Model.ID = "gated/model"
+	md.Spec.Secrets = &airunwayv1alpha1.SecretsSpec{HuggingFaceToken: "my-secret"}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rs := resources[0]
+
+	// Validate structured config directly
+	cfg := tr.buildServeConfig(md)
+	llmCfg := cfg.Applications[0].Args.LLMConfigs[0]
+	if llmCfg.ModelLoadingConfig.ModelSource != "gated/model" {
+		t.Errorf("expected model source 'gated/model', got %s", llmCfg.ModelLoadingConfig.ModelSource)
+	}
+	if llmCfg.ModelLoadingConfig.ModelID != "gated/model" {
+		t.Errorf("expected model ID 'gated/model', got %s", llmCfg.ModelLoadingConfig.ModelID)
+	}
+
+	// Also verify the Hugging Face token is in the worker group specs
+	workerGroups, _, _ := unstructured.NestedSlice(rs.Object, "spec", "rayClusterConfig", "workerGroupSpecs")
+	if len(workerGroups) != 1 {
+		t.Fatalf("expected 1 worker group, got %d", len(workerGroups))
+	}
+	template, _ := workerGroups[0].(map[string]interface{})["template"].(map[string]interface{})
+	spec, _ := template["spec"].(map[string]interface{})
+	containers, _ := spec["containers"].([]interface{})
+	container, _ := containers[0].(map[string]interface{})
+	envVars, _ := container["env"].([]interface{})
+
+	foundHFToken := false
+	for _, env := range envVars {
+		envMap, _ := env.(map[string]interface{})
+		if envMap["name"] == "HF_TOKEN" && envMap["valueFrom"] != nil {
+			secretKeyRef, _ := envMap["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})
+			key, _ := secretKeyRef["key"].(string)
+			if key != "HF_TOKEN" {
+				t.Errorf("expected HF_TOKEN secret ref, got %s", key)
+			}
+			name, _ := secretKeyRef["name"].(string)
+			if name != "my-secret" {
+				t.Errorf("expected HF_TOKEN secret name 'my-secret', got %s", name)
+			}
+			foundHFToken = true
+			break
+		}
+	}
+	if !foundHFToken {
+		t.Errorf("expected HF_TOKEN env var with value 'my-secret' in worker group specs")
+	}
+}
+
+func TestTransformWithEngineArgs(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.Args = map[string]string{
+		"tool-call-parser": "openai",
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rs := resources[0]
+
+	// Validate structured config directly
+	cfg := tr.buildServeConfig(md)
+	llmCfg := cfg.Applications[0].Args.LLMConfigs[0]
+	if llmCfg.EngineArgs["tool-call-parser"] != "openai" {
+		t.Errorf("expected tool-call-parser 'openai', got %v", llmCfg.EngineArgs["tool-call-parser"])
+	}
+
+	// Also verify the YAML string contains expected values
+	spec, _, _ := unstructured.NestedMap(rs.Object, "spec")
+	serveConfig, _ := spec["serveConfigV2"].(string)
+	if !strings.Contains(serveConfig, "tool-call-parser: openai") {
+		t.Errorf("expected tool-call-parser: openai in serveConfig, got: %s", serveConfig)
+	}
+}
+
 func TestTransformWithScaling(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
@@ -112,10 +220,22 @@ func TestTransformWithScaling(t *testing.T) {
 	}
 
 	rs := resources[0]
+
+	// Validate structured config directly
+	cfg := tr.buildServeConfig(md)
+	llmCfg := cfg.Applications[0].Args.LLMConfigs[0]
+	if llmCfg.DeploymentConfig.AutoscalingConfig.MinReplicas != 3 {
+		t.Errorf("expected min_replicas 3, got %d", llmCfg.DeploymentConfig.AutoscalingConfig.MinReplicas)
+	}
+	if llmCfg.DeploymentConfig.AutoscalingConfig.MaxReplicas != 3 {
+		t.Errorf("expected max_replicas 3, got %d", llmCfg.DeploymentConfig.AutoscalingConfig.MaxReplicas)
+	}
+
+	// Also verify the YAML string contains expected values
 	spec, _, _ := unstructured.NestedMap(rs.Object, "spec")
 	serveConfig, _ := spec["serveConfigV2"].(string)
-	if !strings.Contains(serveConfig, "num_replicas: 3") {
-		t.Errorf("expected num_replicas: 3 in serveConfig")
+	if !strings.Contains(serveConfig, "min_replicas: 3") {
+		t.Errorf("expected min_replicas: 3 in serveConfig, got: %s", serveConfig)
 	}
 }
 
@@ -404,29 +524,6 @@ func TestBuildHeadGroupSpec(t *testing.T) {
 	container, _ := containers[0].(map[string]interface{})
 	if container["name"] != "ray-head" {
 		t.Errorf("expected name 'ray-head', got %v", container["name"])
-	}
-
-	// Check env vars
-	envVars, _ := container["env"].([]interface{})
-	foundModelID := false
-	foundEngineArgs := false
-	for _, ev := range envVars {
-		e, _ := ev.(map[string]interface{})
-		if e["name"] == "MODEL_ID" {
-			foundModelID = true
-			if e["value"] != "meta-llama/Llama-2-7b-chat-hf" {
-				t.Errorf("expected MODEL_ID value, got %v", e["value"])
-			}
-		}
-		if e["name"] == "VLLM_ENGINE_ARGS" {
-			foundEngineArgs = true
-		}
-	}
-	if !foundModelID {
-		t.Error("expected MODEL_ID env var")
-	}
-	if !foundEngineArgs {
-		t.Error("expected VLLM_ENGINE_ARGS env var")
 	}
 }
 
