@@ -397,11 +397,10 @@ export class MetricsService {
     return [
       { name: 'vllm:num_requests_running', type: 'gauge', description: 'Number of requests currently running' },
       { name: 'vllm:num_requests_waiting', type: 'gauge', description: 'Number of requests waiting in queue' },
-      { name: 'vllm:gpu_cache_usage_perc', type: 'gauge', description: 'GPU KV cache usage percentage' },
-      { name: 'vllm:cpu_cache_usage_perc', type: 'gauge', description: 'CPU KV cache usage percentage' },
+      { name: 'vllm:kv_cache_usage_perc', type: 'gauge', description: 'GPU KV cache usage (0 to 1)' },
       { name: 'vllm:e2e_request_latency_seconds', type: 'histogram', description: 'End-to-end request latency' },
       { name: 'vllm:time_to_first_token_seconds', type: 'histogram', description: 'Time to first token' },
-      { name: 'vllm:time_per_output_token_seconds', type: 'histogram', description: 'Time per output token' },
+      { name: 'vllm:inter_token_latency_seconds', type: 'histogram', description: 'Time per output token' },
     ];
   }
 
