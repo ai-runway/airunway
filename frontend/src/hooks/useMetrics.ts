@@ -57,16 +57,33 @@ function formatMetricValue(value: number, unit: string): string {
 }
 
 /**
- * vLLM metric definitions (Dynamo provider)
+ * A metric definition plus the other names an engine may export it under.
  */
-const vllmMetricDefinitions: MetricDefinition[] = [
+type EngineMetricDefinition = MetricDefinition & {
+  /** Older names for the same metric, tried in order when `name` is absent */
+  fallbackNames?: string[]
+  /** When no name matches, compute the value as the sum of `numerator` over the sum of `denominator` */
+  fallbackRatio?: { numerator: string; denominator: string }
+}
+
+/**
+ * vLLM metric definitions (Dynamo provider)
+ *
+ * vLLM renamed some metrics, so the current name comes first and the old one
+ * is kept as a fallback for older engines:
+ * - vllm:gpu_cache_usage_perc became vllm:kv_cache_usage_perc (hidden by default in 0.11, removed in 0.12)
+ * - vllm:time_per_output_token_seconds became vllm:inter_token_latency_seconds (hidden by default in 0.12, removed in 0.15)
+ * - vllm:gpu_prefix_cache_hit_rate was only exported by the V0 engine (removed in 0.11);
+ *   the V1 engine exports vllm:prefix_cache_hits_total and vllm:prefix_cache_queries_total
+ */
+const vllmMetricDefinitions: EngineMetricDefinition[] = [
   { name: 'vllm:num_requests_running', displayName: 'Running Requests', description: 'Number of requests currently being processed', unit: 'requests', type: 'gauge', category: 'queue' },
   { name: 'vllm:num_requests_waiting', displayName: 'Waiting Requests', description: 'Number of requests waiting in queue', unit: 'requests', type: 'gauge', category: 'queue' },
-  { name: 'vllm:gpu_cache_usage_perc', displayName: 'GPU Cache Usage', description: 'Percentage of GPU KV cache in use', unit: '%', type: 'gauge', category: 'cache' },
-  { name: 'vllm:gpu_prefix_cache_hit_rate', displayName: 'Prefix Cache Hit Rate', description: 'Hit rate for prefix caching', unit: '%', type: 'gauge', category: 'cache' },
+  { name: 'vllm:kv_cache_usage_perc', fallbackNames: ['vllm:gpu_cache_usage_perc'], displayName: 'GPU Cache Usage', description: 'Percentage of GPU KV cache in use', unit: '%', type: 'gauge', category: 'cache' },
+  { name: 'vllm:gpu_prefix_cache_hit_rate', fallbackRatio: { numerator: 'vllm:prefix_cache_hits_total', denominator: 'vllm:prefix_cache_queries_total' }, displayName: 'Prefix Cache Hit Rate', description: 'Hit rate for prefix caching', unit: '%', type: 'gauge', category: 'cache' },
   { name: 'vllm:e2e_request_latency_seconds', displayName: 'E2E Latency', description: 'End-to-end request latency', unit: 's', type: 'histogram', category: 'latency' },
   { name: 'vllm:time_to_first_token_seconds', displayName: 'Time to First Token', description: 'Time from request to first token', unit: 's', type: 'histogram', category: 'latency' },
-  { name: 'vllm:time_per_output_token_seconds', displayName: 'Time per Token', description: 'Average time per output token', unit: 's', type: 'histogram', category: 'latency' },
+  { name: 'vllm:inter_token_latency_seconds', fallbackNames: ['vllm:time_per_output_token_seconds'], displayName: 'Time per Token', description: 'Average time per output token', unit: 's', type: 'histogram', category: 'latency' },
   { name: 'vllm:prompt_tokens_total', displayName: 'Prompt Tokens', description: 'Total prompt tokens processed', unit: 'tokens', type: 'counter', category: 'throughput' },
   { name: 'vllm:generation_tokens_total', displayName: 'Generated Tokens', description: 'Total tokens generated', unit: 'tokens', type: 'counter', category: 'throughput' },
   { name: 'vllm:request_success_total', displayName: 'Successful Requests', description: 'Total successful requests', unit: 'requests', type: 'counter', category: 'throughput' },
@@ -89,7 +106,7 @@ const rayServeMetricDefinitions: MetricDefinition[] = [
 /**
  * Get metric definitions based on provider type
  */
-function getMetricDefinitions(provider: string): MetricDefinition[] {
+function getMetricDefinitions(provider: string): EngineMetricDefinition[] {
   switch (provider) {
     case 'dynamo':
       return vllmMetricDefinitions
@@ -102,8 +119,36 @@ function getMetricDefinitions(provider: string): MetricDefinition[] {
 }
 
 /**
+ * Sum every sample of a metric (across labels), or undefined when it is absent
+ */
+function sumOf(metrics: RawMetricValue[], name: string): number | undefined {
+  const matching = metrics.filter((m: RawMetricValue) => m.name === name)
+  if (matching.length === 0) return undefined
+  return matching.reduce((acc: number, m: RawMetricValue) => acc + m.value, 0)
+}
+
+/**
+ * Value of one metric name: the summed samples, or for a histogram the
+ * average from its _sum/_count series. Undefined when the metric is absent.
+ */
+function metricValue(metrics: RawMetricValue[], name: string, type: MetricDefinition['type']): number | undefined {
+  const total = sumOf(metrics, name)
+  if (total !== undefined) return total
+
+  if (type === 'histogram') {
+    const totalSum = sumOf(metrics, `${name}_sum`)
+    const totalCount = sumOf(metrics, `${name}_count`)
+    if (totalSum !== undefined && totalCount !== undefined) {
+      return totalCount > 0 ? totalSum / totalCount : 0
+    }
+  }
+  return undefined
+}
+
+/**
  * Compute metrics from raw Prometheus values
  */
+export
 function computeMetrics(
   response: MetricsResponse,
   provider: string
@@ -122,41 +167,27 @@ function computeMetrics(
   const computed: ComputedMetric[] = []
 
   for (const def of definitions) {
-    // Find matching metrics
-    const matchingMetrics = response.metrics.filter((m: RawMetricValue) => m.name === def.name)
-
-    if (matchingMetrics.length === 0) {
-      // For histograms, try to find _sum/_count variants
-      if (def.type === 'histogram') {
-        const sumMetrics = response.metrics.filter((m: RawMetricValue) => m.name === `${def.name}_sum`)
-        const countMetrics = response.metrics.filter((m: RawMetricValue) => m.name === `${def.name}_count`)
-
-        if (sumMetrics.length > 0 && countMetrics.length > 0) {
-          const totalSum = sumMetrics.reduce((acc: number, m: RawMetricValue) => acc + m.value, 0)
-          const totalCount = countMetrics.reduce((acc: number, m: RawMetricValue) => acc + m.value, 0)
-          const avgValue = totalCount > 0 ? totalSum / totalCount : 0
-
-          computed.push({
-            name: def.name,
-            displayName: def.displayName,
-            value: avgValue,
-            formattedValue: formatMetricValue(avgValue, def.unit),
-            unit: def.unit,
-            category: def.category,
-          })
-        }
-      }
-      continue
+    let value: number | undefined
+    for (const name of [def.name, ...(def.fallbackNames ?? [])]) {
+      value = metricValue(response.metrics, name, def.type)
+      if (value !== undefined) break
     }
 
-    // Sum all matching metric values (across labels)
-    const totalValue = matchingMetrics.reduce((acc: number, m: RawMetricValue) => acc + m.value, 0)
+    if (value === undefined && def.fallbackRatio) {
+      const numerator = sumOf(response.metrics, def.fallbackRatio.numerator)
+      const denominator = sumOf(response.metrics, def.fallbackRatio.denominator)
+      if (numerator !== undefined && denominator !== undefined && denominator > 0) {
+        value = numerator / denominator
+      }
+    }
+
+    if (value === undefined) continue
 
     computed.push({
       name: def.name,
       displayName: def.displayName,
-      value: totalValue,
-      formattedValue: formatMetricValue(totalValue, def.unit),
+      value,
+      formattedValue: formatMetricValue(value, def.unit),
       unit: def.unit,
       category: def.category,
     })

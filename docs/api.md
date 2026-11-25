@@ -1114,8 +1114,8 @@ Get Prometheus metrics from a deployment's inference service.
       "labels": { "model": "Qwen/Qwen3-0.6B" }
     },
     {
-      "name": "vllm:gpu_cache_usage_perc",
-      "value": 45.2,
+      "name": "vllm:kv_cache_usage_perc",
+      "value": 0.452,
       "labels": {}
     }
   ]
